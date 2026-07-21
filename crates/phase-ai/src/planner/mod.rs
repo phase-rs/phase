@@ -700,14 +700,22 @@ impl<'a> PlannerServices<'a> {
                 // search.rs:1956/2205 and the sibling fix in `rank_candidates`.
                 .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
-        priors
-            .into_iter()
-            .filter_map(|prior| {
-                let sim = self.apply_candidate(state, &prior.candidate)?;
-                Some((prior.prior, sim))
-            })
-            .take(sample_count)
-            .collect()
+        // Bounded rewrite of the terminal `filter_map(...).take(sample_count)`:
+        // stop on the sample cap OR once the wall-clock deadline is blown, while
+        // preserving legality backfill exactly (an illegal candidate is skipped
+        // WITHOUT consuming a sample slot). Byte-identical to the old iterator
+        // when the deadline is live — same set of applied candidates, same order,
+        // same result — because `deadline.expired()` is always false then.
+        let mut out = Vec::with_capacity(sample_count);
+        for prior in priors {
+            if out.len() == sample_count || self.deadline.expired() {
+                break;
+            }
+            if let Some(sim) = self.apply_candidate(state, &prior.candidate) {
+                out.push((prior.prior, sim));
+            }
+        }
+        out
     }
 
     pub fn evaluate_state(&self, state: &GameState) -> f64 {
@@ -913,6 +921,21 @@ impl<'a> PlannerServices<'a> {
 
         let mut sim = state.clone();
         for _ in 0..MAX_QUIESCE_STEPS {
+            // Search wall-clock bound (CR-agnostic): once the deadline is blown,
+            // stop resolving the stack. A single quiesce can otherwise run up to
+            // MAX_QUIESCE_STEPS uninterruptible applies (e.g. a finite
+            // mega-cascade resolution) after the budget has expired, because the
+            // callers only check the deadline at entry. Returning the
+            // partially-quiesced state to the cheap leaf evaluator is the same
+            // approximation the deadline makes elsewhere. This breaks AFTER the
+            // crossing apply (at loop-top on the next iteration), so quiesce is
+            // bounded to at most one in-flight apply past expiry. It does NOT
+            // bound intra-step cost inside `deterministic_choice` (Case 3); low
+            // risk because the Ugin cascade resolves via Case 1 forced-pass.
+            if self.deadline.expired() {
+                break;
+            }
+
             if matches!(sim.waiting_for, WaitingFor::GameOver { .. }) {
                 break;
             }
@@ -1134,6 +1157,13 @@ impl<'a> PlannerServices<'a> {
         let continuations =
             self.sample_backfilled_continuations(state, evaluation.priors, sample_count);
         if continuations.is_empty() {
+            return self.quiesced_leaf_eval(state);
+        }
+        // CR-agnostic: if the budget was blown while sampling continuations,
+        // short-circuit to the cheap leaf eval instead of descending the rollout
+        // tree. Closes the post-sampling path the reporter flagged; the top-of-
+        // function guard covers a deadline already expired on entry.
+        if self.deadline.expired() {
             return self.quiesced_leaf_eval(state);
         }
         let is_maximizing = rollout_player == self.ai_player;
@@ -1850,8 +1880,10 @@ mod tests {
         assert_eq!(quiesced.players[0].hand.len(), state.players[0].hand.len());
     }
 
-    #[test]
-    fn quiesce_resolves_creature_spell_on_stack() {
+    /// A state with a single Grizzly Bears creature spell on the stack, priced so
+    /// only `PassPriority` is legal for both players — so `quiesce` Case 1 resolves
+    /// it in one apply. Shared by the resolution test and the deadline-bound tests.
+    fn creature_spell_on_stack_state() -> GameState {
         use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
         use engine::types::mana::{ManaCost, ManaCostShard};
 
@@ -1904,8 +1936,14 @@ mod tests {
             },
         });
 
+        state
+    }
+
+    #[test]
+    fn quiesce_resolves_creature_spell_on_stack() {
         // Both players have priority, only PassPriority is legal
         // (creature spell on stack, no instant-speed responses available)
+        let state = creature_spell_on_stack_state();
         let battlefield_before = state.battlefield.len();
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -1925,6 +1963,65 @@ mod tests {
             "Creature should have entered the battlefield: before={}, after={}",
             battlefield_before,
             quiesced.battlefield.len()
+        );
+    }
+
+    /// V1: `quiesce` must break at loop top once the search deadline is blown,
+    /// leaving the resolvable stack UNCHANGED. Paired with a live-deadline
+    /// positive that DOES resolve, so the negative is non-vacuous. Deleting the
+    /// `if self.deadline.expired() { break; }` guard makes the negative fail.
+    #[test]
+    fn quiesce_honors_expired_deadline() {
+        let state = creature_spell_on_stack_state();
+        let stack_before = state.stack.len();
+        assert!(stack_before > 0, "fixture must have a non-empty stack");
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        // Refinement V1/V2: the deadline lives on PlannerServices and is HONORED
+        // only in non-measurement mode. `with_deadline` force-overrides any
+        // injected deadline to `none()` under measurement, which would make the
+        // guard inert and the negative assertion vacuous.
+        assert!(
+            !config.execution_mode.is_measurement(),
+            "config must be non-measurement so the injected deadline is honored"
+        );
+        let policies = PolicyRegistry::default();
+
+        // Positive reach-guard (non-vacuity): a live deadline resolves the stack.
+        let live = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::none()),
+        );
+        let resolved = live.quiesce(&state);
+        assert!(
+            resolved.stack.len() < stack_before,
+            "non-vacuity: quiesce with a live deadline must resolve the stack \
+             (before={stack_before}, after={})",
+            resolved.stack.len()
+        );
+
+        // Negative (the fix): an expired deadline leaves the stack untouched.
+        let expired = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::after(0)),
+        );
+        // Witness: the deadline is genuinely expired before quiesce runs, so a
+        // pass is not a broken probe that never entered the loop body.
+        assert!(
+            expired.deadline.expired(),
+            "witness: the injected deadline must be expired so the guard fires"
+        );
+        let unchanged = expired.quiesce(&state);
+        assert_eq!(
+            unchanged.stack.len(),
+            stack_before,
+            "revert-failing: quiesce must break at loop top on an expired deadline"
         );
     }
 
@@ -2214,6 +2311,66 @@ mod tests {
             perf_counters::snapshot().state_clone_for_legality,
             0,
             "rollout_estimate must not clone-and-apply per candidate for legality"
+        );
+    }
+
+    /// V2: `sample_backfilled_continuations` must apply ZERO continuations once
+    /// the deadline is blown (Edit 2), and `rollout_estimate` must still return a
+    /// finite leaf estimate. Paired with a live-deadline positive that DOES sample,
+    /// so the negative is non-vacuous. Reverting Edit 2 makes the negative fail.
+    #[test]
+    fn sampling_honors_expired_deadline() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert!(
+            !config.execution_mode.is_measurement(),
+            "config must be non-measurement so the injected deadline is honored"
+        );
+        let policies = PolicyRegistry::default();
+
+        // Reach-guard (non-vacuity): with a LIVE deadline, sampling produces
+        // continuations, so the expired-deadline empty result is meaningful.
+        let mut live = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let eval = live.planner_evaluation(&state);
+        assert!(
+            !eval.priors.is_empty(),
+            "reach-guard: planner_evaluation must produce priors"
+        );
+        let sample_count = live.config.search.rollout_samples.max(1) as usize;
+        let live_conts =
+            live.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        assert!(
+            !live_conts.is_empty(),
+            "non-vacuity: a live deadline must sample at least one continuation"
+        );
+
+        // Negative (the fix): an expired deadline applies zero continuations.
+        let mut expired = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::after(0)),
+        );
+        assert!(
+            expired.deadline.expired(),
+            "witness: the injected deadline must be expired so the guard fires"
+        );
+        let empty =
+            expired.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        assert!(
+            empty.is_empty(),
+            "revert-failing (Edit 2): sample_backfilled_continuations must apply \
+             zero continuations once the deadline is blown, got {}",
+            empty.len()
+        );
+
+        // rollout_estimate short-circuits to the leaf eval under an expired
+        // deadline (top-of-function guard subsumes Edit 3 under static expiry).
+        let v = expired.rollout_estimate(&state, 3);
+        assert!(
+            v.is_finite(),
+            "rollout_estimate must return a finite leaf estimate under an expired deadline"
         );
     }
 
