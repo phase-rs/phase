@@ -193,6 +193,17 @@ struct CliArgs {
     batch_games: Option<Vec<(u64, AiDifficulty)>>,
 }
 
+/// Shared immutable inputs for one or more AI-commander game runs.
+#[derive(Clone, Copy)]
+struct GameRunContext<'a> {
+    db: &'a CardDatabase,
+    payload: &'a DeckPayload,
+    seat_difficulty: &'a [Option<AiDifficulty>; 4],
+    action_cap: usize,
+    dump_log_path: Option<&'a str>,
+    dump_actions_path: Option<&'a str>,
+}
+
 /// Everything that isn't argument parsing: loads the card database and feed
 /// once, resolves the shared deck payload once, then either plays one game
 /// (`batch_games.is_none()`, the pre-existing single-game path — its stdout is
@@ -337,19 +348,18 @@ fn run(cli: CliArgs) -> i32 {
     // per-game dump paths is out of scope for the batching change itself.
     let dump_log_path = read_dump_env("PHASE_DUMP_LOG");
     let dump_actions_path = read_dump_env("PHASE_DUMP_ACTIONS");
+    let game_context = GameRunContext {
+        db: &db,
+        payload: &payload,
+        seat_difficulty: &seat_difficulty,
+        action_cap,
+        dump_log_path: dump_log_path.as_deref(),
+        dump_actions_path: dump_actions_path.as_deref(),
+    };
 
     match batch_games {
         None => {
-            let outcome = play_one_game(
-                &db,
-                &payload,
-                seed,
-                difficulty,
-                &seat_difficulty,
-                action_cap,
-                dump_log_path.as_deref(),
-                dump_actions_path.as_deref(),
-            );
+            let outcome = play_one_game(&game_context, seed, difficulty);
             match outcome {
                 RunOutcome::Completed => 0,
                 RunOutcome::Aborted => 2,
@@ -362,16 +372,7 @@ fn run(cli: CliArgs) -> i32 {
                 |(seed, _)| seed.to_string(),
                 |&(seed, seat_diff)| {
                     println!("--- GAME seed={seed} difficulty={seat_diff:?} ---");
-                    play_one_game(
-                        &db,
-                        &payload,
-                        seed,
-                        seat_diff,
-                        &seat_difficulty,
-                        action_cap,
-                        dump_log_path.as_deref(),
-                        dump_actions_path.as_deref(),
-                    );
+                    play_one_game(&game_context, seed, seat_diff);
                     // Immediate per-game flush (Tier 1 item 3): if the process
                     // is killed mid-batch (e.g. pod-lab's external wall-clock
                     // timeout on a hung game), every already-completed game's
@@ -399,16 +400,15 @@ fn run(cli: CliArgs) -> i32 {
 /// once for the single-game path and once per line for `--games-file` batch
 /// mode — the SAME function drives both, so batching can never change what one
 /// game's play-through does or prints.
-fn play_one_game(
-    db: &CardDatabase,
-    payload: &DeckPayload,
-    seed: u64,
-    difficulty: AiDifficulty,
-    seat_difficulty: &[Option<AiDifficulty>; 4],
-    action_cap: usize,
-    dump_log_path: Option<&str>,
-    dump_actions_path: Option<&str>,
-) -> RunOutcome {
+fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficulty) -> RunOutcome {
+    let GameRunContext {
+        db,
+        payload,
+        seat_difficulty,
+        action_cap,
+        dump_log_path,
+        dump_actions_path,
+    } = *context;
     let mut state = build_game_state(db, payload, seed);
 
     engine::game::engine::start_game(&mut state);
