@@ -29430,6 +29430,123 @@ fn static_nonlegendary_creatures_enchanted_player_controls_base_pt_and_lose_type
     );
 }
 
+/// CR 205.3i: "land types" is a fourth loss-enumeration member alongside
+/// abilities/card types/creature types — Alpine Moon, Lithoform Blight, and
+/// Ultima, Origin of Oblivion all use "loses all land types and abilities".
+/// Before the fix `scan_loss_enumeration` recognized none of the four tokens
+/// because "land" matched no member of the (then) 3-way `alt`, so the whole
+/// `separated_list1` failed and the enumeration silently vanished.
+#[test]
+fn scan_loss_enumeration_recognizes_land_types() {
+    assert_eq!(
+        scan_loss_enumeration("loses all land types and abilities"),
+        vec![LossMember::LandTypes, LossMember::Abilities]
+    );
+    let modifications = parse_continuous_modifications("loses all land types and abilities");
+    assert!(
+        modifications.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Land,
+        }),
+        "must remove all land types, got {modifications:?}"
+    );
+    assert!(
+        modifications.contains(&ContinuousModification::RemoveAllAbilities),
+        "must remove all abilities, got {modifications:?}"
+    );
+}
+
+/// Lithoform Blight: "Enchanted land loses all land types and abilities and
+/// has "{T}: Add {C}" and "{T}, Pay 1 life: Add one mana of any color.""
+/// CR 205.3i (land-type removal) + CR 613.1d (Layer 4) / CR 613.1f (Layer 6,
+/// ability removal composed with the two granted mana abilities in written
+/// order). Before the fix the enchanted land kept its original land type and
+/// abilities alongside the two new grants.
+#[test]
+fn static_lithoform_blight_loses_land_types_and_abilities() {
+    let def = parse_static_line(
+        "Enchanted land loses all land types and abilities and has \"{T}: Add {C}\" and \"{T}, Pay 1 life: Add one mana of any color.\"",
+    )
+    .expect("Lithoform Blight's enchanted-land static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::RemoveAllAbilities),
+        "must remove all abilities, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Land,
+            }),
+        "must remove all land types, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "must grant the replacement mana ability, got {:?}",
+        def.modifications
+    );
+}
+
+/// Alpine Moon: "Lands your opponents control with the chosen name lose all
+/// land types and abilities, and they gain "{T}: Add one mana of any color.""
+/// CR 205.3i (land-type removal) + CR 613.1d/f (Layer 4 + Layer 6, written
+/// order) + CR 201.3 / CR 113.6 (the `HasChosenName` name-picker subject,
+/// Petrified Hamlet class, here additionally scoped to opponent-controlled
+/// lands). Before the fix the named land kept its original land type and
+/// abilities — the functional opposite of shutting down an opponent's
+/// nonbasic utility/manland.
+#[test]
+fn static_alpine_moon_loses_land_types_and_abilities() {
+    let def = parse_static_line(
+        "Lands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"",
+    )
+    .expect("Alpine Moon's named-land static must parse");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    match &def.affected {
+        Some(TargetFilter::And { filters }) => {
+            assert!(
+                filters.iter().any(|f| matches!(
+                    f,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Land)
+                            && tf.controller == Some(ControllerRef::Opponent)
+                )),
+                "expected an opponent-controlled land typed filter, got {filters:?}"
+            );
+            assert!(
+                filters.contains(&TargetFilter::HasChosenName),
+                "expected HasChosenName, got {filters:?}"
+            );
+        }
+        other => panic!("expected And[Typed(Land, opponent), HasChosenName], got {other:?}"),
+    }
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::RemoveAllAbilities),
+        "must remove all abilities, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .contains(&ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Land,
+            }),
+        "must remove all land types, got {:?}",
+        def.modifications
+    );
+    assert!(
+        def.modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantAbility { .. })),
+        "must grant the colorless-fixing ability, got {:?}",
+        def.modifications
+    );
+}
+
 /// CR 121.1 + CR 613.11: River Song regression. The "Meet in Reverse" line must
 /// lower to exactly one `DrawFromBottom { Controller }` static (NOT a spell
 /// catch-all `Effect::Unimplemented`), and the "Spoilers" trigger must remain a
