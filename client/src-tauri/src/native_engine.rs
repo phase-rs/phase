@@ -1003,7 +1003,11 @@ fn kill_recorded_process_if_ours(record: &SpawnRecord, files: &NativeEngineFiles
         let pid = record.pid.to_string();
         let _ = Command::new("kill").args(["-TERM", &pid]).status();
         thread::sleep(STOP_GRACE);
-        let _ = Command::new("kill").args(["-KILL", &pid]).status();
+        // The PID may have been recycled while we slept; only escalate to KILL
+        // if it still looks like our binary.
+        if process_is_plausibly_ours(record.pid, &binary) {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+        }
     }
     #[cfg(target_os = "windows")]
     {
@@ -1032,9 +1036,16 @@ fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
     };
     let command = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let expected = binary.canonicalize().ok();
-    expected
-        .as_ref()
-        .is_some_and(|path| path == Path::new(&command))
+    // `ps -o comm=` may report a bare executable name rather than the full
+    // path on BSD-derived systems; the PID already comes from our own spawn
+    // record, so a basename match is sufficient identification here.
+    expected.as_ref().is_some_and(|path| {
+        let command_path = Path::new(&command);
+        path == command_path
+            || path
+                .file_name()
+                .is_some_and(|name| name == command_path.as_os_str())
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1160,8 +1171,9 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), NativeEngineError> 
             .map_err(NativeEngineError::storage)?;
         file.write_all(bytes).map_err(NativeEngineError::storage)?;
         file.sync_all().map_err(NativeEngineError::storage)?;
-        #[cfg(target_os = "windows")]
-        remove_file_if_exists(path)?;
+        // std::fs::rename replaces an existing destination on every supported
+        // platform (MOVEFILE_REPLACE_EXISTING on Windows) — no pre-delete,
+        // which would open a crash window with the file missing entirely.
         fs::rename(&temporary, path).map_err(NativeEngineError::storage)
     })();
     if write_result.is_err() {
