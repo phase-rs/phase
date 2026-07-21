@@ -172,6 +172,7 @@ function installGameStartTracking(): void {
 
       trackEvent("game_start", {
         game_mode: gameMode,
+        format: gameState.format_config?.format,
         player_count: gameState.players.length,
         ai_count: aiSeatIds.length,
       });

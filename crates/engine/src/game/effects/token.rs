@@ -8,18 +8,19 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CastingPermission,
-    Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
+    Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
+    SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, PendingCopyTokenBatch, PendingCounterPostAction,
-    PendingEffectResolutionEvent,
+    DelayedTrigger, GameState, LiminalEntry, LiminalTokenAbilityInjection, PendingCopyTokenBatch,
+    PendingCounterAddition, PendingCounterPostAction, PendingEffectResolutionEvent,
+    TokenEntryEventEmission, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
@@ -29,7 +30,7 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
-use crate::types::zones::Zone;
+use crate::types::zones::{EtbTapState, Zone};
 
 // ── Token script parser ─────────────────────────────────────────────────
 
@@ -128,6 +129,12 @@ fn materialize_predefined_token_payload(
         }
     }
     if let Some(spec) = role_spec {
+        // CR 111.10k: A Monster Role (like every predefined Role) has enchant creature.
+        materialized
+            .keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
         materialized.static_definitions = spec.statics;
         materialized.trigger_definitions = spec.triggers;
     }
@@ -603,7 +610,7 @@ pub fn resolve(
         }
     }
 
-    // CR 609.3: Consume the tracked set after reading its size for "this way" counting.
+    // CR 608.2c: Consume the tracked set after reading its size for "this way" counting.
     if matches!(
         &ability.effect,
         Effect::Token {
@@ -624,6 +631,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -1044,6 +1052,402 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
     true
+}
+
+pub(crate) fn reserve_liminal_token_object(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: String,
+) -> (ObjectId, GameObject) {
+    let id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+    (
+        id,
+        GameObject::new(id, CardId(0), owner, name, Zone::Battlefield),
+    )
+}
+
+pub(crate) fn apply_copiable_values_to_liminal_object(
+    object: &mut GameObject,
+    values: &CopiableValues,
+    display_source: DisplaySource,
+    printed_ref: Option<crate::types::card::PrintedCardRef>,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
+) {
+    object.display_source = display_source;
+    object.printed_ref = printed_ref.clone();
+    object.base_printed_ref = printed_ref;
+    object.token_image_ref = token_image_ref;
+    crate::game::printed_cards::install_copiable_values_as_base(object, values);
+}
+
+/// Commit ONE liminal copy-token to the battlefield WITHOUT driving the rest of
+/// the batch. Returns `false` if an ETB-counter replacement paused mid-commit (a
+/// `ContinueLiminalCopyTokenBatch` post-action was stashed to resume). The
+/// per-token batch loop in `apply_copy_token_after_replacement_with_created_ids`
+/// calls this and iterates, so minting N copies uses O(1) stack depth — the old
+/// commit->continue->apply recursion built one large `im::HashMap` COW frame per
+/// token. CR 707.2: shared by every liminal copy-token batch.
+pub(crate) fn commit_liminal_copy_token_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+}
+
+fn commit_liminal_copy_token_entry_with_continuation(
+    state: &mut GameState,
+    event: ProposedEvent,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let post_actions = continuation
+        .map(liminal_copy_token_continuation_post_action)
+        .into_iter()
+        .collect();
+    commit_liminal_token_entry_with_post_actions(
+        state,
+        event,
+        events,
+        TokenEntryEventEmission::Emit,
+        post_actions,
+    )
+}
+
+pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    if !commit_liminal_copy_token_entry_with_continuation(
+        state,
+        event,
+        continuation.clone(),
+        events,
+    ) {
+        return false;
+    }
+    continue_liminal_copy_token_batch(state, continuation, events)
+}
+
+#[derive(Clone)]
+struct LiminalCopyTokenContinuation {
+    owner: PlayerId,
+    copy: Box<CopyTokenSpec>,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
+    remaining_count: u32,
+}
+
+fn liminal_copy_token_continuation_for_event(
+    state: &GameState,
+    event: &ProposedEvent,
+) -> Option<LiminalCopyTokenContinuation> {
+    let ProposedEvent::TokenEntry { entry_ref, .. } = event else {
+        return None;
+    };
+    let entry = state.liminal_entries.get(entry_ref)?;
+    let copy = entry.copy_resume.clone()?;
+    Some(LiminalCopyTokenContinuation {
+        owner: entry.object.owner,
+        copy,
+        enter_tapped: entry.enter_tapped,
+        enter_with_counters: entry.enter_with_counters.clone(),
+        remaining_count: entry.remaining_count,
+    })
+}
+
+fn continue_liminal_copy_token_batch(
+    state: &mut GameState,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        pending.created_ids = state.last_created_token_ids.clone();
+    }
+    let Some(continuation) = continuation else {
+        if state.pending_copy_token_resolution.is_some() {
+            super::token_copy::drain_pending_copy_token_resolution(state, events);
+        }
+        return !state.pending_copy_token_resolution.is_some()
+            || matches!(state.waiting_for, WaitingFor::Priority { .. });
+    };
+    if continuation.remaining_count > 0 {
+        let initial_created_ids = state.last_created_token_ids.clone();
+        let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
+            state,
+            continuation.owner,
+            *continuation.copy,
+            continuation.enter_tapped,
+            continuation.enter_with_counters,
+            continuation.remaining_count,
+            initial_created_ids,
+            events,
+        );
+        state.last_created_token_ids = status.created_ids;
+        if matches!(
+            status.completion,
+            super::token_copy::CopyTokenApplyCompletion::Paused
+        ) {
+            return false;
+        }
+    }
+    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        pending.created_ids = state.last_created_token_ids.clone();
+    }
+    if state.pending_copy_token_resolution.is_some() {
+        super::token_copy::drain_pending_copy_token_resolution(state, events);
+    }
+    !state.pending_copy_token_resolution.is_some()
+        || matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+fn liminal_copy_token_continuation_post_action(
+    continuation: LiminalCopyTokenContinuation,
+) -> PendingCounterPostAction {
+    PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+        owner: continuation.owner,
+        copy: continuation.copy,
+        enter_tapped: continuation.enter_tapped,
+        enter_with_counters: continuation.enter_with_counters,
+        remaining_count: continuation.remaining_count,
+    }
+}
+
+pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
+    state: &mut GameState,
+    owner: PlayerId,
+    copy: Box<CopyTokenSpec>,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(CounterType, u32)>,
+    remaining_count: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    continue_liminal_copy_token_batch(
+        state,
+        Some(LiminalCopyTokenContinuation {
+            owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            remaining_count,
+        }),
+        events,
+    )
+}
+
+pub(crate) fn commit_liminal_token_entry_with_event_emission(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    entry_events: TokenEntryEventEmission,
+) -> bool {
+    commit_liminal_token_entry_with_post_actions(state, event, events, entry_events, Vec::new())
+}
+
+pub(crate) fn commit_liminal_token_entry_with_post_actions(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+    entry_events: TokenEntryEventEmission,
+    post_actions_after_finalize: Vec<PendingCounterPostAction>,
+) -> bool {
+    let ProposedEvent::TokenEntry {
+        entry_ref,
+        enter_tapped,
+        enter_with_counters,
+        ..
+    } = event
+    else {
+        return true;
+    };
+    let Some(mut entry) = state.liminal_entries.remove(&entry_ref) else {
+        return true;
+    };
+    let finalization = liminal_token_entry_finalization_action(entry_ref, &entry, entry_events);
+    let counters_to_apply: Vec<_> = enter_with_counters
+        .iter()
+        .chain(entry.enter_with_counters.iter())
+        .cloned()
+        .collect();
+    entry.object.tapped = enter_tapped.resolve(entry.object.tapped);
+    let owner = entry.object.owner;
+    state.objects.insert(entry_ref, entry.object);
+    // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
+    zones::add_to_zone(state, entry_ref, Zone::Battlefield, owner);
+
+    for (counter_index, (counter_type, counter_count)) in counters_to_apply.iter().enumerate() {
+        if *counter_count > 0
+            && !super::counters::add_counter_with_replacement(
+                state,
+                owner,
+                entry_ref,
+                counter_type.clone(),
+                *counter_count,
+                events,
+            )
+        {
+            state.last_created_token_ids = entry.created_ids.clone();
+            let remaining_counters = counters_to_apply[counter_index + 1..]
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(counter_type, count)| PendingCounterAddition::Object {
+                    actor: owner,
+                    object_id: entry_ref,
+                    counter_type: counter_type.clone(),
+                    count: *count,
+                })
+                .collect();
+            let mut post_actions = vec![finalization];
+            post_actions.extend(post_actions_after_finalize);
+            super::counters::stash_pending_counter_additions(
+                state,
+                remaining_counters,
+                crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                    if entry.copy_resume.is_some() {
+                        EffectKind::CopyTokenOf
+                    } else {
+                        EffectKind::Token
+                    },
+                    entry.source_id,
+                    post_actions,
+                ),
+            );
+            return false;
+        }
+    }
+
+    finalize_committed_liminal_token_entry_from_action(state, finalization, events);
+    true
+}
+
+fn liminal_token_entry_finalization_action(
+    entry_ref: ObjectId,
+    entry: &LiminalEntry,
+    entry_events: TokenEntryEventEmission,
+) -> PendingCounterPostAction {
+    PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        object_id: entry_ref,
+        name: entry.name.clone(),
+        source_id: entry.source_id,
+        controller: entry.controller,
+        enters_attacking: entry.enters_attacking,
+        attach_to: entry.attach_to,
+        sacrifice_at: entry.sacrifice_at.clone(),
+        created_ids: entry.created_ids.clone(),
+        ability_injection: if entry.copy_resume.is_some() {
+            LiminalTokenAbilityInjection::PredefinedToken
+        } else {
+            LiminalTokenAbilityInjection::ResolvedToken
+        },
+        entry_events,
+    }
+}
+
+pub(crate) fn finalize_committed_liminal_token_entry_from_action(
+    state: &mut GameState,
+    action: PendingCounterPostAction,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        object_id,
+        name,
+        source_id,
+        controller,
+        enters_attacking,
+        attach_to,
+        sacrifice_at,
+        mut created_ids,
+        ability_injection,
+        entry_events,
+    } = action
+    else {
+        return true;
+    };
+
+    match ability_injection {
+        LiminalTokenAbilityInjection::PredefinedToken => {
+            super::token_copy::finalize_copied_token(state, source_id, object_id);
+            inject_predefined_token_abilities(state, object_id);
+        }
+        LiminalTokenAbilityInjection::ResolvedToken => {
+            inject_resolved_token_abilities(state, object_id);
+        }
+    }
+    crate::game::layers::mark_layers_entered(state, object_id);
+    crate::game::restrictions::record_battlefield_entry(state, object_id);
+    crate::game::restrictions::record_token_created(state, object_id);
+
+    if enters_attacking {
+        crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+    }
+    if let Some(host) = attach_to {
+        match host {
+            AttachTarget::Object(id) => {
+                super::attach::attach_to(state, object_id, id);
+            }
+            AttachTarget::Player(pid) => {
+                super::attach::attach_to_player(state, object_id, pid);
+            }
+        };
+    }
+
+    if matches!(entry_events, TokenEntryEventEmission::Emit) {
+        push_committed_token_entry_events(state, object_id, name, source_id, events);
+    }
+    if matches!(sacrifice_at, Some(Duration::UntilEndOfCombat)) {
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndCombat,
+            },
+            ability: ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::Any,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![TargetRef::Object(object_id)],
+                source_id,
+                controller,
+            ),
+            controller,
+            source_id,
+            one_shot: true,
+        });
+    }
+
+    created_ids.push(object_id);
+    state.last_created_token_ids = created_ids;
+    true
+}
+
+pub(crate) fn push_committed_token_entry_events(
+    state: &GameState,
+    object_id: ObjectId,
+    name: String,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    if let Some(token) = state.objects.get(&object_id) {
+        let zone_change_record = token.snapshot_for_zone_change(object_id, None, Zone::Battlefield);
+        events.push(GameEvent::ZoneChanged {
+            object_id,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(zone_change_record),
+        });
+    }
+    events.push(GameEvent::TokenCreated {
+        object_id,
+        name,
+        source_id,
+    });
 }
 
 // ── Layer B: token-handler batch purity gate (Tier 3) ────────────────────
@@ -2017,7 +2421,7 @@ fn powerstone_ability() -> AbilityDefinition {
             },
             restrictions: vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
-                ability: crate::types::mana::AbilityActivationScope::OfSpellType,
+                ability: crate::types::mana::AbilityActivationScope::Any,
             }],
             grants: vec![],
             expiry: None,
@@ -2698,10 +3102,16 @@ fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityM
         obj.static_definitions.push(static_def);
     }
     if !materialized.trigger_definitions.is_empty() {
-        Arc::make_mut(&mut obj.base_trigger_definitions)
-            .extend(materialized.trigger_definitions.iter().cloned());
+        // CR 111.3: A token's abilities are defined as it is created, so these
+        // entries are printed slots of the token's own base set — not grants.
+        // They must carry a real `Printed` occurrence ref: pushing the bare
+        // `TriggerDefinition` would go through `From<TriggerDefinition>` and
+        // stamp `TriggerDefinitionOccurrenceRef::Unmaterialized`, which
+        // `validate_trigger_definitions` rejects from an observable state and
+        // which `#[serde(skip_serializing)]` turns into a hard serialization
+        // failure the moment the state crosses the WASM bridge.
         for trigger in materialized.trigger_definitions {
-            obj.trigger_definitions.push(trigger);
+            obj.push_printed_trigger(trigger);
         }
     }
     if !materialized.abilities.is_empty() {
@@ -2798,14 +3208,18 @@ mod tests {
         build_resolved_from_def, build_resolved_from_def_with_targets,
     };
     use crate::game::engine::apply_as_current;
+    use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::zones::create_object;
+    use crate::types::ability::TriggerDefinition;
     use crate::types::actions::GameAction;
     use crate::types::card_type::CardType;
     use crate::types::game_state::WaitingFor;
-    use crate::types::identifiers::ObjectId;
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+    use std::sync::Arc;
 
     // ── Parser unit tests ───────────────────────────────────────────────
 
@@ -2818,6 +3232,39 @@ mod tests {
         assert!(a.core_types.contains(&CoreType::Creature));
         assert_eq!(a.colors, vec![ManaColor::White]);
         assert_eq!(a.subtypes, vec!["Soldier"]);
+    }
+
+    #[test]
+    fn liminal_copy_token_trigger_state_serializes() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Trigger Source".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_trigger_definitions =
+                Arc::new(vec![TriggerDefinition::new(TriggerMode::ChangesZone)]);
+            source.materialize_base_trigger_definitions();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&source_id).unwrap());
+        let (token_id, mut token) =
+            reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
+        token.is_token = true;
+        apply_copiable_values_to_liminal_object(
+            &mut token,
+            &values,
+            DisplaySource::Token,
+            None,
+            None,
+        );
+        state.objects.insert(token_id, token);
+
+        serde_json::to_string(&state)
+            .expect("a liminal copy token with triggered abilities must serialize");
     }
 
     #[test]
@@ -3678,7 +4125,19 @@ mod tests {
     fn predefined_powerstone_has_colorless_mana() {
         let abilities = predefined_token_abilities("Powerstone");
         assert_eq!(abilities.len(), 1);
-        assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
+        assert!(matches!(
+            *abilities[0].effect,
+            Effect::Mana {
+                ref restrictions,
+                ..
+            } if matches!(
+                restrictions.as_slice(),
+                [crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
+                    spell_type,
+                    ability: crate::types::mana::AbilityActivationScope::Any,
+                }] if spell_type == "Artifact"
+            )
+        ));
     }
 
     #[test]
@@ -3939,11 +4398,14 @@ mod tests {
             1,
             "catalog rules_text must install the attacks life trigger intrinsically"
         );
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::Attacks);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::Attacks
+        );
         assert!(
             !obj.trigger_definitions
                 .iter_all()
-                .any(|trigger| trigger.mode == TriggerMode::ChangesZone),
+                .any(|trigger| trigger.definition.mode == TriggerMode::ChangesZone),
             "SOS Pest must keep its printed attack trigger, not the older Pest dies trigger"
         );
         assert_eq!(
@@ -3977,14 +4439,78 @@ mod tests {
         let obj = &state.objects[&obj_id];
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
         assert_eq!(
-            trigger.trigger_zones,
+            trigger.definition.trigger_zones,
             vec![Zone::Battlefield],
             "CR 603.10a LKI scans a dying token as a Battlefield source"
         );
+    }
+
+    /// CR 111.3: A catalog-materialized token ability is a printed slot of the
+    /// token's own base set, so its live entry must carry a real `Printed`
+    /// occurrence ref.
+    ///
+    /// RED before the fix: `apply_token_ability_payload` pushed the bare
+    /// `TriggerDefinition`, which `Definitions::push<U: Into<T>>` routed through
+    /// `From<TriggerDefinition> for TriggerEntry` and stamped
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized`. That variant is
+    /// `#[serde(skip_serializing)]`, so the first time the state crossed the
+    /// WASM bridge `to_js` panicked ("the enum variant
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized` cannot be serialized"),
+    /// killing the worker — the engine computed the right tokens and then died
+    /// handing them to the UI. No in-process test caught it because engine tests
+    /// never serialize.
+    #[test]
+    fn catalog_token_trigger_carries_printed_occurrence_and_serializes() {
+        use crate::types::ability::TriggerDefinitionOccurrenceRef;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.trigger_definitions.len(), 1);
+
+        let entry = obj.trigger_definitions.iter_all().next().unwrap();
+        assert!(
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed { .. }
+            ),
+            "CR 111.3: a catalog token trigger is a printed slot of the token's own \
+             base set, got {:?}",
+            entry.occurrence
+        );
+
+        // The object-local provenance invariant must hold: `Unmaterialized` is
+        // explicitly rejected from an observable game state.
+        obj.validate_trigger_definitions()
+            .expect("catalog token trigger must have observable occurrence provenance");
+
+        // The bridge check. `engine-wasm`'s `to_js` panics on serialization
+        // failure, so an unserializable entry is fatal, not degraded.
+        serde_json::to_string(obj)
+            .expect("catalog token object must serialize for the WASM bridge");
+        serde_json::to_string(&state).expect("full game state must serialize for the WASM bridge");
     }
 
     #[test]
@@ -4217,10 +4743,14 @@ mod tests {
         );
         assert_eq!(obj.trigger_definitions.len(), 1);
         let trigger = &obj.trigger_definitions[0];
-        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
-        assert_eq!(trigger.origin, Some(Zone::Battlefield));
-        assert_eq!(trigger.destination, Some(Zone::Graveyard));
-        let execute = trigger.execute.as_ref().expect("Pest dies trigger effect");
+        assert_eq!(trigger.definition.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.definition.origin, Some(Zone::Battlefield));
+        assert_eq!(trigger.definition.destination, Some(Zone::Graveyard));
+        let execute = trigger
+            .definition
+            .execute
+            .as_ref()
+            .expect("Pest dies trigger effect");
         assert!(matches!(
             *execute.effect,
             Effect::GainLife {
@@ -4434,6 +4964,121 @@ mod tests {
             obj.static_definitions.len(),
             1,
             "Monster Role must carry its enchanted-creature +1/+1-and-trample static"
+        );
+    }
+
+    /// CR 111.10k + CR 704.5m: a Monster Role has enchant creature, so it
+    /// must be put into its owner's graveyard when an animated Mishra's
+    /// Foundry stops being a creature during cleanup. The token then ceases
+    /// to exist, but the battlefield-to-graveyard event still occurs.
+    #[test]
+    fn monster_role_on_animated_foundry_dies_during_cleanup() {
+        let mut state = GameState::new_two_player(42);
+        let foundry = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(0),
+            "Mishra's Foundry".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&foundry).unwrap();
+            object.card_types.core_types.push(CoreType::Land);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let animate = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(PtValue::Fixed(2)),
+                toughness: Some(PtValue::Fixed(2)),
+                types: vec!["Artifact".to_string(), "Creature".to_string()],
+                remove_types: vec![],
+                keywords: vec![],
+                target: TargetFilter::None,
+            },
+            vec![],
+            foundry,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::animate::resolve(&mut state, &animate, &mut events).unwrap();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must be a creature before the Role is created"
+        );
+
+        let create_role = ResolvedAbility::new(
+            Effect::Token {
+                name: "Monster Role".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec![
+                    "Enchantment".to_string(),
+                    "Aura".to_string(),
+                    "Role".to_string(),
+                ],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: Some(TargetFilter::ParentTarget),
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(foundry)],
+            foundry,
+            PlayerId(0),
+        );
+        resolve(&mut state, &create_role, &mut events).unwrap();
+        let role = state.last_created_token_ids[0];
+        assert_eq!(
+            state.objects[&role].attached_to,
+            Some(AttachTarget::Object(foundry)),
+            "Monster Role must enter attached to Mishra's Foundry"
+        );
+        assert!(
+            // allow-raw-authority: the test verifies the exact intrinsic Enchant filter, which the keyword-kind authority cannot inspect
+            state.objects[&role].keywords.iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Enchant(TargetFilter::Typed(filter))
+                    if filter.type_filters.contains(&TypeFilter::Creature)
+            )),
+            "Monster Role must have the intrinsic enchant creature ability"
+        );
+
+        events.clear();
+        assert!(crate::game::turns::execute_cleanup(&mut state, &mut events).is_none());
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must stop being a creature during cleanup"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == role
+            )),
+            "the illegal Aura must move from the battlefield to its owner's graveyard"
+        );
+        assert!(
+            !state.objects.contains_key(&role),
+            "a Role token put into a graveyard must cease to exist"
         );
     }
 
@@ -5415,11 +6060,164 @@ mod tests {
                     GameEvent::EffectResolved {
                         kind: EffectKind::Token,
                         source_id: ObjectId(100),
+                        ..
                     }
                 ))
                 .count(),
             1,
             "the token effect should resolve once after the paused batch finishes"
+        );
+    }
+
+    #[test]
+    fn paused_liminal_copy_token_counter_finalizes_entry_after_choice() {
+        use std::sync::Arc;
+
+        use crate::game::printed_cards::intrinsic_copiable_values;
+        use crate::types::ability::{QuantityModification, ReplacementDefinition, ReplacementMode};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::LiminalEntry;
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let replacement_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Choice".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .valid_card(TargetFilter::Any)
+                .quantity_modification(QuantityModification::Prevent);
+            def.mode = ReplacementMode::Optional { decline: None };
+            let obj = state.objects.get_mut(&replacement_source).unwrap();
+            obj.base_replacement_definitions = Arc::new(vec![def.clone()]);
+            obj.replacement_definitions = vec![def].into();
+        }
+
+        let copied_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let copied = state.objects.get_mut(&copied_id).unwrap();
+            copied.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Treasure".to_string()],
+            };
+            copied.card_types = copied.base_card_types.clone();
+            copied.base_name = "Treasure".to_string();
+            copied.name = "Treasure".to_string();
+        }
+        let values = intrinsic_copiable_values(state.objects.get(&copied_id).unwrap());
+        let source_id = ObjectId(100);
+        let (entry_ref, mut token) =
+            reserve_liminal_token_object(&mut state, PlayerId(0), values.name.clone());
+        token.is_token = true;
+        apply_copiable_values_to_liminal_object(
+            &mut token,
+            &values,
+            DisplaySource::Token,
+            None,
+            None,
+        );
+        let timestamp = state.next_timestamp();
+        token.reset_for_battlefield_entry(state.turn_number, timestamp);
+        state.liminal_entries.insert(
+            entry_ref,
+            LiminalEntry {
+                object: token,
+                name: values.name.clone(),
+                source_id,
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: Some(Duration::UntilEndOfCombat),
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: Some(Box::new(CopyTokenSpec {
+                    values: Box::new(values.clone()),
+                    display_source: DisplaySource::Token,
+                    printed_ref: None,
+                    token_image_ref: None,
+                    extra_keywords: Vec::new(),
+                    additional_modifications: Vec::new(),
+                    tapped: false,
+                    enters_attacking: false,
+                    sacrifice_at: Some(Duration::UntilEndOfCombat),
+                    source_id,
+                    controller: PlayerId(0),
+                })),
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: std::collections::HashSet::new(),
+            },
+        );
+
+        let event = ProposedEvent::TokenEntry {
+            entry_ref,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: vec![(CounterType::Plus1Plus1, 1)],
+            applied: HashSet::new(),
+        };
+        let mut events = Vec::new();
+        assert!(
+            !commit_liminal_token_entry_and_continue_copy_batch(&mut state, event, &mut events),
+            "counter replacement choice should pause liminal entry"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(
+            state.objects.contains_key(&entry_ref),
+            "liminal entry has already committed its object before the counter choice"
+        );
+        assert!(
+            !state.liminal_entries.contains_key(&entry_ref),
+            "the resume path must not depend on the removed liminal entry"
+        );
+
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        events.extend(result.events);
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_created_token_ids, vec![entry_ref]);
+        let token = state.objects.get(&entry_ref).unwrap();
+        assert!(
+            token
+                .abilities
+                .iter()
+                .any(|ability| matches!(*ability.effect, Effect::Mana { .. })),
+            "Treasure copy must receive predefined token abilities after the counter choice"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == entry_ref)),
+            "finalization must emit the liminal token's battlefield entry event"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, GameEvent::TokenCreated { object_id, .. } if *object_id == entry_ref)),
+            "finalization must emit the token-created event"
+        );
+        assert!(
+            state
+                .delayed_triggers
+                .iter()
+                .any(|trigger| trigger.source_id == source_id),
+            "Mishra-style until-end-of-combat sacrifice must be registered after resume"
         );
     }
 

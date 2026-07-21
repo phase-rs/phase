@@ -42,6 +42,11 @@ export function classify_deck_js(names_js: any): any;
 export function clear_game_state(): void;
 
 /**
+ * Discard the loaded replay (if any). Safe to call even when none is loaded.
+ */
+export function clear_replay_playback(): void;
+
+/**
  * CR 702.124: Of `candidates`, which can legally pair with `first_commander`
  * as a co-commander? Applies the full partner family (generic Partner, Partner
  * with [Name], Friends Forever, Character Select, Doctor's Companion, Choose a
@@ -50,6 +55,11 @@ export function clear_game_state(): void;
  * list through this. Returns an empty array if the database isn't loaded.
  */
 export function commanderPartnerCandidates(first_commander: string, candidates: any): any;
+
+/**
+ * Returns legal Commander-family companion candidates from the main deck.
+ */
+export function companionCandidates(request: any): any;
 
 /**
  * Create a default 2-player game state.
@@ -83,6 +93,13 @@ export function evaluate_deck_compatibility_js(request: any): any;
  * Used by the engine worker to transfer state to AI workers for root parallelism.
  */
 export function export_game_state_json(): string;
+
+/**
+ * Serialize the current game's replay recording to a JSON string — the
+ * format `load_replay_for_playback` reads back. Errors if no game has been
+ * initialized in this worker (or the recording was invalidated by undo).
+ */
+export function export_replay_log(): string;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -175,6 +192,13 @@ export function get_stack_pressure(): any;
 export function get_viewer_snapshot_js(player_id: number): any;
 
 /**
+ * Whether the current game has an in-progress replay recording. `false`
+ * before any game has started, or after the recording was invalidated by
+ * undo/restore (see `restore_game_state`).
+ */
+export function has_replay_recording(): boolean;
+
+/**
  * Initialize panic hook for better error messages in WASM.
  * Called automatically on first use — safe to call multiple times.
  *
@@ -219,6 +243,18 @@ export function is_card_commander_eligible(name: string): boolean;
 export function is_multiplayer_mode(): boolean;
 
 /**
+ * Read-only preview of cast-time target slots for a currently castable spell.
+ * Returns `[]` for uncastable, untargeted, or target-ambiguous casts.
+ */
+export function legal_targets_for_castable_js(object_id: number): any;
+
+/**
+ * Batch variant for hover/drag clients that need previews for many castable
+ * cards. The engine flushes layers once and reuses that snapshot for every id.
+ */
+export function legal_targets_for_castables_js(object_ids: any): any;
+
+/**
  * Returns the engine-typed catalog of debug-spawnable token presets,
  * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
  * to populate the Create Token dropdown — frontend never derives this list.
@@ -232,15 +268,75 @@ export function list_token_presets_js(): any;
 export function load_card_database(json_str: string): number;
 
 /**
+ * Load a replay log (the JSON produced by `export_replay_log`) for
+ * scrubbing/playback. Independent of the live `GAME_STATE` — does not
+ * require, and does not affect, an active game. Uses the loaded `CARD_DB`
+ * to resolve the recorded deck list when reconstructing the starting
+ * state — and errors (rather than silently reconstructing empty
+ * libraries) if the replay carries deck data but no card database is
+ * loaded; see `ReplayError::MissingCardDatabase`. Returns the total number
+ * of recorded actions; valid `replay_seek_js` targets are `0..=length`.
+ */
+export function load_replay_for_playback(json_str: string): number;
+
+/**
  * Verify WASM integration works.
  */
 export function ping(): string;
+
+/**
+ * Issue #5468: non-mutating dry-run of `action` for `actor`. Runs the action on
+ * a throwaway clone (the live `GAME_STATE` is never touched) and returns the
+ * PUBLIC deltas — life-total changes, public-zone object transitions, created
+ * tokens, and objects that ceased to exist — a viewer could observe, for
+ * hover-preview UX ("this kills that", "you take 4").
+ *
+ * Hidden-zone movements never leak: the diff is taken over
+ * `filter_state_for_viewer` snapshots (so any identity the viewer can't see is
+ * already redacted), AND a transition is surfaced only when at least one
+ * endpoint is a public zone (see `engine::game::preview`), so a fully-hidden
+ * hand↔library draw is elided even for the acting player's opponents. Returns
+ * an error string when `action` is malformed or illegal in the current state.
+ */
+export function preview_action_js(actor: number, action: any): any;
+
+/**
+ * Non-mutating automatic spell-payment preview. The engine simulates the
+ * exact, currently legal `CastSpell` action and returns the permanent ids that
+ * produced mana before that spell was committed to the stack. It returns an
+ * empty array when the cast needs another choice before payment can be final.
+ */
+export function preview_mana_payment_js(actor: number, action: any): any;
 
 /**
  * Project an authoritative seat view from Rust so frontend transports do not
  * need to understand format topology details.
  */
 export function project_seat_view(state_json: string): any;
+
+/**
+ * The loaded replay's header (format/match config, player count, seed,
+ * deck data), or `null` if none is loaded. Lets the viewer show "vs. <deck>"
+ * chrome without re-deriving it from the action sequence.
+ */
+export function replay_header_js(): any;
+
+/**
+ * Total number of recorded actions in the loaded replay, or `0` if none is loaded.
+ */
+export function replay_length_js(): number;
+
+/**
+ * Seek the loaded replay to `target` (clamped to the recording's length) and
+ * return the reconstructed state at that point, wrapped the same way
+ * `get_game_state` wraps the live state. Returns `Ok(null)` only when no
+ * replay is loaded — a reconstruction desync (`ReplayError::Desync`, an
+ * engine-version mismatch between recording and playback, not a rules
+ * outcome) is a real failure and must not be silently swallowed into the
+ * same null the caller uses for "nothing loaded"; it throws instead, like
+ * every other fallible engine entry point that returns `Result<_, JsValue>`.
+ */
+export function replay_seek_js(target: number): any;
 
 export function resolve_all(requester: number, ai_seats_json: string, max_resolutions: number): any;
 
@@ -322,6 +418,11 @@ export function set_multiplayer_mode(enabled: boolean): void;
 export function sideboardPolicyForFormat(format: any): any;
 
 /**
+ * Returns the engine-authored Oathbreaker signature-spell selection policy.
+ */
+export function signatureSpellSelectionPolicy(request: any): any;
+
+/**
  * Submit a game action on behalf of `actor` and return the ActionResult
  * (events + waiting_for).
  *
@@ -351,11 +452,14 @@ export interface InitOutput {
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
+    readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any) => [number, number, number];
+    readonly companionCandidates: (a: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
+    readonly export_replay_log: () => [number, number, number, number];
     readonly getFormatRegistry: () => any;
     readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_scored_candidates: (a: number, b: number, c: number, d: bigint) => [number, number, number];
@@ -365,13 +469,20 @@ export interface InitOutput {
     readonly get_filtered_game_state: (a: number) => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
+    readonly has_replay_recording: () => number;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
     readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;
+    readonly legal_targets_for_castable_js: (a: number) => any;
+    readonly legal_targets_for_castables_js: (a: any) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
+    readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
+    readonly preview_action_js: (a: number, b: any) => any;
+    readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
+    readonly replay_seek_js: (a: number) => [number, number, number];
     readonly resolve_all: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number];
@@ -379,15 +490,18 @@ export interface InitOutput {
     readonly select_action_from_scores: (a: number, b: number, c: number, d: number, e: bigint) => [number, number, number];
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
+    readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
     readonly submit_action: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
     readonly get_stack_pressure: () => any;
     readonly init_panic_hook: () => void;
-    readonly clear_game_state: () => void;
+    readonly replay_header_js: () => any;
     readonly list_token_presets_js: () => any;
     readonly create_initial_state: () => any;
+    readonly clear_replay_playback: () => void;
+    readonly replay_length_js: () => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

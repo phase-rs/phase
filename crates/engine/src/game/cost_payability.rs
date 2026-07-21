@@ -60,6 +60,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -89,15 +90,19 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: a granter self-ref carries no pitch-bound X.
         | TargetFilter::GrantingObject
+        // CR 608.2c: source-relative object ref carries no pitch-bound X.
+        | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => false,
     }
 }
@@ -136,6 +141,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -165,15 +171,19 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         // CR 201.5a: no pitch-bound X constraint to relax.
         | TargetFilter::GrantingObject
+        // CR 608.2c: source-relative object ref — nothing to relax.
+        | TargetFilter::OriginalSource
         | TargetFilter::AllPlayers => filter.clone(),
     }
 }
@@ -526,6 +536,18 @@ impl AbilityCost {
                         .any(|subtype| subtype == "Equipment")
                     && obj.attached_to.is_some()
             }),
+            // CR 701.3d + CR 601.2b: An unattach-from cost is payable iff the
+            // source controls >= `count` battlefield attachments matching `filter`
+            // currently attached to it. The generic eligibility count uses `n = 0`
+            // (no mana-value floor); the divided-damage MV>=N narrowing lives in
+            // the interactive detour (`find_eligible_unattach_for_cost_targets`).
+            AbilityCost::UnattachFrom { filter, count } => {
+                super::casting::find_eligible_unattach_for_cost_targets(
+                    state, player, source, filter, 0,
+                )
+                .len()
+                    >= *count as usize
+            }
             // CR 701.13b: A player can mill fewer than N cards if their library
             // has fewer than N; the cost is always payable.
             AbilityCost::Mill { .. } => true,

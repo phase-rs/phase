@@ -2,6 +2,7 @@ import { useId } from "react";
 import { useTranslation } from "react-i18next";
 
 import { openExternal } from "../../services/openExternal";
+import { isBundledTauriOrigin, isTauri } from "../../services/platform";
 import { GameplayTooltip } from "../ui/GameplayTooltip";
 
 function BoltIcon() {
@@ -35,10 +36,14 @@ export function PreviewBadge() {
         href={__PREVIEW_SITE_URL__}
         target="_blank"
         rel="noopener noreferrer"
-        // Route through openExternal so the desktop (Tauri) build opens the
-        // system browser deterministically; href/target remain the web path and
-        // the graceful fallback for middle-click / right-click-copy.
+        // The remote Tauri shell keeps first-party navigation in the webview;
+        // web builds retain the existing external-tab behavior.
         onClick={(e) => {
+          if (isTauri() && !isBundledTauriOrigin()) {
+            e.preventDefault();
+            window.location.assign(__PREVIEW_SITE_URL__);
+            return;
+          }
           e.preventDefault();
           openExternal(__PREVIEW_SITE_URL__);
         }}

@@ -15,12 +15,13 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, AdditionalCost, ControllerRef, CostObjectCount, Effect, EffectScope, FilterProp,
-    QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
+    CostReduction, Effect, EffectScope, FilterProp, QuantityExpr, SacrificeRequirement,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
-    EternalizeCost, FlashbackCost, Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
+    EmbalmCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -294,13 +295,90 @@ pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Optio
     })
 }
 
+/// `parse_oracle_cost` NEVER fails — it hands back `AbilityCost::Unimplemented`
+/// for text it cannot type. So "the cost parser returned" is not evidence the cost
+/// parsed. Without the `ability_cost_is_fully_typed` guard, a kicker line with a
+/// semantic tail ("Kicker {2} if you control an artifact") yields a `Some(_)` cost
+/// built from the untyped remainder, and the priority-8f router then consumes the
+/// line AND fabricates a cost — strictly worse than declining, because the card
+/// renders as supported. Declining lets the line fall through to an honest,
+/// exact-unit `Effect::Unimplemented`.
 fn parse_kicker_cost_payload(input: &str) -> Option<AbilityCost> {
     let stripped = strip_reminder_text(input);
     let cost_text = stripped.trim().trim_end_matches('.').trim();
     if cost_text.is_empty() {
         return None;
     }
-    Some(parse_oracle_cost(cost_text))
+    let cost = parse_oracle_cost(cost_text);
+    ability_cost_is_fully_typed(&cost).then_some(cost)
+}
+
+/// Which keyword-parse contract a keyword-LIST consumer needs for each part.
+///
+/// This is the list-level counterpart of the `parse_granted_keyword_fragment` /
+/// `parse_router_keyword_line` split, expressed as a typed axis rather than two
+/// near-duplicate list walks. The list semantics (comma parts, MTGJSON validation,
+/// protection expansion, `instances_function_separately`) are identical in both
+/// modes; only the per-part remainder contract differs, so THAT is the parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeywordRemainderPolicy {
+    /// EMBEDDED GRANT. The trailing clause belongs to the ENCLOSING sentence
+    /// ("… gains vanishing 3 if that creature doesn't have vanishing"), so the
+    /// part parser must take the leading keyword and leave the rest alone.
+    /// Discarding the remainder is CORRECT here.
+    DiscardRemainder,
+    /// ROUTER. The line IS the unit. Any unconsumed semantic prose means the
+    /// router may not consume the line — it must fall through to ordinary
+    /// parsing and become an honest, exact-unit `Effect::Unimplemented` rather
+    /// than vanishing with no keyword and no diagnostic.
+    RequireAllConsuming,
+}
+
+impl KeywordRemainderPolicy {
+    /// The single place the policy turns into an actual per-part parse.
+    fn parse_part(self, lower: &str) -> Option<Keyword> {
+        match self {
+            Self::DiscardRemainder => parse_granted_keyword_fragment(lower),
+            Self::RequireAllConsuming => parse_router_keyword_fragment(lower),
+        }
+    }
+}
+
+/// PERMISSIVE keyword-list extraction — see [`KeywordRemainderPolicy::DiscardRemainder`].
+///
+/// Valid ONLY in embedded grant contexts (static/token/vote/class-level payloads).
+/// A router that consumes a line on this result silently swallows whatever the
+/// keyword did not explain. Routers must call [`parse_router_keyword_list`].
+pub(crate) fn extract_granted_keyword_list(
+    line: &str,
+    mtgjson_keyword_names: &[String],
+) -> Option<Vec<Keyword>> {
+    parse_keyword_list_with_policy(
+        line,
+        mtgjson_keyword_names,
+        KeywordRemainderPolicy::DiscardRemainder,
+    )
+}
+
+/// STRICT keyword-list extraction — see [`KeywordRemainderPolicy::RequireAllConsuming`].
+///
+/// The list-level sibling of [`parse_router_keyword_line`], and the ONLY keyword-list
+/// surface a router or a routing classifier may use. Every comma part must parse to a
+/// typed keyword with an all-consuming permitted (`P`/`R`/`M`) tail; one part carrying
+/// a semantic clause declines the WHOLE line.
+///
+/// `parse_router_keyword_line` cannot serve this role: it parses a single keyword and
+/// takes no MTGJSON names, so it cannot see a bare-keyword line ("Flying, vigilance")
+/// or the MTGJSON-authoritative parts that carry no Oracle parameter.
+pub(crate) fn parse_router_keyword_list(
+    line: &str,
+    mtgjson_keyword_names: &[String],
+) -> Option<Vec<Keyword>> {
+    parse_keyword_list_with_policy(
+        line,
+        mtgjson_keyword_names,
+        KeywordRemainderPolicy::RequireAllConsuming,
+    )
 }
 
 /// Try to extract keywords from a keyword-only line (comma-separated).
@@ -311,15 +389,19 @@ fn parse_kicker_cost_payload(input: &str) -> Option<AbilityCost> {
 /// Returns only keywords not already covered by MTGJSON names — these are typically
 /// parameterized keywords where MTGJSON lists the name (e.g. "Protection") but
 /// Oracle text has the full form (e.g. "Protection from multicolored").
-pub(crate) fn extract_keyword_line(
+///
+/// `policy` decides the per-part remainder contract — the ONE axis on which the
+/// grant and router surfaces differ.
+fn parse_keyword_list_with_policy(
     line: &str,
     mtgjson_keyword_names: &[String],
+    policy: KeywordRemainderPolicy,
 ) -> Option<Vec<Keyword>> {
     let line_without_reminder = strip_reminder_text(line);
     let line = strip_keyword_activation_cost_prefix(line_without_reminder.trim());
 
     if mtgjson_keyword_names.is_empty() {
-        return parse_mtgjson_missing_standalone_keyword_line(line);
+        return parse_mtgjson_missing_standalone_keyword_line(line, policy);
     }
 
     if mtgjson_keyword_names.iter().any(|n| n == "mobilize") {
@@ -339,6 +421,12 @@ pub(crate) fn extract_keyword_line(
             if kw == Keyword::Bloodthirst(BloodthirstValue::Fixed(1)) {
                 return Some(Vec::new());
             }
+            return Some(vec![kw]);
+        }
+    }
+
+    if mtgjson_keyword_names.iter().any(|n| n == "disguise") {
+        if let Some(kw) = parse_disguise_keyword_line(line) {
             return Some(vec![kw]);
         }
     }
@@ -392,7 +480,7 @@ pub(crate) fn extract_keyword_line(
                 // place printed multiplicity survives — emit one Keyword per occurrence
                 // so the runtime's per-instance trigger loop fires correctly. Synthesis
                 // reconciles the deduped MTGJSON copy against these.
-                if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                if let Some(kw) = policy.parse_part(&lower) {
                     if kw.instances_function_separately() {
                         new_keywords.push(kw);
                     }
@@ -402,14 +490,14 @@ pub(crate) fn extract_keyword_line(
 
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
-            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+            if let Some(kw) = policy.parse_part(&lower) {
                 new_keywords.push(kw);
                 continue;
             }
         }
 
         // Not an MTGJSON match — try parsing as any keyword (for keyword-only line validation)
-        if let Some(kw) = parse_keyword_from_oracle(&lower) {
+        if let Some(kw) = policy.parse_part(&lower) {
             if !matches!(kw, Keyword::Unknown(_)) {
                 // Keywords not in MTGJSON (e.g., firebending) must be extracted here.
                 // They also validate the line as a keyword line.
@@ -475,9 +563,12 @@ fn strip_activation_cost_dash(rest: &str) -> Option<&str> {
     .map(|(keyword_text, _)| keyword_text.trim_start())
 }
 
-fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
+fn parse_mtgjson_missing_standalone_keyword_line(
+    line: &str,
+    policy: KeywordRemainderPolicy,
+) -> Option<Vec<Keyword>> {
     let lower = line.to_lowercase();
-    let keyword = parse_keyword_from_oracle(&lower)?;
+    let keyword = policy.parse_part(&lower)?;
     match keyword {
         Keyword::ForMirrodin => Some(vec![keyword]),
         // CR 702.89a: Umbra armor (printed as "umbra armor"/"totem armor") is a
@@ -567,8 +658,11 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
 
     let filters: Vec<TargetFilter> = legs
         .into_iter()
-        .map(|tf| {
-            let mut f = TypedFilter::new(tf);
+        .map(|leg| {
+            let mut f = TypedFilter::new(leg.type_filter);
+            if !leg.properties.is_empty() {
+                f = f.properties(leg.properties);
+            }
             if let Some(ref c) = controller {
                 f = f.controller(c.clone());
             }
@@ -608,6 +702,19 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
+    // current power on resolution, or its last known information if it left its
+    // expected public zone.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("pay life equal to "),
+        alt((tag("this creature's power"), tag("~'s power"))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(WardCost::PayLifeEqualToPower);
+    }
+
     // "pay N life"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("pay ").parse(lower) {
         if let Some(life_str) = rest.strip_suffix(" life") {
@@ -1122,12 +1229,68 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
     (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
 }
 
+/// CR 702.168d + CR 118.7a: Parse a disguise line with a trailing generic
+/// reduction. The reduction belongs to the turn-face-up special action, not
+/// to casting the creature or its face-down spell.
+fn parse_disguise_keyword_line(text: &str) -> Option<Keyword> {
+    let stripped = strip_reminder_text(text);
+    let upper = stripped.trim().to_ascii_uppercase();
+    let (after_for_each, (_, cost, _, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("DISGUISE "),
+        nom_primitives::parse_mana_cost,
+        tag(". THIS COST IS REDUCED BY "),
+        nom_primitives::parse_mana_cost,
+        tag(" FOR EACH "),
+    )
+        .parse(upper.as_str())
+        .ok()?;
+    let ManaCost::Cost {
+        generic: amount_per,
+        shards,
+    } = amount
+    else {
+        return None;
+    };
+    if !shards.is_empty() {
+        return None;
+    }
+    let count_text = after_for_each.to_ascii_lowercase();
+    let (_, qty) =
+        super::oracle_nom::quantity::parse_for_each_clause_ref_complete(&count_text).ok()?;
+    Some(Keyword::Disguise(DisguiseCost::Reduced {
+        cost,
+        reduction: Box::new(CostReduction {
+            amount_per,
+            count: QuantityExpr::Ref { qty },
+            condition: None,
+        }),
+    }))
+}
+
+/// Remainder-preserving keyword core — the SINGLE authority for keyword-line
+/// parsing. Returns the typed keyword plus the input it did **not** consume.
+///
+/// Two wrappers sit on top and they differ only in what they do with that
+/// remainder:
+///   * `parse_granted_keyword_fragment` DISCARDS it (permissive; correct for an
+///     embedded grant, where a trailing conditional belongs to the host ability);
+///   * `parse_router_keyword_line` REQUIRES it to be an empty/punctuation/
+///     reminder/modeled-modifier tail (strict; the only form valid at a
+///     whole-line router boundary).
+///
+/// Returning `""` is a claim of full consumption. A branch must return the real
+/// remainder whenever it stops early, or the strict router will silently accept
+/// a line it never actually parsed.
 ///
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
 /// handling the "from" preposition used by protection keywords.
-pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
+pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
+
+    if let Some(kw) = parse_disguise_keyword_line(text) {
+        return Some((kw, ""));
+    }
 
     // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
     // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword "Partner".
@@ -1156,7 +1319,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return result;
+        return result.map(|kw| (kw, ""));
     }
 
     // CR 702.24: Cumulative upkeep granted via a quoted ability ("[enchanted
@@ -1165,21 +1328,21 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // parser directly, so delegate to it here too (Mana Chains, Dreams of the
     // Dead, Decomposition).
     if let Some(kw) = super::oracle_special::parse_cumulative_upkeep_keyword(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     // CR 702.48a: "<Subtype> offering" — the Oracle line carries the quality the
     // bare "Offering" keyword name lacks.
     if let Some(kw) = parse_offering_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
 
     // CR 702.112a: Renown N — parameterized keyword from Oracle text.
@@ -1191,7 +1354,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return Some(Keyword::Renown(n));
+        return Some((Keyword::Renown(n), ""));
     }
 
     // CR 702.68a: Frenzy N — parameterized keyword from Oracle/reminder/grant text.
@@ -1203,13 +1366,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return Some(Keyword::Frenzy(n));
+        return Some((Keyword::Frenzy(n), ""));
     }
 
     // CR 702.167a/b: Craft with [materials] [cost] — the Oracle line carries the
     // materials class and activation cost that the bare "Craft" keyword lacks.
     if let Some(kw) = parse_craft_keyword_line(text) {
-        return Some(kw);
+        return Some((kw, ""));
     }
     if tag::<_, _, OracleError<'_>>("craft with ")
         .parse(text)
@@ -1221,7 +1384,14 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // First try direct parse (handles simple keywords like "flying")
     let direct: Keyword = text.parse().unwrap();
     if !matches!(direct, Keyword::Unknown(_)) {
-        return Some(direct);
+        // `FromStr` swallowed the WHOLE line, and it does so leniently: it also
+        // accepts the space-separated parameterized forms ("impending 5—{1}{B}"),
+        // where a trailing clause is absorbed without trace. A bare keyword has no
+        // parameter and nothing to measure ("flying" -> ""); a parameterized one is
+        // measured exactly as the colon-form path measures it.
+        let unconsumed = split_once_on(text, " ")
+            .map_or("", |(_, (_name, param))| mana_cost_remainder(param.trim()));
+        return Some((direct, unconsumed));
     }
 
     // CR 702.29e: "basic landcycling {cost}" — multi-word typecycling variant.
@@ -1232,7 +1402,9 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
             let colon_form = format!("typecycling:Basic Land:{cost_str}");
             let parsed: Keyword = colon_form.parse().unwrap();
             if !matches!(parsed, Keyword::Unknown(_)) {
-                return Some(parsed);
+                // `FromStr` accepted "{1} if you control an artifact" and quietly
+                // kept only the "{1}". Report what it actually left behind.
+                return Some((parsed, mana_cost_remainder(cost_str)));
             }
         }
     }
@@ -1245,7 +1417,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // guard never has to consider em-dash forms.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cycling\u{2014}").parse(text) {
         if let Some(cyc_cost) = parse_cycling_cost(rest) {
-            return Some(Keyword::Cycling(cyc_cost));
+            return Some((Keyword::Cycling(cyc_cost), ""));
         }
     }
 
@@ -1258,7 +1430,8 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
                 let colon_form = format!("typecycling:{subtype}:{cost_str}");
                 let parsed: Keyword = colon_form.parse().unwrap();
                 if !matches!(parsed, Keyword::Unknown(_)) {
-                    return Some(parsed);
+                    // Same lenient-FromStr trap as Basic landcycling above.
+                    return Some((parsed, mana_cost_remainder(cost_str)));
                 }
             }
         }
@@ -1267,7 +1440,9 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // CR 702.21a: Ward with non-mana costs uses em-dash separator (U+2014).
     // "ward—pay N life", "ward—discard a card", "ward—sacrifice a permanent"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("ward\u{2014}").parse(text) {
-        return parse_ward_cost(rest);
+        // `parse_ward_cost` consumes the whole `rest` (or rejects it), so nothing
+        // is left over on success.
+        return parse_ward_cost(rest).map(|kw| (kw, ""));
     }
 
     // CR 702.34a: Flashback with em-dash cost — covers single non-mana costs
@@ -1279,7 +1454,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // mana-payment flow and residual sub-costs through `pay_additional_cost`.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("flashback\u{2014}").parse(text) {
         if let Some(fb_cost) = parse_flashback_cost(rest) {
-            return Some(Keyword::Flashback(fb_cost));
+            return Some((Keyword::Flashback(fb_cost), ""));
         }
     }
 
@@ -1293,7 +1468,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // `pay_additional_cost`.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("bestow\u{2014}").parse(text) {
         if let Some(bestow_cost) = parse_bestow_cost(rest) {
-            return Some(Keyword::Bestow(bestow_cost));
+            return Some((Keyword::Bestow(bestow_cost), ""));
         }
     }
 
@@ -1302,7 +1477,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // ("Buyback {3}") is handled by the direct `FromStr` path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("buyback\u{2014}").parse(text) {
         if let Some(bb_cost) = parse_buyback_cost(rest) {
-            return Some(Keyword::Buyback(bb_cost));
+            return Some((Keyword::Buyback(bb_cost), ""));
         }
     }
 
@@ -1314,7 +1489,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // array and is handled by the `FromStr` path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("evoke\u{2014}").parse(text) {
         if let Some(ev_cost) = parse_evoke_cost(rest) {
-            return Some(Keyword::Evoke(ev_cost));
+            return Some((Keyword::Evoke(ev_cost), ""));
         }
     }
 
@@ -1324,7 +1499,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // generic space-split mangles "echo—discard a card".
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
         if let Some(echo_cost) = parse_echo_cost(rest) {
-            return Some(Keyword::Echo(echo_cost));
+            return Some((Keyword::Echo(echo_cost), ""));
         }
     }
 
@@ -1336,7 +1511,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // mandatory self-exile sub-cost.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("embalm\u{2014}").parse(text) {
         if let Some(embalm_cost) = parse_embalm_cost(rest) {
-            return Some(Keyword::Embalm(embalm_cost));
+            return Some((Keyword::Embalm(embalm_cost), ""));
         }
     }
 
@@ -1345,7 +1520,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // Pure-mana eternalize arrives via the FromStr path above.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("eternalize\u{2014}").parse(text) {
         if let Some(eternalize_cost) = parse_eternalize_cost(rest) {
-            return Some(Keyword::Eternalize(eternalize_cost));
+            return Some((Keyword::Eternalize(eternalize_cost), ""));
         }
     }
 
@@ -1354,7 +1529,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("escalate\u{2014}").parse(text) {
         let cost = normalize_escalate_cost(parse_oracle_cost(rest));
         if !matches!(cost, AbilityCost::Unimplemented { .. }) {
-            return Some(Keyword::Escalate(cost));
+            return Some((Keyword::Escalate(cost), ""));
         }
     }
 
@@ -1376,7 +1551,34 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         .is_ok()
     {
         if let Some(kw) = super::oracle_special::parse_escape_keyword(text) {
-            return Some(kw);
+            // CR 702.138a: the escape cost is ONE sentence —
+            // "Escape—{W}, Exile two other cards from your graveyard."
+            //
+            // Two ways this branch could quietly absorb trailing card text, and both
+            // are closed here:
+            //
+            // 1. `parse_oracle_cost` NEVER fails. It returns
+            //    `AbilityCost::Unimplemented` for prose it cannot type, so a keyword
+            //    can come back "successfully" carrying raw leftovers in a cost slot.
+            // 2. Worse, its sub-parsers match a PREFIX and drop the rest, so
+            //    "Exile two other cards from your graveyard. if you control an
+            //    artifact" types cleanly as an exile cost with the conditional
+            //    silently gone — no `Unimplemented` to detect.
+            //
+            // Neither is visible from the returned cost, so bound the declaration at
+            // its sentence terminator and report everything after it. The strict
+            // router then declines and the line falls through to an honest
+            // `Effect::Unimplemented`; the permissive grant wrapper is unaffected.
+            let after_sentence = split_once_on(text, ".").map_or("", |(_, (_, after))| after);
+            let unconsumed = match &kw {
+                Keyword::Escape(EscapeCost::NonMana(cost))
+                    if !ability_cost_is_fully_typed(cost) =>
+                {
+                    text
+                }
+                _ => after_sentence,
+            };
+            return Some((kw, unconsumed));
         }
     }
 
@@ -1385,7 +1587,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
             if rem.is_empty() {
-                return Some(Keyword::Hideaway(n));
+                return Some((Keyword::Hideaway(n), ""));
             }
         }
     }
@@ -1395,7 +1597,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::Specialize(cost));
+            return Some((Keyword::Specialize(cost), mana_cost_remainder(cost_str)));
         }
     }
 
@@ -1404,7 +1606,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::LevelUp(cost));
+            return Some((Keyword::LevelUp(cost), mana_cost_remainder(cost_str)));
         }
     }
 
@@ -1414,7 +1616,10 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::MoreThanMeetsTheEye(cost));
+            return Some((
+                Keyword::MoreThanMeetsTheEye(cost),
+                mana_cost_remainder(cost_str),
+            ));
         }
     }
 
@@ -1422,8 +1627,16 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // Delegates to nom combinator for number parsing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
+            // The empty-remainder guard is LOAD-BEARING, not an oversight, and it
+            // must stay. CR 701.57: Discover is a keyword ACTION — the printed line
+            // "Discover 4." is a spell INSTRUCTION, not a keyword declaration, and it
+            // belongs to the effect parser. Accepting the terminal period here makes
+            // the strict router consume the line as a keyword and DELETES the
+            // discover effect. (Learned the hard way: relaxing this reds
+            // discover_accept_hit_mv_equals_n_casts_to_stack and
+            // discover_decline_sends_hit_to_hand.)
             if rem.is_empty() {
-                return Some(Keyword::Discover(n));
+                return Some((Keyword::Discover(n), ""));
             }
         }
     }
@@ -1438,15 +1651,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
             "tapped fish" => GiftKind::TappedFish,
             _ => return None,
         };
-        return Some(Keyword::Gift(kind));
+        return Some((Keyword::Gift(kind), ""));
     }
 
     // CR 702.49d: Commander ninjutsu — multi-word keyword name (like "level up").
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("commander ninjutsu ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
+            // `parse_mtgjson_mana_cost` is lenient in the same way `FromStr` is: it
+            // takes the symbols it knows and says nothing about the rest.
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-            return Some(Keyword::CommanderNinjutsu(cost));
+            return Some((
+                Keyword::CommanderNinjutsu(cost),
+                mana_cost_remainder(cost_str),
+            ));
         }
     }
 
@@ -1464,7 +1682,10 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some(Keyword::Suspend { count, cost });
+                return Some((
+                    Keyword::Suspend { count, cost },
+                    mana_cost_remainder(cost_str),
+                ));
             }
         }
     }
@@ -1480,7 +1701,10 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some(Keyword::Awaken { count, cost });
+                return Some((
+                    Keyword::Awaken { count, cost },
+                    mana_cost_remainder(cost_str),
+                ));
             }
         }
     }
@@ -1498,7 +1722,10 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
                 .trim();
             if !cost_str.is_empty() {
                 let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
-                return Some(Keyword::Reinforce { count, cost });
+                return Some((
+                    Keyword::Reinforce { count, cost },
+                    mana_cost_remainder(cost_str),
+                ));
             }
         }
     }
@@ -1515,12 +1742,20 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str.trim());
             if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
                 if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
-                    if let Ok((_, toughness)) = nom_primitives::parse_number.parse(tough_str) {
-                        return Some(Keyword::Prototype {
-                            cost,
-                            power: Some(power as i32),
-                            toughness: Some(toughness as i32),
-                        });
+                    if let Ok((after_toughness, toughness)) =
+                        nom_primitives::parse_number.parse(tough_str)
+                    {
+                        return Some((
+                            Keyword::Prototype {
+                                cost,
+                                power: Some(power as i32),
+                                toughness: Some(toughness as i32),
+                            },
+                            // The toughness parse's tail was previously dropped, so
+                            // "Prototype {1}{B} — 1/1 if you control an artifact"
+                            // typed cleanly and the conditional vanished.
+                            after_toughness,
+                        ));
                     }
                 }
             }
@@ -1537,7 +1772,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     ))
     .parse(text)
     {
-        return Some(Keyword::Ripple(n));
+        return Some((Keyword::Ripple(n), ""));
     }
 
     // CR 702.89a/b: "umbra armor" — and the obsolete "totem armor" the Oracle text
@@ -1551,13 +1786,13 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     .parse(text)
     .is_ok()
     {
-        return Some(Keyword::TotemArmor);
+        return Some((Keyword::TotemArmor, ""));
     }
 
     if let Ok((quality, _)) = tag::<_, _, OracleError<'_>>("bands with other ").parse(text) {
         let normalized = normalize_bands_with_other_quality(quality);
         if !normalized.is_empty() {
-            return Some(Keyword::BandsWithOther(normalized));
+            return Some((Keyword::BandsWithOther(normalized), ""));
         }
     }
 
@@ -1582,16 +1817,52 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // CR 702.63b: Vanishing without a number has no count, so `parse_number`
     // fails and we fall through to the generic path, preserving today's
     // Vanishing(0) routing.
-    let param: Cow<'_, str> = if is_numeric_count_keyword(name) {
-        match nom_primitives::parse_number.parse(rest) {
-            Ok((remainder, _)) => Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
-            Err(_) => Cow::Borrowed(rest),
+    // `unconsumed` is the input the KEYWORD does not account for. In the
+    // colon-form path below, `FromStr` is handed the ENTIRE `param`, so a
+    // successful (non-`Unknown`) parse consumed all of it and the remainder is
+    // empty. The ONE exception is the numeric-count branch, which deliberately
+    // feeds `FromStr` only the leading integer and drops the rest — that dropped
+    // tail is precisely what the strict router must see in order to reject
+    // "<kw> N <semantic clause>" (e.g. "crew 2 if it's an artifact").
+    let (param, unconsumed): (Cow<'_, str>, &str) = if is_numeric_count_keyword(name) {
+        // CR 702.82c: "Devour [quality] N" is a variant where the count follows a
+        // leading type qualifier — Famished Worldsire's "Devour land 3" enters
+        // with three +1/+1 counters per sacrificed LAND, so the numeric token
+        // sits after "land". Take the count at the head; if a non-numeric
+        // qualifier word precedes it, skip that one word and retry, so the count
+        // is captured rather than lost to the keyword's `FromStr` `unwrap_or(1)`
+        // fallback (which produced the reported Devour 1).
+        let count_src = if nom_primitives::parse_number.parse(rest).is_ok() {
+            rest
+        } else {
+            (
+                take_until::<_, _, OracleError<'_>>(" "),
+                tag::<_, _, OracleError<'_>>(" "),
+            )
+                .parse(rest)
+                .map_or(rest, |(after_qualifier, _)| after_qualifier)
+        };
+        match nom_primitives::parse_number.parse(count_src) {
+            // `remainder` is the clause the permissive contract drops on the
+            // floor. Surface it; the strict router turns it into a rejection.
+            Ok((remainder, _)) => (
+                Cow::Borrowed(&count_src[..count_src.len() - remainder.len()]),
+                remainder,
+            ),
+            // No leading integer: the whole `rest` goes to `FromStr`, so whatever
+            // it makes of it, it saw all of it.
+            Err(_) => (Cow::Borrowed(rest), ""),
         }
     } else {
         // Strip "from" preposition (used by protection keywords).
-        tag::<_, _, OracleError<'_>>("from ")
+        let param = tag::<_, _, OracleError<'_>>("from ")
             .parse(rest)
-            .map_or(Cow::Borrowed(rest), |(rem, _)| Cow::Borrowed(rem))
+            .map_or(rest, |(rem, _)| rem);
+
+        // `param` itself is unchanged, so the permissive wrapper's output stays
+        // byte-identical; only the remainder we REPORT is now truthful. See
+        // `mana_cost_remainder` for why `FromStr` cannot be trusted here.
+        (Cow::Borrowed(param), mana_cost_remainder(param))
     };
 
     let colon_form = format!("{name}:{param}");
@@ -1599,7 +1870,341 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if matches!(parsed, Keyword::Unknown(_)) {
         return None;
     }
-    Some(parsed)
+    Some((parsed, unconsumed))
+}
+
+/// Permissive, grant-context keyword parser. Returns the typed leading keyword
+/// and **deliberately discards** whatever the core did not consume.
+///
+/// This is the documented contract, not an oversight: inside a granted or quoted
+/// ability ("enchanted creature has \"Vanishing 3\"", "... gains vanishing 3 if
+/// that creature doesn't have vanishing"), a trailing conditional belongs to the
+/// HOST ability, not to the keyword. Dropping it is correct there.
+///
+/// It is invalid at a whole-line router boundary for exactly the same reason —
+/// there, the trailing clause is unparsed card text and dropping it is a silent
+/// swallow. Routers must use `parse_router_keyword_line`, which is mechanically
+/// enforced by `scripts/check-parser-combinators.sh`.
+pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
+    parse_keyword_line_core(text).map(|(keyword, _discarded_remainder)| keyword)
+}
+
+/// Whether an `AbilityCost` was fully typed, i.e. contains no `Unimplemented`
+/// component anywhere in it.
+///
+/// `parse_oracle_cost` returns `AbilityCost` UNCONDITIONALLY — it never fails, and
+/// hands back `AbilityCost::Unimplemented { description }` for text it cannot type.
+/// So "the cost parser succeeded" is not evidence the cost parsed: a keyword can be
+/// constructed carrying raw leftover prose in a cost slot. A router that commits
+/// such a keyword consumes the source line AND fabricates a cost — strictly worse
+/// than declining, because the line then renders as supported.
+fn ability_cost_is_fully_typed(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Unimplemented { .. } => false,
+        // The only nesting variant; a composite is typed iff every part is.
+        AbilityCost::Composite { costs, .. } => costs.iter().all(ability_cost_is_fully_typed),
+        _ => true,
+    }
+}
+
+/// Honest remainder for a parameter that `Keyword`'s `FromStr` will consume
+/// LENIENTLY.
+///
+/// `FromStr` is not a consumption oracle: given "cycling:{2} if you control an
+/// artifact" it does NOT return `Unknown` — it parses the mana symbols it
+/// recognizes, silently drops the rest, and hands back a degenerate empty cost.
+/// So every cascade branch that formats a colon-form and trusts a non-`Unknown`
+/// result is claiming a full consumption it never verified. Re-derive the tail
+/// with the canonical nom combinator instead.
+///
+/// The combinator is case-SENSITIVE (`{U}`) while the cascade runs lowercased, so
+/// it must be fed uppercase or it stops at the first colored pip and reports a
+/// bogus `{u}` remainder — a partial parse masquerading as progress, which is the
+/// exact failure class this module exists to remove. `to_ascii_uppercase` is
+/// length-preserving, so the remainder's byte length maps back onto the original.
+///
+/// A parameter that is not a mana cost at all (protection "red", splice "onto
+/// arcane") fails outright, and for those `FromStr` really does take the whole
+/// parameter — hence `""`.
+fn mana_cost_remainder(param: &str) -> &str {
+    let upper = param.to_ascii_uppercase();
+    let unconsumed_len = count_dash_cost_remainder_len(&upper)
+        .or_else(|| {
+            nom_primitives::parse_mana_cost(&upper)
+                .ok()
+                .map(|(remainder, _cost)| remainder.len())
+        })
+        .unwrap_or(0);
+    &param[param.len() - unconsumed_len..]
+}
+
+/// The "N—{cost}" parameter shape (CR 702.62a Suspend, CR 702.176a Impending,
+/// Awaken, Reinforce). `FromStr` accepts it leniently in one gulp, so the plain
+/// mana-cost combinator cannot measure it — it does not even start with a mana
+/// symbol, so it reports "nothing consumed" and the caller concludes, wrongly,
+/// that the whole parameter was taken.
+fn count_dash_cost_remainder_len(upper: &str) -> Option<usize> {
+    let (rest, _) = nom_primitives::parse_number.parse(upper).ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("\u{2014}"),
+        tag("--"),
+        tag("-"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = nom_primitives::parse_mana_cost(rest).ok()?;
+    Some(rest.len())
+}
+
+/// CR 602.5b: the only modeled modifier sentence a routed keyword line may carry
+/// after its declaration. Adding a variant here is the ONLY way to widen the
+/// permitted tail — arbitrary prose is never accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum KeywordLineModifier {
+    /// CR 602.5b: "Activate only once each turn." (Crew's cadence sentence.)
+    ActivateOnlyOnceEachTurn,
+}
+
+/// Exactly what the strict router tolerated after the keyword's semantic text.
+/// This is evidence, not decoration: it records that the router SAW the tail and
+/// classified it, rather than having quietly dropped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermittedKeywordRemainder {
+    None,
+    TerminalPunctuation,
+    ReminderText,
+    TerminalPunctuationAndReminderText,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeywordLineTail {
+    pub(crate) modifiers: Vec<KeywordLineModifier>,
+    pub(crate) permitted_remainder: PermittedKeywordRemainder,
+}
+
+/// A whole Oracle line that strictly and completely parsed as a keyword
+/// declaration. A router may advance its source index ONLY on this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoutedKeywordLine {
+    /// `None` when the line is a COMPLETE keyword declaration that has nothing to
+    /// emit because MTGJSON is the typed authority for it (CR 702.124 Partner).
+    /// The line is still fully accounted for, so the router consumes it — it just
+    /// pushes no keyword. Without this the line would fall through and become a
+    /// FALSE `Unimplemented` on a card that is fully supported.
+    pub(crate) keyword: Option<Keyword>,
+    pub(crate) tail: KeywordLineTail,
+}
+
+/// CR 702.124: the Partner family's typed keyword comes from MTGJSON, not from the
+/// Oracle line. `parse_keyword_line_core` deliberately DECLINES "partner with
+/// [Name]" (see the `value(None, tag("partner with "))` arm) because the cascade
+/// sees LOWERCASED text and re-parsing would emit a duplicate keyword with mangled
+/// casing — "alphinaud leveilleur" instead of "Alphinaud Leveilleur".
+///
+/// That refusal was harmless while priority 13 silently skipped the line. Under
+/// consume-on-success it is NOT: measured on the full pool, it turned 60 fully
+/// supported faces into false `Unimplemented`s. The line IS a complete declaration;
+/// it simply has nothing left to contribute. Recognize it so the router consumes it
+/// and emits nothing.
+///
+/// Still all-consuming: "Partner if you control an artifact" is rejected, because a
+/// bare declaration must have an empty remainder.
+fn is_partner_declaration_line(lower: &str) -> bool {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("partner with ").parse(lower) {
+        return !rest.trim().is_empty();
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("partner\u{2014}").parse(lower) {
+        return !rest.trim().is_empty();
+    }
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("partner").parse(lower) {
+        return rest.trim().is_empty();
+    }
+    false
+}
+
+/// CR 602.5b: the modeled modifier sentence, as a combinator.
+fn parse_keyword_line_modifier(
+    input: &str,
+) -> nom::IResult<&str, KeywordLineModifier, OracleError<'_>> {
+    value(
+        KeywordLineModifier::ActivateOnlyOnceEachTurn,
+        tag("activate only once each turn"),
+    )
+    .parse(input)
+}
+
+/// All-consuming permitted tail: whitespace, terminal punctuation, and modeled
+/// modifier sentences — and nothing else. Any other text (a conditional, an
+/// effect clause, a second sentence) makes the whole routed parse fail, which is
+/// the entire point: the caller must then leave the line for ordinary parsing so
+/// it becomes an honest `Effect::Unimplemented` instead of a silent swallow.
+///
+/// Returns the modifiers found and whether terminal punctuation was present.
+fn parse_permitted_keyword_tail(input: &str) -> Option<(Vec<KeywordLineModifier>, bool)> {
+    let mut modifiers = Vec::new();
+    let mut had_terminal_punctuation = false;
+    let mut rest = input.trim();
+
+    while !rest.is_empty() {
+        // Terminal punctuation is structural, not dispatch.
+        if let Ok((after, _)) = tag::<_, _, OracleError<'_>>(".").parse(rest) {
+            had_terminal_punctuation = true;
+            rest = after.trim_start();
+            continue;
+        }
+        if let Ok((after, modifier)) = parse_keyword_line_modifier(rest) {
+            modifiers.push(modifier);
+            rest = after.trim_start();
+            continue;
+        }
+        // Arbitrary semantic prose — reject the whole line.
+        return None;
+    }
+
+    Some((modifiers, had_terminal_punctuation))
+}
+
+/// Apply every modeled modifier to the typed keyword. A modifier we recognize but
+/// cannot attach to THIS keyword is not a permitted tail — decline the routed
+/// parse rather than drop it on the floor, which is exactly the class of silent
+/// loss this unit exists to remove.
+fn apply_keyword_line_modifiers(
+    keyword: Keyword,
+    modifiers: &[KeywordLineModifier],
+) -> Option<Keyword> {
+    let mut keyword = keyword;
+    for modifier in modifiers {
+        keyword = match (keyword, modifier) {
+            // CR 702.122 + CR 602.5b: Crew's cadence sentence is modeled.
+            (Keyword::Crew { power, .. }, KeywordLineModifier::ActivateOnlyOnceEachTurn) => {
+                Keyword::Crew {
+                    power,
+                    once_per_turn: Some(Box::new(ActivationRestriction::OnlyOnceEachTurn)),
+                }
+            }
+            (_, KeywordLineModifier::ActivateOnlyOnceEachTurn) => return None,
+        };
+    }
+    Some(keyword)
+}
+
+/// The SINGLE router-facing keyword-line parser. Returns `Some` only when the
+/// ENTIRE line is a keyword declaration plus a permitted tail (`P/R/M`).
+///
+/// This is the strict counterpart to `parse_granted_keyword_fragment`. The
+/// difference is not stylistic — a router that commits on the permissive parser
+/// consumes the line and throws away everything the keyword did not explain:
+///
+///   "crew 2 if it's an artifact"  -> permissive: Some(Crew(2)), suffix EATEN
+///                                 -> strict:     None, line survives for fallback
+///
+/// A candidate prefix (`is_keyword_cost_line`) is necessary but NEVER sufficient;
+/// neither is an MTGJSON keyword name. Only a complete typed extraction with an
+/// exhaustively applied structured tail permits a router to advance.
+pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine> {
+    let trimmed = line.trim();
+
+    // 1. Candidate recognition — a cheap reject, not evidence of support.
+    if !is_keyword_cost_line(&trimmed.to_lowercase()) {
+        return None;
+    }
+
+    // 2. Balanced reminder-text removal is the ONLY permitted normalization.
+    let without_reminder = strip_reminder_text(trimmed);
+    let semantic = without_reminder.trim();
+    let had_reminder = semantic.len() != trimmed.len();
+    let lower = semantic.to_lowercase();
+
+    let permitted_remainder_of = |had_punct: bool| match (had_punct, had_reminder) {
+        (false, false) => PermittedKeywordRemainder::None,
+        (true, false) => PermittedKeywordRemainder::TerminalPunctuation,
+        (false, true) => PermittedKeywordRemainder::ReminderText,
+        (true, true) => PermittedKeywordRemainder::TerminalPunctuationAndReminderText,
+    };
+
+    // 2b. MTGJSON-authoritative declarations: fully accounted for, nothing to emit.
+    if is_partner_declaration_line(&lower) {
+        return Some(RoutedKeywordLine {
+            keyword: None,
+            tail: KeywordLineTail {
+                modifiers: Vec::new(),
+                permitted_remainder: permitted_remainder_of(false),
+            },
+        });
+    }
+
+    // 3. Remainder-preserving core — it never erases a suffix.
+    let (keyword, unconsumed) = parse_keyword_line_core(&lower)?;
+
+    // 4. The unconsumed tail must be entirely `P`/`M`, or we decline.
+    let (modifiers, had_terminal_punctuation) = parse_permitted_keyword_tail(unconsumed)?;
+
+    // 5. Modeled modifiers are applied exhaustively before the keyword escapes.
+    let keyword = apply_keyword_line_modifiers(keyword, &modifiers)?;
+
+    Some(RoutedKeywordLine {
+        keyword: Some(keyword),
+        tail: KeywordLineTail {
+            modifiers,
+            permitted_remainder: permitted_remainder_of(had_terminal_punctuation),
+        },
+    })
+}
+
+/// The remainder-CHECKING sibling of [`parse_granted_keyword_fragment`], which is
+/// literally `parse_keyword_line_core(t).map(|(kw, _discarded_remainder)| kw)`.
+///
+/// Same core, same typed keyword — but any unconsumed SEMANTIC prose rejects the
+/// fragment instead of being thrown away. Only a permitted (`P`/`M`) tail may
+/// remain. This is the primitive every router-context keyword parse is built on:
+/// the whole-line router ([`parse_router_keyword_line`]) adds candidate recognition
+/// and reminder-text handling on top; the list router
+/// ([`parse_router_keyword_list`]) applies it per comma part.
+///
+/// Takes ALREADY-LOWERCASED text, matching `parse_granted_keyword_fragment`'s
+/// contract, so it is a drop-in at every site that used the permissive surface.
+pub(crate) fn parse_router_keyword_fragment(lower: &str) -> Option<Keyword> {
+    let (keyword, unconsumed) = parse_keyword_line_core(lower)?;
+    let (modifiers, _had_terminal_punctuation) = parse_permitted_keyword_tail(unconsumed)?;
+    apply_keyword_line_modifiers(keyword, &modifiers)
+}
+
+/// A candidate prefix matches only at a WORD BOUNDARY: the prefix must be followed
+/// by end-of-line, whitespace, or an em-dash.
+///
+/// Extracted from [`is_keyword_cost_line`]'s guard so that every candidate
+/// recognizer shares one boundary rule. Without it, a bare `tag("kicker")` accepts
+/// "Kickerfoo {2}" — the router claims a line it cannot parse and (before this
+/// unit) consumed it with no keyword and no diagnostic.
+fn matches_keyword_prefix_at_word_boundary(lower: &str, prefix: &str) -> bool {
+    tag::<_, _, OracleError<'_>>(prefix)
+        .parse(lower)
+        .is_ok_and(|(rest, _)| {
+            rest.is_empty()
+                || rest.as_bytes().first() == Some(&b' ')
+                || rest.as_bytes().first() == Some(&b'\t')
+                || tag::<_, _, OracleError<'_>>("\u{2014}").parse(rest).is_ok()
+        })
+}
+
+/// CR 702.33 Kicker / CR 702.33c Multikicker (a kicker variant, not a sibling rule)
+/// / CR 702.56 Replicate / CR 702.187 Mayhem — the four keyword ADDITIONAL COSTS
+/// that declare themselves on their own Oracle line.
+///
+/// The priority-8f candidate set. Deliberately NOT merged into
+/// [`KEYWORD_COST_PREFIXES`]: these are keyword ADDITIONAL COSTS whose lines also
+/// feed `parse_kicker_additional_cost_line`, and `is_keyword_cost_line` additionally
+/// gates `is_spell_resolution_instruction_line` — widening it there would change
+/// which lines count as spell-resolution text.
+pub(crate) const KICKER_FAMILY_PREFIXES: [&str; 4] =
+    ["kicker", "multikicker", "replicate", "mayhem"];
+
+/// Whether a line is a priority-8f kicker-family candidate, guarded at a word
+/// boundary. Candidate recognition ONLY — never evidence that the line parses.
+pub(crate) fn is_kicker_family_line(lower: &str) -> bool {
+    KICKER_FAMILY_PREFIXES
+        .iter()
+        .any(|prefix| matches_keyword_prefix_at_word_boundary(lower, prefix))
 }
 
 /// Bare-integer-count keywords whose `FromStr` arm does `p.parse().unwrap_or(N)`
@@ -2069,119 +2674,125 @@ fn type_filter_subject_name(tf: &TypeFilter) -> String {
     }
 }
 
+/// The complete fixed-prefix set the keyword-cost candidate recognizer accepts.
+///
+/// This is the SINGLE authority for the candidate prefix set. `ROUTER_KEYWORD_CASES`
+/// (in tests) is asserted set-equal to it, so a prefix added here without a strict
+/// parser, a valid fixture, a semantic-suffix rejection, and a declared production
+/// reach fails the build. That gate is the whole point: a prefix in this list is a
+/// promise that the router can strictly parse the line, and an unbacked promise is
+/// exactly how a candidate recognizer starts silently swallowing card text.
+///
+/// CR 702.29e adds the one NON-fixed rule (typecycling), handled separately below.
+pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
+    "cycling",
+    "basic landcycling",
+    "flashback",
+    "crew",
+    "ward",
+    "equip", // already handled earlier but as safety
+    "bestow",
+    "embalm",
+    "eternalize",
+    "unearth",
+    "commander ninjutsu",
+    "ninjutsu",
+    "prowl",
+    "morph",
+    "megamorph",
+    "madness",
+    "dash",
+    "emerge",
+    "escape",
+    "evoke",
+    "foretell",
+    "mutate",
+    "disturb",
+    "disguise",
+    "blitz",
+    "overload",
+    "spectacle",
+    "freerunning",
+    "surge",
+    "encore",
+    "buyback",
+    "echo",
+    "outlast",
+    "scavenge",
+    "fortify",
+    "prototype",
+    "plot",
+    "craft",
+    "offspring",
+    "impending",
+    "reconfigure",
+    "suspend",
+    "level up",
+    "transfigure",
+    "transmute",
+    "forecast",
+    "recover",
+    "escalate",
+    "awaken",
+    "reinforce",
+    "retrace",
+    "adapt",
+    "monstrosity",
+    "affinity",
+    "convoke",
+    "waterbend",
+    "delve",
+    "improvise",
+    "miracle",
+    "splice",
+    "entwine",
+    "toxic",
+    "saddle",
+    "teamwork",
+    "soulshift",
+    "backup",
+    "squad",
+    "warp",
+    "sneak",
+    "web-slinging",
+    "mobilize",
+    "hideaway",
+    "gift",
+    "discover",
+    "harmonize",
+    "collect evidence",
+    "mayhem",
+    "more than meets the eye",
+    "living weapon",
+    "champion",
+    "amplify",
+    "bloodthirst",
+    "tribute",
+    "persist",
+    "undying",
+    "fabricate",
+    "modular",
+    "partner",
+    "spree",
+    "casualty",
+    "bargain",
+    "demonstrate",
+    "strive",
+    "exploit",
+    "devoid",
+];
+
 /// Check if a line is a keyword with a cost (e.g., "Cycling {2}", "Flashback {3}{R}", "Crew 3").
-/// These are handled by MTGJSON keywords and should be skipped by the Oracle parser.
+///
+/// CANDIDATE RECOGNITION ONLY. A `true` here is NOT evidence that the line can be
+/// parsed, and a router must never advance its source index on it alone — that is
+/// precisely the bug this unit removes. Only `parse_router_keyword_line` returning
+/// `Some` licenses a router to consume the line.
 pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
-    let keyword_costs = [
-        "cycling",
-        "basic landcycling",
-        "flashback",
-        "crew",
-        "ward",
-        "equip", // already handled earlier but as safety
-        "bestow",
-        "embalm",
-        "eternalize",
-        "unearth",
-        "commander ninjutsu",
-        "ninjutsu",
-        "prowl",
-        "morph",
-        "megamorph",
-        "madness",
-        "dash",
-        "emerge",
-        "escape",
-        "evoke",
-        "foretell",
-        "mutate",
-        "disturb",
-        "disguise",
-        "blitz",
-        "overload",
-        "spectacle",
-        "freerunning",
-        "surge",
-        "encore",
-        "buyback",
-        "echo",
-        "outlast",
-        "scavenge",
-        "fortify",
-        "prototype",
-        "plot",
-        "craft",
-        "offspring",
-        "impending",
-        "reconfigure",
-        "suspend",
-        "level up",
-        "transfigure",
-        "transmute",
-        "forecast",
-        "recover",
-        "escalate",
-        "awaken",
-        "reinforce",
-        "retrace",
-        "adapt",
-        "monstrosity",
-        "affinity",
-        "convoke",
-        "waterbend",
-        "delve",
-        "improvise",
-        "miracle",
-        "splice",
-        "entwine",
-        "toxic",
-        "saddle",
-        "teamwork",
-        "soulshift",
-        "backup",
-        "squad",
-        "warp",
-        "sneak",
-        "web-slinging",
-        "mobilize",
-        "hideaway",
-        "gift",
-        "discover",
-        "harmonize",
-        "collect evidence",
-        "mayhem",
-        "more than meets the eye",
-        "living weapon",
-        "champion",
-        "amplify",
-        "bloodthirst",
-        "tribute",
-        "persist",
-        "undying",
-        "fabricate",
-        "modular",
-        "partner",
-        "spree",
-        "casualty",
-        "bargain",
-        "demonstrate",
-        "strive",
-        "exploit",
-        "devoid",
-    ];
-    keyword_costs.iter().any(|kw| {
-        tag::<_, _, OracleError<'_>>(*kw)
-            .parse(lower)
-            .is_ok_and(|(rest, _)| {
-                rest.is_empty()
-                    || rest.as_bytes().first() == Some(&b' ')
-                    || rest.as_bytes().first() == Some(&b'\t')
-                    || tag::<_, _, OracleError<'_>>("\u{2014}")
-                        .parse(rest)
-                        .is_ok()
-            })
-    })
-        // CR 702.29: Typecycling — first word ends in "cycling" but isn't "cycling" itself
+    KEYWORD_COST_PREFIXES
+        .iter()
+        .any(|kw| matches_keyword_prefix_at_word_boundary(lower, kw))
+        // CR 702.29e: Typecycling — first word ends in "cycling" but isn't "cycling" itself
         || lower
             .split_whitespace()
             .next()
@@ -2195,28 +2806,51 @@ mod tests {
     use crate::types::mana::ManaCost;
 
     #[test]
-    fn parse_keyword_from_oracle_cascade() {
+    fn parse_granted_keyword_fragment_cascade() {
         // CR 702.85a: Cascade is a no-parameter keyword.
-        let kw = parse_keyword_from_oracle("cascade").unwrap();
+        let kw = parse_granted_keyword_fragment("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
     }
 
+    /// CR 702.82c: "Devour [quality] N" (Famished Worldsire — "Devour land 3")
+    /// puts the count after the type qualifier. The numeric-count extractor must
+    /// skip the leading qualifier word so the count is 3, not the `FromStr`
+    /// `unwrap_or(1)` fallback (which produced the reported Devour 1).
+    #[test]
+    fn parse_granted_keyword_fragment_devour_quality_qualifier_count() {
+        assert_eq!(
+            parse_granted_keyword_fragment("devour land 3"),
+            Some(Keyword::Devour(3))
+        );
+        // CR 702.82a: the plain "Devour N" form is unaffected.
+        assert_eq!(
+            parse_granted_keyword_fragment("devour 3"),
+            Some(Keyword::Devour(3))
+        );
+        // Regression: a sibling numeric-count keyword still extracts its leading
+        // count — the qualifier-skip only fires on the parse_number-fails branch.
+        assert_eq!(
+            parse_granted_keyword_fragment("vanishing 3"),
+            Some(Keyword::Vanishing(3))
+        );
+    }
+
     /// CR 702.24: a GRANTED cumulative upkeep (the quoted-ability grant path
-    /// routes through `parse_keyword_from_oracle`) must parse with its cost, like
+    /// routes through `parse_granted_keyword_fragment`) must parse with its cost, like
     /// the top-level keyword-line path — Mana Chains / Dreams of the Dead (mana),
     /// Decomposition (pay-life em-dash form).
     #[test]
-    fn parse_keyword_from_oracle_granted_cumulative_upkeep() {
+    fn parse_granted_keyword_fragment_granted_cumulative_upkeep() {
         assert!(matches!(
-            parse_keyword_from_oracle("cumulative upkeep {1}"),
+            parse_granted_keyword_fragment("cumulative upkeep {1}"),
             Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
         ));
         assert!(matches!(
-            parse_keyword_from_oracle("cumulative upkeep {2}"),
+            parse_granted_keyword_fragment("cumulative upkeep {2}"),
             Some(Keyword::CumulativeUpkeep(AbilityCost::Mana { .. }))
         ));
         assert!(matches!(
-            parse_keyword_from_oracle("cumulative upkeep\u{2014}pay 1 life"),
+            parse_granted_keyword_fragment("cumulative upkeep\u{2014}pay 1 life"),
             Some(Keyword::CumulativeUpkeep(AbilityCost::PayLife { .. }))
         ));
     }
@@ -2224,17 +2858,17 @@ mod tests {
     /// CR 702.85c: a spell printing cascade as repeated bare words has one instance
     /// per word; each triggers separately. MTGJSON dedupes the keywords array to a
     /// single "Cascade", so the Oracle line is the sole source of printed
-    /// multiplicity — extract_keyword_line must recover every occurrence.
+    /// multiplicity — extract_granted_keyword_list must recover every occurrence.
     #[test]
-    fn extract_keyword_line_recovers_repeated_cascade_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_cascade_instances() {
         let mtgjson_kws = vec!["cascade".to_string()];
-        let two = extract_keyword_line("Cascade, cascade", &mtgjson_kws)
+        let two = extract_granted_keyword_list("Cascade, cascade", &mtgjson_kws)
             .expect("repeated cascade line is a keyword line");
         assert_eq!(
             two.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
             2
         );
-        let four = extract_keyword_line("Cascade, cascade, cascade, cascade", &mtgjson_kws)
+        let four = extract_granted_keyword_list("Cascade, cascade, cascade, cascade", &mtgjson_kws)
             .expect("repeated cascade line is a keyword line");
         assert_eq!(
             four.iter()
@@ -2247,9 +2881,9 @@ mod tests {
     /// CR 702.85c regression guard: a single printed cascade (Bloodbraid Elf) must
     /// still net exactly one instance — recovery must not over-count.
     #[test]
-    fn extract_keyword_line_single_cascade_yields_one_instance() {
+    fn extract_granted_keyword_list_single_cascade_yields_one_instance() {
         let mtgjson_kws = vec!["cascade".to_string()];
-        let one = extract_keyword_line("Cascade", &mtgjson_kws)
+        let one = extract_granted_keyword_list("Cascade", &mtgjson_kws)
             .expect("single cascade line is a keyword line");
         assert_eq!(
             one.iter().filter(|k| matches!(k, Keyword::Cascade)).count(),
@@ -2260,12 +2894,12 @@ mod tests {
     /// CR 702.116b: a creature printing myriad as repeated bare words has one
     /// instance per word; each triggers separately. MTGJSON dedupes the keywords
     /// array to a single "Myriad", so the Oracle line is the sole source of printed
-    /// multiplicity — extract_keyword_line must recover every occurrence. Scurry of
+    /// multiplicity — extract_granted_keyword_list must recover every occurrence. Scurry of
     /// Squirrels ("Myriad, myriad") is the real card this fixes.
     #[test]
-    fn extract_keyword_line_recovers_repeated_myriad_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_myriad_instances() {
         let mtgjson_kws = vec!["myriad".to_string()];
-        let two = extract_keyword_line("Myriad, myriad", &mtgjson_kws)
+        let two = extract_granted_keyword_list("Myriad, myriad", &mtgjson_kws)
             .expect("repeated myriad line is a keyword line");
         assert_eq!(
             two.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
@@ -2276,9 +2910,9 @@ mod tests {
     /// CR 702.116b regression guard: a single printed myriad must net exactly one
     /// instance — recovery must not over-count.
     #[test]
-    fn extract_keyword_line_single_myriad_yields_one_instance() {
+    fn extract_granted_keyword_list_single_myriad_yields_one_instance() {
         let mtgjson_kws = vec!["myriad".to_string()];
-        let one = extract_keyword_line("Myriad", &mtgjson_kws)
+        let one = extract_granted_keyword_list("Myriad", &mtgjson_kws)
             .expect("single myriad line is a keyword line");
         assert_eq!(
             one.iter().filter(|k| matches!(k, Keyword::Myriad)).count(),
@@ -2295,9 +2929,9 @@ mod tests {
     /// the `{cost} —` keyword-line parser does not yet strip (see the deferred-gap
     /// pin below). When a clean printed instance lands, this test already covers it.
     #[test]
-    fn extract_keyword_line_recovers_repeated_exalted_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_exalted_instances() {
         let mtgjson_kws = vec!["exalted".to_string()];
-        let two = extract_keyword_line("Exalted, exalted", &mtgjson_kws)
+        let two = extract_granted_keyword_list("Exalted, exalted", &mtgjson_kws)
             .expect("repeated exalted line is a keyword line");
         assert_eq!(
             two.iter().filter(|k| matches!(k, Keyword::Exalted)).count(),
@@ -2307,11 +2941,11 @@ mod tests {
 
     /// CR 113.2c / CR 702.83a: Urza's Dark Cannonball prints a keyword line behind
     /// an activation-cost prefix. The prefix is not part of the keyword text, so
-    /// `extract_keyword_line` must still recover both Exalted instances.
+    /// `extract_granted_keyword_list` must still recover both Exalted instances.
     #[test]
-    fn extract_keyword_line_cost_prefixed_exalted_recovers_instances() {
+    fn extract_granted_keyword_list_cost_prefixed_exalted_recovers_instances() {
         let mtgjson_kws = vec!["exalted".to_string()];
-        let result = extract_keyword_line("{TK}{TK} — Exalted, exalted", &mtgjson_kws)
+        let result = extract_granted_keyword_list("{TK}{TK} — Exalted, exalted", &mtgjson_kws)
             .expect("cost-prefixed repeated exalted line is a keyword line");
         assert_eq!(
             result
@@ -2326,9 +2960,9 @@ mod tests {
     /// dedupes the keywords array to one "Provoke", so keyword-line extraction
     /// must recover every printed occurrence before synthesis installs triggers.
     #[test]
-    fn extract_keyword_line_recovers_repeated_provoke_instances() {
+    fn extract_granted_keyword_list_recovers_repeated_provoke_instances() {
         let mtgjson_kws = vec!["provoke".to_string()];
-        let result = extract_keyword_line("Provoke, provoke", &mtgjson_kws)
+        let result = extract_granted_keyword_list("Provoke, provoke", &mtgjson_kws)
             .expect("repeated provoke line is a keyword line");
         assert_eq!(
             result
@@ -2342,18 +2976,18 @@ mod tests {
     /// CR 702.60a: Ripple N triggers when the spell is cast. N is captured into
     /// the parameterized `Keyword::Ripple(u32)`; trailing text is rejected.
     #[test]
-    fn parse_keyword_from_oracle_ripple() {
+    fn parse_granted_keyword_fragment_ripple() {
         assert_eq!(
-            parse_keyword_from_oracle("ripple 4"),
+            parse_granted_keyword_fragment("ripple 4"),
             Some(Keyword::Ripple(4)),
             "ripple 4 (Thrumming Stone grant)"
         );
         assert_eq!(
-            parse_keyword_from_oracle("ripple 2"),
+            parse_granted_keyword_fragment("ripple 2"),
             Some(Keyword::Ripple(2)),
             "ripple 2 — N is captured"
         );
-        assert_eq!(parse_keyword_from_oracle("ripple 4 extra"), None);
+        assert_eq!(parse_granted_keyword_fragment("ripple 4 extra"), None);
     }
 
     /// CR 702.63a: Vanishing N.
@@ -2365,16 +2999,16 @@ mod tests {
     /// instead of feeding the whole remainder to FromStr and falling back. This
     /// tests the building-block class, not a single card.
     #[test]
-    fn parse_keyword_from_oracle_numeric_count_with_trailing_text() {
+    fn parse_granted_keyword_fragment_numeric_count_with_trailing_text() {
         // Regression: Flesh Duplicate's conditional except-clause grant.
         assert_eq!(
-            parse_keyword_from_oracle("vanishing 3 if that creature doesn't have vanishing"),
+            parse_granted_keyword_fragment("vanishing 3 if that creature doesn't have vanishing"),
             Some(Keyword::Vanishing(3)),
             "trailing 'if ...' clause must not erase the count"
         );
         // No-trailing-text form is unchanged.
         assert_eq!(
-            parse_keyword_from_oracle("vanishing 3"),
+            parse_granted_keyword_fragment("vanishing 3"),
             Some(Keyword::Vanishing(3))
         );
         // CR 702.63b: a single-word bare keyword has no space, so the normalizer's
@@ -2382,23 +3016,23 @@ mod tests {
         // (bare vanishing reaches the engine via the MTGJSON colon-form path, not
         // this Oracle-grant normalizer). This is unchanged pre-existing behavior;
         // the fix must not start spuriously accepting the space-less form.
-        assert_eq!(parse_keyword_from_oracle("vanishing"), None);
+        assert_eq!(parse_granted_keyword_fragment("vanishing"), None);
         // Fading shares the normalizer with no dedicated arm — proves the class.
         assert_eq!(
-            parse_keyword_from_oracle("fading 2 if it's an artifact"),
+            parse_granted_keyword_fragment("fading 2 if it's an artifact"),
             Some(Keyword::Fading(2))
         );
         // Renown's dedicated `all_consuming` arm rejects trailing text, so the
         // trailing-text form falls through to the fixed normalizer.
         assert_eq!(
-            parse_keyword_from_oracle("renown 2 if it's your turn"),
+            parse_granted_keyword_fragment("renown 2 if it's your turn"),
             Some(Keyword::Renown(2))
         );
         // CR 702.122a: Crew N is also a bare-integer count keyword. A conditional
         // grant must keep the leading total-power threshold and drop the trailing
         // clause, exactly like the rest of the class.
         assert_eq!(
-            parse_keyword_from_oracle("crew 2 if it's an artifact"),
+            parse_granted_keyword_fragment("crew 2 if it's an artifact"),
             Some(Keyword::Crew {
                 power: 2,
                 once_per_turn: None,
@@ -2407,26 +3041,26 @@ mod tests {
         // Non-numeric keyword must NOT be hijacked by the numeric branch: the
         // "from " preposition strip still produces a protection target.
         assert!(matches!(
-            parse_keyword_from_oracle("protection from red"),
+            parse_granted_keyword_fragment("protection from red"),
             Some(Keyword::Protection(_))
         ));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_bands_with_other_quality() {
+    fn parse_granted_keyword_fragment_bands_with_other_quality() {
         assert_eq!(
-            parse_keyword_from_oracle("bands with other wolves"),
+            parse_granted_keyword_fragment("bands with other wolves"),
             Some(Keyword::BandsWithOther("Wolf".to_string()))
         );
         assert_eq!(
-            parse_keyword_from_oracle("bands with other legends"),
+            parse_granted_keyword_fragment("bands with other legends"),
             Some(Keyword::BandsWithOther("Legend".to_string()))
         );
     }
 
     #[test]
-    fn extract_keyword_line_bands_with_other_quality() {
-        let result = extract_keyword_line("Bands with other Wolves", &[])
+    fn extract_granted_keyword_list_bands_with_other_quality() {
+        let result = extract_granted_keyword_list("Bands with other Wolves", &[])
             .expect("bands with other should parse from Oracle keyword line");
         assert_eq!(result, vec![Keyword::BandsWithOther("Wolf".to_string())]);
     }
@@ -2436,9 +3070,9 @@ mod tests {
     /// no arm matched, so Keyword::Offering was never produced and the cast path
     /// was unreachable. Quality is canonicalized to subtype casing.
     #[test]
-    fn parse_keyword_from_oracle_offering() {
+    fn parse_granted_keyword_fragment_offering() {
         assert_eq!(
-            parse_keyword_from_oracle(
+            parse_granted_keyword_fragment(
                 "goblin offering (you may cast this spell any time you could cast an instant \
                  by sacrificing a goblin and paying the difference in mana costs.)"
             ),
@@ -2446,19 +3080,22 @@ mod tests {
             "Patron of the Akki — Goblin offering"
         );
         assert_eq!(
-            parse_keyword_from_oracle("artifact offering (...)"),
+            parse_granted_keyword_fragment("artifact offering (...)"),
             Some(Keyword::Offering("Artifact".to_string())),
             "Blast-Furnace Hellkite — Artifact offering"
         );
         // Not a keyword line: a prose sentence merely ending in "offering".
-        assert_eq!(parse_keyword_from_oracle("make a generous offering"), None);
+        assert_eq!(
+            parse_granted_keyword_fragment("make a generous offering"),
+            None
+        );
     }
 
     #[test]
-    fn extract_keyword_line_ripple_preserves_oracle_depth() {
+    fn extract_granted_keyword_list_ripple_preserves_oracle_depth() {
         let mtgjson_kws = vec!["ripple".to_string()];
 
-        let result = extract_keyword_line("Ripple 4", &mtgjson_kws)
+        let result = extract_granted_keyword_list("Ripple 4", &mtgjson_kws)
             .expect("Ripple N line should be recognized as a keyword line");
 
         assert_eq!(
@@ -2504,64 +3141,64 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_toxic() {
+    fn parse_granted_keyword_fragment_toxic() {
         // CR 702.164: Toxic N — parameterized keyword from Oracle text
-        let kw = parse_keyword_from_oracle("toxic 2").unwrap();
+        let kw = parse_granted_keyword_fragment("toxic 2").unwrap();
         assert_eq!(kw, Keyword::Toxic(2));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_renown() {
+    fn parse_granted_keyword_fragment_renown() {
         // CR 702.112a: Renown N — parameterized keyword from Oracle text.
-        let kw = parse_keyword_from_oracle("renown 2").unwrap();
+        let kw = parse_granted_keyword_fragment("renown 2").unwrap();
         assert_eq!(kw, Keyword::Renown(2));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_frenzy() {
+    fn parse_granted_keyword_fragment_frenzy() {
         // CR 702.68a: Frenzy N — parameterized keyword from Oracle/grant text.
-        let kw = parse_keyword_from_oracle("frenzy 2").unwrap();
+        let kw = parse_granted_keyword_fragment("frenzy 2").unwrap();
         assert_eq!(kw, Keyword::Frenzy(2));
         // CR 702.68a: the Frenzy Sliver grant line "frenzy 1" must resolve to
         // Frenzy(1), not fall to Unknown/Unimplemented.
-        let kw1 = parse_keyword_from_oracle("frenzy 1").unwrap();
+        let kw1 = parse_granted_keyword_fragment("frenzy 1").unwrap();
         assert_eq!(kw1, Keyword::Frenzy(1));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_saddle() {
+    fn parse_granted_keyword_fragment_saddle() {
         // CR 702.171a: Saddle N
-        let kw = parse_keyword_from_oracle("saddle 3").unwrap();
+        let kw = parse_granted_keyword_fragment("saddle 3").unwrap();
         assert_eq!(kw, Keyword::Saddle(3));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_soulshift() {
+    fn parse_granted_keyword_fragment_soulshift() {
         // CR 702.46: Soulshift N
-        let kw = parse_keyword_from_oracle("soulshift 7").unwrap();
+        let kw = parse_granted_keyword_fragment("soulshift 7").unwrap();
         assert_eq!(kw, Keyword::Soulshift(7));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_backup() {
+    fn parse_granted_keyword_fragment_backup() {
         // CR 702.165: Backup N
-        let kw = parse_keyword_from_oracle("backup 1").unwrap();
+        let kw = parse_granted_keyword_fragment("backup 1").unwrap();
         assert_eq!(kw, Keyword::Backup(1));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_squad() {
+    fn parse_granted_keyword_fragment_squad() {
         // CR 702.157: Squad {cost}
-        let kw = parse_keyword_from_oracle("squad {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("squad {2}").unwrap();
         assert!(matches!(kw, Keyword::Squad(ManaCost::Cost { .. })));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_more_than_meets_the_eye() {
+    fn parse_granted_keyword_fragment_more_than_meets_the_eye() {
         use crate::types::mana::ManaCostShard;
         // CR 702.162a: "more than meets the eye {cost}" — the alternative cost
         // is supplied by the Oracle line. Colored cost case (Flamewar: {B}{R}).
-        let kw = parse_keyword_from_oracle("more than meets the eye {b}{r}").unwrap();
+        let kw = parse_granted_keyword_fragment("more than meets the eye {b}{r}").unwrap();
         match kw {
             Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
                 assert_eq!(generic, 0);
@@ -2574,7 +3211,7 @@ mod tests {
 
         // Class-general: a generic + single color cost parses the same way,
         // proving the arm is not specialized to one card's cost.
-        let kw2 = parse_keyword_from_oracle("more than meets the eye {2}{u}").unwrap();
+        let kw2 = parse_granted_keyword_fragment("more than meets the eye {2}{u}").unwrap();
         match kw2 {
             Keyword::MoreThanMeetsTheEye(ManaCost::Cost { shards, generic }) => {
                 assert_eq!(generic, 2);
@@ -2586,33 +3223,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_typecycling() {
+    fn parse_granted_keyword_fragment_typecycling() {
         // CR 702.29: Typecycling — "plainscycling {2}" is typecycling, not regular cycling
-        let kw = parse_keyword_from_oracle("plainscycling {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("plainscycling {2}").unwrap();
         assert!(matches!(kw, Keyword::Typecycling { .. }));
         if let Keyword::Typecycling { subtype, .. } = &kw {
             assert_eq!(subtype, "Plains");
         }
 
         // "forestcycling {1}{G}" — different subtype
-        let kw2 = parse_keyword_from_oracle("forestcycling {1}{G}").unwrap();
+        let kw2 = parse_granted_keyword_fragment("forestcycling {1}{G}").unwrap();
         if let Keyword::Typecycling { subtype, .. } = &kw2 {
             assert_eq!(subtype, "Forest");
         }
     }
 
     #[test]
-    fn parse_keyword_from_oracle_regular_cycling_not_typecycling() {
+    fn parse_granted_keyword_fragment_regular_cycling_not_typecycling() {
         // "cycling {2}" must remain regular Cycling, not Typecycling
-        let kw = parse_keyword_from_oracle("cycling {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("cycling {2}").unwrap();
         assert!(matches!(kw, Keyword::Cycling(CyclingCost::Mana(_))));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_cycling_em_dash_pay_life() {
+    fn parse_granted_keyword_fragment_cycling_em_dash_pay_life() {
         // CR 702.29a: Street Wraith — "cycling—pay 2 life" must yield
         // Keyword::Cycling(CyclingCost::NonMana(PayLife { life: 2 })).
-        let kw = parse_keyword_from_oracle("cycling\u{2014}pay 2 life").unwrap();
+        let kw = parse_granted_keyword_fragment("cycling\u{2014}pay 2 life").unwrap();
         let Keyword::Cycling(CyclingCost::NonMana(ac)) = kw else {
             panic!("expected Cycling NonMana variant, got {kw:?}");
         };
@@ -2623,28 +3260,40 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_cycling_mana_backward_compat() {
+    fn parse_granted_keyword_fragment_cycling_mana_backward_compat() {
         // Regression: plain mana cycling still dispatches through the direct
         // `FromStr` path and yields CyclingCost::Mana (unchanged behaviour).
-        let kw = parse_keyword_from_oracle("cycling {2}").unwrap();
+        let kw = parse_granted_keyword_fragment("cycling {2}").unwrap();
         let Keyword::Cycling(CyclingCost::Mana(_)) = kw else {
             panic!("expected Cycling Mana variant, got {kw:?}");
         };
     }
 
     #[test]
-    fn parse_keyword_from_oracle_protection_from_color() {
+    fn parse_granted_keyword_fragment_ward_pay_life_equal_to_power() {
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to this creature's power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to ~'s power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+    }
+
+    #[test]
+    fn parse_granted_keyword_fragment_protection_from_color() {
         use crate::types::keywords::ProtectionTarget;
         use crate::types::mana::ManaColor;
 
         // CR 702.16: "protection from red" parses to Protection(Color(Red))
-        let kw = parse_keyword_from_oracle("protection from red").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from red").unwrap();
         assert_eq!(
             kw,
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Red))
         );
 
-        let kw = parse_keyword_from_oracle("protection from blue").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from blue").unwrap();
         assert_eq!(
             kw,
             Keyword::Protection(ProtectionTarget::Color(ManaColor::Blue))
@@ -2652,23 +3301,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_protection_from_chosen_color() {
+    fn parse_granted_keyword_fragment_protection_from_chosen_color() {
         use crate::types::keywords::ProtectionTarget;
 
         // CR 702.16: "protection from the chosen color" parses to Protection(ChosenColor)
-        let kw = parse_keyword_from_oracle("protection from the chosen color").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from the chosen color").unwrap();
         assert_eq!(kw, Keyword::Protection(ProtectionTarget::ChosenColor));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_protection_from_each_of_your_opponents() {
+    fn parse_granted_keyword_fragment_protection_from_each_of_your_opponents() {
         use crate::types::ability::ControllerRef;
         use crate::types::keywords::ProtectionTarget;
 
         // Issue #767 / CR 702.16k: Figure of Fable's Avatar form. Previously
         // fell through to ProtectionTarget::CardType("each of your opponents"),
         // which never matched any source at runtime.
-        let kw = parse_keyword_from_oracle("protection from each of your opponents").unwrap();
+        let kw = parse_granted_keyword_fragment("protection from each of your opponents").unwrap();
         assert_eq!(
             kw,
             Keyword::Protection(ProtectionTarget::FromPlayer(ControllerRef::Opponent))
@@ -2676,30 +3325,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_card() {
+    fn parse_granted_keyword_fragment_gift_a_card() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a card").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a card").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::Card));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_treasure() {
+    fn parse_granted_keyword_fragment_gift_a_treasure() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a treasure").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a treasure").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::Treasure));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_food() {
+    fn parse_granted_keyword_fragment_gift_a_food() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a food").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a food").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::Food));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_gift_a_tapped_fish() {
+    fn parse_granted_keyword_fragment_gift_a_tapped_fish() {
         use crate::types::keywords::GiftKind;
-        let kw = parse_keyword_from_oracle("gift a tapped fish").unwrap();
+        let kw = parse_granted_keyword_fragment("gift a tapped fish").unwrap();
         assert_eq!(kw, Keyword::Gift(GiftKind::TappedFish));
     }
 
@@ -2913,7 +3562,7 @@ mod tests {
     #[test]
     fn expand_protection_baneslayer_pattern() {
         // CR 702.16: "protection from Demons and from Dragons" → two Protection keywords
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, first strike, lifelink, protection from Demons and from Dragons",
             &[
                 "flying".to_string(),
@@ -2939,7 +3588,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         // CR 702.16: "protection from black and from red" → two color protections
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from black and from red",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -2959,7 +3608,7 @@ mod tests {
     #[test]
     fn expand_protection_three_comma_continuation() {
         // CR 702.16: comma + Oxford comma continuation
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "First strike, protection from Vampires, from Werewolves, and from Zombies",
             &["first strike".to_string(), "protection".to_string()],
         )
@@ -2979,7 +3628,7 @@ mod tests {
         use crate::types::keywords::ProtectionTarget;
 
         // Emrakul pattern: qualifier text preserved after split
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "protection from spells and from permanents that were cast this turn",
             &["protection".to_string()],
         )
@@ -3003,7 +3652,7 @@ mod tests {
         // CR 702.16j: "protection from everything" → typed `Everything` variant
         // (no " and from " present, no expansion).
         let keywords =
-            extract_keyword_line("protection from everything", &["protection".to_string()])
+            extract_granted_keyword_list("protection from everything", &["protection".to_string()])
                 .unwrap();
         assert_eq!(keywords.len(), 1);
         assert_eq!(
@@ -3018,7 +3667,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         // Single protection — expansion is a no-op
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from red",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3037,7 +3686,7 @@ mod tests {
     #[test]
     fn expand_protection_non_protection_line_unchanged() {
         // Non-protection keyword line — all matched by MTGJSON, no extracted keywords
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, first strike, lifelink",
             &[
                 "flying".to_string(),
@@ -3058,7 +3707,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         // Three-way inline split: "protection from red and from blue and from green"
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from red and from blue and from green",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3088,7 +3737,7 @@ mod tests {
         // CR 702.16 + CR 105.2: "protection from each color" is shorthand for
         // protection from white, blue, black, red, and green simultaneously
         // (Akroma's Will, Iridescent Angel, Spectra Ward, etc.).
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "Flying, protection from each color",
             &["flying".to_string(), "protection".to_string()],
         )
@@ -3128,7 +3777,7 @@ mod tests {
         // shorthand as "from each color" (Pristine Angel pattern, simplified
         // form ignoring the artifact clause).
         let keywords =
-            extract_keyword_line("protection from all colors", &["protection".to_string()])
+            extract_granted_keyword_list("protection from all colors", &["protection".to_string()])
                 .unwrap();
         let prots: Vec<_> = keywords
             .iter()
@@ -3157,7 +3806,8 @@ mod tests {
         // CR 702.11d + CR 105.2: "hexproof from each color" — Breaker of
         // Creation. Mirrors the protection-from-each-color expansion.
         let keywords =
-            extract_keyword_line("hexproof from each color", &["hexproof".to_string()]).unwrap();
+            extract_granted_keyword_list("hexproof from each color", &["hexproof".to_string()])
+                .unwrap();
         let hf: Vec<_> = keywords
             .iter()
             .filter_map(|k| match k {
@@ -3220,11 +3870,11 @@ mod tests {
         super::push_quality_entry(&mut expanded, "protection from", "each color.");
         assert_eq!(expanded.len(), 5);
 
-        // End-to-end through extract_keyword_line is the more conservative
+        // End-to-end through extract_granted_keyword_list is the more conservative
         // check — current callers do strip the period, so we don't assert
         // on that path. The helper-level guard is what we're locking in.
         let keywords =
-            extract_keyword_line("protection from each color", &["protection".to_string()])
+            extract_granted_keyword_list("protection from each color", &["protection".to_string()])
                 .unwrap();
         let prots = keywords
             .iter()
@@ -3243,7 +3893,7 @@ mod tests {
         // qualifiers — the "each color" prefix here is NOT the bare 5-WUBRG
         // shorthand. Expansion must leave them untouched so a future dynamic
         // handler can interpret them.
-        let keywords = extract_keyword_line(
+        let keywords = extract_granted_keyword_list(
             "protection from each color that's not in your commander's color identity",
             &["protection".to_string()],
         )
@@ -3265,41 +3915,104 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_transmute() {
+    fn extract_granted_keyword_list_transmute() {
         // CR 702.53a: Transmute {cost} — single-keyword line with parameterized cost
         let mtgjson_kws = vec!["transmute".to_string()];
 
-        // Verify parse_keyword_from_oracle works directly
-        let direct = parse_keyword_from_oracle("transmute {1}{b}{b}");
+        // Verify parse_granted_keyword_fragment works directly
+        let direct = parse_granted_keyword_fragment("transmute {1}{b}{b}");
         assert!(
             direct.is_some(),
-            "parse_keyword_from_oracle should handle 'transmute {{1}}{{b}}{{b}}'"
+            "parse_granted_keyword_fragment should handle 'transmute {{1}}{{b}}{{b}}'"
         );
         assert!(matches!(direct.unwrap(), Keyword::Transmute(_)));
 
-        let result = extract_keyword_line("Transmute {1}{B}{B}", &mtgjson_kws);
+        let result = extract_granted_keyword_list("Transmute {1}{B}{B}", &mtgjson_kws);
         assert!(result.is_some(), "Should recognize as keyword line");
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
         assert!(matches!(keywords[0], Keyword::Transmute(_)));
     }
 
+    /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's red pip and dynamic
+    /// turn-face-up discount both survive keyword extraction.
     #[test]
-    fn parse_keyword_from_oracle_umbra_and_totem_armor() {
+    fn extract_router_keyword_line_disguise_with_graveyard_reduction() {
+        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+
+        let keyword = parse_router_keyword_line(
+            "Disguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)",
+        )
+        .and_then(|routed| routed.keyword)
+        .expect("compound disguise keyword should extract");
+        let Keyword::Disguise(DisguiseCost::Reduced { cost, reduction }) = &keyword else {
+            panic!("expected reduced disguise cost, got {keyword:?}");
+        };
+        assert!(matches!(
+            cost,
+            ManaCost::Cost { generic: 5, shards }
+                if shards.as_slice() == [ManaCostShard::Red]
+        ));
+        assert_eq!(reduction.amount_per, 1);
+        assert!(matches!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    ref card_types,
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            } if card_types == &[TypeFilter::Instant, TypeFilter::Sorcery]
+        ));
+
+        let serialized = serde_json::to_value(&keyword).expect("serialize reduced disguise");
+        let round_trip: Keyword =
+            serde_json::from_value(serialized).expect("deserialize reduced disguise");
+        assert_eq!(round_trip, keyword);
+        let legacy: Keyword = serde_json::from_value(serde_json::json!({
+            "Disguise": {"type": "Cost", "generic": 5, "shards": ["Red"]}
+        }))
+        .expect("legacy disguise mana cost remains readable");
+        assert!(matches!(legacy, Keyword::Disguise(DisguiseCost::Mana(_))));
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Prowess, haste\nDisguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)\nWhen this creature is turned face up, discard your hand, then draw three cards.",
+            "Fugitive Codebreaker",
+            &["prowess".to_string(), "haste".to_string(), "disguise".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Detective".to_string()],
+        );
+        assert!(
+            parsed
+                .extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Disguise(DisguiseCost::Reduced { .. }))),
+            "full Oracle parse should retain the reduced disguise cost: {parsed:#?}"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "fully represented Fugitive line should not report a swallowed dynamic quantity: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    #[test]
+    fn parse_granted_keyword_fragment_umbra_and_totem_armor() {
         // CR 702.89a/b: both the current "umbra armor" and the obsolete
         // "totem armor" spelling map to Keyword::TotemArmor.
         assert_eq!(
-            parse_keyword_from_oracle("umbra armor"),
+            parse_granted_keyword_fragment("umbra armor"),
             Some(Keyword::TotemArmor)
         );
         assert_eq!(
-            parse_keyword_from_oracle("totem armor"),
+            parse_granted_keyword_fragment("totem armor"),
             Some(Keyword::TotemArmor)
         );
     }
 
     #[test]
-    fn extract_keyword_line_umbra_armor_reachable_without_mtgjson_keyword() {
+    fn extract_granted_keyword_list_umbra_armor_reachable_without_mtgjson_keyword() {
         // CR 702.89a: the Umbra cycle's "Umbra armor (…)" line carries reminder
         // text and is NOT surfaced in MTGJSON's `keywords` array, so it must be
         // recovered from the Oracle line. Regression guard that the runtime
@@ -3308,7 +4021,7 @@ mod tests {
             "Umbra armor (If enchanted permanent would be destroyed, instead remove all damage marked on it and destroy this Aura.)",
             "Totem armor (If enchanted creature would be destroyed, instead remove all damage marked on it and destroy this Aura.)",
         ] {
-            let result = extract_keyword_line(line, &[]);
+            let result = extract_granted_keyword_list(line, &[]);
             assert_eq!(
                 result,
                 Some(vec![Keyword::TotemArmor]),
@@ -3318,10 +4031,10 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_splice() {
+    fn extract_granted_keyword_list_splice() {
         // CR 702.47a: Splice onto [type] {cost}
         let mtgjson_kws = vec!["splice".to_string()];
-        let result = extract_keyword_line("Splice onto Arcane {1}{W}", &mtgjson_kws);
+        let result = extract_granted_keyword_list("Splice onto Arcane {1}{W}", &mtgjson_kws);
         assert!(result.is_some(), "Should recognize as keyword line");
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
@@ -3339,11 +4052,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_mobilize_where_x_quantity() {
+    fn extract_granted_keyword_list_mobilize_where_x_quantity() {
         use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
 
         let mtgjson_kws = vec!["mobilize".to_string()];
-        let result = extract_keyword_line(
+        let result = extract_granted_keyword_list(
             "Mobilize X, where X is the number of creature cards in your graveyard",
             &mtgjson_kws,
         )
@@ -3369,9 +4082,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_mobilize_fixed_quantity() {
+    fn extract_granted_keyword_list_mobilize_fixed_quantity() {
         let mtgjson_kws = vec!["mobilize".to_string()];
-        let result = extract_keyword_line("Mobilize 2", &mtgjson_kws)
+        let result = extract_granted_keyword_list("Mobilize 2", &mtgjson_kws)
             .expect("fixed mobilize line should be recognized");
 
         assert_eq!(
@@ -3381,12 +4094,13 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_source_power() {
+    fn extract_granted_keyword_list_firebending_source_power() {
         use crate::types::ability::{ObjectScope, QuantityRef};
 
         let mtgjson_kws = vec!["firebending".to_string()];
-        let result = extract_keyword_line("Firebending X, where X is ~'s power.", &mtgjson_kws)
-            .expect("firebending source-power line should be recognized");
+        let result =
+            extract_granted_keyword_list("Firebending X, where X is ~'s power.", &mtgjson_kws)
+                .expect("firebending source-power line should be recognized");
 
         assert_eq!(result.len(), 1);
         assert!(matches!(
@@ -3400,7 +4114,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_comma_separated_fixed_amounts() {
+    fn extract_granted_keyword_list_firebending_comma_separated_fixed_amounts() {
         let mtgjson_kws = vec![
             "flying".to_string(),
             "firebending".to_string(),
@@ -3409,22 +4123,23 @@ mod tests {
             "haste".to_string(),
         ];
 
-        let flying = extract_keyword_line("Flying, firebending 2", &mtgjson_kws)
+        let flying = extract_granted_keyword_list("Flying, firebending 2", &mtgjson_kws)
             .expect("comma-separated flying/firebending should parse");
         assert_eq!(
             flying,
             vec![Keyword::Firebending(QuantityExpr::Fixed { value: 2 })]
         );
 
-        let menace = extract_keyword_line("Menace, firebending 3", &mtgjson_kws)
+        let menace = extract_granted_keyword_list("Menace, firebending 3", &mtgjson_kws)
             .expect("comma-separated menace/firebending should parse");
         assert_eq!(
             menace,
             vec![Keyword::Firebending(QuantityExpr::Fixed { value: 3 })]
         );
 
-        let trample_haste = extract_keyword_line("Trample, firebending 4, haste", &mtgjson_kws)
-            .expect("comma-separated trample/firebending/haste should parse");
+        let trample_haste =
+            extract_granted_keyword_list("Trample, firebending 4, haste", &mtgjson_kws)
+                .expect("comma-separated trample/firebending/haste should parse");
         assert_eq!(
             trample_haste,
             vec![Keyword::Firebending(QuantityExpr::Fixed { value: 4 })]
@@ -3432,11 +4147,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_creatures_you_control() {
+    fn extract_granted_keyword_list_firebending_creatures_you_control() {
         use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter, TypeFilter};
 
         let mtgjson_kws = vec!["firebending".to_string()];
-        let result = extract_keyword_line(
+        let result = extract_granted_keyword_list(
             "Firebending X, where X is the number of creatures you control.",
             &mtgjson_kws,
         )
@@ -3458,12 +4173,12 @@ mod tests {
     }
 
     #[test]
-    fn extract_keyword_line_firebending_experience_counters() {
+    fn extract_granted_keyword_list_firebending_experience_counters() {
         use crate::types::ability::{CountScope, QuantityRef};
         use crate::types::player::PlayerCounterKind;
 
         let mtgjson_kws = vec!["firebending".to_string()];
-        let result = extract_keyword_line(
+        let result = extract_granted_keyword_list(
             "Firebending X, where X is the number of experience counters you have.",
             &mtgjson_kws,
         )
@@ -3482,7 +4197,7 @@ mod tests {
     }
 
     fn craft_keyword(text: &str) -> (TargetFilter, CostObjectCount) {
-        match parse_keyword_from_oracle(text).expect("craft keyword should parse") {
+        match parse_granted_keyword_fragment(text).expect("craft keyword should parse") {
             Keyword::Craft {
                 materials, count, ..
             } => (materials, count),
@@ -3545,7 +4260,7 @@ mod tests {
             "craft with four or more nonlands with activated abilities {8}{u}",
             "craft with a dinosaur, a merfolk, a pirate, and a vampire {4}",
         ] {
-            let parsed = parse_keyword_from_oracle(text);
+            let parsed = parse_granted_keyword_fragment(text);
             assert!(
                 parsed.is_none(),
                 "{text} must not parse as an approximate Craft cost, got {parsed:?}"
@@ -3554,16 +4269,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_firebending_fixed_amount() {
+    fn parse_granted_keyword_fragment_firebending_fixed_amount() {
         assert_eq!(
-            parse_keyword_from_oracle("firebending 5"),
+            parse_granted_keyword_fragment("firebending 5"),
             Some(Keyword::Firebending(QuantityExpr::Fixed { value: 5 }))
         );
     }
 
     #[test]
-    fn extract_keyword_line_bloodthirst_x_overrides_mtgjson_fallback() {
-        let result = extract_keyword_line(
+    fn extract_granted_keyword_list_bloodthirst_x_overrides_mtgjson_fallback() {
+        let result = extract_granted_keyword_list(
             "Bloodthirst X (This creature enters with X +1/+1 counters on it, where X is the damage dealt to your opponents this turn.)",
             &["bloodthirst".to_string()],
         )
@@ -3573,52 +4288,52 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_bloodthirst_fixed_and_x() {
+    fn parse_granted_keyword_fragment_bloodthirst_fixed_and_x() {
         assert_eq!(
-            parse_keyword_from_oracle("bloodthirst 2").unwrap(),
+            parse_granted_keyword_fragment("bloodthirst 2").unwrap(),
             Keyword::Bloodthirst(BloodthirstValue::Fixed(2))
         );
         assert_eq!(
-            parse_keyword_from_oracle("bloodthirst x").unwrap(),
+            parse_granted_keyword_fragment("bloodthirst x").unwrap(),
             Keyword::Bloodthirst(BloodthirstValue::X)
         );
     }
 
     #[test]
-    fn parse_keyword_from_oracle_landwalk_variants() {
+    fn parse_granted_keyword_fragment_landwalk_variants() {
         // CR 702.14: Landwalk variants from Oracle text
-        let kw = parse_keyword_from_oracle("swampwalk").unwrap();
+        let kw = parse_granted_keyword_fragment("swampwalk").unwrap();
         assert_eq!(kw, Keyword::Landwalk("Swamp".to_string()));
 
-        let kw = parse_keyword_from_oracle("islandwalk").unwrap();
+        let kw = parse_granted_keyword_fragment("islandwalk").unwrap();
         assert_eq!(kw, Keyword::Landwalk("Island".to_string()));
 
-        let kw = parse_keyword_from_oracle("forestwalk").unwrap();
+        let kw = parse_granted_keyword_fragment("forestwalk").unwrap();
         assert_eq!(kw, Keyword::Landwalk("Forest".to_string()));
     }
 
     #[test]
-    fn parse_keyword_from_oracle_unit_keywords() {
+    fn parse_granted_keyword_fragment_unit_keywords() {
         // Unit keywords that should be recognized
-        let kw = parse_keyword_from_oracle("bargain").unwrap();
+        let kw = parse_granted_keyword_fragment("bargain").unwrap();
         assert_eq!(kw, Keyword::Bargain);
 
-        let kw = parse_keyword_from_oracle("training").unwrap();
+        let kw = parse_granted_keyword_fragment("training").unwrap();
         assert_eq!(kw, Keyword::Training);
 
-        let kw = parse_keyword_from_oracle("jump-start").unwrap();
+        let kw = parse_granted_keyword_fragment("jump-start").unwrap();
         assert_eq!(kw, Keyword::JumpStart);
 
-        let kw = parse_keyword_from_oracle("undaunted").unwrap();
+        let kw = parse_granted_keyword_fragment("undaunted").unwrap();
         assert_eq!(kw, Keyword::Undaunted);
 
-        let kw = parse_keyword_from_oracle("for mirrodin!").unwrap();
+        let kw = parse_granted_keyword_fragment("for mirrodin!").unwrap();
         assert_eq!(kw, Keyword::ForMirrodin);
     }
 
     #[test]
-    fn extract_keyword_line_for_mirrodin_without_mtgjson_keyword() {
-        let keywords = extract_keyword_line(
+    fn extract_granted_keyword_list_for_mirrodin_without_mtgjson_keyword() {
+        let keywords = extract_granted_keyword_list(
             "For Mirrodin! (When this Equipment enters, create a 2/2 red Rebel creature token, then attach this to it.)",
             &[],
         )
@@ -3626,7 +4341,7 @@ mod tests {
 
         assert_eq!(keywords, vec![Keyword::ForMirrodin]);
         assert!(
-            extract_keyword_line("Flying", &[]).is_none(),
+            extract_granted_keyword_list("Flying", &[]).is_none(),
             "the MTGJSON-missing path should stay scoped to known omissions"
         );
     }
@@ -3649,11 +4364,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_escape_em_dash() {
+    fn parse_granted_keyword_fragment_escape_em_dash() {
         // CR 702.138a: Escape joins the em-dash alt-cost keyword family.
-        // parse_keyword_from_oracle receives already-lowercased oracle text.
+        // parse_granted_keyword_fragment receives already-lowercased oracle text.
         use crate::types::keywords::EscapeCost;
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "escape\u{2014}{2}{u}{r}, exile four other cards from your graveyard",
         )
         .expect("escape em-dash keyword must parse");
@@ -3679,11 +4394,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_keyword_from_oracle_suspend() {
+    fn parse_granted_keyword_fragment_suspend() {
         use crate::types::mana::ManaCost;
 
         // CR 702.62a: Suspend N—{cost}
-        let kw = parse_keyword_from_oracle("suspend 4\u{2014}{u}").unwrap();
+        let kw = parse_granted_keyword_fragment("suspend 4\u{2014}{u}").unwrap();
         match kw {
             Keyword::Suspend { count, cost } => {
                 assert_eq!(count, 4);
@@ -3693,7 +4408,7 @@ mod tests {
         }
 
         // Suspend 1—{R} (Rift Bolt)
-        let kw = parse_keyword_from_oracle("suspend 1\u{2014}{r}").unwrap();
+        let kw = parse_granted_keyword_fragment("suspend 1\u{2014}{r}").unwrap();
         match kw {
             Keyword::Suspend { count, .. } => assert_eq!(count, 1),
             other => panic!("Expected Suspend, got {other:?}"),
@@ -3714,7 +4429,7 @@ mod tests {
         // CR 702.160a + CR 718.3b: "Prototype {cost} — {P}/{T}" carries the
         // alternative power/toughness. The prototype P/T (2/1) must come from the
         // Oracle "— P/T" segment, NOT the card's top-level P/T (Arcane Proxy: 4/3).
-        let kw = parse_keyword_from_oracle("prototype {1}{u}{u} \u{2014} 2/1").unwrap();
+        let kw = parse_granted_keyword_fragment("prototype {1}{u}{u} \u{2014} 2/1").unwrap();
         match kw {
             Keyword::Prototype {
                 cost,
@@ -3736,7 +4451,7 @@ mod tests {
     fn parse_prototype_keyword_line_without_pt_falls_through() {
         // Graceful degradation: a cost-only "prototype {2}" line (no "— P/T")
         // must NOT panic — it falls through to the cost-only keyword path.
-        let kw = parse_keyword_from_oracle("prototype {2}");
+        let kw = parse_granted_keyword_fragment("prototype {2}");
         if let Some(Keyword::Prototype {
             power, toughness, ..
         }) = kw
@@ -3751,30 +4466,30 @@ mod tests {
         use crate::types::keywords::PartnerType;
 
         // CR 702.124: Partner variant keywords from Oracle text
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "partner\u{2014}character select (you can have two commanders if both have this ability.)",
         ).unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::CharacterSelect));
 
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "partner\u{2014}friends forever (you can have two commanders if both have this ability.)",
         ).unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::FriendsForever));
 
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "choose a background (you can have a background as a second commander.)",
         )
         .unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::ChooseABackground));
 
-        let kw = parse_keyword_from_oracle(
+        let kw = parse_granted_keyword_fragment(
             "doctor\u{2019}s companion (you can have two commanders if the other is the doctor.)",
         )
         .unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::DoctorsCompanion));
 
         // Also test with straight apostrophe
-        let kw = parse_keyword_from_oracle("doctor's companion").unwrap();
+        let kw = parse_granted_keyword_fragment("doctor's companion").unwrap();
         assert_eq!(kw, Keyword::Partner(PartnerType::DoctorsCompanion));
     }
 
@@ -3791,8 +4506,8 @@ mod tests {
         assert_eq!(expanded[0], "hexproof from white");
         assert_eq!(expanded[1], "hexproof from black");
 
-        // Through extract_keyword_line
-        let keywords = extract_keyword_line(
+        // Through extract_granted_keyword_list
+        let keywords = extract_granted_keyword_list(
             "hexproof from white and from black",
             &["hexproof".to_string()],
         )
@@ -3815,7 +4530,7 @@ mod tests {
 
         // Single hexproof-from — no expansion needed
         let keywords =
-            extract_keyword_line("hexproof from red", &["hexproof".to_string()]).unwrap();
+            extract_granted_keyword_list("hexproof from red", &["hexproof".to_string()]).unwrap();
         let hf: Vec<_> = keywords
             .iter()
             .filter(|k| matches!(k, Keyword::HexproofFrom(_)))
@@ -3832,14 +4547,14 @@ mod tests {
         use crate::types::keywords::HexproofFilter;
         use crate::types::mana::ManaColor;
 
-        // parse_keyword_from_oracle handles "hexproof from red"
-        let kw = parse_keyword_from_oracle("hexproof from red").unwrap();
+        // parse_granted_keyword_fragment handles "hexproof from red"
+        let kw = parse_granted_keyword_fragment("hexproof from red").unwrap();
         assert_eq!(
             kw,
             Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Red))
         );
 
-        let kw = parse_keyword_from_oracle("hexproof from artifacts").unwrap();
+        let kw = parse_granted_keyword_fragment("hexproof from artifacts").unwrap();
         assert_eq!(
             kw,
             Keyword::HexproofFrom(HexproofFilter::CardType("artifacts".to_string()))
@@ -3849,8 +4564,8 @@ mod tests {
     /// CR 702.xxx: Paradigm (Strixhaven) — bare-keyword recognition.
     /// Assign when WotC publishes SOS CR update.
     #[test]
-    fn parse_keyword_from_oracle_paradigm() {
-        let kw = parse_keyword_from_oracle("paradigm").unwrap();
+    fn parse_granted_keyword_fragment_paradigm() {
+        let kw = parse_granted_keyword_fragment("paradigm").unwrap();
         assert_eq!(kw, Keyword::Paradigm);
     }
 
@@ -3861,13 +4576,13 @@ mod tests {
     /// through the normal mana-payment flow and the life piece through
     /// `pay_additional_cost`.
     #[test]
-    fn parse_keyword_from_oracle_flashback_compound_mana_and_life() {
+    fn parse_granted_keyword_fragment_flashback_compound_mana_and_life() {
         use crate::types::ability::QuantityExpr;
         use crate::types::mana::ManaCostShard;
 
-        // Lowercased Oracle text passed through `parse_keyword_from_oracle` after
+        // Lowercased Oracle text passed through `parse_granted_keyword_fragment` after
         // reminder text is stripped by the upstream pipeline.
-        let kw = parse_keyword_from_oracle("flashback\u{2014}{1}{u}, pay 3 life").unwrap();
+        let kw = parse_granted_keyword_fragment("flashback\u{2014}{1}{u}, pay 3 life").unwrap();
         let Keyword::Flashback(FlashbackCost::NonMana(AbilityCost::Composite { costs })) = kw
         else {
             panic!("expected NonMana(Composite), got {:?}", kw);
@@ -3896,10 +4611,11 @@ mod tests {
     /// `Eternalize(EternalizeCost::NonMana(Composite[Mana{3UU}, Discard]))`,
     /// i.e. the discard suffix is NOT dropped.
     #[test]
-    fn parse_keyword_from_oracle_eternalize_em_dash_discard() {
+    fn parse_granted_keyword_fragment_eternalize_em_dash_discard() {
         use crate::types::mana::ManaCostShard;
 
-        let kw = parse_keyword_from_oracle("eternalize\u{2014}{3}{u}{u}, discard a card").unwrap();
+        let kw =
+            parse_granted_keyword_fragment("eternalize\u{2014}{3}{u}{u}, discard a card").unwrap();
         let Keyword::Eternalize(EternalizeCost::NonMana(AbilityCost::Composite { costs })) = kw
         else {
             panic!("expected Eternalize NonMana(Composite), got {kw:?}");
@@ -3928,8 +4644,8 @@ mod tests {
 
     /// CR 702.128a: Embalm em-dash composite cost parses the discard suffix.
     #[test]
-    fn parse_keyword_from_oracle_embalm_em_dash_discard() {
-        let kw = parse_keyword_from_oracle("embalm\u{2014}{2}{w}{w}, discard a card").unwrap();
+    fn parse_granted_keyword_fragment_embalm_em_dash_discard() {
+        let kw = parse_granted_keyword_fragment("embalm\u{2014}{2}{w}{w}, discard a card").unwrap();
         let Keyword::Embalm(EmbalmCost::NonMana(AbilityCost::Composite { costs })) = kw else {
             panic!("expected Embalm NonMana(Composite), got {kw:?}");
         };
@@ -3941,16 +4657,16 @@ mod tests {
     /// Regression: pure-mana embalm/eternalize still dispatch through the direct
     /// `FromStr` path to the `Mana` variant (backward compat at the keyword level).
     #[test]
-    fn parse_keyword_from_oracle_eternalize_mana_backward_compat() {
-        let kw = parse_keyword_from_oracle("eternalize {3}{b}{b}").unwrap();
+    fn parse_granted_keyword_fragment_eternalize_mana_backward_compat() {
+        let kw = parse_granted_keyword_fragment("eternalize {3}{b}{b}").unwrap();
         assert!(matches!(kw, Keyword::Eternalize(EternalizeCost::Mana(_))));
     }
 
     /// CR 702.34a regression: Battle Screech's tap-creatures flashback shape
     /// must continue to parse to `FlashbackCost::NonMana(TapCreatures)`.
     #[test]
-    fn parse_keyword_from_oracle_flashback_tap_creatures_unchanged() {
-        let kw = parse_keyword_from_oracle(
+    fn parse_granted_keyword_fragment_flashback_tap_creatures_unchanged() {
+        let kw = parse_granted_keyword_fragment(
             "flashback\u{2014}tap three untapped white creatures you control",
         )
         .unwrap();
@@ -3968,8 +4684,8 @@ mod tests {
     /// Roar of the Wurm) goes through the FromStr direct-parse branch and
     /// produces `FlashbackCost::Mana`.
     #[test]
-    fn parse_keyword_from_oracle_flashback_simple_mana_unchanged() {
-        let kw = parse_keyword_from_oracle("flashback {3}{g}").unwrap();
+    fn parse_granted_keyword_fragment_flashback_simple_mana_unchanged() {
+        let kw = parse_granted_keyword_fragment("flashback {3}{g}").unwrap();
         let Keyword::Flashback(FlashbackCost::Mana(_)) = kw else {
             panic!("expected FlashbackCost::Mana, got {:?}", kw);
         };
@@ -3977,18 +4693,18 @@ mod tests {
 
     /// CR 702.74a + CR 118.9: MH2 Incarnation evoke ("Evoke—Exile a [color]
     /// card from your hand.") parses into `EvokeCost::NonMana(Exile{..})`.
-    /// Discriminator for #580: pre-fix `parse_keyword_from_oracle` returns
+    /// Discriminator for #580: pre-fix `parse_granted_keyword_fragment` returns
     /// `None` for this line (no `evoke—` arm); post-fix returns the typed
     /// non-mana cost so the runtime can surface the alt-cast prompt.
     #[test]
-    fn parse_keyword_from_oracle_evoke_exile_white_card_from_hand() {
+    fn parse_granted_keyword_fragment_evoke_exile_white_card_from_hand() {
         use crate::types::ability::FilterProp;
         use crate::types::keywords::EvokeCost;
         use crate::types::mana::ManaColor;
         use crate::types::zones::Zone;
 
-        let kw =
-            parse_keyword_from_oracle("evoke\u{2014}exile a white card from your hand.").unwrap();
+        let kw = parse_granted_keyword_fragment("evoke\u{2014}exile a white card from your hand.")
+            .unwrap();
         let Keyword::Evoke(EvokeCost::NonMana(AbilityCost::Exile {
             count,
             zone,
@@ -4035,9 +4751,10 @@ mod tests {
 
     /// CR 702.120a: Escalate accepts any additional-cost shape, not just mana.
     #[test]
-    fn parse_keyword_from_oracle_escalate_tap_creature_cost() {
-        let kw = parse_keyword_from_oracle("escalate\u{2014}tap an untapped creature you control")
-            .unwrap();
+    fn parse_granted_keyword_fragment_escalate_tap_creature_cost() {
+        let kw =
+            parse_granted_keyword_fragment("escalate\u{2014}tap an untapped creature you control")
+                .unwrap();
         let Keyword::Escalate(AbilityCost::TapCreatures { requirement, .. }) = kw else {
             panic!("expected Escalate(TapCreatures), got {:?}", kw);
         };
@@ -4050,7 +4767,7 @@ mod tests {
     /// to match a keyword name.
     #[test]
     fn extract_enchant_multi_type_union() {
-        let kws = extract_keyword_line(
+        let kws = extract_granted_keyword_list(
             "Enchant creature, land, or planeswalker",
             &["enchant".to_string()],
         )
@@ -4105,6 +4822,41 @@ mod tests {
             };
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
+    }
+
+    /// CR 205.4a + CR 702.5a: Supertype adjectives belong to the Enchant list
+    /// leg they prefix; they must not be dropped or applied to sibling legs.
+    #[test]
+    fn extract_enchant_multi_type_preserves_per_leg_supertype() {
+        use crate::types::card_type::Supertype;
+
+        let kw = super::try_parse_multi_type_enchant("Enchant legendary creature or planeswalker")
+            .expect("multi-type with qualified leg should parse");
+        let Keyword::Enchant(TargetFilter::Or { filters }) = kw else {
+            panic!("expected Or");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(first) = &filters[0] else {
+            panic!("expected first Typed leg");
+        };
+        assert_eq!(first.type_filters, vec![TypeFilter::Creature]);
+        assert!(first.properties.contains(&FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }));
+
+        let TargetFilter::Typed(second) = &filters[1] else {
+            panic!("expected second Typed leg");
+        };
+        assert_eq!(second.type_filters, vec![TypeFilter::Planeswalker]);
+        assert!(
+            !second
+                .properties
+                .iter()
+                .any(|prop| matches!(prop, FilterProp::HasSupertype { .. })),
+            "supertype leaked to sibling leg: {:?}",
+            second.properties
+        );
     }
 
     /// CR 702.5a: "Enchant creature or Food" (Sugar Coat, BLB) — Food is an
@@ -4247,16 +4999,763 @@ mod tests {
         assert!(is_keyword_cost_line("freerunning {1}{b}"));
     }
 
-    /// CR 702.173a: Freerunning parsed from oracle text via parse_keyword_from_oracle.
+    /// CR 702.173a: Freerunning parsed from oracle text via parse_granted_keyword_fragment.
     #[test]
-    fn parse_keyword_from_oracle_freerunning() {
+    fn parse_granted_keyword_fragment_freerunning() {
         use crate::types::keywords::Keyword;
-        let kw = parse_keyword_from_oracle("freerunning {3}{b}{b}").unwrap();
+        let kw = parse_granted_keyword_fragment("freerunning {3}{b}{b}").unwrap();
         match kw {
             Keyword::Freerunning(_cost) => {
                 // Successfully parsed — cost structure validated by ManaCost parser
             }
             other => panic!("expected Keyword::Freerunning, got {other:?}"),
+        }
+    }
+}
+
+/// Plan 02 step 5 item 12 — the exhaustive `is_keyword_cost_line` family registry.
+///
+/// Every fixed candidate prefix occurs here exactly once, plus the one dynamic
+/// typecycling rule. `router_registry_is_set_equal_to_the_candidate_recognizer`
+/// asserts set-equality against `KEYWORD_COST_PREFIXES`, so a prefix added to the
+/// recognizer without a strict parser, a valid fixture, a semantic-suffix
+/// rejection and a declared production reach FAILS THE BUILD.
+///
+/// That gate is the point. A candidate prefix is a promise that the router can
+/// strictly parse the line; an unbacked promise is precisely how a recognizer
+/// starts silently swallowing card text.
+///
+/// Fixtures are VERBATIM current corpus lines (MTGJSON AtomicCards, 41,270 unique
+/// Oracle lines), not synthetic spellings — the plan's own reconciliation
+/// instruction. Where the plan's synthetic differed from the live grammar it was
+/// replaced without changing the prefix-set obligation (e.g. the real line is
+/// title-case "More Than Meets the Eye", and Affinity's real parameter is a
+/// creature type, not "artifacts").
+#[cfg(test)]
+mod router_registry_tests {
+    use super::*;
+
+    /// Where a candidate prefix's line actually commits in production.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ProductionReach {
+        /// The generic strict router at spell priority 9 / permanent priority 13.
+        KeywordCostLine,
+        /// Commits through an earlier TYPED route that returns an ability / modal /
+        /// additional-cost rather than a generic keyword (Equip, Spree, Strive).
+        /// The generic router must not manufacture a keyword for these.
+        SpecializedTypedRoute,
+        /// CR 701.59 Collect Evidence and CR 701.67 Waterbend are keyword ACTIONS,
+        /// and CR 702.57 Forecast is inherently an activated ability. A keyword
+        /// action is something a player PERFORMS, so it can only ever surface as an
+        /// activation COST inside "<kw> N: <body>" — never as a bare declaration.
+        /// Corpus agrees: these three have ONLY colon-bearing forms. The strict
+        /// router must DECLINE them; an earlier typed route commits them (verified
+        /// live: Giant Koi keeps cost {type: Waterbend} and stays green).
+        ActivatedAbilityOnly,
+        /// ZERO standalone corpus lines. Only ever "{1}{G}: Adapt 2." inside an
+        /// activated body, and `is_keyword_cost_line` is only ever called on whole
+        /// lines — so these prefixes are provably DEAD at the router.
+        ///
+        /// Retained deliberately: the set-equality gate is anchored to the CODE's
+        /// prefix set, not to the corpus. A future router-cleanup task may remove
+        /// them, and MUST re-verify the zero-standalone-line evidence against a
+        /// FRESH corpus rather than inheriting this note.
+        NoStandaloneForm,
+    }
+
+    struct RouterKeywordCase {
+        prefix: &'static str,
+        valid_line: &'static str,
+        reach: ProductionReach,
+    }
+
+    /// The hostile suffix. Semantic prose that no permitted tail (P/R/M) admits.
+    const SEMANTIC_SUFFIX: &str = " if you control an artifact";
+
+    const ROUTER_KEYWORD_CASES: &[RouterKeywordCase] = &[
+        RouterKeywordCase {
+            prefix: "cycling",
+            valid_line: "Cycling {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "basic landcycling",
+            valid_line: "Basic landcycling {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "flashback",
+            valid_line: "Flashback {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "ward",
+            valid_line: "Ward {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "equip",
+            valid_line: "Equip {0}",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "bestow",
+            valid_line: "Bestow {1}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "embalm",
+            valid_line: "Embalm {W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "eternalize",
+            valid_line: "Eternalize {2}{G}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "unearth",
+            valid_line: "Unearth {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "commander ninjutsu",
+            valid_line: "Commander ninjutsu {U}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "ninjutsu",
+            valid_line: "Ninjutsu {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "prowl",
+            valid_line: "Prowl {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "madness",
+            valid_line: "Madness {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "dash",
+            valid_line: "Dash {R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "emerge",
+            valid_line: "Emerge {5}{U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "escape",
+            valid_line: "Escape—{W}, Exile two other cards from your graveyard.",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "evoke",
+            valid_line: "Evoke {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "foretell",
+            valid_line: "Foretell {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "mutate",
+            valid_line: "Mutate {1}{U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "disturb",
+            valid_line: "Disturb {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "disguise",
+            valid_line: "Disguise {3}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "blitz",
+            valid_line: "Blitz {1}{R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "overload",
+            valid_line: "Overload {1}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "spectacle",
+            valid_line: "Spectacle {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "freerunning",
+            valid_line: "Freerunning {1}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "surge",
+            valid_line: "Surge {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "encore",
+            valid_line: "Encore {5}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "buyback",
+            valid_line: "Buyback {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "echo",
+            valid_line: "Echo {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "outlast",
+            valid_line: "Outlast {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "scavenge",
+            valid_line: "Scavenge {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "fortify",
+            valid_line: "Fortify {3}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "crew",
+            valid_line: "Crew 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "morph",
+            valid_line: "Morph {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "megamorph",
+            valid_line: "Megamorph {R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "prototype",
+            valid_line: "Prototype {1}{B} — 1/1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "offspring",
+            valid_line: "Offspring {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "impending",
+            valid_line: "Impending 5—{1}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "suspend",
+            valid_line: "Suspend 1—{R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "awaken",
+            valid_line: "Awaken 2—{4}{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "reinforce",
+            valid_line: "Reinforce 1—{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "adapt",
+            valid_line: "Adapt 2",
+            reach: ProductionReach::NoStandaloneForm,
+        },
+        RouterKeywordCase {
+            prefix: "monstrosity",
+            valid_line: "Monstrosity 3",
+            reach: ProductionReach::NoStandaloneForm,
+        },
+        RouterKeywordCase {
+            prefix: "toxic",
+            valid_line: "Toxic 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "saddle",
+            valid_line: "Saddle 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "teamwork",
+            valid_line: "Teamwork 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "soulshift",
+            valid_line: "Soulshift 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "backup",
+            valid_line: "Backup 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "mobilize",
+            valid_line: "Mobilize 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "hideaway",
+            valid_line: "Hideaway 4",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "discover",
+            valid_line: "Discover 4.",
+            // CR 701.57: a keyword ACTION. The printed line is a spell INSTRUCTION
+            // that belongs to the effect parser, not a keyword declaration — the
+            // generic router must decline it or the discover effect is deleted.
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "collect evidence",
+            valid_line:
+                "Collect evidence 6: This Vehicle becomes an artifact creature until end of turn.",
+            reach: ProductionReach::ActivatedAbilityOnly,
+        },
+        RouterKeywordCase {
+            prefix: "amplify",
+            valid_line: "Amplify 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "bloodthirst",
+            valid_line: "Bloodthirst 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "tribute",
+            valid_line: "Tribute 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "fabricate",
+            valid_line: "Fabricate 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "modular",
+            valid_line: "Modular 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "casualty",
+            valid_line: "Casualty 1",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "plot",
+            valid_line: "Plot {R}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "reconfigure",
+            valid_line: "Reconfigure {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "level up",
+            valid_line: "Level up {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "transfigure",
+            valid_line: "Transfigure {1}{B}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "transmute",
+            valid_line: "Transmute {1}{B}{B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "forecast",
+            valid_line: "Forecast — {W}{U}, Reveal this card from your hand: Tap target creature.",
+            reach: ProductionReach::ActivatedAbilityOnly,
+        },
+        RouterKeywordCase {
+            prefix: "recover",
+            valid_line: "Recover {1}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "escalate",
+            valid_line: "Escalate {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "waterbend",
+            valid_line: "Waterbend {6}: Draw a card.",
+            reach: ProductionReach::ActivatedAbilityOnly,
+        },
+        RouterKeywordCase {
+            prefix: "miracle",
+            valid_line: "Miracle {0}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "splice",
+            valid_line: "Splice onto Arcane {G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "entwine",
+            valid_line: "Entwine {1}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "squad",
+            valid_line: "Squad {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "warp",
+            valid_line: "Warp {3}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "sneak",
+            valid_line: "Sneak {B}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "web-slinging",
+            valid_line: "Web-slinging {U}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "harmonize",
+            valid_line: "Harmonize {4}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "mayhem",
+            valid_line: "Mayhem {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "more than meets the eye",
+            valid_line: "More Than Meets the Eye {1}{W}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "affinity",
+            valid_line: "Affinity for Cats",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "gift",
+            valid_line: "Gift a card",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "champion",
+            valid_line: "Champion an Elf",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "convoke",
+            valid_line: "Convoke",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "delve",
+            valid_line: "Delve",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "improvise",
+            valid_line: "Improvise",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "retrace",
+            valid_line: "Retrace",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "living weapon",
+            valid_line: "Living weapon",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "persist",
+            valid_line: "Persist",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "undying",
+            valid_line: "Undying",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "partner",
+            valid_line: "Partner",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "spree",
+            valid_line: "Spree",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "bargain",
+            valid_line: "Bargain",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "demonstrate",
+            valid_line: "Demonstrate",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "exploit",
+            valid_line: "Exploit",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "devoid",
+            valid_line: "Devoid",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "craft",
+            valid_line: "Craft with Cave {5}{G}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+        RouterKeywordCase {
+            prefix: "strive",
+            valid_line:
+                "Strive — This spell costs {1} more to cast for each target beyond the first.",
+            reach: ProductionReach::SpecializedTypedRoute,
+        },
+        RouterKeywordCase {
+            prefix: "TYPECYCLING",
+            valid_line: "Plainscycling {2}",
+            reach: ProductionReach::KeywordCostLine,
+        },
+    ];
+
+    /// THE gate: the registry and the candidate recognizer are the same set.
+    #[test]
+    fn router_registry_is_set_equal_to_the_candidate_recognizer() {
+        let mut registry: Vec<&str> = ROUTER_KEYWORD_CASES
+            .iter()
+            .map(|c| c.prefix)
+            .filter(|p| *p != "TYPECYCLING")
+            .collect();
+        registry.sort_unstable();
+        let dupes = registry.len();
+        registry.dedup();
+        assert_eq!(
+            dupes,
+            registry.len(),
+            "every fixed prefix must occur exactly once in the registry"
+        );
+
+        let mut recognizer: Vec<&str> = KEYWORD_COST_PREFIXES.to_vec();
+        recognizer.sort_unstable();
+
+        assert_eq!(
+            registry, recognizer,
+            "ROUTER_KEYWORD_CASES and KEYWORD_COST_PREFIXES have diverged. A prefix              added to the candidate recognizer without a strict parser, a valid              fixture, a semantic-suffix rejection and a declared production reach is              exactly how silent swallowing gets reintroduced."
+        );
+        assert!(
+            ROUTER_KEYWORD_CASES
+                .iter()
+                .any(|c| c.prefix == "TYPECYCLING"),
+            "the dynamic typecycling rule (CR 702.29e) needs its own case"
+        );
+    }
+
+    /// Non-vacuity for the whole registry: every fixture really is a candidate,
+    /// so a later `None` from the strict router is a STRICT-PARSE rejection and
+    /// not the recognizer quietly failing to match.
+    #[test]
+    fn every_registry_fixture_is_recognized_as_a_candidate() {
+        for case in ROUTER_KEYWORD_CASES {
+            assert!(
+                is_keyword_cost_line(&case.valid_line.to_lowercase()),
+                "[{}] fixture is not even a candidate: {:?}",
+                case.prefix,
+                case.valid_line
+            );
+        }
+    }
+
+    /// The hostile line must STILL be a candidate. This is what makes the
+    /// rejection below meaningful: the recognizer says yes, and only the strict
+    /// parser says no.
+    #[test]
+    fn every_hostile_line_is_still_a_candidate() {
+        for case in ROUTER_KEYWORD_CASES {
+            let hostile = format!("{}{}", case.valid_line, SEMANTIC_SUFFIX);
+            assert!(
+                is_keyword_cost_line(&hostile.to_lowercase()),
+                "[{}] hostile line must still match the recognizer, else the                  rejection test below is vacuous: {hostile:?}",
+                case.prefix
+            );
+        }
+    }
+
+    /// The core obligation: a keyword-cost candidate carrying unmodelled semantic
+    /// text is NEVER strictly routed. It survives for ordinary parsing and becomes
+    /// an honest `Effect::Unimplemented`.
+    #[test]
+    fn every_registry_case_rejects_a_semantic_suffix() {
+        let leaks: Vec<&str> = ROUTER_KEYWORD_CASES
+            .iter()
+            .filter(|case| {
+                parse_router_keyword_line(&format!("{}{}", case.valid_line, SEMANTIC_SUFFIX))
+                    .is_some()
+            })
+            .map(|case| case.prefix)
+            .collect();
+
+        // RATCHET, not a blessing. These six families still absorb a trailing
+        // semantic clause, and they are the ONLY ones left: every other family in
+        // the registry now rejects it.
+        //
+        // They share one root cause and it is NOT the one this unit fixed. Their
+        // parameter is a NOUN or FILTER, not a mana cost — "Affinity for Cats",
+        // "Champion an Elf", "Splice onto Arcane {G}", "Craft with Cave {5}{G}",
+        // bare "Partner", "Bloodthirst 1" — so the mana-cost combinator cannot
+        // measure where the parameter ends, and each needs its own
+        // remainder-preserving noun/filter sub-parser (`parse_type_phrase` already
+        // returns a remainder and is the obvious substrate).
+        //
+        // Pinned as an EXACT set so the gate still bites: a NEW leaking family, or a
+        // fixed one silently regressing, fails this test immediately. Removing an
+        // entry here is the definition of done for the follow-up.
+        const KNOWN_NOUN_PARAM_LEAKS: [&str; 6] = [
+            "affinity",
+            "bloodthirst",
+            "champion",
+            "craft",
+            "partner",
+            "splice",
+        ];
+        let mut sorted = leaks.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted.as_slice(),
+            KNOWN_NOUN_PARAM_LEAKS.as_slice(),
+            "the set of families that absorb a trailing semantic clause CHANGED. If a \
+             family was fixed, drop it from KNOWN_NOUN_PARAM_LEAKS. If a NEW family \
+             appears here, it is a fresh silent-swallow path and must be fixed, not pinned."
+        );
+    }
+
+    /// The reach half. Without this, a strict parser that rejects EVERYTHING would
+    /// pass the rejection test above.
+    #[test]
+    fn every_generic_router_case_strictly_parses_its_valid_line() {
+        for case in ROUTER_KEYWORD_CASES {
+            match case.reach {
+                ProductionReach::KeywordCostLine => assert!(
+                    parse_router_keyword_line(case.valid_line).is_some(),
+                    "[{}] valid whole-line fixture must strictly route, or the                      rejection test is passing for the wrong reason: {:?}",
+                    case.prefix,
+                    case.valid_line
+                ),
+                // These commit through an EARLIER typed route (try_parse_equip, the
+                // Spree modal block, the Strive pre-parser, the activated-ability
+                // path), so in production the generic router is never consulted for
+                // them. Asserting on the router's behaviour here would be testing a
+                // code path that does not run. Their real obligations are the
+                // universal semantic-suffix rejection above plus the card-level
+                // reach guards in oracle_tests.rs.
+                ProductionReach::SpecializedTypedRoute
+                | ProductionReach::ActivatedAbilityOnly => {}
+                // Dead at the router: no production reach assertion is possible, and
+                // faking one would be decoration. The strict CORE is still exercised.
+                ProductionReach::NoStandaloneForm => {}
+            }
+        }
+    }
+
+    /// D1: the two dead-at-router prefixes still get their strict core exercised,
+    /// so they are not merely unasserted placeholders.
+    #[test]
+    fn dead_prefixes_still_exercise_the_strict_core() {
+        for case in ROUTER_KEYWORD_CASES
+            .iter()
+            .filter(|c| c.reach == ProductionReach::NoStandaloneForm)
+        {
+            let hostile = format!("{}{}", case.valid_line, SEMANTIC_SUFFIX);
+            assert!(
+                parse_router_keyword_line(&hostile).is_none(),
+                "[{}] even a dead prefix must reject a semantic suffix",
+                case.prefix
+            );
+        }
+    }
+
+    /// CR 702.29e: the dynamic typecycling rule.
+    ///
+    /// The plan asked that the hostile lexical sibling "recycling {2}" not be a
+    /// candidate. IT CANNOT BE, and the plan's premise is falsified by a real card.
+    ///
+    /// The obvious gate — require the segment before "cycling" to name a subtype —
+    /// would REGRESS Sojourner's Enforcermite, whose printed line is
+    /// "Affinitycycling {2}" (search for a card *with affinity*). Typecycling's
+    /// parameter is any searchable card characteristic, not a type: the live corpus
+    /// carries forest/island/mountain/plains/swamp (land types), sliver/wizard
+    /// (creature types) AND affinity (a KEYWORD). No lexical rule separates "re"
+    /// from "affinity" without a vocabulary that admits keywords, and "recycling"
+    /// has ZERO corpus lines (grep over 41,270 unique Oracle lines).
+    ///
+    /// Building that vocabulary to reject a hostile that does not exist, at the
+    /// cost of breaking one that does, is not a trade worth making. The candidate
+    /// recognizer is only a FILTER now — the strict router is the authority — so an
+    /// over-broad candidate is no longer a swallow risk. What must hold is that the
+    /// real forms route and a semantic suffix is still rejected, both asserted here.
+    #[test]
+    fn dynamic_typecycling_rule_admits_the_real_vocabulary() {
+        for line in [
+            "Forestcycling {1}{G}",
+            "Plainscycling {2}",
+            "Slivercycling {3}",
+            // The card that falsifies the "subtype-only" premise.
+            "Affinitycycling {2}",
+        ] {
+            assert!(
+                is_keyword_cost_line(&line.to_lowercase()),
+                "real typecycling line must be a candidate: {line:?}"
+            );
+            assert!(
+                parse_router_keyword_line(line).is_some(),
+                "real typecycling line must strictly route: {line:?}"
+            );
+            let hostile = format!("{line}{SEMANTIC_SUFFIX}");
+            assert!(
+                parse_router_keyword_line(&hostile).is_none(),
+                "typecycling with unmodelled semantic text must be rejected: {hostile:?}"
+            );
         }
     }
 }

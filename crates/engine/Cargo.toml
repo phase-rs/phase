@@ -9,9 +9,12 @@ cli = ["tracing-subscriber"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
+# Exposes raw zone placement for test crates; never enabled by production consumers.
+test-support = []
 # Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
-# `combo-verify` tool bin. Excluded from the default lib / WASM surface.
-combo-verify = []
+# `combo-verify` tool bin, including the scenario harness it drives. Excluded
+# from the default lib / WASM surface.
+combo-verify = ["test-support"]
 
 [dependencies]
 serde = { workspace = true }
@@ -80,7 +83,15 @@ path = "src/bin/coverage_parse_diff.rs"
 # `test = true` (default): this bin carries non-trivial diff logic with inline
 # unit tests, unlike the logic-free tool bins above that set `test = false`.
 
+[build-dependencies]
+# build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
+# embed avoids the ~1s-per-process debug-mode toml_edit parse (see build.rs).
+toml = "0.8"
+serde_json = "1"
+
 [dev-dependencies]
+flate2 = "1"
+engine = { path = ".", features = ["test-support"] }
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"

@@ -7,10 +7,10 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectScope,
-    FilterProp, ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    TapStateChange, TargetFilter, TypedFilter,
+    CounterReplacementSubject, DamageModification, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Effect, EffectScope, FilterProp, ManaReplacementScope, QuantityExpr,
+    QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, RestrictionExpiry, TapStateChange, TargetFilter, TypedFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
@@ -73,6 +73,8 @@ pub fn convert_as_enters(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::ChangeZone,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode,
@@ -99,6 +101,7 @@ pub fn convert_as_enters(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -155,6 +158,8 @@ pub fn convert_replace_would_enter(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::ChangeZone,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode,
@@ -181,6 +186,7 @@ pub fn convert_replace_would_enter(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -220,6 +226,8 @@ pub fn convert_replace_would_deal_damage(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::DamageDone,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -246,6 +254,7 @@ pub fn convert_replace_would_deal_damage(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -387,7 +396,9 @@ fn recipient_to_damage_target_filter(r: &SingleDamageRecipient) -> Option<Damage
 
 fn single_damage_source_to_filter(source: &SingleDamageSource) -> TargetFilter {
     match source {
-        SingleDamageSource::TheChosenDamageSource => TargetFilter::ChosenDamageSource,
+        SingleDamageSource::TheChosenDamageSource => {
+            TargetFilter::ChosenDamageSource { filter: None }
+        }
     }
 }
 
@@ -594,6 +605,20 @@ pub fn convert_replace_would_draw(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Draw,
+            // CR 121.2 + CR 121.2a: the scope follows the Forge event variant and is
+            // NOT one constant. A count-form antecedent ("would draw one or more /
+            // two or more cards") is the instruction-level hook CR 121.2a modifies
+            // "before considering any of the individual card draws"; a singular
+            // antecedent ("would draw a card", the draw step, a cycling draw) is one
+            // individual draw. Same rule the Oracle parser applies.
+            draw_scope: Some(match event {
+                ReplacableEventWouldDraw::APlayerWouldDrawOneOrMoreCards(_)
+                | ReplacableEventWouldDraw::APlayerWouldDrawTwoOrMoreCards(_) => {
+                    DrawReplacementScope::InstructionCount
+                }
+                _ => DrawReplacementScope::IndividualDraw,
+            }),
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -620,6 +645,7 @@ pub fn convert_replace_would_draw(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -719,6 +745,8 @@ pub fn convert_replace_would_put_into_graveyard(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Moved,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -745,6 +773,7 @@ pub fn convert_replace_would_put_into_graveyard(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -969,6 +998,8 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::Moved,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: Some(Box::new(exec)),
             runtime_execute: None,
             mode: Default::default(),
@@ -995,6 +1026,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1059,6 +1091,8 @@ pub fn convert_replace_would_put_counters(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::AddCounter,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -1085,6 +1119,7 @@ pub fn convert_replace_would_put_counters(
             counter_match: counter_match.clone(),
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1243,6 +1278,8 @@ pub fn convert_replace_would_gain_life(
         out.push(ReplacementDefinition {
             expiry: None,
             event: ReplacementEvent::GainLife,
+            draw_scope: None,
+            planeswalk_scope: None,
             execute: None,
             runtime_execute: None,
             mode: Default::default(),
@@ -1269,6 +1306,7 @@ pub fn convert_replace_would_gain_life(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1361,6 +1399,8 @@ fn try_build_may_cost_pair(
     Ok(Some(ReplacementDefinition {
         expiry: None,
         event: ReplacementEvent::ChangeZone,
+        draw_scope: None,
+        planeswalk_scope: None,
         execute: execute.map(Box::new),
         runtime_execute: None,
         mode: ReplacementMode::MayCost {
@@ -1390,6 +1430,7 @@ fn try_build_may_cost_pair(
         counter_match: None,
         enters_under: None,
         source_controller: None,
+        counter_replacement_subject: CounterReplacementSubject::Recipient,
     }))
 }
 
@@ -1757,18 +1798,21 @@ fn build_replacement_exec(
         // to the same ContinuousModification list used by the native parser.
         A::EnterAsACopyOfAPermanent(perms, copy_effects) => Effect::BecomeCopy {
             target: convert_permanents(perms)?,
+            recipient: TargetFilter::SelfRef,
             duration: None,
             mana_value_limit: None,
             additional_modifications: convert_copy_effects(copy_effects)?,
         },
         A::EnterAsACopyOfPermanent(perm, copy_effects) => Effect::BecomeCopy {
             target: convert_permanent(perm)?,
+            recipient: TargetFilter::SelfRef,
             duration: None,
             mana_value_limit: None,
             additional_modifications: convert_copy_effects(copy_effects)?,
         },
         A::EnterAsACopyOfAPermanentUntil(perms, copy_effects, expiration) => Effect::BecomeCopy {
             target: convert_permanents(perms)?,
+            recipient: TargetFilter::SelfRef,
             duration: Some(static_effect::expiration_to_duration(expiration)?),
             mana_value_limit: None,
             additional_modifications: convert_copy_effects(copy_effects)?,
@@ -2055,6 +2099,7 @@ fn build_replacement_exec(
             let additional_modifications = convert_copy_effects(copy_effects)?;
             Effect::BecomeCopy {
                 target,
+                recipient: TargetFilter::SelfRef,
                 duration: None,
                 mana_value_limit: None,
                 additional_modifications,
@@ -3442,7 +3487,10 @@ mod tests {
         else {
             panic!("expected PreventDamage, got {effect:?}");
         };
-        assert_eq!(damage_source_filter, Some(TargetFilter::ChosenDamageSource));
+        assert_eq!(
+            damage_source_filter,
+            Some(TargetFilter::ChosenDamageSource { filter: None })
+        );
     }
 
     #[test]

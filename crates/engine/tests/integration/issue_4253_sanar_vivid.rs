@@ -11,8 +11,9 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityKind, Chooser, ControllerRef, Effect, IterationCategory, QuantityExpr, QuantityRef,
-    ResolvedAbility, RevealUntilDisposition, TargetFilter, TypeFilter, TypedFilter,
+    AbilityKind, Chooser, ControllerRef, Effect, ForEachCategoryAction, IterationCategory,
+    QuantityExpr, QuantityRef, ResolvedAbility, RevealUntilDisposition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -57,11 +58,13 @@ fn sanar_vivid_chain(source: ObjectId) -> ResolvedAbility {
         P0,
     );
     ability.sub_ability = Some(Box::new(ResolvedAbility::new(
-        Effect::ForEachCategoryExile {
+        Effect::ForEachCategory {
             category: IterationCategory::Color,
-            zone: Zone::Library,
             chooser: Chooser::Controller,
-            up_to: true,
+            action: ForEachCategoryAction::ExileFromPool {
+                zone: Zone::Library,
+                up_to: true,
+            },
         },
         vec![],
         source,
@@ -93,14 +96,17 @@ fn sanar_vivid_parses_library_reveal_then_per_color_exile() {
     assert!(
         matches!(
             exile.effect.as_ref(),
-            Effect::ForEachCategoryExile {
+            Effect::ForEachCategory {
                 category: IterationCategory::Color,
-                zone: Zone::Library,
-                up_to: true,
+                action: ForEachCategoryAction::ExileFromPool {
+                    zone: Zone::Library,
+                    up_to: true,
+                    ..
+                },
                 ..
             }
         ),
-        "expected ForEachCategoryExile, got {:?}",
+        "expected ForEachCategory(ExileFromPool), got {:?}",
         exile.effect
     );
 }

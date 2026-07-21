@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// CR 205.4: Supertypes — Legendary, Basic, Snow, World, Ongoing, plus
 /// supplemental set-specific supertypes such as Host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Supertype {
     Legendary,
     Basic,
@@ -45,7 +45,7 @@ impl fmt::Display for Supertype {
 }
 
 /// CR 205.2a: Card types — the seven main types plus additional types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CoreType {
     /// CR 301: Artifacts — permanents cast at sorcery speed, with subtypes Equipment, Vehicle, etc.
     Artifact,

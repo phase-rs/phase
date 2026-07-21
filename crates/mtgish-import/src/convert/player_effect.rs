@@ -70,6 +70,9 @@ fn apply_with_controller(
                     StaticDefinition::new(StaticMode::CastWithAlternativeCost {
                         cost: alt_cost,
                         timing_permission: Some(CastTimingPermission::AsThoughHadFlash),
+                        // CR 118.9: flash-granting alternative cost applies without
+                        // a per-turn limit.
+                        frequency: CastFrequency::Unlimited,
                     })
                     .affected(scope)
                     .active_zones(vec![Zone::Battlefield]),
@@ -242,6 +245,12 @@ fn player_effect_to_static(
                 play_mode: CardPlayMode::Play,
                 graveyard_destination_replacement: None,
                 extra_cost: None,
+                // Pre-existing BB3 (d09e2bb7a) field-threading gap: playing a land
+                // from the graveyard is a special action (CR 116.2a), never a spell
+                // (CR 305.1) — so it is never cast and never enters with a finality
+                // counter (CR 122). Threaded here only to unblock the workspace
+                // build; unrelated to BB-FU4.
+                enters_with_counter: None,
             })
             .affected(affected));
         }

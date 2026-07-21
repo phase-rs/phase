@@ -2,7 +2,13 @@ import { createContext, useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import {
+  type FormatConfig,
+  type GameAction,
+  type MatchConfig,
+  type MatchType,
+  persistedGameStateView,
+} from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
@@ -26,7 +32,7 @@ import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
-import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
+import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
@@ -45,6 +51,7 @@ import {
   loadActiveGame,
   loadGame,
   loadP2PHostSession,
+  nextGameSessionGeneration,
   saveActiveGame,
   useGameStore,
 } from "../stores/gameStore";
@@ -221,6 +228,7 @@ type ExpandedDeckWithTier = {
   planar_deck: string[];
   scheme_deck: string[];
   signature_spell: string[];
+  companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
 };
@@ -283,6 +291,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     },
@@ -312,6 +321,7 @@ async function buildLocalAiDeckList(
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     });
@@ -511,9 +521,9 @@ export function GameProvider({
 }: GameProviderProps) {
   const { t } = useTranslation("game");
 
-  // Sync the persistent phaseStops preference into engine-owned state so the
-  // engine remains the single authority for auto-pass / empty-blocker decisions.
-  usePhaseStopsSync();
+  // Sync persistent gameplay preferences into engine-owned state so the
+  // engine remains the single authority for priority recommendations.
+  useGameplayPreferencesSync();
 
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
@@ -669,7 +679,7 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -847,8 +857,6 @@ export function GameProvider({
             //    their original seat.
             const sessionKey = `phase-${code}`;
             const existing = await loadP2PSession(sessionKey);
-            const reservationToken =
-              window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -857,7 +865,7 @@ export function GameProvider({
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
-              reservationToken,
+              undefined,
               sessionKey,
             );
             p2pAdapter = adapter;
@@ -954,9 +962,9 @@ export function GameProvider({
       const sessionKey = `phase-join-password:${joinCode ?? ""}`;
       let password: string | undefined =
         (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
-      const reservationSessionKey = `phase-join-reservation:${joinCode ?? ""}`;
-      const reservationToken: string | undefined =
-        (joinCode && window.sessionStorage.getItem(reservationSessionKey)) || undefined;
+      if (joinCode) {
+        window.sessionStorage.removeItem(`phase-join-reservation:${joinCode}`);
+      }
       if (!password && urlParams.has("password")) {
         password = urlParams.get("password") ?? undefined;
         if (password && joinCode) {
@@ -983,7 +991,7 @@ export function GameProvider({
           deck,
           wsMode === "join" ? joinCode : undefined,
           wsMode === "join" ? password : undefined,
-          wsMode === "join" ? reservationToken : undefined,
+          undefined,
           useMultiplayerStore.getState().displayName || "Player",
         );
 
@@ -1019,11 +1027,12 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
             useMultiplayerStore.getState().setConnectionStatus("connected");
+            const wsState = event.snapshot.state;
             if (
-              event.state.match_phase === "Completed"
-              || (!event.state.match_phase && event.state.waiting_for.type === "GameOver")
+              wsState.match_phase === "Completed"
+              || (!wsState.match_phase && wsState.waiting_for.type === "GameOver")
             ) {
               clearActiveGame();
             }
@@ -1155,7 +1164,7 @@ export function GameProvider({
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
           // absent on resume (e.g. navigating directly to a saved game URL).
-          const resumedPlayerCount = savedState.players?.length ?? playerCount;
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai",
             difficulty,
@@ -1271,6 +1280,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             opponent: {
               main_deck: run.opponentDeck,
@@ -1280,6 +1290,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             ai_decks: [],
           };
@@ -1390,6 +1401,7 @@ export function GameProvider({
             logHistory: [],
             nextLogSeq: 0,
             adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,

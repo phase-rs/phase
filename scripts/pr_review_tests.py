@@ -2,17 +2,282 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
+import os
+import re
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pr_review
+import pr_review_dashboard
 
 
 class PrReviewTests(unittest.TestCase):
+    def test_scan_candidate_keeps_github_url_for_dashboard_navigation(self) -> None:
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": {},
+                "local_latest_observations": {},
+                "local_latest_looks": {},
+                "local_latest_actions": {},
+            },
+        )()
+        candidate = pr_review.scan_candidate(
+            {
+                "number": 44,
+                "title": "Useful change",
+                "url": "https://github.com/phase-rs/phase/pull/44",
+                "headRefOid": "head",
+            },
+            {
+                "pr": {"author_login": "author", "self_authored": False},
+                "classification": {"surface": "backend", "gate": "review", "hard_stop_paths": []},
+                "ci": {"state": "green"},
+                "parse_diff": {},
+                "recommendation": {"advisory_action": "review", "reason": "unreviewed"},
+                "policy_trace": [],
+            },
+            context,
+        )
+
+        self.assertEqual(candidate["url"], "https://github.com/phase-rs/phase/pull/44")
+
+    def test_dashboard_history_separates_observations_from_material_actions(self) -> None:
+        events = [
+            {
+                "event_type": "review",
+                "pr": 52,
+                "head_sha": "old-head",
+                "timestamp": "2026-07-10T00:00:00Z",
+                "summary": "Requested a regression test",
+            },
+            {
+                "event_type": "observation",
+                "pr": 52,
+                "head_sha": "current-head",
+                "timestamp": "2026-07-11T00:00:00Z",
+                "summary": "Confirmed the author follow-up",
+            },
+        ]
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": pr_review.latest_events_by_pr(events),
+                "local_latest_observations": pr_review.latest_observations_by_pr(events),
+                "local_latest_looks": pr_review.latest_looks_by_pr(events),
+                "local_latest_actions": pr_review.latest_material_actions_by_pr(events),
+            },
+        )()
+
+        history = pr_review.dashboard_local_history(context, 52, "current-head")
+
+        self.assertEqual(
+            history["last_recorded_observation"]["summary"],
+            "Confirmed the author follow-up",
+        )
+        self.assertEqual(
+            history["last_recorded_look"]["summary"],
+            "Confirmed the author follow-up",
+        )
+        self.assertEqual(
+            history["last_material_action"]["summary"],
+            "Requested a regression test",
+        )
+        self.assertFalse(history["last_material_action"]["head_matches_current"])
+
+    def test_dashboard_material_action_also_counts_as_a_recorded_look(self) -> None:
+        events = [
+            {
+                "event_type": "blocked",
+                "pr": 52,
+                "head_sha": "current-head",
+                "timestamp": "2026-07-11T00:00:00Z",
+                "summary": "Waiting for a rules fix",
+            }
+        ]
+        context = type(
+            "DashboardContext",
+            (),
+            {
+                "local_latest_events": pr_review.latest_events_by_pr(events),
+                "local_latest_observations": pr_review.latest_observations_by_pr(events),
+                "local_latest_looks": pr_review.latest_looks_by_pr(events),
+                "local_latest_actions": pr_review.latest_material_actions_by_pr(events),
+            },
+        )()
+
+        history = pr_review.dashboard_local_history(context, 52, "current-head")
+
+        self.assertIsNone(history["last_recorded_observation"])
+        self.assertEqual(history["last_recorded_look"]["event_type"], "blocked")
+        self.assertEqual(
+            history["last_recorded_look"]["summary"],
+            "Waiting for a rules fix",
+        )
+
+    def test_dashboard_terminal_sections_keep_old_closed_prs_in_archive(self) -> None:
+        reference = datetime(2026, 7, 15, tzinfo=UTC)
+        sections = pr_review.dashboard_terminal_sections(
+            [
+                {"pr": 1, "state": "CLOSED", "closed_at": "2026-07-14T00:00:00Z"},
+                {"pr": 2, "state": "CLOSED", "closed_at": "2026-07-10T00:00:00Z"},
+                {"pr": 3, "state": "MERGED", "merged_at": "2026-07-01T00:00:00Z"},
+            ],
+            reference,
+        )
+
+        self.assertEqual([row["pr"] for row in sections["closed_recent"]], [1])
+        self.assertEqual([row["pr"] for row in sections["closed_archive"]], [2])
+        self.assertEqual([row["pr"] for row in sections["merged"]], [3])
+
+    def test_dashboard_renderer_escapes_snapshot_content_and_auto_refreshes(self) -> None:
+        rendered = pr_review_dashboard.render_dashboard(
+            {
+                "generated_at": "2026-07-15T00:00:00Z",
+                "action_counts": {"review": 1},
+                "candidates_by_action": {
+                    "review": [
+                        {
+                            "pr": 44,
+                            "title": "<script>alert(1)</script>",
+                            "url": "https://example.test/pull/44",
+                            "advisory_action": "review",
+                            "reason": "fresh_head",
+                            "ci": "green",
+                            "local_history": {},
+                        }
+                    ]
+                },
+                "dashboard": {"closed_unmerged": {"recent": [], "archive": []}, "merged": []},
+            }
+        )
+
+        self.assertIn('http-equiv="refresh" content="60"', rendered)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("<table>", rendered)
+        self.assertIn('data-detail-target="open-details-44"', rendered)
+        self.assertIn('id="pr-review-dashboard"', rendered)
+        self.assertIn('href="https://example.test/pull/44"', rendered)
+        self.assertIn('target="_blank"', rendered)
+        self.assertIn('class="status-label ready"', rendered)
+        self.assertNotIn('class="badge ready"', rendered)
+        self.assertIn('aria-label="CI passing"', rendered)
+        self.assertIn(">✓</span>", rendered)
+        self.assertIn('id="pr-search"', rendered)
+        self.assertIn('data-status-filter="review"', rendered)
+        self.assertIn('id="ci-filter"', rendered)
+        self.assertIn('const syncFilterUrl', rendered)
+
+    def test_dashboard_data_updates_terminal_archive_and_removes_reopened_prs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "review-dashboard.json"
+            pr_review.write_json_atomically(
+                output,
+                {
+                    "terminal_archive": [
+                        {"pr": 7, "state": "CLOSED", "closed_at": "2026-07-01T00:00:00Z"}
+                    ]
+                },
+            )
+            args = type(
+                "DashboardArgs",
+                (),
+                {
+                    "output": output,
+                    "html_output": None,
+                    "state_dir": Path(temp),
+                    "repo": "phase-rs/phase",
+                    "terminal_limit": 200,
+                    "limit": 100,
+                },
+            )()
+            scan_output = {
+                "generated_at": "2026-07-15T00:00:00Z",
+                "candidates_by_action": {"review": [{"pr": 7}]},
+            }
+            terminal_row = {
+                "pr": 8,
+                "state": "CLOSED",
+                "closed_at": pr_review.now_iso(),
+            }
+            context = type(
+                "DashboardContext",
+                (),
+                {
+                    "local_latest_events": {},
+                    "local_latest_observations": {},
+                    "local_latest_looks": {},
+                    "local_latest_actions": {},
+                },
+            )()
+            with (
+                mock.patch.object(pr_review, "load_review_context", return_value=context),
+                mock.patch.object(pr_review, "build_scan_output", return_value=scan_output),
+                mock.patch.object(pr_review, "fetch_terminal_prs", return_value=[{"number": 8}]),
+                mock.patch.object(pr_review, "dashboard_terminal_row", return_value=terminal_row),
+            ):
+                self.assertEqual(pr_review.command_dashboard_data(args), 0)
+
+            snapshot = json.loads(output.read_text())
+            self.assertEqual([row["pr"] for row in snapshot["terminal_archive"]], [8])
+            self.assertEqual([row["pr"] for row in snapshot["dashboard"]["closed_unmerged"]["recent"]], [8])
+            self.assertTrue(output.with_suffix(".html").exists())
+
+    def test_gh_user_uses_graphql_viewer_query(self) -> None:
+        with mock.patch.object(
+            pr_review,
+            "run_json",
+            return_value={"data": {"viewer": {"login": "maintainer"}}},
+        ) as run_json:
+            self.assertEqual(pr_review.gh_user(), "maintainer")
+
+        self.assertEqual(
+            run_json.call_args.args[0],
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=query { viewer { login } }",
+            ],
+        )
+
+    def test_required_status_checks_use_effective_graphql_branch_rule(self) -> None:
+        with mock.patch.object(
+            pr_review,
+            "run_json",
+            return_value={
+                "data": {
+                    "repository": {
+                        "ref": {
+                            "branchProtectionRule": {
+                                "requiredStatusCheckContexts": ["Rust", "Frontend"]
+                            }
+                        }
+                    }
+                }
+            },
+        ) as run_json:
+            self.assertEqual(
+                pr_review.required_status_check_names("phase-rs/phase", "main"),
+                {"Rust", "Frontend"},
+            )
+
+        command = run_json.call_args.args[0]
+        self.assertIn("graphql", command)
+        self.assertIn("qualifiedName=refs/heads/main", command)
+        self.assertNotIn("protection/required_status_checks", command)
+
     def test_event_record_is_idempotent_and_compacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             state_dir = Path(temp)
@@ -183,6 +448,243 @@ class PrReviewTests(unittest.TestCase):
 
         self.assertEqual(recommendation["advisory_action"], "blocked")
         self.assertEqual(recommendation["reason"], "changes_requested_current_head")
+
+    def test_expiry_clock_survives_repeated_blocked_recordings(self) -> None:
+        """A re-recorded `blocked` event must not reset the requested-changes clock.
+
+        Every sweep appends a fresh `blocked` event for a still-blocked PR, and
+        `event_id` hashes the timestamp, so each pass is a distinct row. Anchoring
+        the expiry clock on the newest local event pinned `blocker_age` at ~0 and
+        silently disabled warn/close for every PR the loop had ever blocked.
+        """
+        packet = {
+            "pr": {
+                "number": 4132,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(8),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            # The sweep re-blocked this head one minute ago. Under the old anchor
+            # this made blocker_age ~0 and the PR stayed `blocked` forever.
+            "local_current_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(1),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(8),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
+
+    def test_expiry_clock_falls_back_to_first_local_block_without_formal_review(self) -> None:
+        """No formal CHANGES_REQUESTED: age from the FIRST local block, not the latest."""
+        packet = {
+            "pr": {
+                "number": 4589,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": None,
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(1),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(9),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "warn_stale_changes_for_handler")
+        self.assertEqual(recommendation["reason"], "requested_changes_warning_due")
+
+    def test_posted_warning_does_not_orphan_a_local_only_block(self) -> None:
+        """The warning event must not erase the block it was posted about.
+
+        `local_block` reads only the newest event. Once the stale-changes warning is
+        recorded it becomes the newest event, so a head blocked only in the local log
+        (no formal CHANGES_REQUESTED) would flip `active` to False and its warning
+        could never mature into a close.
+        """
+        packet = {
+            "acting_login": "maintainer",
+            "pr": {
+                "number": 4805,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": None,
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            # Newest event is the warning we posted 8 days ago — NOT a block.
+            "local_current_event": {
+                "event_type": "requested_changes_warning",
+                "outcome": "requested_changes_warning",
+                "head_sha": "head",
+                "timestamp": self._days_ago(8),
+            },
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(16),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        state = pr_review.requested_changes_expiry_state(packet, local_block=False, author_followup_after_local_event=False)
+
+        self.assertTrue(state["active"], "a local-only block must survive its own warning")
+        self.assertEqual(state["blocker_timestamp"], packet["local_first_block_event"]["timestamp"])
+        self.assertTrue(state["close_due"], "warning older than close_after_warning_days must close")
+
+        recommendation = pr_review.recommend_from_packet(packet)
+        self.assertEqual(recommendation["advisory_action"], "close_stale_changes_for_handler")
+
+    def test_fresh_formal_review_restarts_expiry_clock(self) -> None:
+        """A NEW CHANGES_REQUESTED on the same head restarts the window (GitHub wins)."""
+        packet = {
+            "pr": {
+                "number": 4133,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+                "reviews": [
+                    {
+                        "author": "maintainer",
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": self._days_ago(1),
+                        "commit": "head",
+                    }
+                ],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_first_block_event": {
+                "event_type": "blocked",
+                "outcome": "blocked",
+                "head_sha": "head",
+                "timestamp": self._days_ago(30),
+            },
+            "policy_trace": [],
+            "policy": {
+                "requested_changes": {
+                    "warning_after_days": 7,
+                    "close_after_warning_days": 7,
+                    "warning_marker": pr_review.REQUESTED_CHANGES_EXPIRY_MARKER,
+                }
+            },
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "blocked")
+
+    def test_first_block_events_by_pr_head_keeps_earliest_and_ignores_non_blocks(self) -> None:
+        events = [
+            {"pr": 1, "head_sha": "h", "outcome": "review", "timestamp": "2026-07-01T00:00:00Z"},
+            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-02T00:00:00Z"},
+            {"pr": 1, "head_sha": "h", "outcome": "blocked", "timestamp": "2026-07-09T00:00:00Z"},
+            {"pr": 1, "head_sha": "other", "outcome": "blocked", "timestamp": "2026-07-05T00:00:00Z"},
+        ]
+
+        first = pr_review.first_block_events_by_pr_head(events)
+
+        self.assertEqual(first[(1, "h")]["timestamp"], "2026-07-02T00:00:00Z")
+        self.assertEqual(first[(1, "other")]["timestamp"], "2026-07-05T00:00:00Z")
+
+    def test_is_block_event_covers_every_routing_block_shape(self) -> None:
+        """The expiry anchor must recognize exactly the events routing calls blocking."""
+        for event_type in pr_review.LOCAL_BLOCK_EVENT_TYPES:
+            self.assertTrue(pr_review.is_block_event({"event_type": event_type}), event_type)
+        for outcome in pr_review.LOCAL_BLOCK_OUTCOMES:
+            self.assertTrue(pr_review.is_block_event({"outcome": outcome}), outcome)
+
+        self.assertFalse(pr_review.is_block_event({"event_type": "blocked", "outcome": "ci_failed"}))
+        self.assertFalse(pr_review.is_block_event({"event_type": "review"}))
+        self.assertFalse(pr_review.is_block_event({"outcome": "approved_enqueued"}))
+        self.assertFalse(pr_review.is_block_event(None))
+
+    def test_review_blocked_event_anchors_expiry(self) -> None:
+        """`review_blocked` routes as a block, so it must also anchor the expiry clock."""
+        events = [
+            {
+                "pr": 7,
+                "head_sha": "h",
+                "event_type": "review_blocked",
+                "timestamp": "2026-07-01T00:00:00Z",
+            },
+        ]
+
+        self.assertIn((7, "h"), pr_review.first_block_events_by_pr_head(events))
 
     def test_requested_changes_warns_after_configured_age(self) -> None:
         packet = {
@@ -569,6 +1071,125 @@ class PrReviewTests(unittest.TestCase):
         self.assertFalse(profile["proof_gap"])
         self.assertIn("missing-ai-contributor-template", profile["risk_flags"])
 
+    def test_low_risk_parser_refactor_clears_agent_coauthor_proof_gap(self) -> None:
+        policy = pr_review.Policy(
+            {"path_classes": {"engine": {"patterns": ["crates/engine/**"]}}}
+        )
+        packet = pr_review.make_packet(
+            {
+                "number": 5302,
+                "title": "refactor(parser): nom P/T remainder combinator",
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "APPROVED",
+                "author": {"login": "contributor"},
+                "labels": [{"name": "refactor"}],
+                "files": [
+                    {"path": "crates/engine/src/parser/oracle_static/grammar.rs"},
+                    {"path": "crates/engine/src/parser/oracle_static/tests.rs"},
+                    {"path": "crates/engine/src/parser/oracle_static/type_change.rs"},
+                ],
+                "comments": [
+                    {
+                        "author": {"login": "github-actions"},
+                        "body": (
+                            f"{pr_review.PARSE_DIFF_MARKER}\n"
+                            "### Parse changes introduced by this PR\n\n"
+                            "✓ No card-parse changes detected.\n"
+                        ),
+                        "updatedAt": "2026-07-08T17:14:15Z",
+                    }
+                ],
+                "statusCheckRollup": [
+                    {"name": "Rust tests", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "contributor"},
+                            {"login": "cursoragent"},
+                        ]
+                    }
+                ],
+            },
+            policy,
+            "maintainer",
+            "full",
+            {},
+            None,
+            {"scrutiny": "maintainer_attention"},
+        )
+
+        self.assertTrue(packet["proof"]["proof_required"])
+        self.assertTrue(packet["proof"]["proof_satisfied"])
+        self.assertFalse(packet["proof"]["proof_gap"])
+        self.assertEqual(
+            packet["proof"]["proof_override"],
+            "low_risk_parser_refactor_green_no_parse_changes",
+        )
+        self.assertEqual(
+            packet["recommendation"]["advisory_action"],
+            "approve_ready_for_handler",
+        )
+
+    def test_low_risk_refactor_override_does_not_clear_skipped_verification(self) -> None:
+        policy = pr_review.Policy(
+            {"path_classes": {"engine": {"patterns": ["crates/engine/**"]}}}
+        )
+        packet = pr_review.make_packet(
+            {
+                "number": 5303,
+                "title": "refactor(parser): nom helper",
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "APPROVED",
+                "author": {"login": "contributor"},
+                "labels": [{"name": "refactor"}],
+                "body": "## Summary\nRefactor parser.\n\n- [ ] `cargo test` (local verification skipped)\n",
+                "files": [
+                    {"path": "crates/engine/src/parser/oracle_static/type_change.rs"},
+                ],
+                "comments": [
+                    {
+                        "author": {"login": "github-actions"},
+                        "body": (
+                            f"{pr_review.PARSE_DIFF_MARKER}\n"
+                            "✓ No card-parse changes detected.\n"
+                        ),
+                        "updatedAt": "2026-07-08T17:14:15Z",
+                    }
+                ],
+                "statusCheckRollup": [
+                    {"name": "Rust tests", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+                "commits": [
+                    {
+                        "authors": [
+                            {"login": "contributor"},
+                            {"login": "cursoragent"},
+                        ]
+                    }
+                ],
+            },
+            policy,
+            "maintainer",
+            "full",
+            {},
+            None,
+            {"scrutiny": "maintainer_attention"},
+        )
+
+        self.assertTrue(packet["proof"]["proof_gap"])
+        self.assertNotIn("proof_override", packet["proof"])
+        self.assertEqual(
+            packet["recommendation"]["advisory_action"],
+            "request_changes",
+        )
+        self.assertEqual(
+            packet["recommendation"]["reason"],
+            "proof_required_missing",
+        )
+
     def test_gittensor_closed_heavy_feeds_proof_risk(self) -> None:
         records = [
             {"author": "Risky", "repository": f"owner/repo{i}", "prState": "CLOSED", "hotkey": "hk"}
@@ -609,7 +1230,11 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "defer")
         self.assertEqual(recommendation["reason"], "frontend_policy")
 
-    def test_current_head_hold_does_not_suppress_green_review(self) -> None:
+    def test_current_head_bare_hold_is_honored(self) -> None:
+        # A recorded hold on the current head with nothing new — green CI, no
+        # author follow-up, no parse-diff — is honored rather than re-reviewed.
+        # (Resurfacing on a real change is covered by the parse-diff and
+        # head-change tests below.)
         packet = {
             "pr": {
                 "number": 4574,
@@ -631,8 +1256,188 @@ class PrReviewTests(unittest.TestCase):
 
         recommendation = pr_review.recommend_from_packet(packet)
 
+        self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(recommendation["reason"], "local_hold_current_head")
+
+    def test_bare_local_hold_resurfaces_on_parse_diff(self) -> None:
+        # A parse-diff update landing after the hold re-surfaces the same head.
+        packet = {
+            "pr": {
+                "number": 4575,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": None,
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(5),
+            },
+            "parse_diff": {"updated_at": self._minutes_ago(1)},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "parse_diff_after_local_hold")
+
+    def test_member_commented_last_helper(self) -> None:
+        # A review outranks an older comment; a member review last -> True.
+        self.assertTrue(
+            pr_review.member_commented_last(
+                {
+                    "comments": [
+                        {"authorAssociation": "CONTRIBUTOR", "createdAt": self._days_ago(1)},
+                    ],
+                    "reviews": [
+                        {"authorAssociation": "MEMBER", "submittedAt": self._minutes_ago(1)},
+                    ],
+                }
+            )
+        )
+        # Missing authorAssociation (e.g. a bot or cached payload) is not a
+        # member, so the guard never suppresses on absent data.
+        self.assertFalse(
+            pr_review.member_commented_last(
+                {
+                    "comments": [
+                        {"createdAt": self._minutes_ago(1)},
+                    ],
+                    "reviews": [],
+                }
+            )
+        )
+        # No dated activity at all -> False.
+        self.assertFalse(pr_review.member_commented_last({"comments": [], "reviews": []}))
+
+    def test_member_commented_last_holds_redundant_review(self) -> None:
+        # No state trigger fires and a repo member spoke last -> hold, so the
+        # sweep does not dispatch a redundant review of the same head.
+        packet = {
+            "pr": {
+                "number": 6262,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "commentsComplete": True,
+                "comments": [
+                    {
+                        "author": "contributor",
+                        "authorAssociation": "CONTRIBUTOR",
+                        "createdAt": self._days_ago(2),
+                        "updatedAt": self._days_ago(2),
+                    },
+                    {
+                        "author": "maintainer",
+                        "authorAssociation": "MEMBER",
+                        "createdAt": self._minutes_ago(5),
+                        "updatedAt": self._minutes_ago(5),
+                    },
+                ],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "hold")
+        self.assertEqual(
+            recommendation["reason"], "redundant_review_member_commented_last"
+        )
+
+    def test_contributor_commented_last_still_reviews(self) -> None:
+        # The converse of the guard: the contributor spoke last, so there is an
+        # unacknowledged follow-up and the PR must still surface for review.
+        packet = {
+            "pr": {
+                "number": 6263,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "",
+                "isInMergeQueue": False,
+                "commentsComplete": True,
+                "comments": [
+                    {
+                        "author": "maintainer",
+                        "authorAssociation": "MEMBER",
+                        "createdAt": self._days_ago(2),
+                        "updatedAt": self._days_ago(2),
+                    },
+                    {
+                        "author": "contributor",
+                        "authorAssociation": "CONTRIBUTOR",
+                        "createdAt": self._minutes_ago(5),
+                        "updatedAt": self._minutes_ago(5),
+                    },
+                ],
+                "reviews": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "needs_review")
+
+    def test_member_guard_never_overrides_head_change(self) -> None:
+        # A member spoke last, but the head advanced since the recorded event: a
+        # mandatory state trigger must win over the redundancy guard.
+        previous_event = {
+            "event_type": "reviewed",
+            "outcome": "reviewed",
+            "head_sha": "old-head",
+            "timestamp": self._minutes_ago(10),
+        }
+        pr = {
+            "number": 6264,
+            "state": "OPEN",
+            "headRefOid": "new-head",
+            "author_login": "contributor",
+            "reviewDecision": "",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [
+                {
+                    "author": "maintainer",
+                    "authorAssociation": "MEMBER",
+                    "createdAt": self._minutes_ago(5),
+                    "updatedAt": self._minutes_ago(5),
+                },
+            ],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "old-head",
+            "local_current_event": None,
+            "freshness": pr_review.review_freshness(pr, "maintainer", None, previous_event),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "head_changed_since_local_event")
 
     def test_author_followup_after_local_block_resurfaces_same_head(self) -> None:
         packet = {
@@ -646,7 +1451,7 @@ class PrReviewTests(unittest.TestCase):
                 "comments": [
                     {
                         "author": "contributor",
-                        "createdAt": "2026-07-04T08:01:22Z",
+                        "createdAt": self._minutes_ago(1),
                     }
                 ],
             },
@@ -657,7 +1462,7 @@ class PrReviewTests(unittest.TestCase):
                 "event_type": "changes_requested",
                 "outcome": "changes_requested",
                 "head_sha": "head",
-                "timestamp": "2026-07-04T00:26:33Z",
+                "timestamp": self._minutes_ago(2),
             },
             "policy_trace": [],
         }
@@ -665,7 +1470,148 @@ class PrReviewTests(unittest.TestCase):
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
-        self.assertEqual(recommendation["reason"], "author_followup_after_local_block")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
+
+    def test_edited_author_followup_is_not_acknowledged_by_later_hold_event(self) -> None:
+        local_event = {
+            "event_type": "held",
+            "outcome": "held",
+            "head_sha": "head",
+            "timestamp": self._minutes_ago(1),
+        }
+        pr = {
+            "number": 5015,
+            "state": "OPEN",
+            "headRefOid": "head",
+            "author_login": "contributor",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [
+                {
+                    "author": "maintainer",
+                    "createdAt": self._days_ago(1),
+                    "updatedAt": self._days_ago(1),
+                },
+                {
+                    "author": "contributor",
+                    "createdAt": self._days_ago(2),
+                    "updatedAt": self._minutes_ago(2),
+                },
+            ],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": local_event,
+            "freshness": pr_review.review_freshness(
+                pr, "maintainer", local_event, local_event
+            ),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
+
+    def test_changed_head_never_inherits_previous_hold(self) -> None:
+        previous_event = {
+            "event_type": "held",
+            "outcome": "held",
+            "head_sha": "old-head",
+            "timestamp": self._minutes_ago(5),
+        }
+        pr = {
+            "number": 5016,
+            "state": "OPEN",
+            "headRefOid": "new-head",
+            "author_login": "contributor",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "isInMergeQueue": False,
+            "commentsComplete": True,
+            "comments": [],
+            "reviews": [],
+        }
+        packet = {
+            "pr": pr,
+            "acting_login": "maintainer",
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "old-head",
+            "local_current_event": None,
+            "freshness": pr_review.review_freshness(
+                pr, "maintainer", None, previous_event
+            ),
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "head_changed_since_local_event")
+
+    def test_incomplete_author_history_does_not_preserve_hold(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5017,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "CHANGES_REQUESTED",
+                "isInMergeQueue": False,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "local_current_event": {
+                "event_type": "held",
+                "outcome": "held",
+                "head_sha": "head",
+                "timestamp": self._minutes_ago(2),
+            },
+            "freshness": {"comment_history_incomplete": True},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(recommendation["reason"], "author_activity_history_incomplete")
+
+    def test_author_followup_resurfaces_queued_pr(self) -> None:
+        packet = {
+            "pr": {
+                "number": 5018,
+                "state": "OPEN",
+                "headRefOid": "head",
+                "author_login": "contributor",
+                "reviewDecision": "APPROVED",
+                "isInMergeQueue": True,
+                "comments": [],
+            },
+            "ci": {"state": "green"},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "latest_maintainer_review_commit": "head",
+            "freshness": {"author_followup_after_maintainer_activity": True},
+            "policy_trace": [],
+        }
+
+        recommendation = pr_review.recommend_from_packet(packet)
+
+        self.assertEqual(recommendation["advisory_action"], "review")
+        self.assertEqual(
+            recommendation["reason"], "author_followup_after_maintainer_activity"
+        )
 
     def test_local_block_without_author_followup_stays_blocked(self) -> None:
         packet = {
@@ -685,7 +1631,7 @@ class PrReviewTests(unittest.TestCase):
                 "event_type": "changes_requested",
                 "outcome": "changes_requested",
                 "head_sha": "head",
-                "timestamp": "2026-07-04T00:26:33Z",
+                "timestamp": self._minutes_ago(2),
             },
             "policy_trace": [],
         }
@@ -713,12 +1659,12 @@ class PrReviewTests(unittest.TestCase):
                 "event_type": "changes_requested",
                 "outcome": "changes_requested",
                 "head_sha": "head",
-                "timestamp": "2026-07-04T18:14:34Z",
+                "timestamp": self._minutes_ago(2),
             },
             "parse_diff": {
                 "present": True,
                 "state": "no_changes",
-                "updated_at": "2026-07-04T22:45:19Z",
+                "updated_at": self._minutes_ago(1),
             },
             "policy_trace": [],
         }
@@ -1252,6 +2198,62 @@ class PrReviewTests(unittest.TestCase):
         self.assertIn("legacy-ci", summary["failures"])
         self.assertIn("clippy", summary["successes"])
 
+    def test_status_summary_ignores_non_required_failed_checks(self) -> None:
+        summary = pr_review.status_summary(
+            [
+                {
+                    "name": "Rust (fmt, clippy, test, coverage-gate)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "name": "Frontend (lint, type-check, test)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+                {
+                    "name": "Contributor trust",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED",
+                },
+            ],
+            {
+                "Rust (fmt, clippy, test, coverage-gate)",
+                "Frontend (lint, type-check, test)",
+            },
+        )
+
+        self.assertEqual(summary["state"], "green")
+        self.assertEqual(summary["failures"], [])
+        self.assertEqual(
+            summary["advisory"],
+            [
+                {
+                    "name": "Contributor trust",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED",
+                }
+            ],
+        )
+
+    def test_status_summary_waits_for_missing_required_check(self) -> None:
+        summary = pr_review.status_summary(
+            [
+                {
+                    "name": "Rust (fmt, clippy, test, coverage-gate)",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            {
+                "Rust (fmt, clippy, test, coverage-gate)",
+                "Frontend (lint, type-check, test)",
+            },
+        )
+
+        self.assertEqual(summary["state"], "pending")
+        self.assertEqual(summary["pending"], ["Frontend (lint, type-check, test)"])
+
     def test_recommend_defer_fe_is_case_insensitive(self) -> None:
         for outcome in ("DEFER-FE", "defer-fe"):
             packet = {
@@ -1348,8 +2350,28 @@ class PrReviewTests(unittest.TestCase):
         self.assertEqual(recommendation["advisory_action"], "review")
         self.assertEqual(recommendation["reason"], "review_parse_baseline_pending")
 
+        repeated_maintainer_merge = copy.deepcopy(base_packet)
+        repeated_maintainer_merge["pr"]["reviewDecision"] = "CHANGES_REQUESTED"
+        repeated_maintainer_merge["pr"]["maintainer_merge_commit_count"] = 1
+        repeated_maintainer_merge["latest_maintainer_review_commit"] = "old_head"
+        ready = pr_review.recommend_from_packet(repeated_maintainer_merge)
+        self.assertEqual(ready["advisory_action"], "approve_ready_for_handler")
+        self.assertEqual(
+            ready["reason"],
+            "baseline_pending_after_maintainer_merge_ready",
+        )
+
+        needs_review = copy.deepcopy(base_packet)
+        needs_review["pr"]["maintainer_merge_commit_count"] = 1
+        maintainer_merge = pr_review.recommend_from_packet(needs_review)
+        self.assertEqual(maintainer_merge["advisory_action"], "review")
+        self.assertEqual(
+            maintainer_merge["reason"],
+            "review_parse_baseline_pending_after_maintainer_merge",
+        )
+
         # Frontend-only surface (no engine path class) keeps the generic review reason.
-        frontend_packet = dict(base_packet)
+        frontend_packet = copy.deepcopy(base_packet)
         frontend_packet["classification"] = {
             "hard_stop_paths": [],
             "surface": "backend",
@@ -1367,6 +2389,11 @@ class PrReviewTests(unittest.TestCase):
     @staticmethod
     def _days_ago(days: int) -> str:
         stamp = datetime.now(UTC).replace(microsecond=0) - timedelta(days=days)
+        return stamp.isoformat().replace("+00:00", "Z")
+
+    @staticmethod
+    def _minutes_ago(minutes: int) -> str:
+        stamp = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=minutes)
         return stamp.isoformat().replace("+00:00", "Z")
 
     @staticmethod
@@ -1699,6 +2726,763 @@ class PrReviewTests(unittest.TestCase):
         self.assertIsNone(packet["contributor"])
         self.assertNotIn("matched:standing_skip", packet["policy_trace"])
         self.assertNotEqual(packet["recommendation"]["reason"], "contributor_standing_skip")
+
+    @staticmethod
+    def _artifact_body(
+        head: str,
+        *,
+        gate_head: str | None = None,
+        review_head: str | None = None,
+        anchor_count: int = 2,
+        unchecked: bool = False,
+    ) -> str:
+        anchors = "\n".join(
+            f"- crates/engine/src/example_{index}.rs:{index + 10} — analogous seam"
+            for index in range(anchor_count)
+        )
+        verification_lines = [
+            f"- [x] {label}" for label in pr_review.REQUIRED_VERIFICATION_CHECKBOX_LABELS
+        ]
+        if unchecked:
+            verification_lines[0] = verification_lines[0].replace("- [x]", "- [ ]", 1)
+        verification_lines.append("- `cargo test` — clean")
+        verification = "\n".join(verification_lines)
+        return (
+            "## Summary\nChange.\n\n"
+            "## Implementation method (required)\nMethod: /engine-implementer\n\n"
+            f"## Verification\n{verification}\n\n"
+            "## Gate A\n"
+            f"Gate A PASS head={gate_head or head} base={'b' * 40}\n\n"
+            f"## Anchored on\n{anchors}\n\n"
+            "## Final review-impl\n"
+            f"Final review-impl PASS head={review_head or head}\n\n"
+            "## Claimed parse impact\n- Test Card\n"
+        )
+
+    def test_artifact_profile_is_sha_bound_and_audit_only(self) -> None:
+        head = "a" * 40
+        policy = pr_review.Policy(
+            {"admission": {"mode": "audit", "enforced_after": "2026-07-01T00:00:00Z"}}
+        )
+        passing = pr_review.artifact_profile(
+            {
+                "headRefOid": head,
+                "createdAt": "2026-07-02T00:00:00Z",
+                "body": self._artifact_body(head),
+            },
+            policy,
+        )
+        self.assertTrue(passing["passes"])
+        self.assertFalse(passing["would_decline"])
+        self.assertFalse(passing["enforced"])
+        self.assertEqual(passing["claimed_cards"], ["Test Card"])
+
+        failing = pr_review.artifact_profile(
+            {
+                "headRefOid": head,
+                "createdAt": "2026-07-02T00:00:00Z",
+                "body": self._artifact_body(
+                    head,
+                    gate_head="c" * 40,
+                    review_head="d" * 40,
+                    anchor_count=1,
+                    unchecked=True,
+                ),
+            },
+            policy,
+        )
+        self.assertEqual(
+            failing["failures"],
+            [
+                "stale_gate_a_head",
+                "stale_final_review_impl_head",
+                "fewer_than_two_anchors",
+                "unchecked_required_verification",
+                "invalid_required_verification_checkboxes",
+            ],
+        )
+        self.assertTrue(failing["would_decline"])
+        self.assertFalse(failing["decline"])
+
+    def test_artifact_enforcement_requires_immutable_cutoff(self) -> None:
+        head = "a" * 40
+        policy = pr_review.Policy(
+            {"admission": {"mode": "enforce", "enforced_after": "2026-07-10T00:00:00Z"}}
+        )
+        before = pr_review.artifact_profile(
+            {"headRefOid": head, "createdAt": "2026-07-09T00:00:00Z", "body": ""},
+            policy,
+        )
+        after = pr_review.artifact_profile(
+            {"headRefOid": head, "createdAt": "2026-07-11T00:00:00Z", "body": ""},
+            policy,
+        )
+        self.assertFalse(before["decline"])
+        self.assertTrue(after["decline"])
+
+    def test_architecture_policy_uses_supplied_patterns_and_accepted_label(self) -> None:
+        policy = pr_review.load_policy(pr_review.DEFAULT_POLICY)
+        self.assertEqual(
+            policy.raw["admission"],
+            {"mode": "audit", "enforced_after": "", "accepted_issue_label": "accepted"},
+        )
+        expected = [
+            "crates/engine/src/types/format.rs",
+            "crates/engine/src/types/card_type.rs",
+            "crates/engine/src/game/mod.rs",
+            "crates/engine/src/game/deck_loading.rs",
+            "crates/engine/src/game/deck_validation.rs",
+            "crates/engine/src/game/match_flow.rs",
+            "crates/engine/src/game/mulligan.rs",
+            "crates/server-core/**",
+            "crates/phase-server/src/main.rs",
+        ]
+        self.assertEqual(policy.architecture_scope_patterns, expected)
+        self.assertEqual(policy.architecture_scope_mode, "review")
+        self.assertEqual(policy.architecture_accepted_issue_label, "accepted")
+        for pattern in expected:
+            path = "crates/server-core/src/session.rs" if pattern.endswith("/**") else pattern
+            with self.subTest(pattern=pattern):
+                profile = pr_review.architecture_scope_profile(
+                    {"author": {"login": "author"}}, [path], policy, {}
+                )
+                self.assertTrue(profile["triggered"])
+                self.assertTrue(profile["requires_maintainer_review"])
+                self.assertFalse(profile["decline"])
+                self.assertEqual(profile["evidence"]["matched_paths"], [path])
+
+    def test_enforce_policy_requires_valid_cutoff_but_audit_allows_empty(self) -> None:
+        pr_review.validate_policy(
+            pr_review.Policy(
+                {"admission": {"mode": "audit", "enforced_after": ""}}
+            )
+        )
+        for value in ("", "not-a-date", "2026-07-10T00:00:00+00:00"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "requires a valid"):
+                    pr_review.validate_policy(
+                        pr_review.Policy(
+                            {"admission": {"mode": "enforce", "enforced_after": value}}
+                        )
+                    )
+
+    def test_artifact_rejects_duplicate_headings_empty_evidence_and_backend_not_applicable(self) -> None:
+        head = "a" * 40
+        policy = pr_review.Policy({"admission": {"mode": "audit"}})
+        body = self._artifact_body(head).replace(
+            "## Gate A\n", "## Gate A\nGate A PASS head=" + head + " base=" + "b" * 40 + "\n\n## Gate A\n", 1
+        )
+        duplicate = pr_review.artifact_profile({"headRefOid": head, "body": body}, policy)
+        self.assertIn("duplicate_required_h2_headings", duplicate["failures"])
+
+        verification = "\n".join(
+            f"- [x] {label}" for label in pr_review.REQUIRED_VERIFICATION_CHECKBOX_LABELS
+        ) + "\n- `cargo test` — clean"
+        empty_body = self._artifact_body(head).replace(
+            f"## Verification\n{verification}\n\n", "## Verification\n\n"
+        )
+        empty = pr_review.artifact_profile({"headRefOid": head, "body": empty_body}, policy)
+        self.assertIn("missing_or_empty_verification", empty["failures"])
+
+        not_applicable = self._artifact_body(head).replace(
+            "Method: /engine-implementer", "Method: not-applicable — small change"
+        )
+        backend = pr_review.artifact_profile(
+            {"headRefOid": head, "body": not_applicable},
+            policy,
+            ["crates/engine/src/parser/oracle.rs"],
+            {"path_classes": {"engine": ["crates/engine/src/parser/oracle.rs"]}},
+        )
+        self.assertIn("invalid_implementation_method", backend["failures"])
+
+    def test_artifact_requires_exact_h2_single_pass_method_and_fixed_checkboxes(self) -> None:
+        head = "a" * 40
+        policy = pr_review.Policy({"admission": {"mode": "audit"}})
+        body = self._artifact_body(head)
+
+        h3 = pr_review.artifact_profile(
+            {"headRefOid": head, "body": body.replace("## Gate A", "### Gate A")},
+            policy,
+        )
+        self.assertIn("missing_required_h2_headings", h3["failures"])
+        self.assertIn("missing_gate_a_pass", h3["failures"])
+
+        duplicate_pass = pr_review.artifact_profile(
+            {
+                "headRefOid": head,
+                "body": body.replace(
+                    f"Gate A PASS head={head} base={'b' * 40}",
+                    f"Gate A PASS head={head} base={'b' * 40}\n"
+                    f"Gate A PASS head={head} base={'c' * 40}",
+                ),
+            },
+            policy,
+        )
+        self.assertIn("duplicate_gate_a_pass", duplicate_pass["failures"])
+
+        both_methods = pr_review.artifact_profile(
+            {
+                "headRefOid": head,
+                "body": body.replace(
+                    "Method: /engine-implementer",
+                    "Method: /engine-implementer\nMethod: not-applicable — docs only",
+                ),
+            },
+            policy,
+        )
+        self.assertIn("invalid_implementation_method", both_methods["failures"])
+
+        verification = "\n".join(
+            f"- [x] {label}" for label in pr_review.REQUIRED_VERIFICATION_CHECKBOX_LABELS
+        ) + "\n- `cargo test` — clean"
+        arbitrary = pr_review.artifact_profile(
+            {
+                "headRefOid": head,
+                "body": body.replace(verification, "- [x] `cargo test` — clean"),
+            },
+            policy,
+        )
+        self.assertIn("invalid_required_verification_checkboxes", arbitrary["failures"])
+
+    def test_unknown_created_at_is_artifact_audit_evidence_or_enforcement_hold(self) -> None:
+        head = "a" * 40
+        audit_policy = pr_review.Policy({"admission": {"mode": "audit"}})
+        audit = pr_review.artifact_profile(
+            {"headRefOid": head, "body": self._artifact_body(head)}, audit_policy
+        )
+        self.assertTrue(audit["insufficient_admission_data"])
+        self.assertFalse(audit["hold"])
+        self.assertFalse(audit["decline"])
+
+        enforce_policy = pr_review.Policy(
+            {"admission": {"mode": "enforce", "enforced_after": "2026-07-10T00:00:00Z"}}
+        )
+        for created_at in (None, "malformed"):
+            with self.subTest(created_at=created_at):
+                pr = {
+                    "headRefOid": head,
+                    "body": self._artifact_body(head),
+                    "createdAt": created_at,
+                    "author": {"login": "contrib"},
+                }
+                artifact = pr_review.artifact_profile(pr, enforce_policy)
+                self.assertTrue(artifact["hold"])
+                self.assertFalse(artifact["decline"])
+                recommendation = pr_review.recommend_from_packet(
+                    {
+                        "pr": {**pr, "number": 1, "state": "OPEN"},
+                        "classification": {"hard_stop_paths": [], "surface": "backend"},
+                        "artifacts": artifact,
+                        "architecture_scope": {
+                            "would_decline": False,
+                            "decline": False,
+                            "hold": False,
+                        },
+                        "ci": {"state": "green"},
+                        "policy_trace": [],
+                    }
+                )
+                self.assertEqual(recommendation["advisory_action"], "hold")
+                self.assertEqual(recommendation["reason"], "insufficient_admission_data")
+                self.assertFalse(
+                    recommendation["hold_evidence"]["implementation_diff_review_allowed"]
+                )
+
+    def test_architecture_enforcement_is_independent_of_artifact_cutoff(self) -> None:
+        policy = pr_review.Policy(
+            {
+                "admission": {"mode": "audit", "enforced_after": ""},
+                "architecture_scope": {
+                    "mode": "enforce",
+                    "patterns": ["central.rs"],
+                },
+            }
+        )
+        pr = {
+            "number": 1,
+            "state": "OPEN",
+            "headRefOid": "h",
+            "author": {"login": "contrib"},
+            "closingIssuesReferences": [],
+            "closingIssuesReferencesComplete": True,
+        }
+        artifact = pr_review.artifact_profile(pr, policy)
+        architecture = pr_review.architecture_scope_profile(
+            pr, ["central.rs"], policy, {}
+        )
+
+        self.assertFalse(artifact["enforced"])
+        self.assertTrue(artifact["would_decline"])
+        self.assertFalse(artifact["decline"])
+        self.assertTrue(architecture["enforced"])
+        self.assertIsNone(architecture["enforcement_cutoff"])
+        self.assertIsNone(architecture["post_cutoff"])
+        self.assertTrue(architecture["decline"])
+
+        recommendation = pr_review.recommend_from_packet(
+            {
+                "pr": pr,
+                "classification": {"hard_stop_paths": [], "surface": "backend"},
+                "artifacts": artifact,
+                "architecture_scope": architecture,
+                "ci": {"state": "green"},
+                "policy_trace": [],
+            }
+        )
+        self.assertEqual(recommendation["advisory_action"], "decline")
+        self.assertEqual(recommendation["reason"], "architecture_scope_not_authorized")
+
+    def test_architecture_enforcement_holds_when_closing_issue_evidence_is_incomplete(self) -> None:
+        policy = pr_review.Policy(
+            {
+                "admission": {"accepted_issue_label": "accepted"},
+                "architecture_scope": {
+                    "mode": "enforce",
+                    "patterns": ["central.rs"],
+                },
+            }
+        )
+        profile = pr_review.architecture_scope_profile(
+            {
+                "author": {"login": "contrib"},
+                "closingIssuesReferences": [],
+                "closingIssuesReferencesComplete": False,
+            },
+            ["central.rs"],
+            policy,
+            {},
+        )
+
+        self.assertTrue(profile["hold"])
+        self.assertFalse(profile["decline"])
+
+    def test_architecture_scope_uses_disjoint_spans_not_file_count(self) -> None:
+        policy = pr_review.load_policy(pr_review.DEFAULT_POLICY)
+        two_spans = pr_review.architecture_scope_profile(
+            {"author": {"login": "author"}},
+            ["crates/engine/src/game/casting.rs", "client/src/App.tsx"],
+            policy,
+            {},
+        )
+        three_spans = pr_review.architecture_scope_profile(
+            {"author": {"login": "author"}},
+            [
+                "crates/engine/src/game/casting.rs",
+                "client/src/App.tsx",
+                "crates/draft-core/src/cube.rs",
+            ],
+            policy,
+            {},
+        )
+        many_files = pr_review.architecture_scope_profile(
+            {"author": {"login": "author"}},
+            [f"crates/engine/src/parser/file_{index}.rs" for index in range(20)],
+            policy,
+            {},
+        )
+        self.assertFalse(two_spans["triggered"])
+        self.assertTrue(three_spans["triggered"])
+        self.assertFalse(many_files["triggered"])
+
+    def test_known_pr_path_shapes_trigger_5618_but_pass_5552_and_5610(self) -> None:
+        policy = pr_review.load_policy(pr_review.DEFAULT_POLICY)
+        trigger_5618 = pr_review.architecture_scope_profile(
+            {"author": {"login": "author"}},
+            [
+                "crates/server-core/src/session.rs",
+                "crates/engine/src/game/deck_loading.rs",
+                "client/src/services/deckParser.ts",
+            ],
+            policy,
+            {},
+        )
+        pass_5552 = pr_review.architecture_scope_profile(
+            {"author": {"login": "author"}},
+            [
+                "crates/engine/src/game/casting.rs",
+                "crates/engine/src/types/ability.rs",
+                "crates/phase-ai/src/policies/payment_selection.rs",
+                "crates/mtgish-import/src/convert/action.rs",
+            ],
+            policy,
+            {},
+        )
+        pass_5610 = pr_review.architecture_scope_profile(
+            {"author": {"login": "author"}},
+            [
+                "crates/engine/src/parser/oracle_effect/mod.rs",
+                "crates/engine/src/parser/oracle_effect/tests.rs",
+            ],
+            policy,
+            {},
+        )
+        self.assertTrue(trigger_5618["triggered"])
+        self.assertFalse(pass_5552["triggered"])
+        self.assertFalse(pass_5610["triggered"])
+
+    def test_architecture_scope_authorizes_private_author_or_accepted_label(self) -> None:
+        policy = pr_review.Policy(
+            {
+                "admission": {"mode": "audit", "accepted_issue_label": "accepted"},
+                "architecture_scope": {
+                    "patterns": ["central.rs"],
+                }
+            }
+        )
+        base_pr = {
+            "author": {"login": "contrib"},
+            "labels": [{"name": "quality"}],
+            "closingIssuesReferences": [],
+            "closingIssuesReferencesComplete": True,
+        }
+        denied = pr_review.architecture_scope_profile(
+            base_pr, ["central.rs"], policy, {"frontend_review_authors": ["contrib"]}
+        )
+        private = pr_review.architecture_scope_profile(
+            base_pr, ["central.rs"], policy, {"architecture_scope_authors": ["Contrib"]}
+        )
+        direct_pr = copy.deepcopy(base_pr)
+        direct_pr["labels"] = [{"name": "accepted"}]
+        direct = pr_review.architecture_scope_profile(direct_pr, ["central.rs"], policy, {})
+        issue_pr = copy.deepcopy(base_pr)
+        issue_pr["closingIssuesReferences"] = [
+            {"number": 42, "labels": [{"name": "accepted"}]}
+        ]
+        issue = pr_review.architecture_scope_profile(issue_pr, ["central.rs"], policy, {})
+        incomplete_pr = copy.deepcopy(issue_pr)
+        incomplete_pr["closingIssuesReferencesComplete"] = False
+        incomplete = pr_review.architecture_scope_profile(
+            incomplete_pr, ["central.rs"], policy, {}
+        )
+        self.assertTrue(denied["would_decline"])
+        self.assertFalse(denied["authorized"])
+        self.assertTrue(private["authorized"])
+        self.assertTrue(direct["authorized"])
+        self.assertTrue(direct["evidence"]["accepted_pr_label"])
+        self.assertTrue(issue["authorized"])
+        self.assertEqual(issue["evidence"]["accepted_closing_issues"], [42])
+        self.assertFalse(incomplete["authorized"])
+        self.assertTrue(incomplete["would_decline"])
+
+    def test_audit_reports_would_decline_without_preempting_review(self) -> None:
+        packet = {
+            "pr": {"number": 1, "state": "OPEN", "headRefOid": "h", "reviewDecision": None},
+            "classification": {"hard_stop_paths": [], "surface": "backend"},
+            "artifacts": {"would_decline": True, "decline": False, "failures": ["missing"]},
+            "architecture_scope": {"would_decline": False, "decline": False},
+            "ci": {"state": "green"},
+            "policy_trace": [],
+        }
+        result = pr_review.recommend_from_packet(packet)
+        self.assertEqual(result["advisory_action"], "review")
+        self.assertEqual(result["audit_would_decline"][0]["gate"], "artifacts")
+
+    def test_enforced_artifact_and_scope_declines_preempt_standing_and_queue(self) -> None:
+        base = {
+            "pr": {
+                "number": 1,
+                "state": "OPEN",
+                "headRefOid": "h",
+                "reviewDecision": "APPROVED",
+                "isInMergeQueue": True,
+            },
+            "classification": {"hard_stop_paths": [], "surface": "frontend"},
+            "artifacts": {"would_decline": True, "decline": True, "failures": ["missing"]},
+            "architecture_scope": {"would_decline": True, "decline": True, "decline_comment": "scope"},
+            "contributor": {"standing": "skip"},
+            "author_policy": {"frontend_review_allowed": True},
+            "ci": {"state": "green"},
+            "policy_trace": [],
+        }
+        artifact = pr_review.recommend_from_packet(base)
+        self.assertEqual(artifact["advisory_action"], "decline")
+        self.assertEqual(artifact["reason"], "required_artifacts_current_head")
+        self.assertIn("Closed without implementation-diff review", artifact["decline_comment"])
+        self.assertIn("fresh PR from current `main`", artifact["decline_comment"])
+        self.assertIn("Merely including", artifact["decline_comment"])
+        scope_packet = copy.deepcopy(base)
+        scope_packet["artifacts"] = {"would_decline": False, "decline": False}
+        scope = pr_review.recommend_from_packet(scope_packet)
+        self.assertEqual(scope["advisory_action"], "decline")
+        self.assertEqual(scope["reason"], "architecture_scope_not_authorized")
+        self.assertEqual(scope["decline_comment"], "scope")
+
+    def test_review_correction_tombstones_exact_signal_subset_everywhere(self) -> None:
+        target = {
+            "event_type": "review",
+            "event_id": "target",
+            "timestamp": self._days_ago(2),
+            "pr": 7,
+            "head_sha": "head",
+            "author": "Contrib",
+            "signals": ["wrong-seam", "false-green"],
+        }
+        correction = {
+            "event_type": "review_correction",
+            "event_id": "correction",
+            "timestamp": self._days_ago(1),
+            "pr": 7,
+            "head_sha": "head",
+            "author": "contrib",
+            "corrects_event_id": "target",
+            "signals": ["wrong-seam"],
+        }
+        events = [target, correction]
+        self.assertIsNone(pr_review.event_validation_error(correction, [target]))
+        self.assertIsNone(pr_review.event_validation_error(correction, events))
+        duplicate_correction = dict(
+            correction,
+            event_id="correction-2",
+            timestamp=self._minutes_ago(1),
+        )
+        self.assertIn(
+            "already-retracted",
+            pr_review.event_validation_error(duplicate_correction, events),
+        )
+        self.assertEqual(pr_review.effective_signals_by_event(events)["target"], ["false-green"])
+        self.assertEqual(pr_review.latest_events_by_pr_head(events)[(7, "head")]["event_id"], "target")
+        model = pr_review.build_analytics_model(
+            events, days=None, author=None, min_prs=1, include_open=True
+        )
+        self.assertEqual(model["contributors"][0]["quality_signals"], {"false-green": 1})
+        occurrences = pr_review.collect_signal_occurrences(events)["contrib"]
+        self.assertEqual([entry["signal"] for entry in occurrences], ["false-green"])
+        with tempfile.TemporaryDirectory() as temp:
+            state_dir = Path(temp)
+            self.assertTrue(pr_review.append_event(state_dir, target))
+            self.assertTrue(pr_review.append_event(state_dir, correction))
+            self.assertFalse(pr_review.append_event(state_dir, correction))
+            args = type("Args", (), {"state_dir": state_dir, "days": None})()
+            with contextlib.redirect_stdout(io.StringIO()):
+                pr_review.command_compact(args)
+            compact = json.loads((state_dir / "review-summary.json").read_text())
+            self.assertEqual(compact["contributors"][0]["signals"], {"false-green": 1})
+            self.assertEqual(compact["prs"][0]["latest_event"], "review")
+
+    def test_review_correction_rejects_wrong_identity_and_non_subset(self) -> None:
+        target = {
+            "event_type": "review",
+            "event_id": "target",
+            "pr": 7,
+            "head_sha": "head",
+            "author": "contrib",
+            "signals": ["wrong-seam"],
+        }
+        wrong_author = {
+            "event_type": "review_correction",
+            "pr": 7,
+            "head_sha": "head",
+            "author": "other",
+            "corrects_event_id": "target",
+            "signals": ["wrong-seam"],
+        }
+        wrong_signal = dict(wrong_author, author="contrib", signals=["false-green"])
+        self.assertIn("author", pr_review.event_validation_error(wrong_author, [target]))
+        self.assertIn("subset", pr_review.event_validation_error(wrong_signal, [target]))
+
+    def test_new_defect_tokens_and_workflow_parent_contract(self) -> None:
+        self.assertIn("wrong-or-stale-cr-annotation", pr_review.DEFECT_SIGNAL_WEIGHTS)
+        self.assertIn("duplicated-domain-vocabulary", pr_review.DEFECT_SIGNAL_WEIGHTS)
+        workflow = (pr_review.REPO_ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertIn("fetch-depth: 2", workflow)
+        parse_step = workflow.split("- name: Parse-detail diff vs base baseline", 1)[1]
+        self.assertNotIn("PAYLOAD_BASE_SHA", parse_step)
+
+    def test_gate_a_actual_success_output_is_sha_bound(self) -> None:
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=pr_review.REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        result = subprocess.run(
+            [str(pr_review.REPO_ROOT / "scripts/check-parser-combinators.sh"), head],
+            cwd=pr_review.REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        self.assertRegex(
+            result.stdout.strip(),
+            rf"^Gate A PASS head={re.escape(head)} base={re.escape(head)}$",
+        )
+
+    def test_parse_diff_base_selects_non_head_parent_and_never_falls_back(self) -> None:
+        script = pr_review.REPO_ROOT / "scripts/parse-diff-base.sh"
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+
+            def git(*args: str, input_text: str | None = None) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    env=env,
+                    text=True,
+                    input=input_text,
+                    capture_output=True,
+                ).stdout.strip()
+
+            tree = git("mktree", input_text="")
+            root = git("commit-tree", tree, input_text="root\n")
+            parent_one = git("commit-tree", tree, "-p", root, input_text="one\n")
+            parent_two = git("commit-tree", tree, "-p", root, input_text="two\n")
+            merge = git(
+                "commit-tree",
+                tree,
+                "-p",
+                parent_one,
+                "-p",
+                parent_two,
+                input_text="merge\n",
+            )
+
+            for head, expected in ((parent_one, parent_two), (parent_two, parent_one)):
+                selected = subprocess.run(
+                    [str(script), head, merge],
+                    cwd=repo,
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(selected.stdout.strip(), expected)
+
+            neither = subprocess.run(
+                [str(script), root, merge],
+                cwd=repo,
+                text=True,
+                capture_output=True,
+            )
+            missing_parent = subprocess.run(
+                [str(script), parent_one, parent_one],
+                cwd=repo,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(neither.returncode, 0)
+            self.assertNotEqual(missing_parent.returncode, 0)
+            self.assertNotIn("payload", neither.stdout.casefold())
+            self.assertNotIn("payload", missing_parent.stdout.casefold())
+
+    def test_normalize_graphql_pr_preserves_complete_closing_issue_labels(self) -> None:
+        normalized = pr_review.normalize_graphql_pr(
+            {
+                "closingIssuesReferences": {
+                    "totalCount": 2,
+                    "pageInfo": {"hasNextPage": False, "endCursor": "issue"},
+                    "nodes": [
+                        {
+                            "number": 9,
+                            "state": "CLOSED",
+                            "labels": {
+                                "totalCount": 3,
+                                "pageInfo": {"hasNextPage": False, "endCursor": "label"},
+                                "nodes": [
+                                    {"name": "engine"},
+                                    {"name": "accepted"},
+                                    {"name": "accepted"},
+                                ],
+                            },
+                        },
+                        {
+                            "number": 9,
+                            "state": "CLOSED",
+                            "labels": {
+                                "totalCount": 3,
+                                "pageInfo": {"hasNextPage": False, "endCursor": "label"},
+                                "nodes": [
+                                    {"name": "accepted"},
+                                    {"name": "engine"},
+                                    {"name": "accepted"},
+                                ],
+                            },
+                        },
+                    ]
+                },
+                "labels": {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": "pr-label"},
+                    "nodes": [{"name": "bug"}],
+                },
+                "files": {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": "file"},
+                    "nodes": [{"path": "crates/engine/src/lib.rs"}],
+                },
+            }
+        )
+        self.assertEqual(
+            normalized["closingIssuesReferences"][0]["labels"],
+            [{"name": "accepted"}, {"name": "engine"}],
+        )
+        self.assertTrue(normalized["closingIssuesReferencesComplete"])
+        self.assertTrue(normalized["closingIssuesReferences"][0]["labelsComplete"])
+        self.assertTrue(normalized["labelsComplete"])
+        self.assertTrue(normalized["filesComplete"])
+        self.assertEqual(normalized["closingIssuesReferencesCount"], 2)
+        self.assertEqual(len(normalized["closingIssuesReferences"]), 1)
+        policy = pr_review.Policy(
+            {
+                "admission": {"accepted_issue_label": "accepted"},
+                "architecture_scope": {"patterns": ["central.rs"]},
+            }
+        )
+        normalized["author"] = {"login": "contrib"}
+        closed_accepted = pr_review.architecture_scope_profile(
+            normalized, ["central.rs"], policy, {}
+        )
+        self.assertTrue(closed_accepted["authorized"])
+
+        twenty_one = {
+            "closingIssuesReferences": {
+                "totalCount": 21,
+                "pageInfo": {"hasNextPage": True, "endCursor": "issue"},
+                "nodes": [
+                    {
+                        "number": number,
+                        "state": "OPEN",
+                        "labels": {
+                            "totalCount": 1,
+                            "pageInfo": {"hasNextPage": False, "endCursor": "label"},
+                            "nodes": [{"name": "accepted"}],
+                        },
+                    }
+                    for number in range(1, 21)
+                ],
+            }
+        }
+        incomplete = pr_review.normalize_graphql_pr(twenty_one)
+        self.assertFalse(incomplete["closingIssuesReferencesComplete"])
+
+        incomplete_labels = pr_review.normalize_graphql_pr(
+            {
+                "closingIssuesReferences": {
+                    "totalCount": 1,
+                    "pageInfo": {"hasNextPage": False, "endCursor": "issue"},
+                    "nodes": [
+                        {
+                            "number": 1,
+                            "state": "OPEN",
+                            "labels": {
+                                "totalCount": 2,
+                                "pageInfo": {"hasNextPage": True, "endCursor": "label"},
+                                "nodes": [{"name": "accepted"}],
+                            },
+                        }
+                    ],
+                }
+            }
+        )
+        self.assertFalse(incomplete_labels["closingIssuesReferencesComplete"])
 
 
 if __name__ == "__main__":

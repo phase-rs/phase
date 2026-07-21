@@ -1,8 +1,8 @@
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, multispace0};
-use nom::combinator::{map, not, opt, success, value};
+use nom::character::complete::{alpha1, multispace0, multispace1};
+use nom::combinator::{map, map_opt, not, opt, peek, rest, success, value};
 use nom::multi::fold_many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -19,18 +19,31 @@ use super::oracle::{find_activated_colon, strip_activated_constraints};
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::{parse_effect_chain_with_context, try_parse_named_choice};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_ir::effect_chain::EffectChainIr;
+use super::oracle_ir::trigger::ModalIr;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
-use super::oracle_static::parse_static_line;
+use super::oracle_quantity::parse_cda_quantity;
+use super::oracle_static::{parse_pt_mod, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text, TextPair};
-use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
+use crate::parser::oracle_ir::ast::{
+    parsed_clause, ModalHeaderAst, ModalOptionality, ModeAst, OracleBlockAst,
+};
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());
     if line.is_empty() {
         return None;
+    }
+
+    // CR 702.183a: Tiered spell with a shared effect line between the keyword and
+    // the chosen-P/T bullets (Vincent's Limit Break). Detected before the generic
+    // mode collector (which starts at start+1 and finds the effect line, not a
+    // bullet, for this shape).
+    if let Some(block) = parse_tiered_shared_effect_block(lines, start, &line) {
+        return Some(block);
     }
 
     let modes = collect_mode_asts(lines, start + 1);
@@ -145,10 +158,13 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             chooser: PlayerFilter::Controller,
             selection: TargetSelectionMode::Chosen,
             dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
 
+    // CR 702.183a: Tiered — choose exactly one mode; its mode_cost is an
+    // additional cost to cast (single authority: compute_modal_total_cost).
     if line.eq_ignore_ascii_case("tiered")
         && !modes.is_empty()
         && modes.iter().all(|m| m.mode_cost.is_some())
@@ -162,6 +178,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
             chooser: PlayerFilter::Controller,
             selection: TargetSelectionMode::Chosen,
             dynamic_max_choices: None,
+            optionality: ModalOptionality::Mandatory,
         };
         return Some((OracleBlockAst::Modal { header, modes }, next));
     }
@@ -416,6 +433,68 @@ fn parse_shared_those_template(header_full_text: &str) -> Option<(String, String
     Some((before.original.to_string(), format!("{}.", suffix)))
 }
 
+/// CR 702.183a + CR 613.4b: Split a Tiered shared-effect sentence around the
+/// "the chosen base power and toughness" anaphor so each mode can substitute its
+/// own literal "base power and toughness N/M". Mirrors `parse_shared_those_template`,
+/// but the anaphor's replacement is a P/T value, not a target phrase, and the
+/// suffix is the raw remainder (it already carries the sentence-terminal ".").
+/// Returns (prefix, suffix) with original casing preserved.
+fn parse_shared_chosen_pt_template(effect_line: &str) -> Option<(String, String)> {
+    let lower = effect_line.to_lowercase();
+    let pair = TextPair::new(effect_line, &lower);
+    let (before, after) = pair.split_around("the chosen base power and toughness")?;
+    Some((before.original.to_string(), after.original.to_string()))
+}
+
+/// CR 702.183a + CR 700.2 + CR 601.2f + CR 613.4b: A Tiered spell whose shared
+/// effect sits on its own line between the keyword and the parameter-only bullet
+/// modes (Vincent's Limit Break). Each bullet is `<tier name> — <additional cost>
+/// — <base P/T>`; the shared effect references "the chosen base power and toughness".
+/// Distribute the shared effect per mode with the tier's P/T substituted in, so the
+/// existing modal-additional-cost machinery lowers each mode to a full effect
+/// (grant dies-return trigger + set base P/T at layer 7b).
+fn parse_tiered_shared_effect_block(
+    lines: &[&str],
+    start: usize,
+    header_line: &str,
+) -> Option<(OracleBlockAst, usize)> {
+    if !header_line.eq_ignore_ascii_case("tiered") {
+        return None;
+    }
+    let shared = strip_reminder_text(lines.get(start + 1)?.trim());
+    let (prefix, suffix) = parse_shared_chosen_pt_template(&shared)?;
+    let modes = collect_mode_asts(lines, start + 2);
+    if modes.is_empty() || !modes.iter().all(|m| m.mode_cost.is_some()) {
+        return None;
+    }
+    let modes: Vec<ModeAst> = modes
+        .into_iter()
+        .map(|mode| {
+            let pt = mode.body.trim().trim_end_matches('.').trim();
+            parse_pt_mod(pt)?; // validate literal P/T; fail-closed otherwise
+            let body = format!("{prefix}base power and toughness {pt}{suffix}");
+            Some(ModeAst { body, ..mode })
+        })
+        .collect::<Option<_>>()?;
+    // The shared-effect line (start + 1) is consumed IN ADDITION to the header,
+    // so the mode bullets begin at start + 2 — `next` must skip both.
+    let next = start + 2 + modes.len();
+    // CR 702.183a: Tiered — choose exactly one mode; its mode_cost is an
+    // additional cost to cast (single authority: compute_modal_total_cost).
+    let header = ModalHeaderAst {
+        raw: header_line.to_string(),
+        min_choices: 1,
+        max_choices: 1,
+        allow_repeat_modes: false,
+        constraints: vec![],
+        chooser: PlayerFilter::Controller,
+        selection: TargetSelectionMode::Chosen,
+        dynamic_max_choices: None,
+        optionality: ModalOptionality::Mandatory,
+    };
+    Some((OracleBlockAst::Modal { header, modes }, next))
+}
+
 /// Lowercase only the first word of a phrase, leaving the remainder untouched.
 /// Used to make a bullet mode's leading "Target …" read mid-sentence ("…
 /// target …") inside a distributed shared-effect template.
@@ -594,14 +673,16 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     };
 
     // CR 700.2 + CR 107.3m / CR 603.12a: a `Dynamic { qty }` header ("choose up
-    // to X / up to that many") has min 0 (decline all modes) and a placeholder
-    // max of `usize::MAX` that `build_modal_choice` clamps to `mode_count`; the
-    // live cap is carried in `dynamic_max_choices` and resolved at runtime from
-    // `qty` (cast {X} for CostXPaid, or the resolution-local repeated-payment
-    // count for TimesCostPaidThisResolution).
+    // to X / up to that many" / "choose up to X, where X is <expr>") has min 0
+    // (decline all modes) and a placeholder max of `usize::MAX` that
+    // `build_modal_choice` clamps to `mode_count`; the live cap is carried in
+    // `dynamic_max_choices` (already a `QuantityExpr`, no re-wrap) and resolved
+    // at runtime from `qty` (cast {X} for CostXPaid, the resolution-local
+    // repeated-payment count for TimesCostPaidThisResolution, or the redefining
+    // where-X-is quantity for Bumi/Riku).
     let (min_choices, max_choices, dynamic_max_choices) = match count_spec {
         ModalCountSpec::Fixed { min, max } => (min, max, None),
-        ModalCountSpec::Dynamic { qty } => (0, usize::MAX, Some(QuantityExpr::Ref { qty })),
+        ModalCountSpec::Dynamic { qty } => (0, usize::MAX, Some(qty)),
     };
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
@@ -640,6 +721,20 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         TargetSelectionMode::Chosen
     };
 
+    // CR 608.2c: "you may choose N" makes the triggered ability optional; "you
+    // may choose up to N" only lowers min_choices (handled by count parsing).
+    let optionality = if tag::<_, _, OracleError<'_>>("you may choose ")
+        .parse(header_lower.as_str())
+        .is_ok()
+        && tag::<_, _, OracleError<'_>>("you may choose up to ")
+            .parse(header_lower.as_str())
+            .is_err()
+    {
+        ModalOptionality::MayDecline
+    } else {
+        ModalOptionality::Mandatory
+    };
+
     Some(ModalHeaderAst {
         raw: text.to_string(),
         min_choices,
@@ -649,6 +744,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         chooser,
         selection,
         dynamic_max_choices,
+        optionality,
     })
 }
 
@@ -872,9 +968,17 @@ fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)>
         terminated(take_until::<_, _, OracleError<'_>>(". "), tag(". "))
             .parse(after_marker)
             .ok()?;
-    // The connector remainder must be exactly the reflexive "when you do".
-    let (rest, ()) = nom_condition::match_when_you_do(connector).ok()?;
-    if !rest.is_empty() {
+    // The connector remainder must be the reflexive "when you do" or its
+    // repeated-payment form, "when you pay this cost one or more times".
+    let when_you_do =
+        nom_condition::match_when_you_do(connector).is_ok_and(|(rest, ())| rest.is_empty());
+    let repeated_payment = terminated(
+        tag::<_, _, OracleError<'_>>("when you pay this cost one or more times"),
+        multispace0,
+    )
+    .parse(connector.trim())
+    .is_ok_and(|(rest, _)| rest.is_empty());
+    if !when_you_do && !repeated_payment {
         return None;
     }
 
@@ -943,7 +1047,7 @@ pub(crate) fn lower_oracle_block(
             // the single-authority scope resolver expects. Without this, bullet-
             // line modes hit the `unwrap_or(ControllerRef::You)` fallback in
             // `oracle_target.rs` while the inline `"; or"` form (which threads the
-            // same scope via `try_parse_inline_modal`) resolved correctly — the
+            // same scope via `try_parse_inline_modal_ir`) resolved correctly — the
             // two modal surface forms of Grenzo, Havoc Raiser disagreed (#2346).
             let relative_player_scope = super::oracle_trigger::relative_player_scope_for_condition(
                 &trigger_line.to_lowercase(),
@@ -956,6 +1060,12 @@ pub(crate) fn lower_oracle_block(
                 relative_player_scope,
                 host_self_reference,
             );
+            if matches!(header.optionality, ModalOptionality::MayDecline) {
+                // CR 608.2c: Resolution-time optionality lives on the execute
+                // ability (`build_triggered_ability` clones it); the trigger
+                // definition flag is stamped for coverage and card-data export.
+                modal_ability.optional = true;
+            }
 
             let execute = match optional_cost {
                 // CR 603.12 + CR 700.2b: The modal is gated behind a reflexive
@@ -984,6 +1094,9 @@ pub(crate) fn lower_oracle_block(
 
             for trigger in &mut triggers {
                 trigger.execute = Some(execute.clone());
+                if matches!(header.optionality, ModalOptionality::MayDecline) {
+                    trigger.optional = true;
+                }
             }
             result.triggers.extend(triggers);
         }
@@ -1119,6 +1232,8 @@ fn lower_as_enters_anchor_word_modal(
             description: Some(format!("CR 614.12c [{label}]: {body}")),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
+            bypass_beneficiary: None,
         };
         result.statics.push(placeholder);
     }
@@ -1188,7 +1303,7 @@ pub(crate) fn build_modal_ability(
 /// controls"` / `"that player's library"` anaphor resolves to the player the
 /// condition introduced (the damaged player) rather than falling back to the
 /// caster (`ControllerRef::You`). This mirrors the inline `"; or"` modal path
-/// (`try_parse_inline_modal`); both must thread the same scope so bullet-line
+/// (`try_parse_inline_modal_ir`); both must thread the same scope so bullet-line
 /// and inline modal forms of the same trigger agree (issue #2346).
 fn build_modal_ability_with_subject(
     kind: AbilityKind,
@@ -1401,10 +1516,7 @@ pub(crate) fn lower_mode_abilities_with_scope(
 /// The `relative_player_scope` from the trigger condition (e.g.
 /// `TriggeringPlayer` for DamageDone triggers) is propagated into every mode
 /// body so "that player" anaphora resolve to the correct player.
-pub(crate) fn try_parse_inline_modal(
-    effect_body: &str,
-    relative_player_scope: Option<crate::types::ability::ControllerRef>,
-) -> Option<AbilityDefinition> {
+pub(crate) fn try_parse_inline_modal_ir(effect_body: &str, ctx: &ParseContext) -> Option<ModalIr> {
     let em_dash_pos = effect_body.find('\u{2014}')?;
     let header_text = effect_body[..em_dash_pos].trim();
     let modes_text = effect_body[em_dash_pos + '\u{2014}'.len_utf8()..].trim();
@@ -1438,13 +1550,21 @@ pub(crate) fn try_parse_inline_modal(
         &modes,
         AbilityKind::Spell,
         None,
-        relative_player_scope,
+        ctx.relative_player_scope.clone(),
         None,
     );
-    Some(
-        AbilityDefinition::new(AbilityKind::Spell, modal_marker_effect(&header))
-            .with_modal(build_modal_choice(&header, &modes), mode_abilities),
-    )
+    Some(ModalIr {
+        marker: EffectChainIr::single_clause(
+            effect_body,
+            AbilityKind::Spell,
+            parsed_clause(modal_marker_effect(&header)),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        ),
+        choice: build_modal_choice(&header, &modes),
+        mode_abilities,
+    })
 }
 
 /// Replace a parsed mode ability with `Effect::Unimplemented` when the mode body
@@ -1745,11 +1865,14 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 /// CR 700.2: The recognized shape of a modal header's count phrase. `Fixed`
 /// holds a statically-resolved `(min, max)` pair; `Dynamic { qty }` marks a
 /// "choose up to X / up to that many" header whose maximum resolves at runtime
-/// from `qty` and is clamped to `mode_count` (CR 700.2d). `qty` is
-/// `CostXPaid` for the cast-{X} subclass (CR 107.3m, The Ruinous Wrecking Crew)
-/// and `TimesCostPaidThisResolution` for the repeated-optional-payment subclass
-/// (CR 603.12a, Hawkeye, Master Marksman). LOW-1: `Copy` is dropped because
-/// `QuantityRef` is not `Copy`.
+/// from `qty` and is clamped to `mode_count` (CR 700.2d). `qty` is a full
+/// `QuantityExpr` matching the sink type `ModalChoice.dynamic_max_choices:
+/// Option<QuantityExpr>`: the cast-{X} subclass (CR 107.3m, The Ruinous Wrecking
+/// Crew) and the repeated-optional-payment subclass (CR 603.12a, Hawkeye, Master
+/// Marksman) wrap their `QuantityRef` in `QuantityExpr::Ref`, while the
+/// "where X is <expr>" subclass (CR 700.2 + CR 601.2b, Bumi/Riku) carries
+/// `parse_cda_quantity`'s `QuantityExpr` directly. LOW-1: `Copy` is dropped
+/// because `QuantityExpr` is not `Copy`.
 ///
 /// Known coverage gap (empty in the current corpus): the
 /// `TimesCostPaidThisResolution` cap is emitted cost-agnostically here, but the
@@ -1763,7 +1886,7 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModalCountSpec {
     Fixed { min: usize, max: usize },
-    Dynamic { qty: QuantityRef },
+    Dynamic { qty: QuantityExpr },
 }
 
 /// Scan for modal count override phrases at word boundaries using nom combinators.
@@ -1798,23 +1921,58 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
                 },
                 alt((tag("one or more"), tag("any number"))),
             ),
+            // CR 700.2 + CR 700.2d + CR 601.2b: "choose up to X, where X is <expr>"
+            // REDEFINES the modal maximum to a dynamic quantity other than the cast
+            // {X} (Bumi: Lesson cards in your graveyard; Riku: modes chosen for the
+            // triggering spell), and such cards carry no cast {X}. Parse <expr> via
+            // the shared `parse_cda_quantity` where-X-is quantity parser, bounded by
+            // the header/bullets terminator (em-dash U+2014, en-dash, hyphen) or
+            // end-of-input; min_choices = 0. Placed BEFORE the `CostXPaid` arm so
+            // the where form is claimed by the quantity parser instead of resolving
+            // `CostXPaid` == 0 (which would silently make the modal choose nothing).
+            // `map_opt` fails (letting `alt` fall through) when <expr> is not a
+            // recognized CDA quantity, so an unrecognized where-clause falls to the
+            // fixed default rather than a wrong dynamic cap.
+            map_opt(
+                preceded(
+                    (
+                        tag::<_, _, OracleError<'_>>("choose up to x"),
+                        opt(tag(",")),
+                        multispace0,
+                        tag("where"),
+                        multispace1,
+                        tag("x"),
+                        multispace1,
+                        tag("is"),
+                        multispace1,
+                    ),
+                    alt((
+                        terminated(take_until("\u{2014}"), peek(tag("\u{2014}"))),
+                        terminated(take_until("\u{2013}"), peek(tag("\u{2013}"))),
+                        terminated(take_until(" -"), peek(tag(" -"))),
+                        rest,
+                    )),
+                ),
+                |expr_slice: &str| {
+                    parse_cda_quantity(expr_slice.trim()).map(|qty| ModalCountSpec::Dynamic { qty })
+                },
+            ),
             // CR 700.2 + CR 107.3m: "choose up to X —" — the maximum is the cast
             // {X}, resolved live at runtime; `parse_number` fails on bare "x" so
             // this arm cannot shadow the numeric "choose up to N" arm below.
             //
-            // A trailing ", where X is <expr>" clause REDEFINES X to a different
-            // quantity (e.g. Bumi "where X is the number of Lesson cards in your
-            // graveyard"; Riku "where X is the number of times you chose a
-            // mode") and the card carries no cast {X}. Such headers must NOT be
-            // read as the cast {X} — the negative lookahead guards them out so
-            // they fall through to the fixed default rather than resolving
-            // `CostXPaid` (which is 0 for a card with no {X}, silently making
-            // the modal choose nothing). Parsing the redefining quantity into
-            // `dynamic_max_choices` is a follow-up; this PR's scope is the
-            // cast-{X} subclass (The Ruinous Wrecking Crew).
+            // A trailing ", where X is <expr>" clause is handled by the
+            // where-X-is arm above (it REDEFINES X and the card carries no cast
+            // {X}). The negative lookahead here stays as belt-and-suspenders so a
+            // bare-{X}-with-trailing-"where" that the arm above failed to parse
+            // still falls through to the fixed default rather than resolving
+            // `CostXPaid` (which is 0 for a card with no {X}, silently making the
+            // modal choose nothing).
             value(
                 ModalCountSpec::Dynamic {
-                    qty: QuantityRef::CostXPaid,
+                    qty: QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid,
+                    },
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to x"),
@@ -1823,25 +1981,21 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
             ),
             // CR 603.12a + CR 700.2d: "choose up to that many." (Hawkeye, Master
             // Marksman) caps the modal at the resolution-local count of repeated
-            // optional payments. MED-1: match the PERIOD/bare/bullet-terminated
-            // header form ONLY — the negative lookahead rejects a following
-            // em-dash (Tranquil Frillback's "choose up to that many —", whose
-            // reflexive condition is NOT WhenYouDo and so is not handled by the
-            // repeated-optional-payment driver) and a following noun phrase (the
+            // optional payments. Accept the em-dash modal form used by Tranquil
+            // Frillback while rejecting a following noun phrase (the
             // non-modal selection clauses "choose up to that many target
             // creatures you control" / "...creatures tapped this way"). Only a
             // clean termination (period / end / bullet) yields the dynamic cap,
             // so an unhandled card is never silently false-greened.
             value(
                 ModalCountSpec::Dynamic {
-                    qty: QuantityRef::TimesCostPaidThisResolution,
+                    qty: QuantityExpr::Ref {
+                        qty: QuantityRef::TimesCostPaidThisResolution,
+                    },
                 },
                 terminated(
                     tag::<_, _, OracleError<'_>>("choose up to that many"),
-                    not(preceded(
-                        multispace0,
-                        alt((tag("\u{2014}"), tag("\u{2013}"), tag("-"), alpha1)),
-                    )),
+                    not(preceded(multispace0, alpha1)),
                 ),
             ),
             // CR 700.2a / CR 700.2d: "choose up to N —" is a modal header where
@@ -1860,6 +2014,27 @@ fn scan_modal_count_override(text: &str) -> Option<ModalCountSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_modal_ir_keeps_marker_and_modes_typed() {
+        let modal = try_parse_inline_modal_ir(
+            "Choose one — Draw a card; or Create a Treasure token.",
+            &ParseContext::default(),
+        )
+        .expect("inline modal should parse into typed trigger IR");
+
+        assert_eq!(modal.marker.clauses.len(), 1);
+        assert!(matches!(
+            modal.marker.clauses[0].parsed.effect,
+            Effect::GenericEffect { .. }
+        ));
+        assert_eq!(modal.choice.mode_count, 2);
+        assert_eq!(modal.mode_abilities.len(), 2);
+        assert!(modal
+            .mode_abilities
+            .iter()
+            .all(|mode| { !matches!(mode.effect.as_ref(), Effect::Unimplemented { .. }) }));
+    }
 
     #[test]
     fn extract_ability_word_reminder_body_increment() {
@@ -2060,6 +2235,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_modal_header_you_may_choose_fixed_count_sets_optional_trigger() {
+        // CR 608.2c: Shadrix Silverquill — "you may choose two" declines the
+        // entire triggered ability; when accepted, exactly two modes are chosen.
+        let header =
+            parse_modal_header_ast("you may choose two. Each mode must target a different player.")
+                .expect("modal header recognized");
+        assert_eq!(header.optionality, ModalOptionality::MayDecline);
+        assert_eq!(header.min_choices, 2);
+        assert_eq!(header.max_choices, 2);
+        assert_eq!(
+            header.constraints,
+            vec![ModalSelectionConstraint::DifferentTargetPlayers]
+        );
+    }
+
+    #[test]
+    fn parse_modal_header_you_may_choose_up_to_does_not_set_optional_trigger() {
+        // "you may choose up to N" lowers min_choices only; the trigger stays mandatory.
+        let header =
+            parse_modal_header_ast("you may choose up to two.").expect("modal header recognized");
+        assert_eq!(header.optionality, ModalOptionality::Mandatory);
+        assert_eq!(header.min_choices, 0);
+        assert_eq!(header.max_choices, 2);
+    }
+
+    #[test]
     fn parse_modal_choose_count_variants() {
         assert_eq!(parse_modal_choose_count("choose one —"), fixed(1, 1));
         assert_eq!(parse_modal_choose_count("choose two —"), fixed(2, 2));
@@ -2124,7 +2325,9 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to x —"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::CostXPaid
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
             }
         );
     }
@@ -2138,29 +2341,33 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose up to that many"),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
         assert_eq!(
             parse_modal_choose_count("choose up to that many."),
             ModalCountSpec::Dynamic {
-                qty: QuantityRef::TimesCostPaidThisResolution
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
             }
         );
     }
 
-    // MED-1 guard: the "that many" arm must NOT match the em-dash header
-    // (Tranquil Frillback, whose reflexive condition is not WhenYouDo and so is
-    // not handled by the repeated-optional-payment driver — matching it would
-    // false-green an unhandled card) nor the non-modal selection clauses
-    // ("choose up to that many target creatures you control"). These fall to the
-    // fixed default. Revert the negative lookahead → both wrongly become Dynamic.
+    // Tranquil Frillback's em-dash header is a repeated-payment modal, while a
+    // following noun phrase is a non-modal selection clause and stays fixed.
     #[test]
-    fn parse_modal_choose_count_up_to_that_many_em_dash_and_noun_are_not_dynamic() {
+    fn parse_modal_choose_count_up_to_that_many_em_dash_is_dynamic_and_noun_is_not() {
         // Tranquil Frillback (em-dash continuation).
         assert_eq!(
             parse_modal_choose_count("choose up to that many \u{2014}"),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::TimesCostPaidThisResolution
+                }
+            }
         );
         // Heroic Feast (non-modal selection clause).
         assert_eq!(
@@ -2169,29 +2376,76 @@ mod tests {
         );
     }
 
-    // CR 700.2 + CR 107.3m: a trailing ", where X is <expr>" clause REDEFINES X
-    // to a quantity other than the cast {X} (Bumi → Lesson cards in graveyard;
-    // Riku → number of times you chose a mode), and such cards carry no {X} in
-    // their cost. These headers must NOT classify as `DynamicCostX` (which
-    // resolves `CostXPaid` == 0 for them, silently choosing nothing); they fall
-    // through to the fixed `(1, 1)` default. This negative discriminates the
-    // word-boundary `not(... "where")` guard — reverting it makes both match
-    // `DynamicCostX`.
+    // CR 700.2 + CR 700.2d + CR 601.2b: a trailing ", where X is <expr>" clause
+    // REDEFINES the modal maximum to a dynamic quantity other than the cast {X}
+    // (Bumi → Lesson cards in your graveyard; Riku → number of modes chosen for
+    // the triggering spell). The where-X-is arm parses <expr> via
+    // `parse_cda_quantity` and classifies the header as `Dynamic`, so the cap
+    // resolves live at runtime (clamped to mode_count, CR 700.2d) instead of
+    // silently falling to the fixed `(1, 1)` default. Revert probe: delete the
+    // where-X-is arm (Part 1.3) → both fall to `fixed(1, 1)`, failing these
+    // positive-shape assertions. These are the previously-pinned negatives,
+    // flipped now that the redefining quantity is parsed.
     #[test]
-    fn parse_modal_choose_count_up_to_x_redefined_is_not_dynamic() {
-        // Bumi, King of Three Trials.
+    fn parse_modal_choose_count_up_to_x_redefined_is_dynamic() {
+        use crate::types::ability::{CountScope, TypeFilter, ZoneRef};
+        // Bumi, King of Three Trials — the cap is the Lesson-card graveyard count.
         assert_eq!(
             parse_modal_choose_count(
                 "choose up to x, where x is the number of lesson cards in your graveyard —"
             ),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Graveyard,
+                        card_types: vec![TypeFilter::Subtype("Lesson".to_string())],
+                        filter: None,
+                        scope: CountScope::Controller,
+                    }
+                }
+            }
         );
-        // Riku of Many Paths.
+        // Riku of Many Paths — the cap is the new modes-chosen event ref.
         assert_eq!(
             parse_modal_choose_count(
                 "choose up to x, where x is the number of times you chose a mode for that spell —"
             ),
-            fixed(1, 1)
+            ModalCountSpec::Dynamic {
+                qty: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceModesChosen
+                }
+            }
+        );
+    }
+
+    // Full-header integration: both cards' complete modal headers must produce
+    // `min_choices == 0` (decline all) and carry a live `dynamic_max_choices`.
+    // Revert probe: delete the where-X-is arm → `dynamic_max_choices` becomes
+    // `None` and min_choices the fixed default, failing these assertions.
+    #[test]
+    fn parse_modal_header_ast_bumi_riku_carry_dynamic_max() {
+        let bumi = parse_modal_header_ast(
+            "choose up to x, where x is the number of lesson cards in your graveyard —",
+        )
+        .expect("Bumi header should parse");
+        assert_eq!(bumi.min_choices, 0);
+        assert!(matches!(
+            bumi.dynamic_max_choices,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount { .. }
+            })
+        ));
+
+        let riku = parse_modal_header_ast(
+            "choose up to x, where x is the number of times you chose a mode for that spell —",
+        )
+        .expect("Riku header should parse");
+        assert_eq!(riku.min_choices, 0);
+        assert_eq!(
+            riku.dynamic_max_choices,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceModesChosen
+            })
         );
     }
 
@@ -2896,6 +3150,146 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             modal_sub.mode_abilities.len(),
             3,
             "one AbilityDefinition per mode"
+        );
+    }
+
+    // ---- Vincent's Limit Break (FIN) — Tiered shared-effect chosen-P/T ----
+
+    const VINCENTS_ORACLE: &str = "Tiered (Choose one additional cost.)\n\
+        Until end of turn, target creature you control gains \"When this creature dies, return it to the battlefield tapped under its owner's control\" and has the chosen base power and toughness.\n\
+        \u{2022} Galian Beast \u{2014} {0} \u{2014} 3/2.\n\
+        \u{2022} Death Gigas \u{2014} {1} \u{2014} 5/2.\n\
+        \u{2022} Hellmasker \u{2014} {3} \u{2014} 7/2.";
+
+    /// Each Tiered mode lowers to `GenericEffect { static_abilities: [one
+    /// continuous grant] }`; return that grant's layer-7b modifications.
+    fn mode_modifications(
+        ability: &AbilityDefinition,
+    ) -> &[crate::types::ability::ContinuousModification] {
+        match ability.effect.as_ref() {
+            Effect::GenericEffect {
+                static_abilities, ..
+            } => {
+                &static_abilities
+                    .first()
+                    .expect("mode has one static grant")
+                    .modifications
+            }
+            other => panic!("mode must lower to a GenericEffect grant, got {other:?}"),
+        }
+    }
+
+    /// A1–A5: the shared-effect Tiered arm distributes the chosen base P/T into
+    /// every mode and lowers each to a full effect (no `Unimplemented`, no
+    /// dropped `SetPower`/`SetToughness`).
+    #[test]
+    fn vincents_limit_break_tiered_shared_pt_distributes_set_pt() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::mana::ManaCost;
+
+        let parsed = parse_oracle_text(
+            VINCENTS_ORACLE,
+            "Vincent's Limit Break",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+
+        // A1: Tiered modal — choose exactly one of three modes with the per-mode
+        // additional costs {0}/{1}/{3} (CR 702.183a). Revert-red: pre-fix modal==None.
+        let modal = parsed
+            .modal
+            .as_ref()
+            .expect("Tiered shared-effect block must parse as modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(
+            modal.mode_costs,
+            vec![ManaCost::zero(), ManaCost::generic(1), ManaCost::generic(3)]
+        );
+        // Tier flavor names survive verbatim as mode descriptions (they are
+        // labels on the bullets, not tokens/effects).
+        assert_eq!(
+            modal.mode_descriptions,
+            vec![
+                "Galian Beast \u{2014} {0} \u{2014} 3/2.",
+                "Death Gigas \u{2014} {1} \u{2014} 5/2.",
+                "Hellmasker \u{2014} {3} \u{2014} 7/2.",
+            ]
+        );
+
+        // A2: one full effect per mode, zero Unimplemented. Revert-red: pre-fix the
+        // 3 bullets fall through to standalone `Effect::Unimplemented`.
+        assert_eq!(parsed.abilities.len(), 3, "one lowered ability per tier");
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+            "no mode may be Unimplemented"
+        );
+
+        // A3: CORE silent-drop fix — each mode sets its tier's base P/T at layer 7b
+        // (CR 613.4b). Revert-red: pre-fix the "the chosen base power and toughness"
+        // anaphor produced NO SetPower anywhere. Reach-guard: paired with A2.
+        for (i, (p, t)) in [(3, 2), (5, 2), (7, 2)].iter().enumerate() {
+            let mods = mode_modifications(&parsed.abilities[i]);
+            assert!(
+                mods.contains(&ContinuousModification::SetPower { value: *p }),
+                "mode {i} must set power {p}: {mods:?}"
+            );
+            assert!(
+                mods.contains(&ContinuousModification::SetToughness { value: *t }),
+                "mode {i} must set toughness {t}: {mods:?}"
+            );
+        }
+
+        // A4: wrong-tier hostile — Galian (mode 0) must carry ONLY its own power.
+        let mode0 = mode_modifications(&parsed.abilities[0]);
+        assert!(!mode0.contains(&ContinuousModification::SetPower { value: 5 }));
+        assert!(!mode0.contains(&ContinuousModification::SetPower { value: 7 }));
+
+        // A5: keep-green — the granted "When this creature dies, return it ...
+        // tapped" trigger survives the distribution on every mode.
+        for (i, a) in parsed.abilities.iter().enumerate() {
+            let mods = mode_modifications(a);
+            assert!(
+                mods.iter()
+                    .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+                "mode {i} must retain the dies-return GrantTrigger: {mods:?}"
+            );
+        }
+    }
+
+    /// A6: anaphor gate — a standard Tiered spell (bullets carry their own
+    /// effects, no shared effect line, no "the chosen base power and toughness")
+    /// must NOT be hijacked by the new arm; the generic Tiered path handles it.
+    #[test]
+    fn standard_tiered_not_hijacked_by_shared_pt_arm() {
+        let text = "Tiered (Choose one additional cost.)\n\
+            \u{2022} Cure \u{2014} {0} \u{2014} Target permanent gains hexproof and indestructible until end of turn.\n\
+            \u{2022} Cura \u{2014} {1} \u{2014} Target permanent gains hexproof and indestructible until end of turn. You gain 3 life.\n\
+            \u{2022} Curaga \u{2014} {3}{W} \u{2014} Permanents you control gain hexproof and indestructible until end of turn. You gain 6 life.";
+        let parsed = parse_oracle_text(
+            text,
+            "Restoration Magic",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let modal = parsed
+            .modal
+            .as_ref()
+            .expect("standard Tiered still parses as modal");
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.mode_costs.len(), 3);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .all(|a| !matches!(a.effect.as_ref(), Effect::Unimplemented { .. })),
+            "standard Tiered modes must be unaffected by the shared-effect arm"
         );
     }
 }

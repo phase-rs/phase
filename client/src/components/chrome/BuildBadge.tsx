@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { getVersion } from "@tauri-apps/api/app";
 
 import { useCardDataMeta, formatRelativeDate } from "../../hooks/useCardDataMeta";
 import { checkForServiceWorkerUpdate } from "../../pwa/registerServiceWorker";
@@ -11,7 +12,7 @@ import {
   useUpdateError,
   getUpdateDebugReport,
 } from "../../pwa/updateStatus";
-import { isTauri } from "../../services/sidecar";
+import { isBundledTauriOrigin, isTauri } from "../../services/platform";
 
 const UPDATED_LABEL_MS = 4500;
 const didAutoUpdate = consumeRecentAutoUpdateMarker();
@@ -26,10 +27,12 @@ interface BuildBadgeProps {
 export function BuildBadge({ className = "", inline = false, compact = false }: BuildBadgeProps = {}) {
   const { t } = useTranslation();
   const [showUpdatedLabel, setShowUpdatedLabel] = useState(didAutoUpdate);
+  const [shellVersion, setShellVersion] = useState<string | null>(null);
   const cardDataMeta = useCardDataMeta();
   const updateStatus = useUpdateStatus();
   const downloadProgress = useDownloadProgress();
   const updateError = useUpdateError();
+  const isRemoteTauriShell = isTauri() && !isBundledTauriOrigin();
 
   useEffect(() => {
     if (!showUpdatedLabel) return;
@@ -51,10 +54,25 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   const isDownloading = updateStatus === "downloading";
   const hasUpdateIssue = Boolean(updateError);
 
+  useEffect(() => {
+    if (!isRemoteTauriShell) return;
+
+    let active = true;
+    void getVersion()
+      .then((version) => {
+        if (active) setShellVersion(version);
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [isRemoteTauriShell]);
+
   const handleCheckUpdate = () => {
     if (isTauri()) {
       checkForTauriUpdate();
-      return;
+      if (isBundledTauriOrigin()) return;
     }
     checkForServiceWorkerUpdate();
   };
@@ -76,6 +94,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
   if (compact) {
     const tooltip = [
       `v${__APP_VERSION__} · ${__BUILD_HASH__}`,
+      shellVersion && `shell ${shellVersion}`,
       cardDataMeta &&
         t("buildBadge.cardDataTitle", {
           date: cardDataMeta.generated_at,
@@ -95,6 +114,7 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           className="inline-flex items-center gap-1 font-mono text-[10.5px] leading-none text-slate-400 transition-colors hover:text-white"
         >
           <span>v{__APP_VERSION__}</span>
+          {shellVersion && <span>shell {shellVersion}</span>}
           <span className={`text-[11px] text-slate-500 ${isActive ? "animate-spin" : ""}`} aria-hidden>
             ↻
           </span>
@@ -133,6 +153,13 @@ export function BuildBadge({ className = "", inline = false, compact = false }: 
           <span>v{__APP_VERSION__}</span>
           <span className="text-slate-600">{__BUILD_HASH__}</span>
         </a>
+
+        {shellVersion && (
+          <>
+            <span className="text-slate-700">·</span>
+            <span>shell {shellVersion}</span>
+          </>
+        )}
 
         {cardDataMeta && (
           <>

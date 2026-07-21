@@ -17,7 +17,7 @@
 //!      `ManaProduction::AnyOneColor { count: QuantityExpr::Ref { qty }, .. }`.
 //!   3. `effects/mod.rs` derives `last_effect_amount` from the parent effect's
 //!      semantic event class, so `Effect::RemoveCounter` reads
-//!      `GameEvent::CounterRemoved { count, .. }` (CR 609.3 + CR 122.1).
+//!      `GameEvent::CounterRemoved { count, .. }` (CR 608.2c + CR 122.1).
 //!
 //! The trigger-AST shape (parser-level) is verified in
 //! `parser::oracle_trigger::tests::trigger_coalition_relic_charge_counter_drain`.
@@ -33,8 +33,8 @@
 use engine::game::effects;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCondition, AbilityKind, Effect, ManaContribution, ManaProduction, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    AbilityCondition, AbilityKind, DamageChannel, Effect, ManaContribution, ManaProduction,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
@@ -59,7 +59,11 @@ fn build_coalition_relic_drain(controller: PlayerId, source: ObjectId) -> Resolv
         Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    // CR 608.2c: the counters-removed count is a TOTAL-channel
+                    // amount (CR 120.6) — the excess channel is damage-only.
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
                 },
                 color_options: vec![
                     ManaColor::White,
@@ -125,7 +129,7 @@ fn create_relic_with_charge_counters(
     id
 }
 
-/// CR 122.1 + CR 609.3 + CR 106.1: With three charge counters, the parent
+/// CR 122.1 + CR 608.2c + CR 106.1: With three charge counters, the parent
 /// removes all three (count=-1 sentinel resolves to actual count), and the
 /// sub-ability reads `PreviousEffectAmount = 3`, producing three units of
 /// `AnyOneColor` mana. The actual color-choice prompts are interactive, so we

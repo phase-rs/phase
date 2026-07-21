@@ -1,0 +1,138 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 147,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Ninjutsu {3}{B} ({3}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)"
+      },
+      "node": {
+        "Keyword": {
+          "Ninjutsu": {
+            "type": "Cost",
+            "shards": [
+              "Black"
+            ],
+            "generic": 3
+          }
+        }
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 148,
+          "end_byte": 385,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Whenever ~ deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost."
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "DamageDone",
+          "execute": {
+            "kind": "Spell",
+            "effect": {
+              "type": "ExileTop",
+              "player": {
+                "type": "Controller"
+              },
+              "count": {
+                "type": "Fixed",
+                "value": 1
+              }
+            },
+            "cost": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "CastFromZone",
+                "target": {
+                  "type": "TrackedSet",
+                  "id": 0
+                },
+                "without_paying_mana_cost": false,
+                "mode": "Play",
+                "alt_ability_cost": {
+                  "type": "PayLife",
+                  "amount": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "SelfManaValue"
+                    }
+                  }
+                },
+                "duration": "UntilEndOfTurn"
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": "UntilEndOfTurn",
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false,
+              "sub_link": "SequentialSibling"
+            },
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false,
+            "player_scope": {
+              "type": "All"
+            }
+          },
+          "valid_card": null,
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
+          "optional": false,
+          "damage_kind": "CombatOnly",
+          "secondary": false,
+          "valid_target": {
+            "type": "Player"
+          },
+          "valid_source": {
+            "type": "SelfRef"
+          },
+          "description": "Whenever ~ deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
+      }
+    }
+  ],
+  "source_text": "Ninjutsu {3}{B} ({3}{B}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever Nashi deals combat damage to a player, exile the top card of each player's library. Until end of turn, you may play one of those cards. If you cast a spell this way, pay life equal to its mana value rather than paying its mana cost.",
+  "card_name": "Nashi, Moon Sage's Scion"
+}

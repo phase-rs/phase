@@ -127,12 +127,14 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         target_slots: vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: legal_targets.clone(),
             optional: false,
+            chooser: None,
         }],
         target_constraints: Vec::new(),
         selection: crate::game::ability_utils::begin_target_selection(
             &[crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
+                chooser: None,
             }],
             &[],
         )
@@ -235,6 +237,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         target_slots: vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(legal_target)],
             optional: false,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -368,6 +371,166 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
     assert_eq!(state.stack.len(), 1);
     assert!(state.pending_trigger.is_some());
     assert!(state.pending_trigger_entry.is_some());
+    assert_eq!(
+        state
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .selected_mode_labels,
+        [
+            "Deal 1 damage to target player.",
+            "Deal 1 damage to target player.",
+        ],
+        "triggered modal choice retains repeated selected labels while target selection is pending",
+    );
+}
+
+fn vindictive_lich_modal() -> ModalChoice {
+    ModalChoice {
+        min_choices: 1,
+        max_choices: 3,
+        mode_count: 3,
+        mode_descriptions: vec![
+            "Target opponent sacrifices a creature of their choice.".to_string(),
+            "Target opponent discards two cards.".to_string(),
+            "Target opponent loses 5 life.".to_string(),
+        ],
+        constraints: vec![ModalSelectionConstraint::DifferentTargetPlayers],
+        ..Default::default()
+    }
+}
+
+fn vindictive_lich_target_opponent_mode() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::LoseLife {
+            amount: QuantityExpr::Fixed { value: 5 },
+            target: Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent),
+            )),
+        },
+    )
+}
+
+fn setup_vindictive_lich_pending_trigger(state: &mut GameState) {
+    state.active_player = PlayerId(0);
+    state.priority_player = PlayerId(0);
+    let source_id = create_object(
+        state,
+        CardId(4959),
+        PlayerId(0),
+        "Vindictive Lich".to_string(),
+        Zone::Graveyard,
+    );
+    let pending = crate::game::triggers::PendingTrigger {
+        source_id,
+        controller: PlayerId(0),
+        condition: None,
+        ability: ResolvedAbility::new(
+            Effect::unimplemented("modal_placeholder", "modal fixture placeholder"),
+            vec![],
+            source_id,
+            PlayerId(0),
+        ),
+        timestamp: 1,
+        target_constraints: Vec::new(),
+        distribute: None,
+        trigger_event: None,
+        modal: Some(vindictive_lich_modal()),
+        mode_abilities: vec![
+            vindictive_lich_target_opponent_mode(),
+            vindictive_lich_target_opponent_mode(),
+            vindictive_lich_target_opponent_mode(),
+        ],
+        description: Some("When this creature dies".to_string()),
+        may_trigger_origin: None,
+        subject_match_count: None,
+        die_result: None,
+    };
+    let pending_for_state = pending.clone();
+    let mut setup_events = Vec::new();
+    let entry_id =
+        crate::game::triggers::push_pending_trigger_to_stack(state, pending, &mut setup_events);
+    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger_entry = Some(entry_id);
+}
+
+#[test]
+fn vindictive_lich_duel_caps_mode_choice_to_one_opponent() {
+    let mut state = GameState::new_two_player(42);
+    setup_vindictive_lich_pending_trigger(&mut state);
+
+    let waiting = begin_pending_trigger_target_selection(&mut state)
+        .unwrap()
+        .expect("modal choice should be required");
+
+    match waiting {
+        WaitingFor::AbilityModeChoice {
+            modal,
+            unavailable_modes,
+            ..
+        } => {
+            // CR 700.2b + CR 115.1: all three modes target an opponent, and a
+            // duel has only one legal opponent for the different-player constraint.
+            assert_eq!(modal.max_choices, 1);
+            assert!(unavailable_modes.is_empty());
+        }
+        other => panic!("expected AbilityModeChoice, got {other:?}"),
+    }
+}
+
+#[test]
+fn vindictive_lich_multiplayer_caps_mode_choice_to_opponent_count() {
+    let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 3, 42);
+    setup_vindictive_lich_pending_trigger(&mut state);
+
+    let waiting = begin_pending_trigger_target_selection(&mut state)
+        .unwrap()
+        .expect("modal choice should be required");
+
+    match waiting {
+        WaitingFor::AbilityModeChoice { modal, .. } => {
+            // CR 700.2b + CR 115.1: three-player free-for-all leaves two legal
+            // opponents, so at most two differently targeted modes can be chosen.
+            assert_eq!(modal.max_choices, 2);
+        }
+        other => panic!("expected AbilityModeChoice, got {other:?}"),
+    }
+}
+
+#[test]
+fn vindictive_lich_duel_rejects_overselected_modes_and_accepts_one() {
+    let mut invalid_state = GameState::new_two_player(42);
+    setup_vindictive_lich_pending_trigger(&mut invalid_state);
+    invalid_state.waiting_for = begin_pending_trigger_target_selection(&mut invalid_state)
+        .unwrap()
+        .expect("modal choice should be required");
+
+    let invalid = apply_as_current(
+        &mut invalid_state,
+        GameAction::SelectModes {
+            indices: vec![0, 1],
+        },
+    );
+    assert!(
+        invalid.is_err(),
+        "duel cannot choose two differently targeted modes"
+    );
+
+    let mut valid_state = GameState::new_two_player(42);
+    setup_vindictive_lich_pending_trigger(&mut valid_state);
+    valid_state.waiting_for = begin_pending_trigger_target_selection(&mut valid_state)
+        .unwrap()
+        .expect("modal choice should be required");
+
+    let valid = apply_as_current(
+        &mut valid_state,
+        GameAction::SelectModes { indices: vec![0] },
+    )
+    .unwrap();
+    assert!(matches!(valid.waiting_for, WaitingFor::Priority { .. }));
 }
 
 #[test]
@@ -657,6 +820,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             },
             crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![
@@ -664,6 +828,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             },
         ],
         mode_labels: Vec::new(),
@@ -724,6 +889,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
                 TargetRef::Player(PlayerId(1)),
             ],
             optional: false,
+            chooser: None,
         },
         crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![
@@ -731,6 +897,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
                 TargetRef::Player(PlayerId(1)),
             ],
             optional: false,
+            chooser: None,
         },
     ];
     let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];

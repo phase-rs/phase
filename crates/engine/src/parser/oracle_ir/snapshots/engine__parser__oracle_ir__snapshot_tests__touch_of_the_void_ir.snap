@@ -1,0 +1,130 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 32,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Devoid (This card has no color.)"
+      },
+      "node": {
+        "Keyword": "Devoid"
+      }
+    },
+    {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 33,
+          "end_byte": 139,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "~ deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 3
+            },
+            "target": {
+              "type": "Any"
+            }
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "AddTargetReplacement",
+              "replacement": {
+                "event": "Moved",
+                "execute": {
+                  "kind": "Spell",
+                  "effect": {
+                    "type": "ChangeZone",
+                    "origin": "Battlefield",
+                    "destination": "Exile",
+                    "target": {
+                      "type": "SelfRef"
+                    },
+                    "owner_library": false,
+                    "enter_transformed": false,
+                    "enter_tapped": false,
+                    "enters_attacking": false
+                  },
+                  "cost": null,
+                  "sub_ability": null,
+                  "duration": null,
+                  "description": null,
+                  "target_prompt": null,
+                  "condition": null,
+                  "optional_targeting": false,
+                  "optional": false,
+                  "forward_result": false
+                },
+                "mode": {
+                  "type": "Mandatory"
+                },
+                "valid_card": {
+                  "type": "SelfRef"
+                },
+                "description": null,
+                "condition": null,
+                "destination_zone": "Graveyard",
+                "consume_on_apply": true,
+                "expiry": {
+                  "type": "EndOfTurn"
+                }
+              },
+              "target": {
+                "type": "Any"
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": null,
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "duration": null,
+          "description": "~ deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Devoid (This card has no color.)\nTouch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+  "card_name": "Touch of the Void"
+}

@@ -1,6 +1,12 @@
 import { createStore, del, get, set } from "idb-keyval";
 
-import type { FormatConfig, GameState, MatchConfig } from "../adapter/types";
+import type {
+  EngineAdapter,
+  FormatConfig,
+  GameState,
+  MatchConfig,
+  PersistedGameState,
+} from "../adapter/types";
 import type { SeatState } from "../multiplayer/seatTypes";
 import { ACTIVE_GAME_KEY, GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../constants/storage";
 
@@ -38,8 +44,8 @@ export interface ActiveGameMeta {
  * can resume the game on the same room code. Mirrors the server-side
  * `PersistedSession` pattern in `server-core::persist`:
  *
- * - `state: GameState` lives in a separate IDB record via `saveGame`
- *   (written on every action). This record is only written on
+ * - The engine's trusted state envelope lives in a separate IDB record via
+ *   `saveGame` (written on every action). This record is only written on
  *   lifecycle events (guest join, reconnect, game start, kick, elim).
  * - `playerTokens` is keyed by PlayerId numeric value so non-contiguous
  *   seats (e.g., pre-game disconnect + rejoin) round-trip correctly.
@@ -98,10 +104,11 @@ function getGameStore(): ReturnType<typeof createStore> {
 
 // ── Game State (IndexedDB) ──────────────────────────────────────────────
 
-export async function saveGame(gameId: string, state: GameState): Promise<void> {
+export async function saveGame(gameId: string, state: PersistedGameState): Promise<void> {
+  const publicState = "state" in state ? state.state : state;
   if (
-    state.match_phase === "Completed"
-    || (!state.match_phase && state.waiting_for.type === "GameOver")
+    publicState.match_phase === "Completed"
+    || (!publicState.match_phase && publicState.waiting_for.type === "GameOver")
   ) {
     await clearGame(gameId);
     return;
@@ -113,9 +120,25 @@ export async function saveGame(gameId: string, state: GameState): Promise<void> 
   }
 }
 
-export async function loadGame(gameId: string): Promise<GameState | null> {
+/**
+ * Persist the engine's trusted envelope whenever this adapter owns an engine;
+ * adapters that only hold a public remote view retain the legacy raw snapshot.
+ */
+export async function saveAuthoritativeGame(
+  gameId: string,
+  adapter: EngineAdapter,
+  fallbackState: GameState,
+): Promise<void> {
+  const trustedJson = await adapter.exportPersistenceState?.();
+  await saveGame(
+    gameId,
+    trustedJson ? JSON.parse(trustedJson) as PersistedGameState : fallbackState,
+  );
+}
+
+export async function loadGame(gameId: string): Promise<PersistedGameState | null> {
   try {
-    const state = await get<GameState>(GAME_KEY_PREFIX + gameId, getGameStore());
+    const state = await get<PersistedGameState>(GAME_KEY_PREFIX + gameId, getGameStore());
     return state ?? null;
   } catch {
     return null;

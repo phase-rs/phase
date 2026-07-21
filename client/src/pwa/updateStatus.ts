@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 export type UpdateStatus = "idle" | "checking" | "downloading" | "activating" | "deferred";
+export type UpdateStatusOwner = "chunk" | "serviceWorker" | "tauri";
 type DebugLevel = "info" | "warn" | "error";
 
 interface UpdateDebugEvent {
@@ -10,7 +11,20 @@ interface UpdateDebugEvent {
 }
 
 let status: UpdateStatus = "idle";
+let statusOwner: UpdateStatusOwner | null = null;
 const listeners = new Set<() => void>();
+
+/** Claim the shared badge while an updater is presenting a lifecycle. */
+export function claimUpdateStatus(owner: UpdateStatusOwner): boolean {
+  if (statusOwner !== null && statusOwner !== owner) return false;
+  statusOwner = owner;
+  return true;
+}
+
+/** Release the badge after an updater has finished presenting its lifecycle. */
+export function releaseUpdateStatus(owner: UpdateStatusOwner): void {
+  if (statusOwner === owner) statusOwner = null;
+}
 
 let updateError: string | null = null;
 let debugEvents: UpdateDebugEvent[] = [];
@@ -106,6 +120,12 @@ let downloadProgress = 0;
 const progressListeners = new Set<() => void>();
 
 export function setDownloadProgress(value: number) {
+  // NaN escapes the 0–100 clamp below (Math.max/min propagate NaN, and
+  // `downloadProgress === NaN` is always false so the change guard doesn't stop
+  // it), poisoning the store and the progress UI. NaN is the `received / total`
+  // result when a download reports no content-length, so ignore it and keep the
+  // last valid value. (±Infinity still clamp correctly to 100 / 0.)
+  if (Number.isNaN(value)) return;
   const clamped = Math.max(0, Math.min(100, Math.round(value)));
   if (downloadProgress === clamped) return;
   downloadProgress = clamped;

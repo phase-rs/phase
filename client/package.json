@@ -1,11 +1,12 @@
 {
   "name": "phase-rs-client",
   "private": true,
-  "version": "0.18.0",
+  "version": "0.31.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "pnpm run protocol:check && tsc -b && vite build",
+    "build:bootstrap": "vite build --config bootstrap/vite.config.ts",
     "lint": "eslint .",
     "protocol:check": "node ../scripts/check-protocol-version.mjs",
     "type-check": "pnpm run protocol:check && tsc -b --noEmit",

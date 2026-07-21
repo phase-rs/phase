@@ -47,7 +47,9 @@ pub fn guard_client_message_before_dispatch(
         } => guard_client_hello(client_version, build_commit),
         ClientMessage::CreateGame { deck } => guard_legacy_deck(deck),
         ClientMessage::JoinGame { game_code, deck } => guard_legacy_join_game(game_code, deck),
-        ClientMessage::Action { action } => guard_game_action_payload(action),
+        ClientMessage::Action { action } | ClientMessage::PreviewManaPayment { action, .. } => {
+            guard_game_action_payload(action)
+        }
         ClientMessage::Reconnect {
             game_code,
             player_token,
@@ -232,6 +234,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::Concede
         | ClientMessage::Emote { .. }

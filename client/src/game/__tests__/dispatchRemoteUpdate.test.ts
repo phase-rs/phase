@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import type { GameLogEntry, GameState, LegalActionsResult } from "../../adapter/types";
+import type { EngineSnapshot, GameLogEntry, GameState, LegalActionsResult } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
 import { processRemoteUpdate } from "../dispatch";
 
@@ -36,6 +37,14 @@ function noLegalActions(): LegalActionsResult {
   };
 }
 
+function prioritySnapshot(): EngineSnapshot {
+  return {
+    state: priorityState(),
+    legalResult: noLegalActions(),
+    seq: nextSnapshotSeq(),
+  };
+}
+
 describe("processRemoteUpdate", () => {
   beforeEach(() => {
     useGameStore.getState().reset();
@@ -50,7 +59,7 @@ describe("processRemoteUpdate", () => {
       segments: [{ type: "Text", value: "AI guesses Nonland" }],
     };
 
-    await processRemoteUpdate(priorityState(), [], noLegalActions(), [aiGuessLog]);
+    await processRemoteUpdate(prioritySnapshot(), [], [aiGuessLog]);
 
     expect(useGameStore.getState().logHistory).toEqual([
       {

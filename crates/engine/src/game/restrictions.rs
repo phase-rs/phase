@@ -371,7 +371,7 @@ pub fn record_token_created(state: &mut crate::types::game_state::GameState, obj
             .insert(obj.controller);
         state
             .created_tokens_this_turn
-            .push(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+            .push_back(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
     }
 }
 
@@ -385,7 +385,11 @@ pub fn record_sacrifice(
     };
     state
         .sacrificed_permanents_this_turn
-        .push(obj.snapshot_for_zone_change(object_id, Some(Zone::Battlefield), Zone::Graveyard));
+        .push_back(obj.snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        ));
     if obj.card_types.core_types.contains(&CoreType::Artifact) {
         state
             .players_who_sacrificed_artifact_this_turn
@@ -527,7 +531,7 @@ pub fn record_zone_change(
     let to_zone = record.to_zone;
     let turn_zone_change_index = state.zone_changes_this_turn.len();
     record.turn_zone_change_index = turn_zone_change_index;
-    state.zone_changes_this_turn.push(record);
+    state.zone_changes_this_turn.push_back(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
@@ -1115,6 +1119,9 @@ fn casting_restriction_applies(
         CastingRestriction::RequiresCondition { condition } => condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // Not a timing gate: "can't spend mana" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::CantSpendMana => true,
     }
 }
 
@@ -1512,7 +1519,18 @@ pub(crate) fn evaluate_condition(
         }
         // CR 602.5b: "Activate only if [player condition]" — count matching non-eliminated players.
         ParsedCondition::PlayerCountAtLeast { filter, minimum } => {
-            crate::game::quantity::resolve_player_count(state, filter, player, source_id) as usize
+            crate::game::quantity::resolve_player_count(
+                state,
+                filter,
+                player,
+                crate::game::quantity::QuantityContext {
+                    entering: None,
+                    source: source_id,
+                    trigger_source: None,
+                    recipient: None,
+                    scoped_player: None,
+                },
+            ) as usize
                 >= *minimum
         }
         // CR 702.131c: The city's blessing is a player designation that effects
@@ -1628,24 +1646,21 @@ fn target_filter_accepts_player(filter: &crate::types::ability::TargetFilter) ->
 
 fn target_ref_matches_spell_targets_filter(
     state: &crate::types::game_state::GameState,
-    context_source_id: crate::types::identifiers::ObjectId,
     target: &crate::types::ability::TargetRef,
     filter: &crate::types::ability::TargetFilter,
+    context: &super::filter::FilterContext,
 ) -> bool {
     use crate::types::ability::{TargetFilter, TargetRef};
     match target {
         TargetRef::Player(_) => target_filter_accepts_player(filter),
-        TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source(state, context_source_id);
-            match filter {
+        TargetRef::Object(object_id) => match filter {
+            TargetFilter::Player => false,
+            TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
                 TargetFilter::Player => false,
-                TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
-                    TargetFilter::Player => false,
-                    branch => super::filter::matches_target_filter(state, *object_id, branch, &ctx),
-                }),
-                _ => super::filter::matches_target_filter(state, *object_id, filter, &ctx),
-            }
-        }
+                branch => super::filter::matches_target_filter(state, *object_id, branch, context),
+            }),
+            _ => super::filter::matches_target_filter(state, *object_id, filter, context),
+        },
     }
 }
 
@@ -1703,21 +1718,21 @@ pub(crate) fn triggering_spell_targets(
 /// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
 /// triggering spell's committed targets at resolution time.
 ///
-/// `context_source_id` scopes filter-relative terms like `FilterProp::Another`:
-/// use the triggering spell id for `AbilityCondition`, and the trigger source id
-/// for `TriggerCondition` (Orvar — "other permanents you control").
+/// `context` scopes filter-relative terms like `FilterProp::Another`: an
+/// `AbilityCondition` uses its triggering spell, while a `TriggerCondition`
+/// carries the exact trigger source (Orvar — "other permanents you control").
 pub(crate) fn triggering_spell_targets_filter(
     state: &crate::types::game_state::GameState,
     spell_id: crate::types::identifiers::ObjectId,
     filter: &crate::types::ability::TargetFilter,
-    context_source_id: crate::types::identifiers::ObjectId,
+    context: &super::filter::FilterContext,
 ) -> bool {
     let Some(targets) = spell_cast_targets(state, spell_id) else {
         return false;
     };
-    targets.iter().any(|target| {
-        target_ref_matches_spell_targets_filter(state, context_source_id, target, filter)
-    })
+    targets
+        .iter()
+        .any(|target| target_ref_matches_spell_targets_filter(state, target, filter, context))
 }
 
 /// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent
@@ -2722,6 +2737,96 @@ mod tests {
         ));
     }
 
+    /// P02-U3b RUNTIME WITNESS (CR 102.2 + CR 102.3 + CR 608.2h) — Whiplash Trap.
+    ///
+    /// "If **an opponent** had **two or more** creatures enter the battlefield under
+    /// **their** control this turn …". "An opponent" binds ONE player, and "their
+    /// control" binds the count to that same player. So the threshold is PER OPPONENT,
+    /// never a sum across opponents.
+    ///
+    /// This is the red-first witness for the multiplayer correction. BEFORE the port the
+    /// restriction fallback encoded the opponent INSIDE the TargetFilter
+    /// (`controller: Opponent`), so `evaluate_condition` counted every entry under ANY
+    /// opponent's control and compared the SUM — two DIFFERENT opponents with one creature
+    /// each wrongly satisfied "two or more". This test FAILS on that code. After the port
+    /// the phrase is a `QuantityComparison` over
+    /// `BattlefieldEntriesThisTurn { player: Opponent { aggregate: Max } }`, which counts
+    /// per opponent and takes the largest tally: max(1, 1) = 1 < 2 → correctly FALSE.
+    ///
+    /// The two readings coincide at two players, which is why this needs THREE seats.
+    ///
+    /// Placement note: this is a condition-SEMANTICS witness, and `evaluate_condition` is
+    /// `pub(crate)`. It lives beside the other runtime condition tests rather than in
+    /// `tests/integration/` because reaching it from an integration test would mean
+    /// widening the evaluator's visibility purely for a test. It still drives the real
+    /// runtime path — a real 3-player `GameState` through `game::quantity`'s
+    /// `resolve_per_player_scalar`, not a parse-tree assertion.
+    #[test]
+    fn opponent_entry_threshold_is_per_opponent_not_summed_across_opponents() {
+        const WHIPLASH_TRAP: &str = "an opponent had two or more creatures enter the battlefield under their control this turn";
+
+        fn state_with_entries(entries: &[(PlayerId, u32)]) -> crate::types::game_state::GameState {
+            // free-for-all, THREE seats: P1 and P2 are both genuine opponents of P0 (a
+            // team format would make one of them a teammate and defeat the point).
+            let mut state = crate::types::game_state::GameState::new(
+                crate::types::format::FormatConfig::free_for_all(),
+                3,
+                42,
+            );
+            let mut next_id = 100u64;
+            for (controller, count) in entries {
+                for _ in 0..*count {
+                    state
+                        .battlefield_entries_this_turn
+                        .push(BattlefieldEntryRecord {
+                            object_id: ObjectId(next_id),
+                            name: "Bear".to_string(),
+                            core_types: vec![CoreType::Creature],
+                            subtypes: vec![],
+                            supertypes: vec![],
+                            colors: vec![],
+                            keywords: vec![],
+                            controller: *controller,
+                        });
+                    next_id += 1;
+                }
+            }
+            state
+        }
+
+        // THE BUG: two DIFFERENT opponents, ONE creature each. No single opponent had two,
+        // so the condition must be FALSE. The pre-port fallback summed 1 + 1 = 2 and
+        // returned TRUE.
+        let split = state_with_entries(&[(PlayerId(1), 1), (PlayerId(2), 1)]);
+        assert!(
+            !parse_and_evaluate_condition(&split, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "two DIFFERENT opponents with one creature each must NOT satisfy \"an opponent \
+             had two or more creatures enter\" — no single opponent had two (CR 102.2/102.3: \
+             \"an opponent\" binds one player; \"their control\" binds the count to that same \
+             player). Summing across opponents is the pre-port bug this test exists to catch."
+        );
+
+        // POSITIVE CONTROL (nonvacuity): ONE opponent with TWO creatures MUST satisfy it.
+        // Without this, the assertion above would also pass if the condition were broken to
+        // always-false — or if the parse silently stopped producing anything at all.
+        let concentrated = state_with_entries(&[(PlayerId(1), 2)]);
+        assert!(
+            parse_and_evaluate_condition(&concentrated, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "a SINGLE opponent with two creatures entering MUST satisfy the condition — if \
+             this fails the per-opponent tally is broken (or the phrase stopped parsing), and \
+             the negative assertion above is vacuous"
+        );
+
+        // CONTROL: the controller's OWN entries are not an opponent's. Two creatures under
+        // the ability controller's control must not satisfy an opponent-scoped threshold.
+        let mine = state_with_entries(&[(PlayerId(0), 2)]);
+        assert!(
+            !parse_and_evaluate_condition(&mine, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "the controller's own battlefield entries must not satisfy an OPPONENT-scoped \
+             entry threshold"
+        );
+    }
+
     #[test]
     fn evaluates_you_control_creature_with_flying_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2855,9 +2960,16 @@ mod tests {
     #[test]
     fn evaluates_opponent_searched_library_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
+        // Production (`effects::search_library`) records the search in BOTH the
+        // legacy set and the `PlayerPerformedAction` ledger; the shared grammar
+        // now counts the latter, so this test must simulate both halves.
         state
             .players_who_searched_library_this_turn
             .insert(PlayerId(1));
+        state.player_actions_this_turn.push((
+            PlayerId(1),
+            crate::types::events::PlayerActionKind::SearchedLibrary,
+        ));
 
         assert!(parse_and_evaluate_condition(
             &state,
@@ -2870,8 +2982,34 @@ mod tests {
     #[test]
     fn evaluates_you_attacked_with_two_or_more_creatures_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        state.players_attacked_this_turn.insert(PlayerId(0));
-        state.attacking_creatures_this_turn.insert(PlayerId(0), 2);
+        state.active_player = PlayerId(0);
+        // The shared grammar counts `attacker_declarations_this_turn` snapshots;
+        // production `combat::declare_attackers` records those AND the summary
+        // counters, so this test must simulate both halves (see
+        // `zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn`).
+        for card_id in [2, 3] {
+            let attacker = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(card_id),
+                PlayerId(0),
+                format!("Attacker {card_id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            let record = state
+                .objects
+                .get(&attacker)
+                .unwrap()
+                .snapshot_for_attack_declaration(attacker);
+            state.attacker_declarations_this_turn.push(record);
+        }
+        record_attackers_declared(&mut state, 2);
 
         assert!(parse_and_evaluate_condition(
             &state,
@@ -2881,6 +3019,15 @@ mod tests {
         ));
     }
 
+    /// CR 508.1a: "you attacked this turn" is satisfied only by a declaration that
+    /// actually named an attacker.
+    ///
+    /// The condition is now read by the shared static-condition grammar as a count over
+    /// `attacker_declarations_this_turn` — the same per-attacker records that carry the
+    /// LKI a filtered variant ("you attacked with a Spacecraft") needs. Production
+    /// `combat::declare_attackers` populates those records AND calls
+    /// `record_attackers_declared`; this test must therefore simulate both halves, not
+    /// just the summary counters.
     #[test]
     fn zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2895,6 +3042,26 @@ mod tests {
             "you attacked this turn"
         ));
 
+        let attacker = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        let record = state
+            .objects
+            .get(&attacker)
+            .unwrap()
+            .snapshot_for_attack_declaration(attacker);
+        state.attacker_declarations_this_turn.push(record);
         record_attackers_declared(&mut state, 1);
 
         assert!(parse_and_evaluate_condition(
@@ -3044,7 +3211,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Grizzly Bears".to_string(),
                 core_types: vec![CoreType::Creature],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -3163,7 +3330,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Skeleton".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Skeleton".to_string()],
@@ -3184,7 +3351,7 @@ mod tests {
 
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Vampire".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Vampire".to_string()],
@@ -3238,7 +3405,7 @@ mod tests {
         for i in 0..3 {
             state
                 .zone_changes_this_turn
-                .push(crate::types::game_state::ZoneChangeRecord {
+                .push_back(crate::types::game_state::ZoneChangeRecord {
                     name: format!("Card {}", i),
                     ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                         ObjectId(100 + i),
@@ -4323,5 +4490,68 @@ mod tests {
                 "opponent's turn {phase:?} must be illegal (DuringYourTurn gate)"
             );
         }
+    }
+
+    #[test]
+    fn parsed_combat_window_activation_gates_reach_production_enforcement() {
+        let check_window = |oracle: &str,
+                            expected: &[ActivationRestriction],
+                            legal_phase: Phase,
+                            illegal_phase: Phase| {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                "Combat Window Test",
+                &[],
+                &["Artifact".to_string()],
+                &[],
+            );
+            let restrictions = &parsed.abilities[0].activation_restrictions;
+            assert_eq!(
+                restrictions, expected,
+                "parser must expose the enforced gate"
+            );
+
+            let mut state = crate::types::game_state::GameState::new_two_player(42);
+            let player = PlayerId(0);
+            state.active_player = player;
+            state.priority_player = player;
+            state.waiting_for = WaitingFor::Priority { player };
+
+            state.phase = legal_phase;
+            assert!(
+                check_activation_restrictions(&state, player, ObjectId(10), 0, restrictions)
+                    .is_ok(),
+                "activation must be legal in {legal_phase:?}"
+            );
+
+            state.phase = illegal_phase;
+            assert!(
+                check_activation_restrictions(&state, player, ObjectId(10), 0, restrictions)
+                    .is_err(),
+                "activation must be illegal in {illegal_phase:?}"
+            );
+        };
+
+        check_window(
+            "{T}: Draw a card. Activate only before attackers are declared.",
+            &[ActivationRestriction::BeforeAttackersDeclared],
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+        );
+        check_window(
+            "{T}: Draw a card. Activate only before combat damage has been dealt.",
+            &[ActivationRestriction::BeforeCombatDamage],
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+        );
+        check_window(
+            "{T}: Draw a card. Activate only during combat before combat damage has been dealt.",
+            &[
+                ActivationRestriction::DuringCombat,
+                ActivationRestriction::BeforeCombatDamage,
+            ],
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+        );
     }
 }

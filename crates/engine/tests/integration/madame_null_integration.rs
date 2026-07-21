@@ -107,6 +107,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             is_token: false,
             combat_status: Default::default(),
             trigger_definitions: Vec::new(),
+            trigger_source_context: None,
             co_departed: Vec::new(),
             attached_to: None,
             entered_incarnation: None,
@@ -225,6 +226,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
+            attachments: Vec::new(),
         },
     );
     set_etb_event(&mut state, dead_id);

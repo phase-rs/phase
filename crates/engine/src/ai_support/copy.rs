@@ -58,6 +58,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
                 duration: Some(Duration::Permanent),
                 mana_value_limit: None,
                 additional_modifications: Vec::new(),
@@ -72,6 +73,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
                 duration: Some(Duration::Permanent),
                 mana_value_limit: Some(CopyManaValueLimit::AmountSpentToCastSource),
                 additional_modifications: vec![
@@ -103,6 +105,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::BecomeCopy {
                 target: TargetFilter::Any,
+                recipient: TargetFilter::SelfRef,
                 duration: Some(Duration::Permanent),
                 mana_value_limit: None,
                 additional_modifications: vec![ContinuousModification::AddKeyword {

@@ -105,27 +105,77 @@ entry point and a **thin wrapper** over two phases: `parse_oracle_ir()` (IR
 production) followed by `lower_oracle_ir()` (IR lowering). Diagnostics flow
 through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
 
+The document IR is **source-addressed**: every item carries a stable
+`OracleItemId` and an `OracleUnitSource` (byte + line span), and items are
+emitted in **Oracle source order** — not category order. This is what makes the
+CR 707.9a printed-ability slot (`"except it has this ability"`) bind to the right
+ability, and it is why preprocessor-emitted items (Saga chapters, Spacecraft
+thresholds) no longer jump ahead of main-loop items.
+
 ```
 Oracle text (from MTGJSON)
     ↓
 parse_oracle_ir()               — oracle.rs: the priority router (see §3)
     ├─ normalize_card_name_refs()   — card name / "this creature" → ~ (once, at entry)
-    ├─ pre-parsers (before the line loop): Saga chapters [oracle_saga.rs],
-    │     Attraction visit lines [oracle_attraction.rs], Class levels
-    │     [oracle_class.rs], Leveler LEVEL blocks [oracle_level.rs],
+    ├─ DocEmitter                   — oracle.rs: the SINGLE source-order emission
+    │                                 authority. Wraps OracleDocBuilder; owns the
+    │                                 one per-line ordinal allocator. Every
+    │                                 emission — preprocessors AND the dispatch
+    │                                 loop — routes through it.
+    ├─ pre-parsers (emit at their printed source line): Saga chapters
+    │     [oracle_saga.rs], Attraction visit lines [oracle_attraction.rs],
+    │     Class levels [oracle_class.rs], Leveler LEVEL blocks [oracle_level.rs],
     │     Spacecraft "N+ |" thresholds [oracle_spacecraft.rs], Strive cost
     ├─ per line: strip_reminder_text(), then classify by priority slot (§3)
     ↓
-OracleDocIr                     — oracle_ir/doc.rs: Vec<OracleItemIr> + diagnostics.
-    │                             Core variants carry typed IR (EffectChainIr,
-    │                             TriggerIr, StaticIr, ReplacementIr); PreLowered
-    │                             variants carry already-assembled engine types.
+OracleDocIr                     — oracle_ir/doc.rs:
+    │   .items       Vec<OracleItemIr { id: OracleItemId,
+    │                                   source: OracleUnitSource,
+    │                                   node: OracleNodeIr }>  — SOURCE ORDER
+    │   .relations   Vec<DocumentRelationIr>  — closed, cross-item producer→
+    │                consumer facts keyed by exact OracleItemId (never inferred
+    │                by scanning lowered shapes)
+    │   .diagnostics Vec<OracleDiagnostic>
     ↓
-lower_oracle_ir()               — oracle.rs: exhaustive match on each OracleItemIr
-    ↓                             (core IR → dedicated lowering fn; PreLowered → identity)
+lower_oracle_ir()               — oracle.rs: exhaustive match on each OracleNodeIr,
+    ↓                             iterating source-ordered items; applies relations
+    ↓                             BY ID. Folds into the grouped runtime type:
 ParsedAbilities                 — abilities / triggers / statics / replacements /
                                   keywords / casting options + parse_warnings
 ```
+
+**`OracleSourceSpan` precision** (`doc.rs`) is typed, and honest about what it knows:
+
+| `SpanPrecision` | Meaning |
+|---|---|
+| `Exact` | Card-absolute byte + line range. Every document item carries this. |
+| `ChainRelative` | Byte range is exact *within one effect chain*, not card-absolute (the document allocator is not yet threaded through `ParseContext`). The verbatim `fragment` is retained so a later unit can upgrade it. Minted by `ClauseIrBuilder` for per-clause provenance. **U5 debt — the last non-card-absolute tier.** |
+
+A renderer must consult `is_exact()` before printing a `first_line`/`start_byte` as a card
+position: a `ChainRelative` offset is truthful, but only relative to its chain. `carries_fragment()`
+is the single authority for whether a tier may report a verbatim fragment, and
+`check_fragment_precision()` enforces the coupling **both ways** (fail-closed) — a tier that cannot
+locate a unit must not hand a renderer the whole card as "the offending clause". The retired
+`WholeDocument` tier was that case; there is no longer any span that does not locate its unit.
+
+> **The builder is the ordering authority, not the call order.** `OracleDocBuilder` keys items by
+> `(first_line, ordinal_within_span)` and re-sorts, so *emission order is irrelevant* — a
+> preprocessor may emit a later line before the dispatch loop reaches an earlier one and the
+> document still comes out in source order (`builder_returns_items_in_source_order_regardless_of_emission_order`).
+> **To perturb item order you must perturb the span, never the sequence of `emit` calls.** Any
+> parity probe that reorders calls instead of spans will come back falsely green.
+
+**Cross-item relations — `DocumentRelationIr`** (closed enum, `doc.rs`). Each variant names one
+exact producer `OracleItemId` and one exact consumer `OracleItemId`, is bound at parse time, and
+**fails closed on ambiguity** rather than pairing by adjacency or by scanning lowered shapes:
+
+- `EtbExileLtbReturn` — CR 607.1 linked exile/return pairs (Oblivion Ring, Fiend Hunter).
+- `ActivePlayerPunisher` — CR 102.1 + CR 608.2c coerce/punisher rebinding (Siren's Call).
+- `LinkedChoice` — CR 607.2d "choose a [value]" → "the chosen [value]". **One parameterized
+  variant**, not three siblings: the producer is always the `choose` clause; the variants differ
+  only in `ChosenValueKind` (what is chosen) and `LinkedChoiceBinding` (which consumer surface
+  reads it back). A fourth linked-choice shape must be a new enum *value*, never a new relation
+  variant.
 
 Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full slot table):
 
@@ -145,13 +195,115 @@ Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full s
 | Sub-module | Purpose |
 |-----------|---------|
 | `ast.rs` | All parser AST types (`ParsedEffectClause`, `ClauseAst`, modal/loyalty AST — moved here from `oracle_effect/types.rs`, `oracle_modal.rs`, `oracle.rs`) |
-| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr` |
+| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleItemId`, `OracleUnitSource`, `OracleSourceSpan`/`SpanPrecision`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex` |
 | `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
 | `diagnostic.rs` | `OracleDiagnostic` — structured parse warnings |
-| `effect_chain.rs` | `EffectChainIr` + lowering for spell/ability effect chains |
+| `effect_chain.rs` | `EffectChainIr`, `ClauseIr` + **typed clause provenance** (`ClauseId`, `ClauseDisposition`, antecedents, reference uses) and the mandatory `ClauseIrBuilder` |
 | `trigger.rs` | `TriggerIr` + lowering |
 | `static_ir.rs` | `StaticIr` + lowering |
 | `replacement.rs` | `ReplacementIr` + lowering |
+
+### Clause Provenance — `ClauseIr` (`oracle_ir/effect_chain.rs`)
+
+A clause does not just carry *what* it does; it carries *where it came from* and *how it relates
+to the clause before it*. This is what replaced the old post-lowering tree-scan repairs.
+
+Every `ClauseIr` carries a stable `ClauseId`, an `OracleUnitSource`, its declared antecedents, its
+reference uses, and **exactly one** `ClauseDisposition`:
+
+| `ClauseDisposition` | Meaning (CR 608.2c: later text may modify earlier text) |
+|---|---|
+| `Emit` | Ordinary clause — emit it. |
+| `Continue { antecedent, continuation }` | Continues a named earlier instruction (search → destination, reveal → rider). |
+| `BranchOtherwise { antecedent }` | The `else` branch of a named earlier instruction. |
+| `ReplaceMeaning { antecedent }` | Re-interprets a named earlier instruction. |
+| `Absorb { antecedent }` | Folded into a named earlier instruction. |
+
+**All `ClauseIr` construction goes through `ClauseIrBuilder`.** There is no `Default`, and no public
+struct literal — missing identity or provenance is a **compile error**, not a silent `None`. The gate
+is `rg 'ClauseIr \{'`, which may match only the struct declaration and the builder's single internal
+construction.
+
+> **Antecedents are named, never searched.** When two compatible producers exist, the parser names
+> the antecedent by `ClauseId`/`AntecedentId` or target slot. The assembler must **never** choose by
+> searching the lowered tree for the nearest matching `Effect` variant. That search *was* the bug.
+
+### Effect-Chain Assembly — `oracle_effect/assembly.rs`
+
+`assemble_effect_chain(&EffectChainIr) -> AbilityDefinition` is the **single source-order assembly
+traversal**. It owns an arena of output nodes plus an `AssemblyEnv`, so an earlier node can be
+amended by an explicitly-bound later continuation without recursively walking a partially-built tree.
+
+Parsed IR is **immutable** during assembly; the assembler owns the mutable output nodes and the typed
+environment. Final materialization (arena links → `Box<AbilityDefinition>`) is mechanical and contains
+no semantic pattern matching.
+
+**The arena is keyed by node index, not by `ClauseId`.** A `ClauseId` names a *parsed clause*, but a
+continuation may push an output node that no clause owns (a search destination, a rest-destination
+patch), so a `ClauseId`-only key cannot address every amendable node. `Arena { nodes: Vec<ArenaNode> }`
+therefore addresses nodes by position, and `AssemblyEnv` carries a **typed role registry per
+amendable class** — `conditional_nodes`, `optional_head_nodes`, `search_destination_nodes`,
+`dig_or_reveal_until_nodes`, `destroy_like_nodes`, `face_down_profile_nodes` — each a `Vec<usize>` in
+emission order.
+
+They are **lists, not last-only slots**, because a guarded selector may have to walk *past* a
+candidate that fails its guard (`BranchOtherwise` skips an optional head that already has a sub).
+A binding is then `(AntecedentRole, AntecedentSelector)`: the role names *which class of node* is
+being bound, the selector names *which one* (`LastEmitted`, `LastWithRole`, …). The walk is over the
+typed candidate list — **never over the output tree**. Scanning the lowered tree for the nearest
+matching `Effect` variant is the bug this whole layer exists to delete.
+
+> Roles are deliberately **narrow and non-nested**. `DigOrRevealUntil` (the `RestDestination`
+> patchable set) is a *different* set from `DigOrMill` (the `DigFromAmong` anchor) even though both
+> contain `Dig`. Widening a role to a superset to save a variant re-opens the nearest-match trap for
+> every card in the difference.
+
+> **`lower_effect_chain_ir` (`lower.rs`) is a one-line delegator to `assemble_effect_chain`** —
+> a name-preserving wrapper kept so the traversal relocation did not have to touch every call site in
+> one commit. It is scaffolding, not an authority. **Do not add logic to it.** The ~30 `pub(super)`
+> clause-lowering helpers still live in `lower.rs`; relocating them into `assembly.rs` is a later
+> increment, not a settled design.
+
+### Known Milestone-1 debt (do not mistake these for the target architecture)
+
+- **`OracleNodeIr::PreLowered{Spell,Trigger,Static,Replacement}`** still exist (26 references in
+  `oracle.rs`). They carry an already-assembled engine type instead of typed IR, and are produced by
+  the preprocessors and the complex dispatch paths. Retiring them is **item-granular** work: the
+  document already gives every item an `OracleItemId` and an exact span, so what is missing is the
+  per-node IR type, not the addressing.
+- **`TriggerBody::PreLowered`** still exists, for the **whole-body recognizers**
+  (`parse_vote_block`, `parse_separate_into_piles`, `try_parse_inline_modal`, …). These take an
+  entire multi-sentence body and refuse to let it be chain-fragmented, so they have no `_ir` sibling.
+  Converting them is a genuine bring-up (it *changes* lowering), which a parity migration may not
+  absorb — **deferred to the recognizer→IR bring-up plan**
+  (`.planning/architecture-remediation/05-recognizer-ir-bringup.md`).
+- **`SpanPrecision::ChainRelative`** is the last non-card-absolute span tier: `ClauseIrBuilder`'s
+  allocator is seeded over the chain text because the document allocator is not yet threaded through
+  `ParseContext`. Honest, not fabricated — the fragment is retained so a later unit can upgrade it to
+  `Exact`. **This is now the only tier a position renderer must refuse to print as a card position.**
+- **Undeclared positional bindings remain outside the effect-chain arena.** 28 `defs.last_mut()`-style
+  sites (`sequence.rs` 20, `lower.rs` 4, `assembly.rs` 3, `mod.rs` 1) still bind "the previous thing"
+  by position rather than by declared role, plus a handful of clause-stream `.rev()` lookbacks in
+  `mod.rs`. Each is a latent mis-binding site of the same species the arena was built to kill.
+  **A byte-identity gate cannot validate converting these** — see the warning below.
+- **`ChainLoweringMode`** (`oracle_effect/mod.rs`) encodes a deliberate asymmetry: the standalone
+  chain entry point runs 8 bypass recognizers, the with-context one runs 9 (it also runs
+  `try_parse_exile_pile_shuffle_cloak`). This is **preserved byte-for-byte**, as typed data with an
+  exhaustive match. It is suspected-accidental history, but unifying it would silently change lowering
+  across the die-roll cards, so it is a post-Milestone-1 follow-up gated on finding a discriminating card.
+
+> **Byte-identity is structurally blind to a narrowed binding.** When the positional walk-backs were
+> converted to declared roles, *every* call site turned out to see exactly one candidate on today's
+> pool — so `LastEmitted`, `LastWithRole`, and any other nearest-match rule are all output-identical,
+> and a full-pool byte-for-byte parity run cannot tell a correct binding from a wrongly-collapsed one.
+> Validating a binding change needs a **forced diagonal** (drive the selector to a different candidate
+> and confirm the output moves) or a synthetic discriminating card. **Never sign off a binding
+> migration on byte-identity alone.**
+
+**Retired in Milestone 1** (do not re-introduce): the category-ordered `parsed_abilities_to_doc_ir`
+Class façade and its `SpanPrecision::WholeDocument` span tier — Class is now an ordinary preprocessor
+emitting at printed source lines; the four post-lowering shape-repair passes removed in U7; and the
+lowered-tree scans replaced by the arena's declared-role bindings.
 
 ### Nom Combinator Layer — `oracle_nom/`
 
@@ -264,7 +416,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `0` | Semicolon-separated keyword line ("Defender; reach"); colon guard excludes activated abilities | per-part keyword extraction | `oracle.rs` |
 | `1` | Modal block: "Choose one —" header + mode lines, or Spree + `+` lines (consumes multiple lines) | `parse_oracle_block()` + `lower_oracle_block()` | `oracle_modal.rs` |
 | — | "Equip {cost}" / "Equip — {cost}" (not "Equipped …"); "Crew N" with trailing cadence sentence | `try_parse_equip()`, `parse_crew_keyword()` | `oracle.rs` |
-| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `extract_keyword_line()` | `oracle_keyword.rs` |
+| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `parse_router_keyword_list()` (strict — see §3a) | `oracle_keyword.rs` |
 | `2` | "Enchant {filter}" | skip (handled externally) | — |
 | — | Commander-permission / deck-construction copy-limit sentences (skip); named equip "<Name> — Equip {cost}" | `try_parse_equip()` | `oracle.rs` |
 | `11` | Planeswalker loyalty `+N:` / `−N:` / `0:` / `[+N]:` (runs here despite the label) | `try_parse_loyalty_line()` | `oracle.rs` |
@@ -287,16 +439,17 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `6c-altcost-e` | "You may [cost] rather than pay [keyword] cost[s]" (New Perspectives / Heart of Kiran class) | `parse_alternative_keyword_cost()` | `oracle_static/cost_mod.rs` |
 | `6d` | Compound "enters tapped and doesn't untap during your untap step" — decomposed into ETB-tapped replacement (CR 614.1c) + CantUntap static (CR 502.3) | both parsers run | `oracle.rs` |
 | `6e` | Cross-layer compound "`<subject>` can't `<P1>` and can't `<P2>`" — each conjunct routed to both layer parsers (Blossombind: Untap-prevention replacement CR 701.26b + AddCounter-prevention replacement CR 614.6) so a conjunct isn't dropped by `is_static_pattern` claiming the whole line | `parse_static_replacement_compound()` | `oracle.rs` |
+| `6f` | Compound "`<continuous grant or restriction>` and can't become/be untapped" (Frozen in Ice class) — leading grant/restriction clause stays a static modification, trailing clause becomes a broad Untap-prevention replacement (CR 701.26b + CR 614.6) so `is_static_pattern` at `7` doesn't silently absorb and drop the untap prohibition | `try_split_and_cant_become_untapped()` | `oracle.rs` |
 | `7` | Static/continuous patterns — `is_static_pattern()`; spell lines with explicit durations and damage verbs are deferred to `9`; copy-replacement lines route to the replacement parser first | `parse_static_line_multi()` family | `oracle_classifier.rs` → `oracle_static/` |
 | `8` | Replacement patterns — `is_replacement_pattern()`; one paragraph can yield multiple ETB replacements | `parse_replacement_line()` | `oracle_classifier.rs` → `oracle_replacement.rs` |
 | `8c` | Leyline clause "If this card is in your opening hand, you may begin the game with it on the battlefield" (CR 103.6) | `parse_begin_game_clause()` | `oracle.rs` |
 | `8c-strive` | Strive lines — skip (cost extracted by the pre-loop scan) | skip | `oracle.rs` |
 | — | Casting restrictions ("Cast this spell only …"), spell casting options, die-roll tables (`try_parse_die_roll_table`, consumes header + table lines), Suspend/Specialize/Harmonize/Mayhem keyword-cost extraction | various | `oracle_casting.rs`, `oracle_special.rs`, `oracle_keyword.rs` |
 | `8f` | Kicker / Multikicker / Replicate cost lines — before the spell catch-all so they don't become Unimplemented | keyword extraction | `oracle.rs` |
-| `9` | Card is Instant/Sorcery → imperative spell body | `parse_effect_chain()` | `oracle_effect/` |
+| `9` | Card is Instant/Sorcery → strict keyword-cost line first (consume-on-success, §3a), else imperative spell body | `parse_router_keyword_line()` (strict) → `parse_effect_chain()` | `oracle_keyword.rs` + `oracle_effect/` |
 | — | Flashback-equal-to-mana-cost, Commander ninjutsu, Escape em-dash, Cumulative upkeep keyword extraction | keyword extraction | `oracle.rs` / `oracle_keyword.rs` |
 | `12` | Roman numeral chapters (saga) | skip (pre-parsed) | — |
-| `13` | Keyword cost lines (`is_keyword_cost_line`) — extract parameterized keyword (e.g. "Morph {2}{B}") then skip | `parse_keyword_from_oracle()` | `oracle_keyword.rs` |
+| `13` | Keyword cost lines (`is_keyword_cost_line`) — extract parameterized keyword (e.g. "Morph {2}{B}") then skip. Consume-on-success: only an all-consuming strict parse advances the line (see §3a) | `parse_router_keyword_line()` (strict) | `oracle_keyword.rs` |
 | `13b` | Kicker/Multikicker leftovers | skip (handled by keywords) | — |
 | `13c` | Vehicle tier lines "N+ \| keyword(s)" | skip | `oracle_classifier.rs` |
 | `13d` | "Activate only…" constraint line | skip | — |
@@ -304,6 +457,46 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `14` | Ability word prefix ("Landfall —") — strip, map known words to typed conditions, re-classify the body | `strip_ability_word_with_name()` + `ability_word_to_condition()` | `oracle.rs` |
 | `14a` | Nom fallback dispatch — try effect, trigger, static, and replacement sub-parsers | `dispatch_line_nom()` | `oracle_dispatch.rs` |
 | `15` | Final fallback | `Effect::Unimplemented` with diagnostic trace | — |
+
+### 3a. Keyword Lines — Strict Router vs Permissive Grant (`oracle_keyword.rs`)
+
+There are **two** keyword-parsing surfaces. They are not interchangeable, and using
+the wrong one at a router boundary is the silent-swallow bug class.
+
+| Surface | Contract | Where it may be used |
+|---|---|---|
+| `parse_keyword_line_core()` | Remainder-**preserving** core: `Option<(Keyword, &str /* unconsumed */)>`. The single authority both wrappers are built on. | Internal — call a wrapper, not this. |
+| `parse_router_keyword_line()` | **STRICT / all-consuming.** Candidate recognizer → reminder strip → core → `all_consuming` permitted tail (P/R/M modifiers). Returns a typed `RoutedKeywordLine` only when the line parses *completely*. | The **only** surface that may license a router to CONSUME a whole line. |
+| `parse_router_keyword_fragment()` | **STRICT.** One keyword phrase: core + all-consuming permitted tail + modifiers. The primitive the other strict surfaces are built on. | Any router intercept parsing a single keyword phrase (flashback, suspend, specialize, buyback, escalate, commander ninjutsu, …). |
+| `parse_router_keyword_list()` | **STRICT.** The keyword-LIST sibling: comma parts, MTGJSON validation, protection expansion — with every part all-consuming. | Router slots and routing classifiers facing a keyword *list* (priorities 0 and 1b, `is_semicolon_keyword_line`, `is_spell_resolution_instruction_line`). `parse_router_keyword_line` cannot serve here: it parses ONE keyword and takes no MTGJSON names, so it cannot see a bare-keyword line ("Flying, vigilance"). |
+| `parse_granted_keyword_fragment()` / `extract_granted_keyword_list()` | **PERMISSIVE.** Takes the leading keyword and **discards the remainder** — by design. | **Embedded grant contexts only**: static/token/vote/class-level/effect-payload payloads ("…gains vanishing 3 if …"), where a trailing clause belongs to the *enclosing* sentence. |
+
+**Consume-on-success (the rule).** A candidate recognizer (`is_keyword_cost_line`)
+is a *filter, not evidence*. A router may advance past a line only after
+`parse_router_keyword_line` returns a typed keyword all-consumingly, or after it
+explicitly emits `Effect::unimplemented`. Advancing on a permissive parse drops the
+discarded remainder's semantics with **no keyword and no diagnostic** — the card then
+renders as fully supported while its text was never modelled. `Cycling {2} if you
+control an artifact` must fall through to an honest, exact-unit `Effect::Unimplemented`,
+not vanish.
+
+**Registry.** `ROUTER_KEYWORD_CASES` (`oracle_keyword.rs`, `#[cfg(test)]`) is the typed
+family registry. A set-equality test pins it against `is_keyword_cost_line`'s candidate
+prefix set: every prefix has exactly one case, with a valid fixture, a semantic-suffix
+rejection, and a declared production reach. Adding a prefix to the recognizer without a
+strict parser fails the build. `KNOWN_NOUN_PARAM_LEAKS` is a **ratchet** listing the
+families whose noun/filter parameter still absorbs a trailing clause — entries are
+deleted as each is fixed, never added to.
+
+**The boundary is fully enforced.** Every router slot and routing classifier now parses
+through a strict surface; the permissive symbols are not even imported into `oracle.rs`.
+**Gate G** in `scripts/check-parser-combinators.sh` is the plain whole-file invariant: a
+permissive keyword-parser symbol appearing anywhere inside `parse_oracle_ir`,
+`is_semicolon_keyword_line`, or `is_spell_resolution_instruction_line` fails the build, at
+any count. Note the ordering consequence this closed: priority `1b` runs long before the
+strict routers at `9`/`13`, so while it was permissive it claimed keyword lines first
+whenever MTGJSON named the keyword — which silently shadowed the strict wiring downstream
+for exactly the cards MTGJSON knows about.
 
 ### `is_static_pattern()` — `oracle_classifier.rs`
 Gates Priority `7`. Returns false for `target`-leading lines, then matches
@@ -856,9 +1049,9 @@ Use `--warning-detector <detector>` for broad-family triage and `--warning-patte
 3. Classify the pattern: detector false positive, parsed primary effect with missing modifier, or real parser gap.
 4. When fixing a real swallow, identify the dispatch site that *recognized* the marker but failed to either capture or chomp it. The fix is almost always at one of two places: the upstream recognition (route through the right `try_parse_*` interceptor) or the downstream chomping loop (add a missing arm). The peek-vs-chomp pitfall in §10 is the recurring root cause.
 5. After fixing, regenerate (`./scripts/gen-card-data.sh`) and rerun the same drilldown; warnings should drop by exactly the affected class size unless other detectors were un-muted.
-6. **Suppression rule** — `swallow_check.rs` may skip detectors when a card already has stronger parser failures; fixing one issue can un-mute additional detector warnings on the same cards.
+6. **Suppression rule** — suppression is **per source unit**, never card-wide. A unit that owns an `Effect::Unimplemented` has already declared its gap explicitly, so its own expectations are not re-reported as swallowed clauses; every *other* unit on the card is still audited. Fixing one unit's gap can therefore un-mute that unit's own detector warnings, but never another unit's.
 
-**Companion Python audit:** `scripts/swallow_audit.py` runs the same heuristics over `coverage-data.json` independently of the Rust runtime. Use it for cross-checking, or for exploring novel detector classes before promoting them to `swallow_check.rs`.
+**Scope** — the audit runs once per source unit (a distinct span of Oracle text), not once per card. Both halves are unit-scoped: the expectation comes from that unit's own fragment, and the evidence from the definitions that unit produced. `line_index` names the line the clause was swallowed on.
 
 ---
 

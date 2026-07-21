@@ -68,6 +68,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Renown,
         source_id,
+        subject: None,
     });
 
     Ok(())
@@ -122,7 +123,7 @@ mod tests {
                 GameEvent::EffectResolved {
                     kind: EffectKind::Renown,
                     source_id,
-                } if *source_id == id
+                ..} if *source_id == id
             )
         }));
     }

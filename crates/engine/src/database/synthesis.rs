@@ -5,7 +5,7 @@ use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::{
     compute_deck_copy_limit_from_text, oracle_text_allows_commander, parse_oracle_text,
 };
-use crate::parser::oracle_keyword::{keyword_display_name, parse_keyword_from_oracle};
+use crate::parser::oracle_keyword::{keyword_display_name, parse_granted_keyword_fragment};
 use crate::parser::oracle_util::{apply_bracket_mode, strip_reminder_text, BracketMode};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
@@ -234,6 +234,11 @@ impl KeywordTriggerInstaller {
             // one trigger is emitted per `Keyword::Soulshift(_)` on the face.
             Keyword::Soulshift(n) => vec![build_soulshift_trigger(*n)],
             Keyword::Annihilator(n) => vec![build_annihilator_trigger(*n)],
+            // CR 702.181a: Mobilize N — attacks trigger creating N tapped/attacking
+            // Warrior tokens. Enables runtime keyword grants (`AddDynamicKeyword`
+            // — Infantry Shield's "mobilize X, where X is its power") to install
+            // the trigger; the printed path uses `synthesize_mobilize` directly.
+            Keyword::Mobilize(qty) => vec![build_mobilize_trigger(qty)],
             // CR 702.39a: Provoke — attacks trigger that may untap a creature the
             // defending player controls and force it to block this attacker.
             Keyword::Provoke => vec![build_provoke_trigger()],
@@ -740,11 +745,61 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
 // - `prepare_spell_cast` overrides the mana cost when cast from hand
 // - `stack.rs::resolve_top` creates a delayed exile trigger on resolution
 
+/// CR 702.181a: Build the Mobilize attack trigger — "Whenever this creature
+/// attacks, create N 1/1 red Warrior creature tokens. Those tokens enter tapped
+/// and attacking. Sacrifice them at the beginning of the next end step." Shared
+/// by the printed path ([`synthesize_mobilize`]) and the runtime keyword-grant
+/// path ([`KeywordTriggerInstaller::triggers_for`], used by `AddDynamicKeyword`
+/// when a static grants "mobilize X, where X is …" — Infantry Shield).
+fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
+    use crate::types::ability::PtValue;
+    use crate::types::triggers::TriggerMode;
+
+    let token_effect = Effect::Token {
+        name: "Warrior".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string(), "Warrior".to_string()],
+        colors: vec![ManaColor::Red],
+        keywords: vec![],
+        tapped: true,
+        count: qty.clone(),
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: true,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+
+    let sacrifice_at_end_step = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    count: qty.clone(),
+                    min_count: 0,
+                },
+            )),
+            uses_tracked_set: false,
+        },
+    );
+
+    TriggerDefinition::new(TriggerMode::Attacks)
+        .execute(
+            AbilityDefinition::new(AbilityKind::Spell, token_effect)
+                .sub_ability(sacrifice_at_end_step),
+        )
+        .description("Mobilize — create Warrior tokens tapped and attacking".to_string())
+}
+
 /// Synthesize Mobilize N trigger: when this creature attacks, create N 1/1 red
 /// Warrior creature tokens tapped and attacking. Sacrifice them at the beginning
 /// of the next end step (CR 702.181a).
 pub fn synthesize_mobilize(face: &mut CardFace) {
-    use crate::types::ability::PtValue;
     use crate::types::triggers::TriggerMode;
 
     // Idempotency: skip if a Mobilize attack trigger already exists.
@@ -759,53 +814,15 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
         return;
     }
 
-    for kw in &face.keywords {
-        if let Keyword::Mobilize(qty) = kw {
-            let token_effect = Effect::Token {
-                name: "Warrior".to_string(),
-                power: PtValue::Fixed(1),
-                toughness: PtValue::Fixed(1),
-                types: vec!["Creature".to_string(), "Warrior".to_string()],
-                colors: vec![ManaColor::Red],
-                keywords: vec![],
-                tapped: true,
-                count: qty.clone(),
-                owner: TargetFilter::Controller,
-                attach_to: None,
-                enters_attacking: true,
-                supertypes: vec![],
-                static_abilities: vec![],
-                enter_with_counters: vec![],
-            };
-
-            let sacrifice_at_end_step = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::CreateDelayedTrigger {
-                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-                    effect: Box::new(AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::Sacrifice {
-                            target: TargetFilter::LastCreated,
-                            count: qty.clone(),
-                            min_count: 0,
-                        },
-                    )),
-                    uses_tracked_set: false,
-                },
-            );
-
-            face.triggers.push(
-                TriggerDefinition::new(TriggerMode::Attacks)
-                    .execute(
-                        AbilityDefinition::new(AbilityKind::Spell, token_effect)
-                            .sub_ability(sacrifice_at_end_step),
-                    )
-                    .description(
-                        "Mobilize — create Warrior tokens tapped and attacking".to_string(),
-                    ),
-            );
-        }
-    }
+    let new_triggers: Vec<TriggerDefinition> = face
+        .keywords
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Mobilize(qty) => Some(build_mobilize_trigger(qty)),
+            _ => None,
+        })
+        .collect();
+    face.triggers.extend(new_triggers);
 }
 
 /// CR 702.134a: Mentor — "Whenever this creature attacks, put a +1/+1 counter on
@@ -1377,7 +1394,11 @@ pub fn synthesize_bargain(face: &mut CardFace) {
         return;
     }
 
-    face.additional_cost = Some(AdditionalCost::Optional {
+    face.additional_cost = Some(bargain_additional_cost());
+}
+
+pub(crate) fn bargain_additional_cost() -> AdditionalCost {
+    AdditionalCost::Optional {
         cost: AbilityCost::Sacrifice(SacrificeCost::count(
             TargetFilter::Or {
                 filters: vec![
@@ -1391,7 +1412,7 @@ pub fn synthesize_bargain(face: &mut CardFace) {
             1,
         )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    });
+    }
 }
 
 /// Synthesize Gift optional cost and delivery effect.
@@ -2303,6 +2324,14 @@ pub fn synthesize_casualty(face: &mut CardFace) {
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(TriggerCondition::AdditionalCostPaid {
+                    source: AdditionalCostPaymentSource::NonKicker,
+                    origin: Some(AdditionalCostOrigin::Casualty),
+                    origin_ordinal: Some(casualty_ordinal),
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                })
                 .execute(execute)
                 .description("Casualty — copy this spell when cast with casualty paid".to_string()),
         );
@@ -2942,7 +2971,10 @@ pub fn synthesize_dredge(face: &mut CardFace) {
     );
     mill.sub_ability = Some(Box::new(return_to_hand));
 
-    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw);
+    // CR 702.52a + CR 121.6b: Dredge replaces a single individual card draw
+    // ("if you would draw a card, you may instead mill N"), not the instruction count.
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
+        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
     replacement.description = Some(
         "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
@@ -3090,14 +3122,16 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
     // so the trigger is collectable this same resolution before the next layers
     // pass re-derives `trigger_definitions`.
     if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
-        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
-            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+        if !obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| is_evoke_sac(entry.definition()))
+        {
+            obj.relive_printed_trigger(is_evoke_sac);
         }
         return;
     }
-    let trigger = build_evoke_etb_sac_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    obj.push_printed_trigger(build_evoke_etb_sac_trigger());
 }
 
 fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinition {
@@ -3185,20 +3219,17 @@ pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
             .iter()
             .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal));
         if has_base {
-            if !obj
-                .trigger_definitions
-                .iter_all()
-                .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal))
-            {
-                obj.trigger_definitions
-                    .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
+            if !obj.trigger_definitions.iter_all().any(|entry| {
+                is_offspring_etb_copy_trigger_for_ordinal(entry.definition(), origin_ordinal)
+            }) {
+                obj.relive_printed_trigger(|trigger| {
+                    is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal)
+                });
             }
             continue;
         }
 
-        let trigger = offspring_etb_copy_trigger_for_ordinal(origin_ordinal);
-        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-        obj.trigger_definitions.push(trigger);
+        obj.push_printed_trigger(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
     }
 }
 
@@ -4016,7 +4047,9 @@ fn is_unleash_cant_block_static(
 ///     Graveyard`, `valid_card = SelfRef` (the canonical dies trigger shape;
 ///     CR 603.10a — leaves-the-battlefield triggers look back in time).
 ///   * `condition = Not(HadCounters { Some("P1P1") })` — CR 400.7 LKI lookup
-///     against `state.lki_cache` for the source's pre-death counter map.
+///     against the exact `ZoneChanged` record context for the pre-death counter
+///     map. The ObjectId-keyed cache is only a compatibility fallback when a
+///     legacy/defaulted record has no context.
 ///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
 ///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
 ///     default `enters_under = None` matches the rule's "under its owner's
@@ -5851,7 +5884,7 @@ fn is_extort_trigger(t: &TriggerDefinition) -> bool {
                                 &*gain.effect,
                                 Effect::GainLife {
                                     amount: QuantityExpr::Ref {
-                                        qty: QuantityRef::PreviousEffectAmount,
+                                        qty: QuantityRef::PreviousEffectAmount { .. },
                                     },
                                     player: TargetFilter::Controller,
                                 }
@@ -5956,7 +5989,9 @@ fn build_extort_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::GainLife {
             amount: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: crate::types::ability::DamageChannel::Total,
+                },
             },
             player: TargetFilter::Controller,
         },
@@ -6342,6 +6377,10 @@ fn build_evolve_trigger() -> TriggerDefinition {
 /// (`"P1P1"` or `"M1M1"`). Any future "dies → return with single typed
 /// counter, gated on the same counter type's prior absence" keyword can reuse
 /// this directly.
+///
+/// At runtime, `HadCounters` reads the exact `ZoneChanged` record LKI. The
+/// ObjectId-keyed cache is retained only for legacy records whose defaulted
+/// source context is absent, never as an alternative to a present context.
 fn build_dies_return_with_counter_trigger(
     counter_type: &str,
     counter_label: &str,
@@ -6375,8 +6414,9 @@ fn build_dies_return_with_counter_trigger(
     ));
 
     // CR 400.7 + CR 603.10a: "if it had no <polarity> counters on it" —
-    // negate `HadCounters` to express the absence of the specific counter
-    // type in the LKI snapshot captured by `apply_zone_exit_cleanup`.
+    // negate `HadCounters` to express the absence of the specific counter type
+    // in the exact ZoneChanged record LKI. Only a legacy record with no source
+    // context may fall back to the ObjectId-keyed cache.
     let condition = TriggerCondition::Not {
         condition: Box::new(TriggerCondition::HadCounters {
             counter_type: Some(counter_type),
@@ -7309,7 +7349,7 @@ fn backup_granted_oracle_text(face: &CardFace) -> Option<String> {
             .next()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
-            .and_then(|text| parse_keyword_from_oracle(&text));
+            .and_then(|text| parse_granted_keyword_fragment(&text));
         if matches!(first_keyword, Some(Keyword::Backup(_))) {
             let granted = lines.collect::<Vec<_>>().join("\n");
             return Some(granted);
@@ -7366,7 +7406,7 @@ fn backup_grant_modifications(face: &CardFace) -> Vec<ContinuousModification> {
 
 /// CR 702 + CR 201.5: Collect the keywords the raw Oracle text grants as standalone
 /// keyword lines (e.g. "Flying" or "Flying, vigilance"). A line counts only when EVERY
-/// comma-separated part parses as a real keyword via `parse_keyword_from_oracle`, so
+/// comma-separated part parses as a real keyword via `parse_granted_keyword_fragment`, so
 /// ability lines that merely mention a keyword word ("Whenever Storm attacks, ...") are
 /// excluded. Used to corroborate name-colliding MTGJSON keywords before they are kept.
 fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
@@ -7384,7 +7424,7 @@ fn oracle_corroborated_keywords(raw_oracle_text: &str) -> Vec<Keyword> {
         let mut line_keywords = Vec::new();
         let mut all_keywords = true;
         for part in parts {
-            match parse_keyword_from_oracle(&part.to_ascii_lowercase()) {
+            match parse_granted_keyword_fragment(&part.to_ascii_lowercase()) {
                 Some(keyword) if !matches!(keyword, Keyword::Unknown(_)) => {
                     line_keywords.push(keyword)
                 }
@@ -7417,7 +7457,7 @@ fn backup_keyword_modifications(granted_text: &str) -> Vec<ContinuousModificatio
         let mut line_keywords = Vec::new();
         for part in parts {
             let lower = part.to_ascii_lowercase();
-            let Some(keyword) = parse_keyword_from_oracle(&lower) else {
+            let Some(keyword) = parse_granted_keyword_fragment(&lower) else {
                 line_keywords.clear();
                 break;
             };
@@ -9822,7 +9862,7 @@ fn build_oracle_face_inner(
     // B8: For multi-face cards, skip MTGJSON-provided keywords entirely.
     // MTGJSON duplicates keywords across both faces of Transform/DFC cards,
     // causing the front face to incorrectly gain back-face keywords.
-    // Parser-extracted keywords from `extract_keyword_line` are face-specific.
+    // Parser-extracted keywords from `extract_granted_keyword_list` are face-specific.
     let mut keywords: Vec<Keyword> = if skip_mtgjson_keywords {
         Vec::new()
     } else {
@@ -9875,10 +9915,10 @@ fn build_oracle_face_inner(
     // it. Drop a name-colliding MTGJSON keyword that the Oracle text does NOT corroborate
     // as a standalone keyword line; corroborated keywords (e.g. Flying on a card literally
     // named "Flying Men") and non-colliding keywords (e.g. Storm's real Flying) are kept.
-    // Corroboration re-scans the raw Oracle lines via `parse_keyword_from_oracle` rather
+    // Corroboration re-scans the raw Oracle lines via `parse_granted_keyword_fragment` rather
     // than reading `extracted_keywords`, because the latter deliberately omits evergreen
     // keywords already present in the MTGJSON list (only multi-instance keywords survive
-    // there — see `extract_keyword_line`). Value-equality (e == kw) matches the
+    // there — see `extract_granted_keyword_list`). Value-equality (e == kw) matches the
     // `merge_extracted_keywords` convention.
     let name_words: std::collections::HashSet<String> = face_name
         .split(|c: char| !c.is_alphanumeric())
@@ -9904,6 +9944,23 @@ fn build_oracle_face_inner(
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
     merge_extracted_keywords(&mut keywords, extracted_keywords);
+
+    // CR 611.3a + CR 702: MTGJSON can list a keyword that is granted only by a
+    // conditional static (Goddric's flying). Keep it on the static and drop the
+    // unconditional copy unless a standalone keyword line corroborates it.
+    keywords.retain(|keyword| {
+        oracle_corroborated.iter().any(|entry| entry == keyword)
+            || !parsed.statics.iter().any(|definition| {
+                definition.condition.is_some()
+                    && definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword { keyword: granted }
+                                if granted == keyword
+                        )
+                    })
+            })
+    });
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
@@ -12594,11 +12651,12 @@ mod undying_persist_synthesis_tests {
 #[cfg(test)]
 mod undying_persist_runtime_tests {
     //! CR 702.93a + CR 702.79a runtime integration: a battlefield permanent
-    //! with the keyword dies, `apply_zone_exit_cleanup` captures its LKI
-    //! counter map into `state.lki_cache`, `process_triggers` fires the
-    //! synthesized dies-trigger, the intervening `Not(HadCounters)` condition
-    //! reads the LKI snapshot, and `resolve_top` resolves `Effect::ChangeZone`
-    //! to return the permanent with a single +1/+1 (or -1/-1) counter.
+    //! with the keyword dies, the `ZoneChanged` record captures its exact LKI
+    //! counter map, `process_triggers` fires the synthesized dies-trigger, the
+    //! intervening `Not(HadCounters)` condition reads that record snapshot, and
+    //! `resolve_top` resolves `Effect::ChangeZone` to return the permanent with
+    //! a single +1/+1 (or -1/-1) counter. The ObjectId-keyed cache is only an
+    //! absence-only compatibility path for legacy/defaulted records.
 
     use super::*;
     use crate::game::printed_cards::apply_card_face_to_object;
@@ -14572,7 +14630,7 @@ mod extort_synthesis_tests {
         assert!(matches!(
             amount,
             QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount
+                qty: QuantityRef::PreviousEffectAmount { .. }
             }
         ));
         assert!(matches!(player, TargetFilter::Controller));
@@ -14692,7 +14750,9 @@ mod extort_synthesis_tests {
         drain.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::PreviousEffectAmount,
+                    qty: QuantityRef::PreviousEffectAmount {
+                        channel: DamageChannel::Total,
+                    },
                 },
                 player: TargetFilter::Controller,
             },
@@ -15552,6 +15612,8 @@ mod myriad_runtime_tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
         };
 
         let card_id = CardId(state.next_object_id);
@@ -15856,6 +15918,7 @@ mod myriad_runtime_tests {
         // Make Muddle become a copy of the target "except it has myriad".
         let copy_ability = ResolvedAbility::new(
             Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
                 target: TargetFilter::Any,
                 duration: Some(Duration::UntilEndOfTurn),
                 mana_value_limit: None,
@@ -15877,8 +15940,9 @@ mod myriad_runtime_tests {
             "Muddle should have Myriad keyword after becoming a copy"
         );
         let has_myriad_trigger = muddle_obj.trigger_definitions.iter_all().any(|trigger| {
-            matches!(trigger.mode, TriggerMode::Attacks)
+            matches!(trigger.definition.mode, TriggerMode::Attacks)
                 && trigger
+                    .definition
                     .execute
                     .as_deref()
                     .is_some_and(|a| a.optional && matches!(a.effect.as_ref(), Effect::Myriad))
@@ -15932,10 +15996,12 @@ mod myriad_runtime_tests {
         assert_eq!(token_attacker.defending_player, PlayerId(2));
 
         // Token should inherit the combat damage trigger from Face-Breaker.
-        let token_has_damage_trigger = token_obj
-            .trigger_definitions
-            .iter_all()
-            .any(|trigger| matches!(trigger.mode, TriggerMode::DamageDoneOnceByController));
+        let token_has_damage_trigger = token_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(
+                trigger.definition.mode,
+                TriggerMode::DamageDoneOnceByController
+            )
+        });
         assert!(
             token_has_damage_trigger,
             "Token copy should inherit the source's triggered abilities"
@@ -17888,6 +17954,19 @@ mod idempotency_tests {
             .expect("casualty trigger must have an execute ability");
 
         assert_eq!(
+            trig.condition,
+            Some(TriggerCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::NonKicker,
+                origin: Some(AdditionalCostOrigin::Casualty),
+                origin_ordinal: Some(0),
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            }),
+            "intrinsic casualty must be gated when the spell is cast, not only when the copy trigger resolves"
+        );
+
+        assert_eq!(
             **execute, canonical,
             "intrinsic casualty trigger's execute must equal the canonical \
              casualty_copy_ability_definition() — single source of truth for \
@@ -18152,11 +18231,11 @@ mod sorcery_speed_invariant_tests {
     /// the source from exile transformed. RED on main (no ability synthesized).
     #[test]
     fn synthesize_craft_from_oracle_line_builds_sorcery_speed_return_transformed() {
-        use crate::parser::oracle_keyword::parse_keyword_from_oracle;
+        use crate::parser::oracle_keyword::parse_granted_keyword_fragment;
         use crate::types::ability::{CostObjectCount, TargetFilter};
         use crate::types::zones::Zone;
 
-        let kw = parse_keyword_from_oracle("craft with creature {4}{b}")
+        let kw = parse_granted_keyword_fragment("craft with creature {4}{b}")
             .expect("craft Oracle line parses to a keyword");
         let (materials, count) = match &kw {
             Keyword::Craft {

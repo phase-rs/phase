@@ -1025,7 +1025,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 16] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 18] = [
     UnsupportedCapability {
         code: "upstream.response-envelope-mismatch",
         area: "transport",
@@ -1121,6 +1121,18 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 16] = [
         area: "responses",
         reason: "The previous adapter accepted direct engine action ids, but the updated protocol requires prompt-id-correlated PromptResponse payloads.",
         suggested_protocol_extension: "Use canonical PromptResponse for all client decisions and keep engine action tables adapter-private.",
+    },
+    UnsupportedCapability {
+        code: "local.meld-pair-choice-unsupported",
+        area: "prompts",
+        reason: "The pinned protocol has no typed choice for selecting one physical meld pair from multiple live-name candidates.",
+        suggested_protocol_extension: "Add a non-target object-pair choice carrying stable card ids.",
+    },
+    UnsupportedCapability {
+        code: "local.entry-attack-target-choice-unsupported",
+        area: "combat",
+        reason: "The pinned protocol has no response shape for choosing the player, planeswalker, or battle attacked by an entering creature.",
+        suggested_protocol_extension: "Add an entry-attack destination choice using the existing attack-target reference shape.",
     },
 ];
 
@@ -1256,20 +1268,35 @@ fn build_prompt_input(
             }))
         }
         WaitingFor::DeclareAttackers {
+            player: _,
             valid_attacker_ids,
             valid_attack_targets,
-            ..
+            valid_attack_targets_by_attacker,
+            attacker_constraints,
         } => Ok(PromptInput::ChooseAttackers(ChooseAttackersInput {
             attackers: valid_attacker_ids
                 .iter()
                 .copied()
-                .map(|attacker_id| AttackerOptionDto {
-                    attacker_id: encode_object_id(attacker_id),
-                    valid_target_ids: valid_attack_targets
-                        .iter()
-                        .map(attack_target_ref_id)
-                        .collect(),
-                    must_attack: false,
+                .map(|attacker_id| {
+                    // CR 508.1a–d: each attacker's own legal targets come from the
+                    // engine per-attacker map; the aggregate list is used only for a
+                    // legacy (`None`) payload. `Some(map)` with a missing key means
+                    // "no legal targets", so absent-vs-empty is preserved.
+                    let target_slice: &[engine::game::combat::AttackTarget] =
+                        match valid_attack_targets_by_attacker {
+                            Some(map) => map.get(&attacker_id).map(Vec::as_slice).unwrap_or(&[]),
+                            None => valid_attack_targets.as_slice(),
+                        };
+                    AttackerOptionDto {
+                        attacker_id: encode_object_id(attacker_id),
+                        valid_target_ids: target_slice.iter().map(attack_target_ref_id).collect(),
+                        // CR 508.1d: surface the must-attack requirement from the
+                        // engine display constraints instead of hardcoding false.
+                        must_attack: matches!(
+                            attacker_constraints.get(&attacker_id),
+                            Some(engine::game::combat::CombatRequirement::MustAttack { .. })
+                        ),
+                    }
                 })
                 .collect(),
             attack_targets: valid_attack_targets.iter().map(attack_target_dto).collect(),
@@ -1285,7 +1312,10 @@ fn build_prompt_input(
                 .map(|(attacker_id, blocker_ids)| BlockableAttackerDto {
                     attacker_id: encode_object_id(*attacker_id),
                     valid_blocker_ids: blocker_ids.iter().copied().map(encode_object_id).collect(),
-                    min_blockers: block_requirements.get(attacker_id).copied().unwrap_or(0),
+                    min_blockers: block_requirements
+                        .get(attacker_id)
+                        .map(|r| r.count)
+                        .unwrap_or(0),
                     max_blockers: None,
                     must_be_blocked: block_requirements.contains_key(attacker_id),
                 })
@@ -1409,6 +1439,9 @@ fn build_prompt_input(
         }
         WaitingFor::KeepWithinTotalPowerChoice { .. } => {
             unsupported_prompt(waiting_for, "local.keep-with-total-power-unsupported")
+        }
+        WaitingFor::KeepExactPermanentsChoice { .. } => {
+            unsupported_prompt(waiting_for, "local.keep-exact-permanents-unsupported")
         }
         WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
             unsupported_prompt(waiting_for, "local.optional-trigger-unsupported")
@@ -1669,8 +1702,20 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseEnlist { .. } => {
             AvailableActionConversion::Unsupported("local.enlist-unsupported")
         }
+        GameAction::ChooseMeldPair { .. } => {
+            AvailableActionConversion::Unsupported("local.meld-pair-choice-unsupported")
+        }
+        GameAction::ChooseEntryAttackTarget { .. } => {
+            AvailableActionConversion::Unsupported("local.entry-attack-target-choice-unsupported")
+        }
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
+        }
+        GameAction::ChooseAnnouncingOpponent { .. } => {
+            AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
+        }
+        GameAction::ChoosePileOpponent { .. } => {
+            AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
         }
         GameAction::ChooseAssistPlayer { .. } | GameAction::CommitAssistPayment { .. } => {
             AvailableActionConversion::Unsupported("local.assist-unsupported")
@@ -1723,6 +1768,7 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::SubmitSpellbookDraft { .. }
         | GameAction::ChoosePile { .. }
         | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. } => {
             AvailableActionConversion::Unsupported("local.selection-unsupported")
         }
@@ -1767,7 +1813,8 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::ChooseLegend { .. }
         | GameAction::ChooseBattleProtector { .. }
         | GameAction::SelectCategoryPermanents { .. }
-        | GameAction::ChooseKeptCreatures { .. } => {
+        | GameAction::ChooseKeptCreatures { .. }
+        | GameAction::ChooseKeptPermanents { .. } => {
             AvailableActionConversion::Unsupported("local.non-target-selection-unsupported")
         }
         GameAction::ChooseDungeon { .. }
@@ -1804,7 +1851,10 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::SetAutoPass { .. }
         | GameAction::CancelAutoPass
         | GameAction::SetPhaseStops { .. }
-        | GameAction::SetPriorityYield { .. } => {
+        | GameAction::SetPriorityPassingMode { .. }
+        | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
         GameAction::AssignCombatDamage { .. } => AvailableActionConversion::Skip,
@@ -1843,6 +1893,15 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. } => {
             AvailableActionConversion::Unsupported("local.debug-action-unsupported")
+        }
+        // CR 732.2a/b/c: the interactive loop-shortcut protocol is opt-in
+        // (`LoopDetectionMode::Interactive`) and never reached on the legacy manabrew
+        // protocol — a legacy client never sets that mode.
+        GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. } => {
+            AvailableActionConversion::Unsupported("local.loop-shortcut-unsupported")
         }
     }
 }
@@ -3053,6 +3112,7 @@ mod tests {
                         TargetRef::Player(PlayerId(1)),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -3490,6 +3550,8 @@ mod tests {
         assert!(codes.contains("local.pass-until-unsupported"));
         assert!(codes.contains("local.auto-pay-unsupported"));
         assert!(codes.contains("local.legacy-engine-action-unsupported"));
+        assert!(codes.contains("local.meld-pair-choice-unsupported"));
+        assert!(codes.contains("local.entry-attack-target-choice-unsupported"));
     }
 
     #[test]
@@ -3538,6 +3600,56 @@ mod tests {
             kept: vec![ObjectId(1)]
         }])
         .is_empty());
+
+        assert!(matches!(
+            convert_available_action(
+                &GameAction::ChooseAnnouncingOpponent {
+                    opponent: PlayerId(1),
+                },
+                "action-1".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
+        ));
+        assert!(available_actions(&[GameAction::ChooseAnnouncingOpponent {
+            opponent: PlayerId(1),
+        }])
+        .is_empty());
+    }
+
+    #[test]
+    fn meld_actions_return_stable_unsupported_capability_codes() {
+        assert!(matches!(
+            convert_available_action(
+                &GameAction::ChooseMeldPair {
+                    source_id: ObjectId(1),
+                    partner_id: ObjectId(2),
+                },
+                "action-0".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.meld-pair-choice-unsupported")
+        ));
+        assert!(matches!(
+            convert_available_action(
+                &GameAction::ChooseEntryAttackTarget {
+                    target: AttackTarget::Battle(ObjectId(3)),
+                },
+                "action-1".to_string(),
+            ),
+            AvailableActionConversion::Unsupported("local.entry-attack-target-choice-unsupported")
+        ));
+        assert!(
+            available_actions(&[
+                GameAction::ChooseMeldPair {
+                    source_id: ObjectId(1),
+                    partner_id: ObjectId(2),
+                },
+                GameAction::ChooseEntryAttackTarget {
+                    target: AttackTarget::Player(PlayerId(1)),
+                },
+            ])
+            .is_empty(),
+            "unsupported meld decisions must never be serialized as generic custom actions"
+        );
     }
 
     #[test]
@@ -3574,6 +3686,8 @@ mod tests {
                     player: PlayerId(0),
                     valid_attacker_ids: vec![ObjectId(1)],
                     valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+                    valid_attack_targets_by_attacker: None,
+                    attacker_constraints: Default::default(),
                 },
             ),
             (
@@ -3583,6 +3697,7 @@ mod tests {
                     valid_blocker_ids: vec![ObjectId(1)],
                     valid_block_targets: HashMap::from([(ObjectId(2), vec![ObjectId(1)])]),
                     block_requirements: HashMap::new(),
+                    blocker_constraints: Default::default(),
                 },
             ),
             (
@@ -3619,6 +3734,68 @@ mod tests {
             let json = serde_json::to_value(prompt).unwrap();
             assert_eq!(json["input"]["type"], expected_type);
         }
+    }
+
+    /// CR 508.1a–d wire contract: the ChooseAttackers DTO takes each attacker's
+    /// `validTargetIds` from the engine per-attacker map when it is `Some`, and only
+    /// falls back to the aggregate list when the map is `None` (legacy). An explicit
+    /// empty map entry yields NO targets — the aggregate is NOT reused, so absent
+    /// (`None` map) and empty (`Some` with an empty/missing entry) are distinguishable.
+    ///
+    /// Revert guard: a DTO that ignored the map and always used the aggregate would
+    /// give attacker 2 the full aggregate list; the `len() == 0` assertion flips.
+    #[test]
+    fn declare_attackers_dto_follows_per_attacker_map() {
+        // Some(map): attacker 1 → [P1]; attacker 2 → explicit empty.
+        let some_map = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![ObjectId(1), ObjectId(2)],
+            valid_attack_targets: vec![
+                AttackTarget::Player(PlayerId(1)),
+                AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: Some(HashMap::from([
+                (ObjectId(1), vec![AttackTarget::Player(PlayerId(1))]),
+                (ObjectId(2), vec![]),
+            ])),
+            attacker_constraints: Default::default(),
+        };
+        let json =
+            serde_json::to_value(build_prompt(&prepared_for(some_map), &lookup, vec![]).unwrap())
+                .unwrap();
+        let attackers = json["input"]["attackers"].as_array().unwrap();
+        assert_eq!(attackers.len(), 2);
+        assert_eq!(
+            attackers[0]["validTargetIds"].as_array().unwrap().len(),
+            1,
+            "attacker 1 follows its own map entry ([P1])"
+        );
+        assert_eq!(
+            attackers[1]["validTargetIds"].as_array().unwrap().len(),
+            0,
+            "attacker 2's explicit-empty map entry yields no targets — the aggregate is NOT reused"
+        );
+
+        // None: legacy fallback — the attacker gets the aggregate target list.
+        let none_map = WaitingFor::DeclareAttackers {
+            player: PlayerId(0),
+            valid_attacker_ids: vec![ObjectId(1)],
+            valid_attack_targets: vec![
+                AttackTarget::Player(PlayerId(1)),
+                AttackTarget::Player(PlayerId(2)),
+            ],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        let json =
+            serde_json::to_value(build_prompt(&prepared_for(none_map), &lookup, vec![]).unwrap())
+                .unwrap();
+        let attackers = json["input"]["attackers"].as_array().unwrap();
+        assert_eq!(
+            attackers[0]["validTargetIds"].as_array().unwrap().len(),
+            2,
+            "a None map falls back to the aggregate list (2 targets)"
+        );
     }
 }
 
@@ -4098,13 +4275,13 @@ mod protocol_wire_tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 16);
+        assert_eq!(capabilities.len(), 18);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 16, "capability codes must be unique");
+        assert_eq!(codes.len(), 18, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

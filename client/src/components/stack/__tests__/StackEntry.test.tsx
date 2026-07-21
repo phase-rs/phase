@@ -253,4 +253,119 @@ describe("StackEntry", () => {
 
     expect(screen.queryByRole("button", { name: /auto-pass/i })).not.toBeInTheDocument();
   });
+
+  it("renders engine-authored repeated spell mode labels and hides empty or nonspell labels", () => {
+    const spell: StackEntryType = buildStackEntry({
+      id: 100,
+      source_id: 70,
+      controller: 0,
+      kind: { type: "Spell", data: { card_id: 4, actual_mana_spent: 0 } },
+    });
+    const trigger: StackEntryType = buildStackEntry({
+      id: 101,
+      source_id: 70,
+      controller: 0,
+      kind: {
+        type: "TriggeredAbility",
+        data: { source_id: 70, ability: { targets: [] }, source_name: "Brotherhood's End" },
+      },
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObject({ id: 70, card_id: 4, name: "Brotherhood's End", zone: "Stack" }),
+      ),
+      stack: [spell],
+    });
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+    const details = {
+      source_name: "Brotherhood's End",
+      kind_label: "Spell",
+      selected_mode_labels: ["~ deals 3 damage.", "~ deals 3 damage."],
+    };
+
+    const { rerender } = render(
+      <StackEntry entry={spell} index={0} isTop cardSize={{ width: 120, height: 168 }} details={details} />,
+    );
+    const selectedModes = screen.getByRole("region", { name: "Selected modes" });
+    expect(selectedModes).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getAllByText("Brotherhood's End deals 3 damage.")).toHaveLength(2);
+
+    rerender(
+      <StackEntry entry={trigger} index={0} isTop cardSize={{ width: 120, height: 168 }} details={details} />,
+    );
+    expect(screen.queryByRole("region", { name: "Selected modes" })).not.toBeInTheDocument();
+
+    rerender(
+      <StackEntry
+        entry={spell}
+        index={0}
+        isTop
+        cardSize={{ width: 120, height: 168 }}
+        details={{ ...details, selected_mode_labels: [] }}
+      />,
+    );
+    expect(screen.queryByRole("region", { name: "Selected modes" })).not.toBeInTheDocument();
+  });
+
+  // Issue #4711: the warning already shows on hand and battlefield cards via
+  // CardImage; a spell matters most while it is on the stack about to resolve,
+  // and that was the one surface that skipped it.
+  it("surfaces the unimplemented-mechanics warning for a spell on the stack", () => {
+    const entry: StackEntryType = buildStackEntry({
+      id: 77,
+      source_id: 50,
+      controller: 0,
+      kind: { type: "Spell", data: { card_id: 9, actual_mana_spent: 0 } },
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObject({
+          id: 50,
+          card_id: 9,
+          name: "Bloodghast",
+          zone: "Stack",
+          unimplemented_mechanics: ["cascade"],
+        }),
+      ),
+      stack: [entry],
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />);
+
+    const badge = screen.getByTestId("unimplemented-mechanics-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", "Unimplemented: cascade");
+  });
+
+  it("shows no warning for a fully-supported spell on the stack", () => {
+    // Discriminating guard: without it the test above would still pass if the
+    // badge were rendered unconditionally for every stack entry.
+    const entry: StackEntryType = buildStackEntry({
+      id: 78,
+      source_id: 51,
+      controller: 0,
+      kind: { type: "Spell", data: { card_id: 9, actual_mana_spent: 0 } },
+    });
+    const gameState = createGameState({
+      objects: buildObjectMap(
+        buildGameObject({ id: 51, card_id: 9, name: "Grizzly Bears", zone: "Stack" }),
+      ),
+      stack: [entry],
+    });
+
+    act(() => {
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    });
+
+    render(<StackEntry entry={entry} index={0} isTop cardSize={{ width: 120, height: 168 }} />);
+
+    expect(screen.queryByTestId("unimplemented-mechanics-badge")).not.toBeInTheDocument();
+  });
 });

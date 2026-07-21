@@ -3,11 +3,19 @@ use tauri::WebviewWindowBuilder;
 #[cfg(target_os = "windows")]
 use tauri::Manager;
 
+mod migration;
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![
+            migration::stash_legacy_storage,
+            migration::take_legacy_storage,
+            migration::confirm_legacy_import,
+            migration::mark_remote_load_ok
+        ])
         .setup(|app| {
             // `create: false` on the "main" window in tauri.conf.json defers
             // window creation to here so we can pin an explicit, always-writable

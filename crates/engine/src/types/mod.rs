@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod action_stable_order;
 pub mod actions;
 pub mod attribution;
 pub mod card;
@@ -18,6 +19,8 @@ pub mod phase;
 pub mod player;
 pub mod proposed_event;
 pub mod replacements;
+pub mod replay;
+pub mod resolution;
 pub mod statics;
 pub mod stickers;
 pub mod triggers;
@@ -41,10 +44,14 @@ pub use format::{DeckCopyLimit, FormatConfig, GameFormat};
 pub use game_state::{
     ActionResult, BattlefieldEntryRecord, CommanderDamageEntry, CostResume, GameState, LKISnapshot,
     LandPlayRecord, NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
-    PendingSpellCostReduction, PlayerDeckPool, ScheduledTurnControl, SpellCastRecord, StackEntry,
-    StackEntryKind, TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
+    PendingSpellCostReduction, PlayerDeckPool, PriorityPassingMode, ScheduledTurnControl,
+    SpellCastRecord, StackEntry, StackEntryKind, TransientContinuousEffect, WaitingFor,
+    ZoneChangeRecord,
 };
-pub use identifiers::{CardId, ObjectId};
+pub use identifiers::{
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,
+    LEGACY_INCARNATION,
+};
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
 pub use log::{GameLogEntry, LogCategory, LogSegment};
@@ -56,8 +63,15 @@ pub use match_config::{
 };
 pub use phase::Phase;
 pub use player::{Player, PlayerId};
-pub use proposed_event::{ProposedEvent, ReplacementId};
+pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
+pub use replay::{RecordedAction, ReplayHeader, ReplayLog};
+pub use resolution::{
+    AbilityContinuationFrame, ChangeZoneFrame, DirectChoiceGate, FrameGate, FrameKind,
+    MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame,
+    ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    RESOLUTION_STATE_WIRE_VERSION,
+};
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};

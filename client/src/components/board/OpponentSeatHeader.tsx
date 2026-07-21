@@ -21,6 +21,8 @@ import {
   StatusBadge,
   UnboundedBadge,
 } from "../hud/HudBadges.tsx";
+import { AvatarHoverPreview } from "../hud/AvatarHoverPreview.tsx";
+import { EnchantmentsBadge } from "../hud/EnchantmentsBadge.tsx";
 import { KickConfirmDialog } from "../hud/KickConfirmDialog.tsx";
 import { NextUpBadge } from "../hud/NextUpBadge.tsx";
 
@@ -127,20 +129,36 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
         />
       ) : null}
       <div className={`pointer-events-none absolute left-1/2 top-1/2 z-10 flex min-w-0 ${identityWidth} -translate-x-1/2 -translate-y-1/2 items-center justify-center ${compact ? "gap-1" : "gap-1.5"}`}>
-        <div
-          className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
-            isValidPlayerTarget ? "ring-2 ring-cyan-300/70" : ""
-          } ${isValidPlayerTarget ? "pointer-events-none" : ""}`}
-          style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
-          title={isValidPlayerTarget ? t("opponentHud.clickToTarget", { name: label }) : label}
-        >
-          {avatarUrl ? (
+        {avatarUrl ? (
+          // Portrait-preview on hover, matching the 1v1 OpponentHud avatar. The
+          // enclosing identity block is pointer-events-none, so the tile must
+          // re-enable pointer events to receive hover — except while this seat is
+          // a legal target, where the header's full-area target button must win.
+          <AvatarHoverPreview
+            avatarUrl={avatarUrl}
+            label={label}
+            seatColor={seatColor}
+            title={isValidPlayerTarget ? t("opponentHud.clickToTarget", { name: label }) : label}
+            className={`relative flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
+              isValidPlayerTarget ? "pointer-events-none ring-2 ring-cyan-300/70" : "pointer-events-auto"
+            }`}
+            style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
+          >
             <img src={avatarUrl} alt={label} className="h-full w-full object-cover" />
-          ) : (
-            label.charAt(0).toUpperCase()
-          )}
-          {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
-        </div>
+            {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
+          </AvatarHoverPreview>
+        ) : (
+          <div
+            className={`relative flex shrink-0 items-center justify-center overflow-hidden rounded-md border bg-slate-950 font-bold text-white transition ${avatarSize} ${
+              isValidPlayerTarget ? "ring-2 ring-cyan-300/70" : ""
+            }`}
+            style={{ borderColor: `${seatColor}cc`, backgroundColor: `${seatColor}44` }}
+            title={label}
+          >
+            {label.charAt(0).toUpperCase()}
+            {isUnderAttack && <span className="absolute inset-0 rounded-md ring-2 ring-red-400/70" />}
+          </div>
+        )}
 
         <div className={`flex min-w-0 shrink items-center justify-center ${compact ? "gap-1" : "gap-1.5"}`}>
           <span
@@ -156,7 +174,18 @@ export function OpponentSeatHeader({ playerId, compact = false, onKickPlayer }: 
             />
           )}
           <LifeTotal playerId={playerId} size="sm" hideLabel />
-          <div className={`flex min-w-0 max-w-[9rem] shrink items-center justify-end gap-0.5 overflow-hidden ${badgeScale} [&>*]:origin-right`}>
+          {/* The enclosing identity block is pointer-events-none (so the
+              header's full-area target button owns clicks while this seat is a
+              legal target). Re-enable pointer events on the badge cluster so the
+              enchantments badge is hoverable/clickable and the counter/condition
+              tooltips fire — except while targeting, where the target button
+              must win. Mirrors the avatar's pointer-events gating above. */}
+          <div className={`flex min-w-0 max-w-[9rem] shrink items-center justify-end gap-0.5 overflow-hidden ${badgeScale} [&>*]:origin-right ${isValidPlayerTarget ? "pointer-events-none" : "pointer-events-auto"}`}>
+            {/* Player-attached Auras (Curse cycle, Faith's Fetters, Dictate of
+                Kruphix…). Reads the engine's `auras_attached_to_player`
+                projection; brings the split seat header to parity with the
+                legacy 1v1/tab HUDs, which already surface curses. */}
+            <EnchantmentsBadge playerId={playerId} />
             {designations.isMonarch ? <MonarchBadge /> : null}
             {designations.hasInitiative ? <InitiativeBadge /> : null}
             {designations.hasCityBlessing ? <CityBlessingBadge /> : null}

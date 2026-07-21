@@ -188,7 +188,7 @@ fn hordewing_skaab_discard_that_many_uses_previous_effect_amount() {
         &*sub.effect,
         Effect::Discard {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount { .. },
             },
             ..
         }
@@ -581,10 +581,7 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
     };
     assert_eq!(
         enter_with_counters,
-        &vec![(
-            CounterType::Generic("finality".to_string()),
-            QuantityExpr::Fixed { value: 1 },
-        )]
+        &vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
     );
 
     let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
@@ -817,8 +814,8 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
 
     assert_eq!(
         def.condition,
-        Some(AbilityCondition::CastFromZone {
-            zone: Zone::Graveyard
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
         })
     );
     assert!(matches!(
@@ -833,8 +830,8 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
     let put = def.sub_ability.as_ref().expect("expected then-put clause");
     assert_eq!(
         put.condition,
-        Some(AbilityCondition::CastFromZone {
-            zone: Zone::Graveyard
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
         })
     );
     let Effect::ChangeZone {
@@ -858,10 +855,7 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
     assert_eq!(*enters_under, None);
     assert_eq!(
         enter_with_counters,
-        &vec![(
-            CounterType::Generic("finality".to_string()),
-            QuantityExpr::Fixed { value: 1 },
-        )]
+        &vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
     );
 }
 
@@ -1179,13 +1173,14 @@ fn skullwinder_etb_parses_choose_opponent() {
 }
 
 // -----------------------------------------------------------------------
-// Balance equalization parser arms (try_parse_balance_equalization)
+// Balance equalization parser arms (parse_balance_equalization_ir)
 // -----------------------------------------------------------------------
 
 /// Assert a `Difference { ObjectCount(Land, You), ControlledByEachPlayer }`
 /// sacrifice link with `player_scope: All`.
 fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Sacrifice { target, count, .. } = &*def.effect else {
         panic!("expected Effect::Sacrifice, got {:?}", def.effect);
     };
@@ -1239,6 +1234,7 @@ fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
 /// discard link with `player_scope: All`.
 fn assert_hand_discard_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Discard { target, count, .. } = &*def.effect else {
         panic!("expected Effect::Discard, got {:?}", def.effect);
     };
@@ -1285,6 +1281,7 @@ fn balance_parses_to_three_link_equalization_chain() {
         .as_ref()
         .expect("expected creature sacrifice clause");
     assert_eq!(link3.player_scope, Some(PlayerFilter::All));
+    assert_eq!(link3.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Sacrifice { target, .. } = &*link3.effect else {
         panic!("link 3 must be Effect::Sacrifice, got {:?}", link3.effect);
     };
@@ -1336,7 +1333,12 @@ fn balancing_act_single_continuation_clause_parses() {
 fn non_balance_text_is_not_intercepted() {
     // The interceptor must not fire on unrelated "each player" text.
     assert!(
-        try_parse_balance_equalization("Each player draws a card.", AbilityKind::Spell).is_none(),
+        parse_balance_equalization_ir(
+            "Each player draws a card.",
+            AbilityKind::Spell,
+            &ParseContext::default(),
+        )
+        .is_none(),
         "interceptor must only match the Balance equalization shape"
     );
 }
@@ -1349,9 +1351,10 @@ fn balance_arm_b_rejects_non_equalization_quantity() {
     // ref) must NOT be intercepted. Confirms Arm B verifies the structure
     // rather than discarding the parsed ref.
     assert!(
-            try_parse_balance_equalization(
+            parse_balance_equalization_ir(
                 "Each player chooses a number of lands they control equal to the number of cards in their hand, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"

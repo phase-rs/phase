@@ -1,0 +1,544 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [],
+  "triggers": [
+    {
+      "mode": "Phase",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "GenericEffect",
+          "static_abilities": [
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "FirstStrike"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "FirstStrike"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Flying"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Flying"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Deathtouch"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Deathtouch"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "DoubleStrike"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "DoubleStrike"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Haste"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Haste"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Hexproof"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Hexproof"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Indestructible"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Indestructible"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Lifelink"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Lifelink"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Menace"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Menace"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Reach"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Reach"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Skulk"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Skulk"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Trample"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Trample"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            },
+            {
+              "mode": "Continuous",
+              "affected": {
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
+              },
+              "modifications": [
+                {
+                  "type": "AddKeyword",
+                  "keyword": "Vigilance"
+                }
+              ],
+              "condition": {
+                "type": "IsPresent",
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Vigilance"
+                    }
+                  ]
+                }
+              },
+              "affected_zone": null,
+              "effect_zone": null,
+              "active_zones": [],
+              "characteristic_defining": false,
+              "description": "gain first strike"
+            }
+          ],
+          "duration": "UntilEndOfTurn",
+          "target": null
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": "UntilEndOfTurn",
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": "BeginCombat",
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "At the beginning of each combat, creatures you control gain first strike until end of turn if a creature you control has first strike. The same is true for flying, deathtouch, double strike, haste, hexproof, indestructible, lifelink, menace, reach, skulk, trample, and vigilance.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

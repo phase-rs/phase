@@ -542,7 +542,12 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         loyalty: obj.loyalty,
         loyalty_activations_this_turn: obj.loyalty_activations_this_turn,
         abilities: obj.abilities.clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
+        trigger_definitions: obj
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .collect::<Vec<_>>()
+            .into(),
         replacement_definitions: obj.replacement_definitions.clone(),
         static_definitions: obj.static_definitions.clone(),
         played_from_zone: obj.played_from_zone,
@@ -706,6 +711,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // SAFE — read only candidate fingerprint fields.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Tapped
         | FilterProp::Untapped
@@ -727,10 +733,13 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: reads only the candidate's own `goaded_by` fingerprint field.
+        | FilterProp::Goaded
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
@@ -754,7 +763,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
 
         // POISON — read another object / side-table / combat / history / identity.
         // ControllerChoseLabel reads the controller's per-player anchor state.
+        // ControllerMatches reads live per-turn history (damage ledger, life
+        // tallies) via the controller's inner PlayerFilter predicate.
         FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -763,6 +775,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         // CR 302.6: per-turn control-continuity marker — a turn/history-relative
         // predicate like the siblings here (POISON for memoization).
@@ -790,10 +803,14 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasSingleTarget
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 715.2: Adventure identity reads the stored alternate face, which
+        // is not part of the candidate fingerprint; memoizing it is unsound.
+        | FilterProp::HasAdventure
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }
         | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
         | FilterProp::SharesQuality { .. }
         | FilterProp::CanEnchant { .. }
         | FilterProp::IsChosenCreatureType
@@ -804,10 +821,19 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::ProtectorMatches { .. }
         | FilterProp::HasHasteOrControlledSinceTurnBegan
         | FilterProp::Unpaired
+        // CR 205.3m + CR 903.3: POISON, and deliberately NOT grouped with
+        // `IsCommander` above. `IsCommander` reads `obj.is_commander` — a field ON
+        // the candidate. This one reads the CONTROLLER'S COMMANDER (the deck-pool
+        // registration, falling back to an is_commander object scan) and compares it
+        // against the candidate, so its answer depends on state outside the
+        // candidate's fingerprint entirely. Memoizing on the candidate alone would
+        // cache a verdict that a commander change invalidates.
+        | FilterProp::SharesCreatureTypeWithCommander
         // CR 608.2c: Reads the resolution-chain tracked-set side-table
         // (`tracked_object_sets` / `chain_tracked_set_id`), not the candidate's
         // own fingerprint — POISON for memoization.
         | FilterProp::InTrackedSet { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::Other { .. } => false,
     }
 }

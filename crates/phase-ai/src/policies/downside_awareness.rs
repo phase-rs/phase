@@ -74,10 +74,15 @@ impl TacticalPolicy for DownsideAwarenessPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("downside_awareness_score"),
-        }
+        // Range check (issue #5473): the largest gift penalty is `gift_card`
+        // (-3.0), doubled to -6.0 for pure-downside removal — so `score()` never
+        // leaves [-6.0, 0.0], comfortably inside the critical band. No rescale is
+        // needed; PolicyVerdict::score is identity here and simply upholds the
+        // band contract uniformly (no raw Score literal).
+        PolicyVerdict::score(
+            self.score(ctx),
+            PolicyReason::new("downside_awareness_score"),
+        )
     }
 }
 

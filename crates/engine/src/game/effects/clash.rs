@@ -105,6 +105,7 @@ pub fn perform_clash(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Clash,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // Build the sub_ability chain with updated context for optional_effect_performed.
@@ -126,7 +127,7 @@ pub fn perform_clash(
     // redundant sub_ability processing.
     let stash_sub = |state: &mut GameState| {
         if let Some(sub) = original_sub {
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub)));
+            state.pending_continuation = Some(PendingContinuation::new(Box::new(sub), state));
         }
     };
 

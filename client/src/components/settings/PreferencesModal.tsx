@@ -162,6 +162,7 @@ export function PreferencesModal({
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
+  const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
@@ -173,6 +174,7 @@ export function PreferencesModal({
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
+  const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
   const setCustomBackgroundUrl = usePreferencesStore((s) => s.setCustomBackgroundUrl);
@@ -361,6 +363,27 @@ export function PreferencesModal({
                       onChange={setCardSize}
                       renderLabel={(opt) => t(`gameplay.cardSizeOptions.${opt}`)}
                     />
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.autoPass")}>
+                    <label className="flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={priorityPassingMode === "SkipLowUseWindows"}
+                        onChange={(event) => {
+                          setPriorityPassingMode(
+                            event.target.checked ? "SkipLowUseWindows" : "Standard",
+                          );
+                        }}
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("gameplay.skipLowUsePriorityWindows")}
+                        <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">
+                          {t("gameplay.skipLowUsePriorityWindowsDescription")}
+                        </span>
+                      </span>
+                    </label>
                   </SettingGroup>
 
                   <SettingGroup label={t("gameplay.commandZone")}>

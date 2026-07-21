@@ -103,6 +103,7 @@ fn guard_counter_type_payload(field: &str, counter_type: &CounterType) -> Result
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Keyword(_) => {}
     }
     Ok(())
@@ -280,6 +281,58 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SelectModes { indices } => {
             bound_list("SelectModes.indices", indices.len())?;
         }
+        // CR 732.2a: a client-supplied loop-shortcut declaration. The prior comment here
+        // ("`count` is a small enum — nothing unbounded") was FALSE: `IterationCount::Fixed`
+        // wraps an unbounded `u32` and IS the real DoS vector — bounded here as a coarse
+        // WS-level belt (mirrors `ChooseManaColor.count`; the engine's MAX_SHORTCUT_CYCLES is
+        // the authoritative cap). The nested template vecs (a `Targets` pin's `Vec<TargetPin>`
+        // and each `Scheduled` pin's schedule `Vec`) are bounded as DEFENSE-IN-DEPTH: the
+        // 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) already keeps a remote
+        // nested payload to a few hundred structs, and this guard runs POST-deserialize
+        // (client_message_wire_guard.rs:50), so it bounds downstream compute/clone work — not
+        // the transient serde allocation — for in-process callers that bypass the frame cap.
+        // Exhaustive matches (no wildcard) force a future variant to be classified here.
+        GameAction::DeclareShortcut { count, template } => {
+            use engine::analysis::decision_template::{
+                IterationCount, PinnedDecision, TargetPin, TargetSchedule,
+            };
+            // Exhaustive (no wildcard): a future `IterationCount` count variant build-breaks
+            // here so its wire bound is a conscious decision, not a silent gap.
+            match count {
+                IterationCount::Fixed(n) => bound_batch_count("DeclareShortcut.count", *n)?,
+                IterationCount::UntilLethal => {}
+            }
+            if let Some(template) = template {
+                bound_list("DeclareShortcut.template.decisions", template.decisions.len())?;
+                for decision in &template.decisions {
+                    match decision {
+                        PinnedDecision::Targets { targets, .. } => {
+                            bound_list("DeclareShortcut.template.targets", targets.len())?;
+                            for target in targets {
+                                match target {
+                                    TargetPin::Scheduled(TargetSchedule::RoundRobin(v)) => {
+                                        bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                    }
+                                    TargetPin::Scheduled(TargetSchedule::Piecewise(v)) => {
+                                        bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                    }
+                                    TargetPin::Scheduled(TargetSchedule::Constant(_))
+                                    | TargetPin::ByIdentity(_)
+                                    | TargetPin::Player(_) => {}
+                                }
+                            }
+                        }
+                        PinnedDecision::Order { .. }
+                        | PinnedDecision::Mode { .. }
+                        | PinnedDecision::MayChoice { .. }
+                        | PinnedDecision::UnlessBreak { .. }
+                        // CR 608.2d: a mana-color pin carries a fixed enum, no unbounded payload.
+                        | PinnedDecision::ManaColor { .. }
+                        | PinnedDecision::ConvokeTaps { .. } => {}
+                    }
+                }
+            }
+        }
         GameAction::ChooseOutsideGameCards { selections } => {
             bound_list("ChooseOutsideGameCards.selections", selections.len())?;
         }
@@ -324,6 +377,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseKeptCreatures { kept } => {
             bound_list("ChooseKeptCreatures.kept", kept.len())?;
         }
+        GameAction::ChooseKeptPermanents { kept } => {
+            bound_list("ChooseKeptPermanents.kept", kept.len())?;
+        }
         GameAction::SubmitPhyrexianChoices { choices } => {
             bound_list("SubmitPhyrexianChoices.choices", choices.len())?;
         }
@@ -337,6 +393,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SetPhaseStops { stops } => {
             bound_list("SetPhaseStops.stops", stops.len())?;
         }
+        GameAction::SetPriorityPassingMode { .. } => {}
         GameAction::DistributeAmong { distribution, .. } => {
             bound_list("DistributeAmong.distribution", distribution.len())?;
         }
@@ -372,6 +429,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
         | GameAction::ChooseAssistPlayer { .. }
         | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
@@ -391,6 +450,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChoosePile { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. }
         | GameAction::DecideOptionalCost { .. }
         | GameAction::RespondToSpliceOffer { .. }
@@ -429,6 +489,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::RippleChoice { .. }
         | GameAction::FreeCastWindowChoice { .. }
         | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
         // CR 702.140c: mutate merge side carries a single typed enum — nothing
         // client-controlled to bound.
         | GameAction::ChooseMutateMergeSide { .. }
@@ -449,7 +511,38 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
         | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        // CR 732.2b/c: a typed enum + a single `u32` — nothing unbounded.
+        | GameAction::RespondToShortcut { .. }
+        // CR 732.2a-c: opaque epoch/route/breakpoint ids and a typed response
+        // carry only bounded scalars.
+        | GameAction::PrecastCopyShortcut { .. }
+        // CR 732.2a: the decline is payloadless — nothing to bound.
+        | GameAction::DeclineShortcut
         | GameAction::Concede { .. } => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::game::combat::AttackTarget;
+    use engine::types::identifiers::ObjectId;
+
+    #[test]
+    fn bounded_meld_actions_are_accepted() {
+        for action in [
+            GameAction::ChooseMeldPair {
+                source_id: ObjectId(1),
+                partner_id: ObjectId(2),
+            },
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Planeswalker(ObjectId(3)),
+            },
+        ] {
+            assert_eq!(guard_game_action_payload(&action), Ok(()));
+        }
+    }
 }

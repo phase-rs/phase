@@ -114,7 +114,8 @@ pub(crate) struct ClauseContext {
     /// CR 608.2d: Implicit per-player iteration from an opponent-may prefix
     /// (`each opponent may`, `target opponent may`, `defending player may`, …).
     pub(crate) may_implicit_player_scope: Option<PlayerFilter>,
-    /// CR 609.3: `for each [qty], ` prefix or trailing `twice` / `N times`.
+    /// CR 608.2c: `for each [qty], ` prefix or trailing `twice` / `N times` — the
+    /// controller follows the instruction as written, once per counted iteration.
     pub(crate) repeat_for: Option<QuantityExpr>,
     /// CR 109.5: `each opponent` / `each player` subject-prefix iteration scope.
     pub(crate) player_scope: Option<PlayerFilter>,
@@ -215,7 +216,18 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
         }
     }
 
-    // Repeat-for: "for each [qty], " leading prefix (CR 107.1 / CR 609.3).
+    // CR 705.2: Redundant "for each flip you won, " coin-flip quantifier — the
+    // flip loop (`finish_until_lose` / the `FlipCoins` win branch) already runs
+    // the win effect once per win, so drop the prefix (no `repeat_for`) and keep
+    // peeling the bare imperative. Must precede the generic for-each peel, which
+    // cannot strip "flip(s) you won" (not a countable clause) and would leave
+    // the text to fall through to an `Unimplemented` "for" dispatch (#5966).
+    if let Some(rest) = super::oracle_effect::lower::strip_redundant_flip_win_quantifier(&text) {
+        return peel_inner(rest, ctx);
+    }
+
+    // Repeat-for: "for each [qty], " leading prefix (CR 608.2c: the instruction is
+    // followed as written, once per counted iteration).
     if ctx.repeat_for.is_none() {
         let (qty, rest) = peel_for_each_prefix(&text);
         if qty.is_some() {
@@ -260,7 +272,8 @@ enum YouMayBlocklist {
     ChunkLoop,
 }
 
-/// CR 107.1 + CR 609.3: Peel a leading `for each [qty], ` repeat prefix.
+/// CR 608.2c: Peel a leading `for each [qty], ` repeat prefix — the controller
+/// follows the instruction as written, once per counted iteration.
 /// Delegates to the existing `strip_for_each_prefix` building block.
 pub(crate) fn peel_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
     super::oracle_effect::lower::strip_for_each_prefix(text)
@@ -331,6 +344,15 @@ fn try_peel_opponent_may_prefix(
             value(
                 (Some(OpponentMayScope::AnyOpponent), None),
                 tag("any opponent may "),
+            ),
+            // CR 608.2d + CR 101.4: "any other player may" — every player except
+            // the affected player of the resolving replaced event (Zur's
+            // Weirding). Must precede the bare "any player may " arm; the tag
+            // is disjoint ("any other …" vs "any player …") but ordering keeps
+            // the more specific phrase first.
+            value(
+                (Some(OpponentMayScope::AnyOtherPlayer), None),
+                tag("any other player may "),
             ),
             value(
                 (Some(OpponentMayScope::AnyPlayer), None),
@@ -441,13 +463,18 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 fn parse_additional_land_head(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
-    use nom::combinator::value;
+    use nom::combinator::{opt, value};
     alt((
         value((), tag("play an additional land")),
+        // CR 305.2: "play <n> additional lands" and the equivalent
+        // "play up to <n> additional lands" (Summer Bloom) — the "up to" is
+        // redundant grammar (land plays are already optional), so it grants the
+        // same +n land-play allowance.
         value(
             (),
             (
                 tag("play "),
+                opt(tag("up to ")),
                 crate::parser::oracle_nom::primitives::parse_number,
                 tag(" additional lands"),
             ),

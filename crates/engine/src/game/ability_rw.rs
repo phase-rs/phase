@@ -1325,7 +1325,11 @@ enum WriteScope {
 /// Exhaustive & wildcard-free: a future `TargetFilter` variant must be classified.
 fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope {
     match target {
-        TargetFilter::SelfRef | TargetFilter::SourceOrPaired => WriteScope::SelfSource,
+        // CR 608.2c: `OriginalSource` denotes the ability's own (pre-rebind) source
+        // object — a write to it lands on the source, exactly like `SelfRef`.
+        TargetFilter::SelfRef | TargetFilter::SourceOrPaired | TargetFilter::OriginalSource => {
+            WriteScope::SelfSource
+        }
         TargetFilter::TriggeringSource => WriteScope::EventObject,
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => {
             chain_root.unwrap_or(WriteScope::EventObject)
@@ -1335,6 +1339,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::Typed(..)
         | TargetFilter::Not { .. }
         | TargetFilter::Or { .. }
@@ -1368,11 +1373,13 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => WriteScope::External,
@@ -1521,6 +1528,9 @@ fn census_of_typed(tf: &TypedFilter) -> Census {
             }
             FilterProp::NonToken => {
                 tags.insert("nontoken".into());
+            }
+            FilterProp::RepresentedByCard => {
+                tags.insert("represented-card".into());
             }
             _ => {}
         }
@@ -1836,6 +1846,11 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastVariantPaidPersistent { .. }
         | TriggerCondition::ActivatedAbilityIsNonMana
         | TriggerCondition::FirstTimeObjectTappedThisTurn
+        // Both first-time siblings are terminal here: neither carries a legacy
+        // player-filter/quantity ref, so the D5 legacy-batch-prompt flag is
+        // identical either way (the read-vs-no-read divergence is only in
+        // `rw_trigger_condition` above).
+        | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
         | TriggerCondition::WasType { .. }
         | TriggerCondition::AttackedThisTurn
         | TriggerCondition::FirstCombatPhaseOfTurn
@@ -1870,6 +1885,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         AbilityCondition::ObjectsShareQuality { .. }
         | AbilityCondition::TargetMatchesFilter { .. }
         | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::SourceIsTapped
         | AbilityCondition::ControllerControlsMatching { .. }
         | AbilityCondition::TriggeringSpellTargetsFilter { .. }
@@ -1877,6 +1893,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::ZoneChangedThisWay { .. }
         | AbilityCondition::CostPaidObjectMatchesFilter { .. }
         | AbilityCondition::EventOutcomeWon
+        | AbilityCondition::CoinFlipOutcome { .. }
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::NthResolutionThisTurn { .. }
         | AbilityCondition::RevealedHasCardType { .. }
@@ -1891,7 +1908,7 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::AlternativeManaCostPaid
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::WhenYouDo
-        | AbilityCondition::CastFromZone { .. }
+        | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }
         | AbilityCondition::CastTimingPermission { .. }
@@ -1900,6 +1917,8 @@ fn legacy_ability_condition(x: &AbilityCondition) -> bool {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer
@@ -1932,6 +1951,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::TopOfLibraryMatches { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsAttacking
@@ -1971,6 +1991,7 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         | StaticCondition::ControlsCommander { .. }
         | StaticCondition::SourceControllerEquals { .. }
         | StaticCondition::EnchantedIsFaceDown
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => false,
@@ -1983,6 +2004,7 @@ fn legacy_duration(x: &Duration) -> bool {
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
+        | Duration::UntilSourceExilesAnotherCard
         | Duration::Permanent
         | Duration::UntilNextTurnOf { .. }
         | Duration::UntilEndOfNextTurnOf { .. }
@@ -2029,6 +2051,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
+        | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
@@ -2039,6 +2062,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::Aggregate { .. }
         | QuantityRef::PlayerCount { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::TargetObjectManaValue { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -2056,7 +2080,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::TrackedSetAggregate { .. }
         | QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::ChosenNumber
@@ -2097,6 +2121,11 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
+        // CR 700.2: NOT a frozen legacy event-context tag (the frozen 12 are the
+        // EventContextAmount / EventContextSourceCostX / ManaSpentToCast group
+        // above → true); classified with the newer event-live
+        // TimesCostPaidThisResolution twin → false.
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::TimesCostPaidThisResolution => false,
     }
 }
@@ -2114,6 +2143,9 @@ fn legacy_object_scope(s: &ObjectScope) -> bool {
         // Per-resolution local surfaced by THIS ability's own reveal — not one of
         // the 12 retained legacy refs (mirrors the LastRevealed precedent).
         | ObjectScope::OtherRevealedCard
+        // Source-persistent exile-pile member read (not one of the retained
+        // legacy refs), mirroring the OtherRevealedCard precedent.
+        | ObjectScope::OwnedLinkedExileCard
         | ObjectScope::EventTarget => false,
     }
 }
@@ -2206,13 +2238,16 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -2233,6 +2268,10 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: `OriginalSource` is not one of the 12 frozen event-context
+        // tags — it is concretized to `SpecificObject` at resolution (mirrors
+        // `SpecificObject`, its concretized form).
+        | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -2253,6 +2292,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => legacy_target_filter(filter),
+        FilterProp::DistinctFrom { reference } => legacy_target_filter(reference),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(legacy_target_filter)
         }
@@ -2277,12 +2317,17 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         // CR 607.2d / CR 607.2m (by analogy): player-anchor labels are live
         // per-player state, not one of the frozen-12 event-context refs.
         FilterProp::ControllerChoseLabel { .. } => false,
+        // CR 608.2i: the controller look-back predicate reads live turn-history
+        // (damage ledger, life-lost tallies) via its inner PlayerFilter — not one
+        // of the frozen-12 event-context refs. Mirrors ControllerChoseLabel.
+        FilterProp::ControllerMatches { .. } => false,
         // Resolution-chain tracked-set membership (leaf; only a `TrackedSetId`) —
         // not one of the frozen-12 event-context refs. Member-boundness is handled
         // in `member_bound_filter_prop`.
         FilterProp::InTrackedSet { .. } => false,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2304,6 +2349,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2326,10 +2372,14 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation, not a legacy
+        // event-context or per-source member-bound referent.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2337,6 +2387,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
@@ -2346,9 +2397,13 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: a unit variant with no nested TargetFilter/QuantityExpr/
+        // ControllerRef interior — nothing to descend, so no legacy referent.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
+        | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::Other { .. } => false,
     }
 }
@@ -2397,13 +2452,14 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::HasChosenName
         | TargetFilter::SourceChosenPlayer
-        | TargetFilter::ChosenDamageSource
+        | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::Neighbor { .. }
         | TargetFilter::OriginalController
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::ParentTargetSlot { .. }
@@ -2432,6 +2488,9 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         // legacy-12 tags (`legacy_batch_prompt`), resolution-local refs, and
         // uniformity-/owner-partition-invariant refs — all documented above.
         TargetFilter::SelfRef
+        // CR 608.2c: source carrier (writes_self/reads_src) — source-invariant,
+        // not per-member-bound; concretized to SpecificObject before this walk.
+        | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
@@ -2449,6 +2508,10 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        // CR 615: controller-relative compound recipient — uniformity-invariant
+        // (one shared controller `c0`), not per-member-bound.
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
@@ -2497,6 +2560,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => member_bound_target_filter(filter),
+        FilterProp::DistinctFrom { reference } => member_bound_target_filter(reference),
         FilterProp::SharesQuality { reference, .. } => {
             reference.as_deref().is_some_and(member_bound_target_filter)
         }
@@ -2521,6 +2585,9 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // CR 607.2d / CR 607.2m (by analogy): this reads durable per-player anchor
         // state keyed by controller, not per-source member-bound storage.
         FilterProp::ControllerChoseLabel { .. } => false,
+        // CR 608.2i: reads live per-turn history keyed by the object's controller,
+        // not per-source member-bound storage. Mirrors ControllerChoseLabel.
+        FilterProp::ControllerMatches { .. } => false,
         // CR 603.10a (PR-6.75 c5): membership in the active resolution-chain tracked
         // set — the property form of the member-bound `TargetFilter::TrackedSet`
         // selector (chain-first via `chain_tracked_set_id`). Per-source published
@@ -2528,6 +2595,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::InTrackedSet { .. } => true,
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -2549,6 +2617,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ManaCostIn { .. }
         | FilterProp::InZone { .. }
         | FilterProp::Foretold
+        | FilterProp::HasAdventure
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -2571,10 +2640,14 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: goad is a candidate-local designation, not a legacy
+        // event-context or per-source member-bound referent.
+        | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -2582,6 +2655,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
+        | FilterProp::Transformed
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
@@ -2591,9 +2665,12 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::IsCommander
+        // CR 205.3m: no nested interior to carry a member-bound referent.
+        | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
+        | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::Other { .. } => false,
     }
 }
@@ -2634,6 +2711,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         }
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -2652,7 +2730,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -2672,6 +2750,7 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -2860,8 +2939,14 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::Fight { target, subject } => {
             legacy_target_filter(target) || legacy_target_filter(subject)
         }
-        Effect::EachDealsDamageEqualToPower { sources, recipient } => {
-            legacy_target_filter(sources) || legacy_target_filter(recipient)
+        Effect::EachDealsDamageEqualToPower {
+            sources,
+            recipient,
+            extra_source,
+        } => {
+            legacy_target_filter(sources)
+                || legacy_target_filter(recipient)
+                || extra_source.as_ref().is_some_and(legacy_target_filter)
         }
         // CR 120: each source deals damage; `recipient` (`Shared`) can be a context
         // anaphor (ParentTarget/TriggeringSource) ⇒ descend all tag-bearing fields.
@@ -2892,6 +2977,9 @@ fn legacy_effect(x: &Effect) -> bool {
         }
         // Payload-less keyword action (planar chaos, CR 311.7) — no tag-bearing field.
         Effect::ChaosEnsues => false,
+        // Payload-less self-gathering effect (redistribute life totals, CR 119.7 + CR 119.8)
+        // — no tag-bearing field.
+        Effect::RedistributeLifeTotals => false,
         // Payload-less keyword action (reverse turn order, CR 103.1) — no
         // tag-bearing field and reads no per-object state.
         Effect::ReverseTurnOrder => false,
@@ -2985,6 +3073,7 @@ fn legacy_effect(x: &Effect) -> bool {
             max: _,
             copy_modifications,
             scale: _,
+            choose_scope: _,
         } => {
             legacy_target_filter(choose_filter)
                 || copy_modifications
@@ -3182,8 +3271,15 @@ fn legacy_effect(x: &Effect) -> bool {
         Effect::SeparateIntoPiles {
             object_filter,
             chosen_pile_effect,
+            unchosen_pile_effect,
             ..
-        } => legacy_target_filter(object_filter) || legacy_definition(chosen_pile_effect),
+        } => {
+            legacy_target_filter(object_filter)
+                || legacy_definition(chosen_pile_effect)
+                || unchosen_pile_effect
+                    .as_ref()
+                    .is_some_and(|d| legacy_definition(d))
+        }
         Effect::EpicCopy { spell } => contains_legacy_event_ref(spell),
         Effect::CreateDelayedTrigger { effect, .. } => legacy_definition(effect),
         Effect::CreateDrawReplacement { replacement_effect } => legacy_effect(replacement_effect),
@@ -3239,17 +3335,18 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::SolveCase
         | Effect::SetClassLevel { .. }
         | Effect::AddRestriction { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::OpenAttractions { .. }
         | Effect::RollToVisitAttractions
         | Effect::AssembleContraptionsFromRollDifference
         | Effect::ProcessRadCounters
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::GiftDelivery { .. }
         | Effect::SetDayNight { .. }
         | Effect::Conjure { .. }
@@ -3444,6 +3541,11 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
             reads_board_of(kind)
         }
         ObjectScope::AmassedArmy => member_bound_read(),
+        // CR 607.2a: a source-persistent exile-pile member read across resolutions
+        // (not a per-resolution reveal-local like `OtherRevealedCard`). It must be
+        // member-bound so same-event ability ordering (`profiles_conflict` via
+        // `reads_member_bound`) does not fail open. Mirrors `AmassedArmy`.
+        ObjectScope::OwnedLinkedExileCard => member_bound_read(),
         ObjectScope::EventSource | ObjectScope::EventTarget => reads_event_live(),
         // §L7 precedent (CR 608.2c): a per-resolution local surfaced by THIS
         // ability's own reveal within the same resolution — observed by no
@@ -3527,6 +3629,7 @@ fn walk_ability(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3536,8 +3639,9 @@ fn walk_ability(
         mode_abilities,
         targets: _,
         source_id: _,
-        source_incarnation: _,
-        source_card_id: _, // latched card identity token (AllCopies yield), no read/write effect
+        source_incarnation: _, // self-transform epoch latch, no read/write effect
+        trigger_source: _,     // exact triggered-source authority, no read/write effect
+        trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -3548,13 +3652,15 @@ fn walk_ability(
         optional_for: _,
         target_choice_timing: _,
         description: _,
-        min_x_value: _,
+        selected_mode_labels: _, // display snapshots, no game-state read/write
+        min_x_value: _,          // u32, no read
         cant_be_copied: _,
         copy_count_status: _,
         forward_result: _,
         distribution: _,
         chosen_x: _,
         cost_paid_object: _,
+        cost_paid_object_ids: _,
         effect_context_object: _,
         amassed_army_object: _,
         ability_index: _,
@@ -3563,7 +3669,7 @@ fn walk_ability(
         chosen_players: _,
         sub_link: _,
         replacement_applied: _,
-        dig_found_nothing_for_parent_target: _,
+        parent_target_missing_reason: _,
     } = a;
 
     // §4.3.2: a definition's own `player_scope` overrides the inherited scope for
@@ -3596,6 +3702,12 @@ fn walk_ability(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -3648,6 +3760,7 @@ fn walk_definition(
         player_scope,
         starting_with,
         repeat_for,
+        announced_x,
         multi_target,
         target_constraints,
         unless_pay,
@@ -3707,6 +3820,12 @@ fn walk_definition(
     }
     if let Some(rf) = repeat_for {
         acc.merge(rw_quantity_expr(rf));
+    }
+    // CR 601.2b: the announce-time-locked X definition is a live board read, merely
+    // read at announcement rather than at resolution. Same read-kind as any other
+    // quantity slot.
+    if let Some(ax) = announced_x {
+        acc.merge(rw_quantity_expr(ax));
     }
     if let Some(MultiTargetSpec { min, max }) = multi_target {
         acc.merge(rw_quantity_expr(min));
@@ -3788,6 +3907,7 @@ fn rw_duration(x: &Duration) -> RwProfile {
         Duration::UntilEndOfTurn
         | Duration::UntilEndOfCombat
         | Duration::UntilHostLeavesPlay
+        | Duration::UntilSourceExilesAnotherCard
         | Duration::Permanent => RwProfile::empty(),
         Duration::UntilNextTurnOf { player, .. }
         | Duration::UntilEndOfNextTurnOf { player, .. }
@@ -4052,6 +4172,12 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, None)
         }
+        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
+            let mut p = ext_write(StateKind::Other);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_quantity_expr(keep_on_top));
+            (p, None)
+        }
         Effect::Shuffle { target: _ } => (ext_write(StateKind::HandLibrary), None),
         Effect::PutAtLibraryPosition {
             target: _,
@@ -4063,10 +4189,7 @@ fn rw_effect(
             (p, None)
         }
         Effect::Learn => (ext_write(StateKind::HandLibrary), None),
-        Effect::DraftFromSpellbook {
-            destination: _,
-            tapped: _,
-        } => (ext_write(StateKind::HandLibrary), None),
+        Effect::DraftFromSpellbook { .. } => (ext_write(StateKind::HandLibrary), None),
         Effect::Clash => (ext_write(StateKind::HandLibrary), None),
         Effect::ChooseDrawnThisTurnPayOrTopdeck {
             count,
@@ -4581,10 +4704,15 @@ fn rw_effect(
             source: _,
             partner: _,
             result: _,
+            source_filter,
+            partner_filter,
+            entry: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_target_filter(source_filter));
+            p.merge(rw_target_filter(partner_filter));
             (p, None)
         }
         Effect::PhaseOut { target } => obj_membership_scope(target, chain_root),
@@ -4684,6 +4812,8 @@ fn rw_effect(
             cards: _,
             destination,
             tapped: _,
+            library_position: _,
+            library_players: _,
         } => {
             let mut p = RwProfile::empty();
             p.writes_external.set(StateKind::SetMembership);
@@ -4752,16 +4882,33 @@ fn rw_effect(
         Effect::Transform { target } => obj(StateKind::ObjectPt, target),
         Effect::BecomeCopy {
             target,
+            recipient,
             duration: _,
             mana_value_limit: _,
             additional_modifications: _,
         } => {
-            let (mut p, sc) = obj(StateKind::ObjectPt, target);
+            // CR 707.2 + CR 611.2c: the RECIPIENT (copier) is mutated (ObjectPt +
+            // SetMembership); the donor `target` is only read for its copiable
+            // values. The single-subject case (`recipient == SelfRef`, every
+            // existing copy card) keeps its EXACT prior profile — the write scoped
+            // by the announced `target` slot — so the ordering-parity classification
+            // of the existing copy corpus is byte-identical (no scope re-derivation
+            // is smuggled into this Niko-only change). Only the NEW mass-recipient
+            // path (Niko: "Shards you control") writes the recipient set and reads
+            // the donor, since there the copier and the copied donor are distinct.
+            let write_scope_filter = match recipient {
+                TargetFilter::SelfRef => target,
+                _ => recipient,
+            };
+            let (mut p, sc) = obj(StateKind::ObjectPt, write_scope_filter);
             place_object_write(
                 &mut p,
                 StateKind::SetMembership,
-                scope_of(target, chain_root),
+                scope_of(write_scope_filter, chain_root),
             );
+            if !matches!(recipient, TargetFilter::SelfRef) {
+                p.merge(board_value_aggregate_read(target, StateKind::ObjectPt));
+            }
             (p, sc)
         }
         Effect::Animate {
@@ -4791,13 +4938,40 @@ fn rw_effect(
         }
         Effect::TurnFaceDown { target, profile: _ } => obj(StateKind::ObjectPt, target),
         Effect::GenericEffect {
-            static_abilities: _,
+            static_abilities,
             duration,
             target,
         } => {
-            let tf = target.clone().unwrap_or(TargetFilter::SelfRef);
-            let (mut p, sc) = obj(StateKind::ObjectPt, &tf);
-            place_object_write(&mut p, StateKind::SetMembership, scope_of(&tf, chain_root));
+            // CR 611.2c: the player-chosen `target` slot names the affected object
+            // when present; otherwise transient static grants (Stonehoof #5335)
+            // carry `affected: TriggeringSource` on the nested static.
+            let target_filters: Vec<_> = target.clone().map_or_else(
+                || {
+                    let nested: Vec<_> = static_abilities
+                        .iter()
+                        .filter_map(|s| s.affected.clone())
+                        .collect();
+                    if nested.is_empty() {
+                        vec![TargetFilter::SelfRef]
+                    } else {
+                        nested
+                    }
+                },
+                |tf| vec![tf],
+            );
+            let mut p = RwProfile::empty();
+            let mut sc = None;
+            for tf in target_filters {
+                let (target_profile, target_scope) = obj(StateKind::ObjectPt, &tf);
+                p.merge(target_profile);
+                place_object_write(&mut p, StateKind::SetMembership, scope_of(&tf, chain_root));
+                sc = match (sc, target_scope) {
+                    (None, next) => next,
+                    (current, None) => current,
+                    (Some(current), Some(next)) if current == next => Some(current),
+                    (Some(_), Some(_)) => Some(WriteScope::External),
+                };
+            }
             if let Some(d) = duration {
                 p.merge(rw_duration(d));
             }
@@ -4902,7 +5076,9 @@ fn rw_effect(
             p.writes_external.set(StateKind::StackShape);
             (p, None)
         }
-        Effect::ExileResolvingSpellInsteadOfGraveyard => (ext_write(StateKind::StackShape), None),
+        Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: _ } => {
+            (ext_write(StateKind::StackShape), None)
+        }
 
         // ---- Pool ----
         Effect::Mana {
@@ -5326,6 +5502,9 @@ fn rw_effect(
         | Effect::GrantExtraLoyaltyActivations { .. }
         | Effect::ExchangeLifeWithStat { .. }
         | Effect::ExchangeLifeTotals { .. }
+        // CR 119.7 + CR 119.8: writes multiple players' life totals via an interactive
+        // permutation — conservative alongside the life-total sibling.
+        | Effect::RedistributeLifeTotals
         | Effect::SetDayNight { .. }
         | Effect::Monstrosity { .. }
         | Effect::Specialize
@@ -5334,7 +5513,7 @@ fn rw_effect(
         | Effect::Harness
         | Effect::ChooseAndSacrificeRest { .. }
         | Effect::RememberCard { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
         | Effect::RollToVisitAttractions
@@ -5468,6 +5647,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_player_of(StateKind::PlayerLife)
         }
         QuantityRef::StartingLifeTotal => RwProfile::empty(),
+        // CR 701.57a: reads the transient last-discover scalar, written only by
+        // discover resolution (never by a sibling trigger) — no ordering-relevant
+        // read/write, mirroring StartingLifeTotal.
+        QuantityRef::TriggeringDiscoverValue => RwProfile::empty(),
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
@@ -5487,6 +5670,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             property: _,
         } => board_value_aggregate_read(filter, StateKind::ObjectPt),
         QuantityRef::PlayerCount { filter: _ } => RwProfile::empty(),
+        QuantityRef::EventContextPlayerCount { filter: _ } => reads_event_live(),
         QuantityRef::CountersOn { scope, .. } | QuantityRef::Intensity { scope, .. } => {
             read_object_scope(scope, StateKind::ObjectCounters)
         }
@@ -5561,7 +5745,7 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // Resolution-local / turn- / commander-scoped: no per-source binding
         // (member-invariant under uniformity).
         QuantityRef::ExiledFromHandThisResolution
-        | QuantityRef::PreviousEffectAmount
+        | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::AttackedThisTurn { .. }
@@ -5646,6 +5830,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::UnspentMana { color: _ } => reads_player_of(StateKind::PlayerLife),
         QuantityRef::AttachmentsOnLeavingObject { .. } => reads_event_live(),
         QuantityRef::TimesCostPaidThisResolution => reads_event_live(),
+        // CR 700.2: reads the live triggering-spell object like the
+        // TimesCostPaidThisResolution twin — event-live, NOT a frozen D5 carrier,
+        // so no `legacy_batch_prompt` (that would be `legacy_ref()`).
+        QuantityRef::EventContextSourceModesChosen => reads_event_live(),
         // D5 carriers.
         QuantityRef::EventContextAmount
         | QuantityRef::EventContextSourceCostX
@@ -5731,8 +5919,13 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         AbilityCondition::TriggeringSpellTargetsFilter { filter: _ }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
         | AbilityCondition::ZoneChangedThisWay { filter: _ }
+        // CR 615.5: reads the prevented event's live damage-source object.
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter: _ }
         | AbilityCondition::CostPaidObjectMatchesFilter { filter: _ } => reads_event_live(),
         AbilityCondition::EventOutcomeWon => reads_event_live(),
+        // CR 705.2: reads resolution-local `state.resolution_coin_flip` — a live
+        // in-resolution signal, same read-bucket as `EventOutcomeWon`.
+        AbilityCondition::CoinFlipOutcome { result: _ } => reads_event_live(),
         AbilityCondition::SpellCastWithVariantThisTurn { variant: _ }
         | AbilityCondition::NthResolutionThisTurn { n: _ } => {
             reads_player_of(StateKind::JournalCast)
@@ -5774,7 +5967,7 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::AlternativeManaCostPaid
         | AbilityCondition::EffectOutcome { .. }
         | AbilityCondition::WhenYouDo
-        | AbilityCondition::CastFromZone { .. }
+        | AbilityCondition::WasCast { .. }
         | AbilityCondition::CastDuringPhase { .. }
         | AbilityCondition::CurrentPhaseIs { .. }
         | AbilityCondition::CastTimingPermission { .. }
@@ -5783,6 +5976,8 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         | AbilityCondition::CastVariantPaidInstead { .. }
         | AbilityCondition::HasMaxSpeed
         | AbilityCondition::IsMonarch
+        // CR 309.7: controller-state predicate; reads no object, writes nothing.
+        | AbilityCondition::CompletedDungeon { .. }
         | AbilityCondition::IsInitiative
         | AbilityCondition::HasCityBlessing
         | AbilityCondition::IsRingBearer
@@ -5831,6 +6026,14 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         TriggerCondition::HadCounters { .. } => reads_frozen_of(StateKind::ObjectCounters),
         TriggerCondition::HasCounters { .. } => reads_src_of(StateKind::ObjectCounters),
         TriggerCondition::CounterAddedThisTurn => reads_board_of(StateKind::ObjectCounters),
+        // CR 603.3b: Mirrors `CounterAddedThisTurn` — reads the
+        // `counter_added_this_turn` board ledger. This is the fail-open CR 603.3b
+        // fix: it must declare a board read here, NOT land in the terminal
+        // `RwProfile::empty()` group with the tapped sibling (which reads a
+        // count-map that is classified as no-read).
+        TriggerCondition::FirstTimeObjectCountersAddedThisTurn => {
+            reads_board_of(StateKind::ObjectCounters)
+        }
         TriggerCondition::SourceIsTapped => reads_src_of(StateKind::TapState),
         TriggerCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
         TriggerCondition::NoSpellsCastLastTurn
@@ -5932,6 +6135,13 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
             reads_player_of(StateKind::JournalCast)
         }
         StaticCondition::SourceMatchesFilter { filter: _ } => reads_src_of(StateKind::ObjectPt),
+        // CR 401/402: reads the controller's library top card (contents + order).
+        // A draw/scry/surveil/mill/shuffle writes `HandLibrary`, so marking this
+        // gate as reading `HandLibrary` invalidates it whenever the library top
+        // can change — the correct dependency for a top-of-library static.
+        StaticCondition::TopOfLibraryMatches { filter: _ } => {
+            reads_player_of(StateKind::HandLibrary)
+        }
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             let mut p = RwProfile::empty();
             for c in conditions {
@@ -5955,6 +6165,10 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         | StaticCondition::SourceAttachedToCreature
         | StaticCondition::SourceIsPaired
         | StaticCondition::SourceInZone { .. }
+        // CR 311.2: the source plane's face-up status is a source-object status
+        // read (command-zone membership), grouped with the other frozen source
+        // status flags (saddled/monstrous/…).
+        | StaticCondition::SourceIsFaceUp
         | StaticCondition::WasStartingPlayer { .. } => frozen_source_read(),
         StaticCondition::RecipientHasCounters { .. }
         | StaticCondition::RecipientMatchesFilter { .. }
@@ -6021,9 +6235,10 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::ChosenDamageSource => reads_event_live(),
+        | TargetFilter::ChosenDamageSource { .. } => reads_event_live(),
         TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
             rw_target_filter(filter)
         }
@@ -6051,6 +6266,9 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        // CR 615: controller-relative compound recipient — a read-free selector.
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -6071,6 +6289,9 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
+        // CR 201.5a: `OriginalSource` is a read-free object selector (concretized
+        // to `SpecificObject` at resolution).
+        | TargetFilter::OriginalSource
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
@@ -6089,9 +6310,11 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
         PlayerFilter::OpponentLostLife | PlayerFilter::OpponentGainedLife => {
             reads_player_of(StateKind::JournalLife)
         }
-        PlayerFilter::OpponentDealtDamage { source: _, kind: _ } => {
-            reads_player_of(StateKind::JournalLife)
-        }
+        PlayerFilter::OpponentDealtDamage {
+            source: _,
+            kind: _,
+            min_sources: _,
+        } => reads_player_of(StateKind::JournalLife),
         // D5 carrier.
         PlayerFilter::TriggeringPlayer => legacy_ref(),
         PlayerFilter::OpponentOtherThanTriggering
@@ -6151,11 +6374,15 @@ fn rw_player_scope(x: &PlayerScope) -> RwProfile {
         },
         // CR 603.10a: per-source look-back referent ⇒ member-bound.
         PlayerScope::SourceChosenPlayer => member_bound_read(),
+        // CR 513.1: `AnyTurn` is a turn-agnostic duration deadline reached via
+        // `rw_duration`'s `UntilNextStepOf` walk — a pure timing referent that
+        // reads no game state, exactly like the controller/scoped scopes.
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
         | PlayerScope::Target
         | PlayerScope::Opponent { .. }
         | PlayerScope::RecipientController
+        | PlayerScope::AnyTurn
         | PlayerScope::DefendingPlayer => RwProfile::empty(),
     }
 }
@@ -7658,6 +7885,32 @@ mod tests {
         assert!(
             !feeds(ts, pt, &nc, &nc, &nz, &nz, sg),
             "ObjectPt write does not feed TurnStructure"
+        );
+    }
+
+    // CR 513.1 + CR 603.7b (Gate-1): `PlayerScope::AnyTurn` reached via a
+    // duration walk (`rw_duration` → `rw_player_scope`) is a pure timing
+    // referent — it must return a byte-identical profile to the `Controller`
+    // scope and must NOT hit a stranded `unreachable!()`. A future card with
+    // "until the next end step" on a duration-walked effect (GenericEffect,
+    // pump, …) would otherwise panic the ordering-parity profiler.
+    #[test]
+    fn any_turn_duration_scope_profiles_like_controller_no_panic() {
+        let any_turn = rw_duration(&Duration::UntilNextStepOf {
+            step: crate::types::phase::Phase::End,
+            player: PlayerScope::AnyTurn,
+        });
+        let controller = rw_duration(&Duration::UntilNextStepOf {
+            step: crate::types::phase::Phase::End,
+            player: PlayerScope::Controller,
+        });
+        assert!(
+            !any_turn.reads_member_bound && !any_turn.reads_event_live,
+            "AnyTurn is a pure timing referent — no state read"
+        );
+        assert_eq!(
+            any_turn.reads_member_bound, controller.reads_member_bound,
+            "AnyTurn and Controller durations profile identically"
         );
     }
 

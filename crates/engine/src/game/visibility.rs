@@ -1,20 +1,90 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{CastOfferKind, GameState, PayCostKind, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::players;
 use super::turn_control;
 
+const HIDDEN_CARD_NAME: &str = "Hidden Card";
+
+/// Capture the authoritative display characteristics learned at the search
+/// boundary, so later zone changes/redaction never require a live object lookup.
+pub(crate) fn capture_library_search_card_view(
+    object: &crate::game::game_object::GameObject,
+) -> LibrarySearchCardView {
+    let current_face = LibrarySearchCardFaceView {
+        name: object.name.clone(),
+        mana_cost: object.mana_cost.clone(),
+        mana_value: object.effective_mana_value(),
+        colors: object.effective_colors(),
+        card_type: object.card_types.clone(),
+        keywords: object.keywords.clone(),
+        power: object.power,
+        toughness: object.toughness,
+        loyalty: object.loyalty,
+        printed_ref: object.printed_ref.clone(),
+    };
+    let front_face = LibrarySearchCardFaceView {
+        name: object.base_name.clone(),
+        mana_cost: object.base_mana_cost.clone(),
+        mana_value: object.base_mana_cost.mana_value(),
+        colors: object.base_color.clone(),
+        card_type: object.base_card_types.clone(),
+        keywords: object.base_keywords.clone(),
+        power: object.base_power,
+        toughness: object.base_toughness,
+        loyalty: object.base_loyalty,
+        printed_ref: object.base_printed_ref.clone(),
+    };
+    let back_face = object
+        .back_face
+        .as_ref()
+        .map(|face| LibrarySearchCardFaceView {
+            name: face.name.clone(),
+            mana_cost: face.mana_cost.clone(),
+            mana_value: face.mana_cost.mana_value(),
+            colors: face.color.clone(),
+            card_type: face.card_types.clone(),
+            keywords: face.keywords.clone(),
+            power: face.power,
+            toughness: face.toughness,
+            loyalty: face.loyalty,
+            printed_ref: face.printed_ref.clone(),
+        });
+    LibrarySearchCardView {
+        owner: object.owner,
+        zone: object.zone,
+        identity: ObjectIncarnationRef::from_object(object),
+        card_id: object.card_id,
+        current_face,
+        front_face,
+        back_face,
+    }
+}
+
 /// Returns a filtered copy of the game state for the given viewer.
 /// Hides all opponents' hand contents and all library contents except where the
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // The replacement-resume cursor is server authority and can retain private
+    // object IDs and last-known snapshots from a cost payment.
+    filtered.pending_cost_move_resume = None;
+    let replacement_candidate_source_ids = match &state.waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => Some(
+            candidates
+                .iter()
+                .map(|candidate| candidate.source_id)
+                .collect::<HashSet<_>>(),
+        ),
+        _ => None,
+    };
+    let mut hidden_replacement_candidate_source_ids = HashSet::new();
     filtered.pending_begin_game_abilities.clear();
     filtered.resolving_begin_game_abilities = false;
 
@@ -30,24 +100,68 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // handle for good measure) closes the wire leak without affecting
     // server-side randomness or session restore.
     filtered.rng_seed = 0;
+    // Also drop the serialized stream position (issue #5466 sibling): a leaked
+    // word offset would give an attacker the keystream alignment for free. Zero
+    // it so no viewer snapshot carries either the seed or its stream position.
+    filtered.rng_word_pos = 0;
     filtered.rng = <rand_chacha::ChaCha20Rng as rand::SeedableRng>::seed_from_u64(0);
+    filtered.liminal_entries.clear();
+    filtered.pending_liminal_entry_resume = None;
 
-    let can_view_private_for_player = |player: PlayerId| {
-        player == viewer
-            || (player == state.active_player
-                && turn_control::viewer_controls_active_turn(state, viewer))
-    };
+    let can_view_private_for_player =
+        |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
+    let replacement_choice_authorized = matches!(
+        &state.waiting_for,
+        WaitingFor::ReplacementChoice { player, .. }
+            if turn_control::authorized_submitter_for_player(state, *player) == viewer
+    );
+
+    // A pending replacement is the authoritative continuation record behind a
+    // ReplacementChoice. It carries real replacement sources, so only the
+    // prompted player (or their turn controller) may receive it. Other viewers
+    // submit no replacement action and must not receive its private source IDs.
+    if !replacement_choice_authorized {
+        filtered.pending_replacement = None;
+    }
 
     // CR 701.20e: A bare "look at" peek privately reveals card(s) to the looking
     // player only. `dig.rs` and `reveal_hand.rs` record the looker in
     // `private_look_player`; surface the peeked cards to that player without
     // leaking them to opponents.
-    let private_look_visible: HashSet<ObjectId> = match state.private_look_player {
+    let mut private_look_visible: HashSet<ObjectId> = match state.private_look_player {
         Some(looker) if can_view_private_for_player(looker) => {
             state.private_look_ids.iter().copied().collect()
         }
         _ => HashSet::new(),
     };
+    // CR 723.4 + CR 400.7: union ordinary private access with only the exact
+    // hidden objects learned by this viewer in every active search session.
+    for (_, search) in state.active_library_searches.iter() {
+        if search.learned_audience().contains(&viewer) {
+            for (owner, zone, identity) in search.looked_at() {
+                if state
+                    .objects
+                    .get(&identity.object_id)
+                    .is_some_and(|object| {
+                        object.owner == *owner
+                            && object.zone == *zone
+                            && object.incarnation == identity.incarnation
+                    })
+                {
+                    private_look_visible.insert(identity.object_id);
+                }
+            }
+        }
+    }
+    filtered
+        .active_library_searches
+        .retain(|_, search| search.learned_audience().contains(&viewer));
+    filtered
+        .active_search_decision_controls
+        .retain(|searcher, _| {
+            state.waiting_for.acting_players().contains(searcher)
+                && turn_control::authorized_submitter_for_player(state, *searcher) == viewer
+        });
 
     let opponents = players::opponents(state, viewer);
     let opp_hand_ids: Vec<ObjectId> = opponents
@@ -59,7 +173,36 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     for obj_id in opp_hand_ids {
         if !is_visible_revealed_card(state, obj_id) && !private_look_visible.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
+            record_hidden_replacement_candidate_source(
+                replacement_candidate_source_ids.as_ref(),
+                &mut hidden_replacement_candidate_source_ids,
+                obj_id,
+            );
         }
+    }
+
+    // Source-bound named choices carry complete source contexts in authoritative
+    // state. The client needs only the exact public prompt projection, never its
+    // LKI/links/cost facts, so strip the private context before serialization.
+    if let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        source,
+        persist_player,
+    } = &state.waiting_for
+    {
+        let mut source = source.clone();
+        if let Some(source) = source.as_mut() {
+            source.context = None;
+        }
+        filtered.waiting_for = WaitingFor::NamedChoice {
+            player: *player,
+            choice_type: choice_type.clone(),
+            options: options.clone(),
+            source,
+            persist_player: *persist_player,
+        };
     }
 
     // CR 608.2d: While an `OpponentGuess` is pending, strip the secret the
@@ -81,22 +224,30 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     //     visible (re-hiding them would misreport which numbers were used up).
     if let WaitingFor::OpponentGuess {
         player,
-        ref options,
-        ref choice_type,
-        source_id,
-        proposition_truth: _,
-    } = state.waiting_for
+        options,
+        choice_type,
+        source,
+        ..
+    } = &state.waiting_for
     {
         filtered.waiting_for = WaitingFor::OpponentGuess {
-            player,
+            player: *player,
             options: options.clone(),
             choice_type: choice_type.clone(),
-            source_id,
+            source: source.clone(),
+            owner: None,
             proposition_truth: None,
         };
-        let is_controller = state.objects.get(&source_id).map(|o| o.controller) == Some(viewer);
+        let is_controller = source.prompt.controller == viewer;
         if !is_controller {
-            if let Some(obj) = filtered.objects.get_mut(&source_id) {
+            if let Some(obj) = filtered
+                .objects
+                .get_mut(&source.prompt.identity.reference.object_id)
+                .filter(|object| {
+                    ObjectIncarnationRef::from_object(object) == source.prompt.identity.reference
+                        && object.zone == source.prompt.identity.expected_zone
+                })
+            {
                 if let Some(pos) = obj
                     .chosen_attributes
                     .iter()
@@ -251,6 +402,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             && !drawn_choice_hand_cards.contains(&obj_id)
         {
             hide_card(&mut filtered, obj_id);
+            record_hidden_replacement_candidate_source(
+                replacement_candidate_source_ids.as_ref(),
+                &mut hidden_replacement_candidate_source_ids,
+                obj_id,
+            );
         }
     }
 
@@ -267,6 +423,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     for obj_id in all_attraction_ids {
         if !state.revealed_cards.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
+            record_hidden_replacement_candidate_source(
+                replacement_candidate_source_ids.as_ref(),
+                &mut hidden_replacement_candidate_source_ids,
+                obj_id,
+            );
         }
     }
 
@@ -278,6 +439,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     for obj_id in all_contraption_ids {
         if !state.revealed_cards.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
+            record_hidden_replacement_candidate_source(
+                replacement_candidate_source_ids.as_ref(),
+                &mut hidden_replacement_candidate_source_ids,
+                obj_id,
+            );
         }
     }
 
@@ -294,6 +460,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     for obj_id in supplementary_deck_ids {
         if !state.revealed_cards.contains(&obj_id) {
             hide_card(&mut filtered, obj_id);
+            record_hidden_replacement_candidate_source(
+                replacement_candidate_source_ids.as_ref(),
+                &mut hidden_replacement_candidate_source_ids,
+                obj_id,
+            );
         }
     }
 
@@ -349,6 +520,11 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         .collect();
     for obj_id in hidden_facedown_exile_ids {
         hide_card(&mut filtered, obj_id);
+        record_hidden_replacement_candidate_source(
+            replacement_candidate_source_ids.as_ref(),
+            &mut hidden_replacement_candidate_source_ids,
+            obj_id,
+        );
     }
 
     // CR 708.5: "At any time, you may look at a face-down permanent you control
@@ -390,6 +566,29 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     reveal_face_down_identity_to_controller(obj);
                 } else {
                     redact_face_down_identity_from_observer(obj);
+                    record_hidden_replacement_candidate_source(
+                        replacement_candidate_source_ids.as_ref(),
+                        &mut hidden_replacement_candidate_source_ids,
+                        obj_id,
+                    );
+                }
+            }
+        }
+    }
+
+    // Replacement candidates snapshot their source name before this function
+    // redacts the underlying object. Keep that display payload consistent with
+    // the filtered object view, while the player making the choice retains the
+    // real source identity needed by the action round-trip.
+    if let WaitingFor::ReplacementChoice { candidates, .. } = &mut filtered.waiting_for {
+        if !replacement_choice_authorized {
+            for candidate in candidates {
+                let source_is_hidden = candidate.source_id != ObjectId(0)
+                    && (hidden_replacement_candidate_source_ids.contains(&candidate.source_id)
+                        || !filtered.objects.contains_key(&candidate.source_id));
+                if source_is_hidden {
+                    candidate.source_id = ObjectId(0);
+                    candidate.source_name = HIDDEN_CARD_NAME.to_string();
                 }
             }
         }
@@ -406,6 +605,97 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 source_id,
+            };
+        }
+    }
+
+    // CR 732.2a: redact hidden-info legal targets in a `LoopShortcut` OFFER for a viewer who is
+    // NOT the schema's proposer. The schema is built for the offer's public declaration; this
+    // is the SOLE seam that removes a hidden-zone (hand/library) legal target from a viewer who
+    // cannot legally see it. Public option sets (`ConvokeTaps` battlefield taps,
+    // `TargetRef::Player`) are retained. The per-target drop reuses the EXACT hand-redaction
+    // composite (`!is_visible_revealed_card && !private_look_visible`) keyed on each TARGET
+    // object's owner + private zone — never the controller's visibility.
+    if let WaitingFor::LoopShortcut {
+        proposer,
+        predicted_winner,
+        ref certificate,
+        ref schema,
+    } = state.waiting_for
+    {
+        if !can_view_private_for_player(proposer) {
+            use crate::analysis::decision_template::{
+                DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
+            };
+            use crate::types::ability::TargetRef;
+            // A target object is hidden from this viewer iff it sits in a private zone whose
+            // owner the viewer can't privately view AND it isn't otherwise revealed/peeked.
+            let target_hidden = |id: ObjectId| -> bool {
+                state.objects.get(&id).is_some_and(|obj| {
+                    matches!(obj.zone, Zone::Hand | Zone::Library)
+                        && !can_view_private_for_player(obj.owner)
+                        && !is_visible_revealed_card(state, id)
+                        && !private_look_visible.contains(&id)
+                })
+            };
+            let points: Vec<DecisionPoint> = schema
+                .points
+                .iter()
+                .map(|point| {
+                    let kind = match &point.kind {
+                        DecisionPointKind::Targets { legal_targets } => {
+                            DecisionPointKind::Targets {
+                                legal_targets: legal_targets
+                                    .iter()
+                                    .filter(|t| match t {
+                                        TargetRef::Object(id) => !target_hidden(*id),
+                                        TargetRef::Player(_) => true,
+                                    })
+                                    .cloned()
+                                    .collect(),
+                            }
+                        }
+                        DecisionPointKind::ConvokeTaps { tappable } => {
+                            DecisionPointKind::ConvokeTaps {
+                                tappable: tappable.clone(),
+                            }
+                        }
+                        DecisionPointKind::Mode { available_modes } => DecisionPointKind::Mode {
+                            available_modes: available_modes.clone(),
+                        },
+                        DecisionPointKind::MayChoice => DecisionPointKind::MayChoice,
+                        DecisionPointKind::UnlessBreak => DecisionPointKind::UnlessBreak,
+                        // CR 608.2d: a fixed mana color is public (not hidden info) — clone through.
+                        DecisionPointKind::ManaColor { color } => {
+                            DecisionPointKind::ManaColor { color: *color }
+                        }
+                    };
+                    DecisionPoint {
+                        slot: point.slot.clone(),
+                        kind,
+                    }
+                })
+                .collect();
+            // CR 702.51a: recompute the convoke count from the redacted points so the invariant
+            // "count == sum of this schema's tappable lengths" holds after visibility filtering
+            // (ConvokeTaps are public battlefield objects and are not redacted, so this equals
+            // the pre-filter count today; recomputing keeps it correct if that ever changes).
+            let convoke_tappable_count = points
+                .iter()
+                .filter_map(|p| match &p.kind {
+                    DecisionPointKind::ConvokeTaps { tappable } => Some(tappable.len()),
+                    _ => None,
+                })
+                .sum();
+            filtered.waiting_for = WaitingFor::LoopShortcut {
+                proposer,
+                predicted_winner,
+                certificate: certificate.clone(),
+                schema: ShortcutDecisionSchema {
+                    iteration_count: schema.iteration_count.clone(),
+                    points,
+                    convoke_tappable_count,
+                },
             };
         }
     }
@@ -505,6 +795,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     if let WaitingFor::SearchChoice {
         player,
+        library_owner,
         ref cards,
         count,
         reveal,
@@ -517,6 +808,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::SearchChoice {
                 player,
+                library_owner,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 count,
                 reveal,
@@ -525,6 +817,137 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 constraint: constraint.clone(),
                 split: split.clone(),
             };
+        }
+    }
+
+    // CR 101.4a + CR 701.23i: A simultaneous multi-player library search keeps
+    // each prior searcher's found cards private while later players decide.
+    // `SearchChoice` above hides the current candidate list, but the protocol's
+    // pending state also retains prior selections for deferred batch delivery;
+    // redact those ids per selector so an observer cannot recover library
+    // identities from `pending_scoped_library_search`.
+    let can_view_scoped_search_private = |searcher: PlayerId| {
+        state.active_library_searches.get(&searcher).map_or_else(
+            || can_view_private_for_player(searcher),
+            |search| search.learned_audience().contains(&viewer),
+        )
+    };
+    if let Some(pending) = filtered.pending_scoped_library_search.as_mut() {
+        if let crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+            prepared_choices,
+            selections,
+            frozen_dispositions,
+            pending_reveals,
+            ..
+        } = &mut pending.phase
+        {
+            for choice in prepared_choices {
+                if !can_view_scoped_search_private(choice.player) {
+                    for identity in &mut choice.candidates {
+                        identity.object_id = ObjectId(0);
+                    }
+                    if let Some(announced) = &mut choice.announced_selection {
+                        for identity in announced {
+                            identity.object_id = ObjectId(0);
+                        }
+                    }
+                }
+            }
+            for (selector, selected) in selections.iter_mut().chain(pending_reveals.iter_mut()) {
+                if !can_view_scoped_search_private(*selector) {
+                    for identity in selected {
+                        identity.object_id = ObjectId(0);
+                    }
+                }
+            }
+            for frozen in frozen_dispositions {
+                if !can_view_scoped_search_private(frozen.searcher) {
+                    frozen.identity.object_id = ObjectId(0);
+                }
+            }
+        }
+    }
+    if let Some(batch) = filtered.pending_search_found_batch.as_mut() {
+        if !can_view_private_for_player(batch.searcher) {
+            for identity in batch
+                .remaining
+                .iter_mut()
+                .chain(batch.survivors.iter_mut())
+                .chain(batch.current.iter_mut())
+            {
+                identity.object_id = ObjectId(0);
+            }
+        }
+    }
+    // CR 400.2 + CR 723.4: A nested zone-change replacement can park the
+    // currently found hidden-library card in the batch completion sidecar.
+    // Apply the same searcher/private-access boundary as the owning
+    // `PendingSearchFoundBatch`; filtering mutates only this viewer copy.
+    if state
+        .pending_search_found_batch
+        .as_ref()
+        .is_some_and(|batch| !can_view_private_for_player(batch.searcher))
+    {
+        if let Some(crate::types::game_state::PendingBatchDeliveries {
+            completion:
+                Some(crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                    object_id,
+                    ..
+                }),
+            ..
+        }) = filtered.pending_batch_deliveries.as_mut()
+        {
+            *object_id = ObjectId(0);
+        }
+    }
+    // CR 400.2 + CR 701.23a + CR 701.23i: Search delivery completions can carry an
+    // undelivered hidden-zone suffix across a replacement pause. Scrub both
+    // the generic batch tail and the typed search-specific continuation unless
+    // this viewer may inspect every searcher's private choice.
+    if let Some(pending) = filtered.pending_batch_deliveries.as_mut() {
+        match pending.completion.as_mut() {
+            Some(crate::types::game_state::BatchCompletion::SearchPartitionPrimaryDelivered {
+                rest_ids,
+                resume: crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher },
+                ..
+            }) if !can_view_private_for_player(*searcher) => {
+                pending.remaining.fill(ObjectId(0));
+                pending.attempted.fill(ObjectId(0));
+                for request in &mut pending.requests {
+                    request.object_id = ObjectId(0);
+                }
+                rest_ids.fill(ObjectId(0));
+            }
+            Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume: crate::types::game_state::LibrarySearchDeliveryResume::Standard { searcher },
+            }) if !can_view_private_for_player(*searcher) => {
+                pending.remaining.fill(ObjectId(0));
+                pending.attempted.fill(ObjectId(0));
+                for request in &mut pending.requests {
+                    request.object_id = ObjectId(0);
+                }
+            }
+            Some(crate::types::game_state::BatchCompletion::LibrarySearchDeliverySettled {
+                resume:
+                    crate::types::game_state::LibrarySearchDeliveryResume::Scoped {
+                        search_keys,
+                        grants,
+                        ..
+                    },
+            }) if !search_keys
+                .iter()
+                .all(|searcher| can_view_private_for_player(*searcher)) =>
+            {
+                pending.remaining.fill(ObjectId(0));
+                pending.attempted.fill(ObjectId(0));
+                for request in &mut pending.requests {
+                    request.object_id = ObjectId(0);
+                }
+                for (identity, _) in grants {
+                    identity.object_id = ObjectId(0);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -829,8 +1252,12 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
     filtered.phase_stops.retain(|pid, _| *pid == viewer);
     filtered
+        .priority_passing_modes
+        .retain(|pid, _| *pid == viewer);
+    filtered
         .may_trigger_auto_choices
         .retain(|record| record.key.player == viewer);
+    filtered.decision_templates.retain(|t| t.owner == viewer);
     filtered.priority_yields.retain(|y| y.player == viewer);
     filtered
         .lands_tapped_for_mana
@@ -861,9 +1288,27 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             pool.registered_sideboard = Arc::new(Vec::new());
             pool.current_main = Arc::new(Vec::new());
             pool.current_sideboard = Arc::new(Vec::new());
+            pool.registered_companion = Arc::new(Vec::new());
+            pool.current_companion = Arc::new(Vec::new());
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+        }
+    }
+
+    // CR 702.139a: A companion is outside the game and stays private until
+    // its owner reveals it. The offer is therefore visible only to the owner
+    // (or an authorized turn controller); the public player.companion field is
+    // populated only after the reveal action succeeds.
+    if let WaitingFor::CompanionReveal { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::CompanionReveal {
+                eligible_companions,
+                ..
+            } = &mut filtered.waiting_for
+            {
+                eligible_companions.clear();
+            }
         }
     }
 
@@ -918,15 +1363,16 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered
 }
 
-/// Whether `viewer` may see another player's library/hand private zones.
-fn viewer_may_see_player_private_zone(
+/// CR 723.4 + CR 805.8: a player controlling another player sees the
+/// information visible to that player; when turns are shared, controlling one
+/// player controls that player's team. Reuse submitter authority so the same
+/// team-turn boundary governs decisions and private information.
+fn viewer_has_private_access_to_player(
     state: &GameState,
     viewer: PlayerId,
     player: PlayerId,
 ) -> bool {
-    player == viewer
-        || (player == state.active_player
-            && turn_control::viewer_controls_active_turn(state, viewer))
+    player == viewer || turn_control::authorized_submitter_for_player(state, player) == viewer
 }
 
 /// Returns a viewer-safe copy of `events` for wire broadcast.
@@ -935,30 +1381,52 @@ fn viewer_may_see_player_private_zone(
 /// filtered `GameState`. Unlike the state snapshot, this array was broadcast
 /// verbatim to every seat and spectator — leaking hidden library information
 /// through `GameEvent::CardDrawn` (specific `object_id`) and
-/// `GameEvent::ZoneChanged` records emitted on library → hand moves (the
-/// `ZoneChangeRecord` embeds the full card name and type line). The structured
-/// game log already excludes these events; this closes the same hole on the
-/// raw event channel clients also consume.
+/// `GameEvent::ZoneChanged` records emitted on library → hand or hand → library
+/// moves (the `ZoneChangeRecord` embeds the full card name and type line).
+/// The structured game log already excludes these events; this closes the same
+/// hole on the raw event channel clients also consume.
 pub fn filter_events_for_viewer(
     events: &[GameEvent],
     state: &GameState,
     viewer: PlayerId,
 ) -> Vec<GameEvent> {
+    let spectator = !state.players.iter().any(|player| player.id == viewer);
     events
         .iter()
         .filter(|event| event_visible_to_viewer(event, state, viewer))
-        .cloned()
+        .map(|event| match event {
+            // `CardId` is assigned from the pre-shuffle object sequence when a
+            // deck loads. An opponent can use it to recover hidden deck order,
+            // including the identity of a face-down spell; only the public
+            // stack-object reference is safe to retain here.
+            GameEvent::SpellCast {
+                controller,
+                object_id,
+                ..
+            } if !viewer_has_private_access_to_player(state, viewer, *controller)
+                && (spectator
+                    || state
+                        .objects
+                        .get(object_id)
+                        .is_some_and(|obj| obj.face_down)) =>
+            {
+                GameEvent::SpellCast {
+                    card_id: CardId(0),
+                    controller: *controller,
+                    object_id: *object_id,
+                }
+            }
+            other => other.clone(),
+        })
         .collect()
 }
 
 fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerId) -> bool {
-    let can_view_private_for_player = |player: PlayerId| {
-        player == viewer
-            || (player == state.active_player
-                && turn_control::viewer_controls_active_turn(state, viewer))
-    };
+    let can_view_private_for_player =
+        |player: PlayerId| viewer_has_private_access_to_player(state, viewer, player);
 
     match event {
+        GameEvent::HiddenSearchViewed { audience, .. } => audience.contains(&viewer),
         // Individual draws identify the exact library card — only viewers with
         // private-zone authority for the drawer may see them.
         GameEvent::CardDrawn { player_id, .. } => can_view_private_for_player(*player_id),
@@ -976,6 +1444,32 @@ fn event_visible_to_viewer(event: &GameEvent, state: &GameState, viewer: PlayerI
             record,
             &can_view_private_for_player,
         ),
+        // CR 400.2: A mulligan moves cards from one hidden zone to another.
+        // The record contains the original hand identity, so only the owner
+        // or a viewer with private-zone authority may receive it.
+        GameEvent::ZoneChanged {
+            from: Some(Zone::Hand),
+            to: Zone::Library,
+            record,
+            ..
+        } => can_view_private_for_player(record.owner),
+        // CR 702.143a: foretell exiles a hand card face down. The zone-change
+        // record snapshots its real name, so it is visible only to a viewer
+        // who may look at that face-down exiled card.
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Hand),
+            to: Zone::Exile,
+            ..
+        } => state.objects.get(object_id).is_none_or(|obj| {
+            !obj.face_down
+                || face_down_exile_visible_to_viewer(
+                    state,
+                    *object_id,
+                    obj,
+                    &can_view_private_for_player,
+                )
+        }),
         _ => true,
     }
 }
@@ -995,7 +1489,7 @@ fn library_zone_change_visible_to_viewer(
     can_view_private_for_player: &impl Fn(PlayerId) -> bool,
 ) -> bool {
     if matches!(to, Zone::Hand | Zone::Library) {
-        return viewer_may_see_player_private_zone(state, viewer, record.owner);
+        return viewer_has_private_access_to_player(state, viewer, record.owner);
     }
 
     let Some(obj) = state.objects.get(&object_id) else {
@@ -1147,7 +1641,7 @@ fn is_visible_revealed_card(state: &GameState, obj_id: ObjectId) -> bool {
 fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.face_down = true;
-        obj.name = "Hidden Card".to_string();
+        obj.name = HIDDEN_CARD_NAME.to_string();
         Arc::make_mut(&mut obj.abilities).clear();
         obj.keywords.clear();
         obj.base_keywords.clear();
@@ -1169,6 +1663,16 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
     }
 }
 
+fn record_hidden_replacement_candidate_source(
+    candidate_source_ids: Option<&HashSet<ObjectId>>,
+    hidden_candidate_source_ids: &mut HashSet<ObjectId>,
+    source_id: ObjectId,
+) {
+    if candidate_source_ids.is_some_and(|source_ids| source_ids.contains(&source_id)) {
+        hidden_candidate_source_ids.insert(source_id);
+    }
+}
+
 fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::GameObject) {
     if let Some(back_face) = &obj.back_face {
         obj.name = back_face.name.clone();
@@ -1179,8 +1683,8 @@ fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::G
 }
 
 fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::GameObject) {
-    obj.name = "Hidden Card".to_string();
-    obj.base_name = "Hidden Card".to_string();
+    obj.name = HIDDEN_CARD_NAME.to_string();
+    obj.base_name = HIDDEN_CARD_NAME.to_string();
     obj.printed_ref = None;
     obj.base_printed_ref = None;
     obj.back_face = None;
@@ -1222,20 +1726,58 @@ fn redact_pending_trigger_context_for_observer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::{apply, EngineError};
     use crate::game::morph::manifest;
     use crate::game::printed_cards::snapshot_object_face;
+    use crate::game::replacement::{
+        continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
+    };
     use crate::game::zones::create_object;
-    use crate::types::ability::{BeholdCostAction, Effect, ResolvedAbility};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot, Effect,
+        ReplacementDefinition, ResolvedAbility, TargetFilter,
+    };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        AutoMayChoice, CastPaymentMode, CastingVariant, CostResume, ManaAbilityResume,
-        MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility, PendingCast,
-        PendingManaAbility,
+        ActiveLibrarySearch, AutoMayChoice, CastPaymentMode, CastingVariant, CostResume,
+        FrozenScopedSearchFoundDisposition, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
+        ManaAbilityResume, MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingBeginGameAbility,
+        PendingCast, PendingCostMoveCompletion, PendingCostMoveResume, PendingManaAbility,
+        PendingScopedLibrarySearch, PendingSearchFoundBatch, PreparedScopedLibrarySearchChoice,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
+    use crate::types::proposed_event::{ProposedEvent, SearchFoundDisposition};
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::{ExileCostSourceZone, Zone};
+    use rand::RngCore;
+
+    #[test]
+    fn priority_passing_preferences_are_visible_only_to_their_owner() {
+        use crate::types::game_state::PriorityPassingMode;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+
+        let p0 = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(p0.priority_passing_modes.len(), 1);
+        assert_eq!(
+            p0.priority_passing_mode(PlayerId(0)),
+            PriorityPassingMode::SkipLowUseWindows
+        );
+        assert_eq!(
+            p0.priority_passing_mode(PlayerId(1)),
+            PriorityPassingMode::Standard
+        );
+    }
 
     fn dummy_pending_cast(
         object_id: ObjectId,
@@ -1259,8 +1801,10 @@ mod tests {
             declared_mana_additions: Vec::new(),
             activation_cost: None,
             activation_ability_index: None,
+            pending_loyalty_activation_player: None,
             target_constraints: vec![],
             casting_variant: CastingVariant::Normal,
+            casting_permission_index: None,
             cast_timing_permission: None,
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
@@ -1276,11 +1820,15 @@ mod tests {
             declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
+            deferred_sacrificed_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
             assist_state: crate::types::game_state::AssistState::NotOffered,
             activation_residual: crate::types::game_state::ActivationResidual::None,
+            activation_target_selection:
+                crate::types::game_state::ActivationTargetSelection::Pending,
+            alt_cost_grant_source: None,
         })
     }
 
@@ -1295,6 +1843,7 @@ mod tests {
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
             chosen_tappers: Vec::new(),
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -1311,20 +1860,121 @@ mod tests {
     #[test]
     fn redacts_rng_seed_from_every_viewer() {
         // A distinctive non-zero seed so a leak is unmistakable.
-        let state = GameState::new_two_player(0x1234_5678_9abc_def0);
+        let mut state = GameState::new_two_player(0x1234_5678_9abc_def0);
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
 
-        // Seat viewers and the non-seat spectator must never see the real seed.
+        // Advance the ChaCha20 stream as gameplay would and snapshot the offset,
+        // so `rng_word_pos` is non-zero. Issue #5466 sibling: a leaked word
+        // offset hands an attacker the keystream alignment for free, so the
+        // filter must redact the stream position as well as the seed.
+        for _ in 0..5 {
+            state.rng.next_u32();
+        }
+        state.capture_rng_word_pos();
+        let source_word_pos = state.rng_word_pos;
+        assert_ne!(
+            source_word_pos, 0,
+            "test precondition: stream position must be non-zero to prove redaction"
+        );
+
+        // Seat viewers and the non-seat spectator must never see the real seed
+        // or the serialized stream position.
         for viewer in [PlayerId(0), PlayerId(1), PlayerId(u8::MAX)] {
             let filtered = filter_state_for_viewer(&state, viewer);
             assert_eq!(
                 filtered.rng_seed, 0,
                 "rng_seed must be redacted for viewer {viewer:?}"
             );
+            assert_eq!(
+                filtered.rng_word_pos, 0,
+                "rng_word_pos must be redacted for viewer {viewer:?}"
+            );
         }
 
         // The authoritative source state is untouched by filtering.
         assert_eq!(state.rng_seed, 0x1234_5678_9abc_def0);
+        assert_eq!(state.rng_word_pos, source_word_pos);
+    }
+
+    #[test]
+    fn liminal_entry_state_serializes_but_is_filtered_from_viewers() {
+        let mut state = GameState::new_two_player(42);
+        let entry_ref = ObjectId(99);
+        state.liminal_entries.insert(
+            entry_ref,
+            crate::types::game_state::LiminalEntry {
+                object: crate::game::game_object::GameObject::new(
+                    entry_ref,
+                    CardId(99),
+                    PlayerId(0),
+                    "Liminal Token".to_string(),
+                    Zone::Battlefield,
+                ),
+                name: "Liminal Token".to_string(),
+                source_id: ObjectId(1),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: std::collections::HashSet::new(),
+            },
+        );
+        state.pending_liminal_entry_resume =
+            Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                source_id: entry_ref,
+                player: PlayerId(0),
+                event: crate::types::proposed_event::ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    applied: std::collections::HashSet::new(),
+                },
+            });
+
+        let serialized = serde_json::to_string(&state).unwrap();
+        let restored: GameState = serde_json::from_str(&serialized).unwrap();
+        assert!(restored.liminal_entries.contains_key(&entry_ref));
+        assert!(restored.pending_liminal_entry_resume.is_some());
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(filtered.liminal_entries.is_empty());
+        assert!(filtered.pending_liminal_entry_resume.is_none());
+    }
+
+    #[test]
+    fn search_found_batch_is_visible_only_to_searcher() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.pending_search_found_batch = Some(PendingSearchFoundBatch {
+            searcher: PlayerId(1),
+            library_owner: Some(PlayerId(1)),
+            remaining: vec![ObjectIncarnationRef::of(ObjectId(101), 4)],
+            survivors: vec![ObjectIncarnationRef::of(ObjectId(102), 5)],
+            current: None,
+            continuation: crate::types::game_state::PendingSearchFoundContinuation::Standard {
+                split: None,
+            },
+            visibility: crate::types::game_state::SearchFoundVisibility::Private,
+        });
+
+        let searcher_view = filter_state_for_viewer(&state, PlayerId(1));
+        let batch = searcher_view.pending_search_found_batch.unwrap();
+        assert_eq!(batch.remaining[0].object_id, ObjectId(101));
+        assert_eq!(batch.survivors[0].object_id, ObjectId(102));
+
+        for viewer in [PlayerId(0), PlayerId(2)] {
+            let batch = filter_state_for_viewer(&state, viewer)
+                .pending_search_found_batch
+                .expect("opaque batch remains serialized");
+            assert_eq!(batch.remaining[0].object_id, ObjectId(0));
+            assert_eq!(batch.survivors[0].object_id, ObjectId(0));
+        }
     }
 
     #[test]
@@ -1375,6 +2025,108 @@ mod tests {
         let controller =
             filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0));
         assert_eq!(controller, vec![event]);
+    }
+
+    #[test]
+    fn filters_opponent_mulligan_hand_to_library_events() {
+        let state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let opponent = PlayerId(0);
+
+        let mut mulligan = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(98),
+            Some(Zone::Hand),
+            Zone::Library,
+        );
+        mulligan.name = "Secret Mulligan Card".to_string();
+        mulligan.owner = owner;
+        let mut discard = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Hand),
+            Zone::Graveyard,
+        );
+        discard.name = "Public Discard".to_string();
+        discard.owner = owner;
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(98),
+                from: Some(Zone::Hand),
+                to: Zone::Library,
+                record: Box::new(mulligan),
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record: Box::new(discard),
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, owner), events);
+        let visible = filter_events_for_viewer(&events, &state, opponent);
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(
+            &visible[0],
+            GameEvent::ZoneChanged {
+                from: Some(Zone::Hand),
+                to: Zone::Graveyard,
+                record,
+                ..
+            } if record.name == "Public Discard"
+        ));
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, PlayerId(u8::MAX)),
+            visible
+        );
+    }
+
+    #[test]
+    fn library_draw_events_visible_to_shared_team_turn_controller() {
+        let active_player = PlayerId(0);
+        let drawer = PlayerId(1);
+        let turn_controller = PlayerId(2);
+        let observer = PlayerId(3);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = active_player;
+        state.turn_decision_controller = Some(turn_controller);
+        assert_eq!(
+            turn_control::authorized_submitter_for_player(&state, drawer),
+            turn_controller,
+            "the shared-team turn controller must authorize decisions for the drawer"
+        );
+
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            ObjectId(99),
+            Some(Zone::Library),
+            Zone::Hand,
+        );
+        record.name = "Secret Teammate Card".to_string();
+        record.owner = drawer;
+        let events = vec![
+            GameEvent::CardDrawn {
+                player_id: drawer,
+                object_id: ObjectId(99),
+                nth_in_turn: 1,
+                nth_in_step: 1,
+            },
+            GameEvent::ZoneChanged {
+                object_id: ObjectId(99),
+                from: Some(Zone::Library),
+                to: Zone::Hand,
+                record: Box::new(record),
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, drawer), events);
+        assert_eq!(
+            filter_events_for_viewer(&events, &state, turn_controller),
+            events,
+            "the controller of the active shared team must receive the teammate's private draw events"
+        );
+        assert!(
+            filter_events_for_viewer(&events, &state, observer).is_empty(),
+            "an observer without turn-control authority must not receive the teammate's private draw events"
+        );
     }
 
     #[test]
@@ -1471,6 +2223,125 @@ mod tests {
     }
 
     #[test]
+    fn opponent_spell_cast_hides_stable_card_id_but_keeps_public_stack_reference() {
+        let mut state = GameState::new_two_player(42);
+        let face_down_spell = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(1),
+            "Secret Morph".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&face_down_spell).unwrap().face_down = true;
+        let own_spell = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Known Spell".to_string(),
+            Zone::Stack,
+        );
+        let opponent_face_up_spell = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(1),
+            "Known Opponent Spell".to_string(),
+            Zone::Stack,
+        );
+        let events = vec![
+            GameEvent::SpellCast {
+                card_id: CardId(701),
+                controller: PlayerId(1),
+                object_id: face_down_spell,
+            },
+            GameEvent::SpellCast {
+                card_id: CardId(702),
+                controller: PlayerId(0),
+                object_id: own_spell,
+            },
+            GameEvent::SpellCast {
+                card_id: CardId(703),
+                controller: PlayerId(1),
+                object_id: opponent_face_up_spell,
+            },
+        ];
+
+        let viewer = filter_events_for_viewer(&events, &state, PlayerId(0));
+        assert!(matches!(
+            viewer.as_slice(),
+            [
+                GameEvent::SpellCast {
+                    card_id: CardId(0),
+                    controller: PlayerId(1),
+                    object_id,
+                },
+                GameEvent::SpellCast {
+                    card_id: CardId(702),
+                    controller: PlayerId(0),
+                    ..
+                },
+                GameEvent::SpellCast {
+                    card_id: CardId(703),
+                    controller: PlayerId(1),
+                    object_id: face_up_object_id,
+                },
+            ] if *object_id == face_down_spell && *face_up_object_id == opponent_face_up_spell
+        ));
+
+        let spectator = filter_events_for_viewer(&events, &state, PlayerId(u8::MAX));
+        assert!(spectator.iter().all(|event| matches!(
+            event,
+            GameEvent::SpellCast {
+                card_id: CardId(0),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn foretold_hand_to_exile_zone_change_is_hidden_from_opponent_and_spectator() {
+        let mut state = GameState::new_two_player(42);
+        let owner = PlayerId(1);
+        let foretold = create_object(
+            &mut state,
+            CardId(704),
+            owner,
+            "Secret Foretell".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&foretold).unwrap();
+        obj.foretold = true;
+        obj.face_down = true;
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            foretold,
+            Some(Zone::Hand),
+            Zone::Exile,
+        );
+        record.name = "Secret Foretell".to_string();
+        record.owner = owner;
+        let events = vec![
+            GameEvent::ZoneChanged {
+                object_id: foretold,
+                from: Some(Zone::Hand),
+                to: Zone::Exile,
+                record: Box::new(record),
+            },
+            GameEvent::Foretold {
+                player_id: owner,
+                object_id: foretold,
+            },
+        ];
+
+        assert_eq!(filter_events_for_viewer(&events, &state, owner), events);
+        for viewer in [PlayerId(0), PlayerId(u8::MAX)] {
+            let visible = filter_events_for_viewer(&events, &state, viewer);
+            assert!(matches!(
+                visible.as_slice(),
+                [GameEvent::Foretold { object_id, .. }] if *object_id == foretold
+            ));
+        }
+    }
+
+    #[test]
     fn library_mill_zone_change_stays_public() {
         let state = GameState::new_two_player(42);
         let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -1521,6 +2392,45 @@ mod tests {
 
         assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
         assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
+    }
+
+    /// CR 603.3b: saved trigger-ordering templates are per-player private preference
+    /// state — a viewer sees only their own, never an opponent's saved orderings.
+    #[test]
+    fn filters_other_players_decision_templates() {
+        use crate::analysis::decision_template::{
+            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
+        };
+        use crate::types::game_state::YieldTarget;
+
+        let template = |owner: PlayerId, card_id: u64| {
+            let src = YieldTarget::AllCopies {
+                card_id: CardId(card_id),
+                trigger_description: None,
+            };
+            DecisionTemplate {
+                owner,
+                decisions: vec![PinnedDecision::Order {
+                    source: src.clone(),
+                    pos: 0,
+                }],
+                replay: ReplayMode::Static,
+                key: DecisionGroupKey::from_sources(&[src], DecisionKind::TriggerOrdering),
+            }
+        };
+
+        let mut state = GameState::new_two_player(42);
+        // Distinct keys (different card ids) so both templates coexist.
+        state.set_trigger_order_template(template(PlayerId(0), 100));
+        state.set_trigger_order_template(template(PlayerId(1), 200));
+        assert_eq!(state.decision_templates.len(), 2);
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        // Own-kept AND other-removed: without the retain, P1's template leaks into P0's
+        // view (len 2) or an inverted retain drops P0's own (len 0) — both fail here.
+        assert_eq!(filtered.decision_templates.len(), 1);
+        assert_eq!(filtered.decision_templates[0].owner, PlayerId(0));
     }
 
     /// CR 117.3d: priority yields are private preference state — a viewer sees
@@ -1616,6 +2526,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -1635,6 +2546,261 @@ mod tests {
             filtered.objects.get(&card_id).map(|obj| obj.name.as_str()),
             Some("Hidden Tutor Target")
         );
+    }
+
+    /// CR 101.4a + CR 701.23i: In a three-player simultaneous library search,
+    /// each selector sees only their own already-found cards and only the
+    /// current searcher sees that search's candidates. The deferred delivery
+    /// state must not leak a prior selector's library object ids to the third
+    /// player while the current `SearchChoice` is correctly redacted.
+    #[test]
+    fn scoped_library_search_redacts_prior_selection_and_current_candidates_per_viewer() {
+        let p0 = PlayerId(0);
+        let p1 = PlayerId(1);
+        let p2 = PlayerId(2);
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let p0_selected = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "P0 Secret Forest".to_string(),
+            Zone::Library,
+        );
+        let p1_candidate = create_object(
+            &mut state,
+            CardId(2),
+            p1,
+            "P1 Secret Island".to_string(),
+            Zone::Library,
+        );
+        let source_id = ObjectId(99);
+        state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "test scoped search".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                source_id,
+                p0,
+            )),
+            phase: crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices: Vec::new(),
+                next_selection_index: 0,
+                current_player: Some(p1),
+                selections: vec![(
+                    p0,
+                    vec![ObjectIncarnationRef::from_object(
+                        &state.objects[&p0_selected],
+                    )],
+                )],
+                frozen_dispositions: Vec::new(),
+                pending_reveals: Vec::new(),
+            },
+            after_scope: None,
+        });
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: p1,
+            library_owner: None,
+            cards: vec![p1_candidate],
+            count: 1,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        };
+
+        let p0_view = filter_state_for_viewer(&state, p0);
+        let p0_pending = p0_view
+            .pending_scoped_library_search
+            .expect("P0 view retains the deferred search state");
+        let crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+            selections,
+            ..
+        } = p0_pending.phase
+        else {
+            panic!("expected CollectSelections")
+        };
+        assert_eq!(selections[0].1[0].object_id, p0_selected);
+        assert!(matches!(
+            p0_view.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards == vec![ObjectId(0)]
+        ));
+
+        let p1_view = filter_state_for_viewer(&state, p1);
+        let p1_pending = p1_view
+            .pending_scoped_library_search
+            .expect("P1 view retains the deferred search state");
+        let crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+            selections,
+            ..
+        } = p1_pending.phase
+        else {
+            panic!("expected CollectSelections")
+        };
+        assert_eq!(selections[0].1[0].object_id, ObjectId(0));
+        assert!(matches!(
+            p1_view.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards == vec![p1_candidate]
+        ));
+
+        let p2_view = filter_state_for_viewer(&state, p2);
+        let p2_pending = p2_view
+            .pending_scoped_library_search
+            .expect("spectating player retains only the public pending-state shape");
+        let crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+            selections,
+            ..
+        } = p2_pending.phase
+        else {
+            panic!("expected CollectSelections")
+        };
+        assert_eq!(selections[0].1[0].object_id, ObjectId(0));
+        assert!(matches!(
+            p2_view.waiting_for,
+            WaitingFor::SearchChoice { cards, .. } if cards == vec![ObjectId(0)]
+        ));
+    }
+
+    #[test]
+    fn scoped_hidden_search_uses_latched_audience_after_live_control_changes() {
+        let p0 = PlayerId(0);
+        let latched_controller = PlayerId(1);
+        let live_controller = PlayerId(2);
+        let later_searcher = PlayerId(3);
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        let p0_hidden = create_object(
+            &mut state,
+            CardId(10),
+            p0,
+            "P0 latched search card".to_string(),
+            Zone::Library,
+        );
+        let later_candidate = create_object(
+            &mut state,
+            CardId(11),
+            later_searcher,
+            "Later APNAP search card".to_string(),
+            Zone::Library,
+        );
+        let p0_exact = ObjectIncarnationRef::from_object(&state.objects[&p0_hidden]);
+        let later_exact = ObjectIncarnationRef::from_object(&state.objects[&later_candidate]);
+        state.active_library_searches.insert(
+            ActiveLibrarySearch::try_new(
+                p0,
+                p0,
+                Some(p0),
+                vec![p0, latched_controller],
+                vec![(p0, Zone::Library, p0_exact)],
+            )
+            .unwrap(),
+        );
+        state.active_player = p0;
+        state.turn_decision_controller = Some(live_controller);
+        state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "latched scoped search test".to_string(),
+                    description: None,
+                },
+                Vec::new(),
+                ObjectId(99),
+                p0,
+            )),
+            phase: crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices: vec![
+                    PreparedScopedLibrarySearchChoice {
+                        player: p0,
+                        library_owner: Some(p0),
+                        candidates: vec![p0_exact],
+                        offered_count: Some(1),
+                        announced_selection: Some(vec![p0_exact]),
+                        filter: TargetFilter::Any,
+                        count: 1,
+                        reveal: false,
+                        up_to: false,
+                        allows_partial_find: false,
+                        constraint: crate::types::ability::SearchSelectionConstraint::None,
+                    },
+                    PreparedScopedLibrarySearchChoice {
+                        player: later_searcher,
+                        library_owner: Some(later_searcher),
+                        candidates: vec![later_exact],
+                        offered_count: Some(1),
+                        announced_selection: None,
+                        filter: TargetFilter::Any,
+                        count: 1,
+                        reveal: false,
+                        up_to: false,
+                        allows_partial_find: false,
+                        constraint: crate::types::ability::SearchSelectionConstraint::None,
+                    },
+                ],
+                next_selection_index: 2,
+                current_player: Some(later_searcher),
+                selections: vec![(p0, vec![p0_exact])],
+                frozen_dispositions: vec![FrozenScopedSearchFoundDisposition {
+                    searcher: p0,
+                    identity: p0_exact,
+                    disposition: SearchFoundDisposition::Original,
+                }],
+                pending_reveals: Vec::new(),
+            },
+            after_scope: None,
+        });
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: later_searcher,
+            library_owner: Some(later_searcher),
+            cards: vec![later_candidate],
+            count: 1,
+            reveal: false,
+            up_to: false,
+            allows_partial_find: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        };
+
+        for (viewer, can_see_p0_search) in [
+            (p0, true),
+            (latched_controller, true),
+            (live_controller, false),
+        ] {
+            let view = filter_state_for_viewer(&state, viewer);
+            let pending = view.pending_scoped_library_search.unwrap();
+            let crate::types::game_state::ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices,
+                selections,
+                frozen_dispositions,
+                ..
+            } = pending.phase
+            else {
+                panic!("expected CollectSelections")
+            };
+            let prepared = prepared_choices
+                .iter()
+                .find(|choice| choice.player == p0)
+                .unwrap();
+            let expected = if can_see_p0_search {
+                p0_hidden
+            } else {
+                ObjectId(0)
+            };
+            assert_eq!(
+                prepared.candidates[0].object_id, expected,
+                "viewer {viewer:?}"
+            );
+            assert_eq!(
+                prepared.announced_selection.as_ref().unwrap()[0].object_id,
+                expected,
+                "viewer {viewer:?}",
+            );
+            assert_eq!(selections[0].1[0].object_id, expected, "viewer {viewer:?}");
+            assert_eq!(
+                frozen_dispositions[0].identity.object_id, expected,
+                "viewer {viewer:?}",
+            );
+        }
     }
 
     #[test]
@@ -1944,6 +3110,7 @@ mod tests {
         state.turn_decision_controller = Some(PlayerId(0));
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(1),
+            library_owner: None,
             cards: vec![card_id],
             count: 1,
             reveal: false,
@@ -2624,6 +3791,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![crate::types::ability::TargetRef::Object(ObjectId(20))],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             target_constraints: Vec::new(),
@@ -2826,6 +3994,345 @@ mod tests {
         );
         assert_eq!(opponent_obj.power, Some(2));
         assert_eq!(opponent_obj.toughness, Some(2));
+    }
+
+    #[test]
+    fn replacement_choice_redacts_hidden_candidate_source_for_non_actor() {
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let mut state = GameState::new_two_player(42);
+        let finality_source = create_object(
+            &mut state,
+            CardId(1),
+            controller,
+            "Secret Finality".to_string(),
+            Zone::Battlefield,
+        );
+        let finality_back_face = snapshot_object_face(&state.objects[&finality_source]);
+        let finality = state
+            .objects
+            .get_mut(&finality_source)
+            .expect("finality permanent exists");
+        finality.face_down = true;
+        finality.back_face = Some(finality_back_face);
+        finality.counters.insert(CounterType::Finality, 1);
+
+        let redirect_source = create_object(
+            &mut state,
+            CardId(2),
+            opponent,
+            "Public Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&redirect_source)
+            .expect("competing redirect exists")
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+            .destination_zone(Zone::Graveyard)]
+        .into();
+
+        let mut events = Vec::new();
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::zone_change(finality_source, Zone::Battlefield, Zone::Graveyard, None),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(player) if player == controller),
+            "the finality redirect and competing redirect must surface a real ordering choice"
+        );
+        state.waiting_for = replacement_choice_waiting_for(controller, &state);
+
+        let controller_view = filter_state_for_viewer(&state, controller);
+        assert!(
+            controller_view
+                .pending_replacement
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending
+                        .candidates
+                        .iter()
+                        .any(|candidate| candidate.source == finality_source)
+                }),
+            "the authorized chooser must retain the real replacement continuation"
+        );
+        let controller_snapshot = serde_json::to_value(&controller_view)
+            .expect("authorized viewer snapshot must serialize");
+        assert!(
+            controller_snapshot["pending_replacement"]["candidates"]
+                .as_array()
+                .is_some_and(|candidates| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate["source"] == finality_source.0)
+                }),
+            "the authorized viewer's serialized snapshot must retain the replacement source"
+        );
+
+        let finality_index = match &controller_view.waiting_for {
+            WaitingFor::ReplacementChoice {
+                candidate_count,
+                candidates,
+                ..
+            } => {
+                assert_eq!(*candidate_count, 2);
+                let finality_index = candidates
+                    .iter()
+                    .position(|candidate| candidate.source_id == finality_source)
+                    .expect("the controller must retain the finality candidate identity");
+                assert_eq!(
+                    candidates[finality_index].source_name, "Secret Finality",
+                    "the controller must retain the hidden candidate's real identity"
+                );
+                assert!(
+                    candidates.iter().any(|candidate| {
+                        candidate.source_id == redirect_source
+                            && candidate.source_name == "Public Redirect"
+                    }),
+                    "the actor must retain the public competing candidate"
+                );
+                finality_index
+            }
+            other => panic!("expected ReplacementChoice for controller, got {other:?}"),
+        };
+
+        let opponent_view = filter_state_for_viewer(&state, opponent);
+        assert!(
+            opponent_view.pending_replacement.is_none(),
+            "an unauthorized viewer must not receive the replacement continuation"
+        );
+        let opponent_snapshot =
+            serde_json::to_value(&opponent_view).expect("opponent viewer snapshot must serialize");
+        assert!(
+            opponent_snapshot["pending_replacement"].is_null(),
+            "the serialized snapshot must omit the replacement continuation"
+        );
+        assert_eq!(
+            opponent_view.objects[&finality_source].name, HIDDEN_CARD_NAME,
+            "test precondition: the opponent must not see the face-down source"
+        );
+        match &opponent_view.waiting_for {
+            WaitingFor::ReplacementChoice {
+                candidate_count,
+                candidates,
+                ..
+            } => {
+                assert_eq!(*candidate_count, 2);
+                assert_eq!(candidates[finality_index].source_id, ObjectId(0));
+                assert_eq!(candidates[finality_index].source_name, HIDDEN_CARD_NAME);
+                assert!(
+                    !candidates
+                        .iter()
+                        .any(|candidate| candidate.source_id == finality_source),
+                    "opponent must not receive the hidden finality source identifier"
+                );
+                assert!(
+                    candidates.iter().any(|candidate| {
+                        candidate.source_id == redirect_source
+                            && candidate.source_name == "Public Redirect"
+                    }),
+                    "redaction must preserve visible replacement candidates"
+                );
+            }
+            other => panic!("expected ReplacementChoice for opponent, got {other:?}"),
+        }
+        let serialized_candidates = opponent_snapshot["waiting_for"]["data"]["candidates"]
+            .as_array()
+            .expect("replacement candidates must serialize as an array");
+        assert_eq!(
+            serialized_candidates[finality_index]["source_id"],
+            serde_json::Value::from(0),
+            "the serialized waiting summary must not expose the hidden source"
+        );
+        assert!(
+            !serialized_candidates
+                .iter()
+                .any(|candidate| { candidate["source_id"] == finality_source.0 }),
+            "neither serialized replacement surface may expose the hidden source"
+        );
+
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { to, .. }) =
+            continue_replacement(&mut state, finality_index, &mut events)
+        else {
+            panic!("the controller must be able to resolve the real finality candidate");
+        };
+        assert_eq!(to, Zone::Exile);
+    }
+
+    #[test]
+    fn replacement_choice_shared_team_turn_controller_receives_private_continuation() {
+        let active_player = PlayerId(0);
+        let affected_teammate = PlayerId(1);
+        let turn_controller = PlayerId(2);
+        let unauthorized_opponent = PlayerId(3);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = active_player;
+        state.turn_decision_controller = Some(turn_controller);
+
+        let hidden_source = create_object(
+            &mut state,
+            CardId(3),
+            affected_teammate,
+            "Secret Teammate Replacement".to_string(),
+            Zone::Battlefield,
+        );
+        let hidden_back_face = snapshot_object_face(&state.objects[&hidden_source]);
+        let hidden_object = state
+            .objects
+            .get_mut(&hidden_source)
+            .expect("hidden replacement source exists");
+        hidden_object.face_down = true;
+        hidden_object.back_face = Some(hidden_back_face);
+        hidden_object.counters.insert(CounterType::Finality, 1);
+
+        let redirect_source = create_object(
+            &mut state,
+            CardId(4),
+            unauthorized_opponent,
+            "Public Redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&redirect_source)
+            .expect("competing redirect exists")
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: Vec::new(),
+                    conditional_enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+            .destination_zone(Zone::Graveyard)]
+        .into();
+
+        let mut events = Vec::new();
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::zone_change(hidden_source, Zone::Battlefield, Zone::Graveyard, None),
+            &mut events,
+        );
+        assert!(
+            matches!(result, ReplacementResult::NeedsChoice(player) if player == affected_teammate),
+            "the teammate's finality and competing redirect must surface a real ordering choice"
+        );
+        state.waiting_for = replacement_choice_waiting_for(affected_teammate, &state);
+
+        assert_eq!(
+            turn_control::authorized_submitter_for_player(&state, affected_teammate),
+            turn_controller,
+            "CR 723.5 + CR 805.8: controlling the active team's turn authorizes the controller for a teammate's choice"
+        );
+
+        let controller_view = filter_state_for_viewer(&state, turn_controller);
+        assert!(
+            controller_view.pending_replacement.is_some(),
+            "the legal team-turn replacement chooser must retain the continuation"
+        );
+        let controller_source = controller_view
+            .objects
+            .get(&hidden_source)
+            .expect("the hidden replacement source must remain visible to the controller");
+        assert_eq!(controller_source.name, "Secret Teammate Replacement");
+        assert_eq!(
+            controller_source
+                .back_face
+                .as_ref()
+                .expect("the controller must receive the face-down source identity")
+                .name,
+            "Secret Teammate Replacement"
+        );
+        let WaitingFor::ReplacementChoice { candidates, .. } = controller_view.waiting_for else {
+            panic!("expected ReplacementChoice for the authorized turn controller");
+        };
+        let finality_index = candidates
+            .iter()
+            .position(|candidate| candidate.source_id == hidden_source)
+            .expect("the controller must receive the face-down replacement source");
+        assert_eq!(
+            candidates[finality_index].source_name,
+            "Secret Teammate Replacement"
+        );
+
+        let teammate_view = filter_state_for_viewer(&state, affected_teammate);
+        assert!(
+            teammate_view.pending_replacement.is_none(),
+            "the controlled teammate must not receive the controller's replacement continuation"
+        );
+
+        let observer_view = filter_state_for_viewer(&state, unauthorized_opponent);
+        assert!(
+            observer_view.pending_replacement.is_none(),
+            "an unauthorized opposing observer must not receive the continuation"
+        );
+        assert_eq!(
+            observer_view.objects[&hidden_source].name, HIDDEN_CARD_NAME,
+            "the observer must not receive the face-down source identity"
+        );
+        assert!(
+            observer_view.objects[&hidden_source].back_face.is_none(),
+            "the observer must not receive the face-down source's back face"
+        );
+        let WaitingFor::ReplacementChoice { candidates, .. } = observer_view.waiting_for else {
+            panic!("expected ReplacementChoice for the observer");
+        };
+        assert_eq!(candidates[finality_index].source_id, ObjectId(0));
+        assert_eq!(candidates[finality_index].source_name, HIDDEN_CARD_NAME);
+
+        assert!(
+            matches!(
+                apply(
+                    &mut state,
+                    affected_teammate,
+                    GameAction::ChooseReplacement {
+                        index: finality_index,
+                    },
+                ),
+                Err(EngineError::WrongPlayer)
+            ),
+            "the controlled teammate must not submit the controller's replacement choice"
+        );
+        apply(
+            &mut state,
+            turn_controller,
+            GameAction::ChooseReplacement {
+                index: finality_index,
+            },
+        )
+        .expect("the controlling player must submit the visible replacement choice");
+        assert_eq!(state.objects[&hidden_source].zone, Zone::Exile);
+        assert!(state.pending_replacement.is_none());
     }
 
     /// CR 708.5 (Found Footage class): "You may look at face-down creatures your
@@ -3256,13 +4763,25 @@ mod tests {
             "The Seventh Doctor".to_string(),
             Zone::Battlefield,
         );
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).unwrap(),
+        );
         state.waiting_for = WaitingFor::OpponentGuess {
             player: PlayerId(0),
             options: vec!["greater".to_string(), "not greater".to_string()],
             choice_type: ChoiceType::Labeled {
                 options: vec!["greater".to_string(), "not greater".to_string()],
             },
-            source_id: source,
+            source: crate::types::game_state::OpponentGuessSource {
+                prompt: crate::types::game_state::PromptSourceBinding::from_trigger_source(
+                    &source_context,
+                ),
+            },
+            owner: Some(crate::types::game_state::OpponentGuessOwner {
+                context: source_context,
+                committed_choice: None,
+            }),
             proposition_truth: Some(true),
         };
 
@@ -3309,6 +4828,10 @@ mod tests {
         // secret commit.
         state.objects.get_mut(&source).unwrap().chosen_attributes =
             vec![ChosenAttribute::Number(3), ChosenAttribute::Number(5)];
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).unwrap(),
+        );
         state.waiting_for = WaitingFor::OpponentGuess {
             player: PlayerId(0),
             options: (1..=5).map(|n| n.to_string()).collect(),
@@ -3317,7 +4840,15 @@ mod tests {
                 max: 5,
                 distinctness: NumberDistinctness::DistinctFromSourceHistory,
             },
-            source_id: source,
+            source: crate::types::game_state::OpponentGuessSource {
+                prompt: crate::types::game_state::PromptSourceBinding::from_trigger_source(
+                    &source_context,
+                ),
+            },
+            owner: Some(crate::types::game_state::OpponentGuessOwner {
+                context: source_context,
+                committed_choice: Some(ChosenAttribute::Number(5)),
+            }),
             proposition_truth: None,
         };
 
@@ -3339,5 +4870,213 @@ mod tests {
         let controller_attrs = &controller_view.objects[&source].chosen_attributes;
         assert!(controller_attrs.contains(&ChosenAttribute::Number(3)));
         assert!(controller_attrs.contains(&ChosenAttribute::Number(5)));
+
+        // A later same-id object is not the prompt source. It may have its own
+        // public chosen number, which must not be hidden by the old prompt.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        state.objects.get_mut(&source).unwrap().chosen_attributes =
+            vec![ChosenAttribute::Number(5)];
+        let returned_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert!(
+            returned_view.objects[&source]
+                .chosen_attributes
+                .contains(&ChosenAttribute::Number(5)),
+            "a same-id higher incarnation must not be redacted as the prompt source"
+        );
+    }
+
+    #[test]
+    fn paused_cost_move_resume_is_server_authoritative_for_unauthorized_viewers() {
+        let mut state = GameState::new_two_player(42);
+        state.next_object_id = 70_001;
+        let hidden = create_object(
+            &mut state,
+            CardId(70_001),
+            PlayerId(0),
+            "Paused Cost Secret".to_string(),
+            Zone::Hand,
+        );
+        let mut pending = *dummy_pending_mana_ability(PlayerId(0), ObjectId(70_002));
+        pending.chosen_discards = vec![hidden];
+        pending.chosen_exiled = vec![hidden];
+        pending.cost_paid_object = Some(CostPaidObjectSnapshot {
+            object_id: hidden,
+            lki: state.objects[&hidden].snapshot_for_mana_spent(),
+        });
+        let mana_resume = PendingCostMoveResume::ManaAbilityPayment {
+            pending: Box::new(pending),
+            cursor: ManaAbilityCostCursor {
+                remaining: Vec::new(),
+                resolution_mode: ManaAbilityCostResolutionMode::Interactive,
+                excluded_sources: Vec::new(),
+                sub_cost_demand: None,
+                next_tapper: 0,
+                next_discard: 0,
+                next_exiled: 0,
+                next_sacrificed: 0,
+                selected_exile_remaining: Some(vec![hidden]),
+                selected_sacrifice_remaining: None,
+                deferred_cost_events: Vec::new(),
+                current_action_deferred_start: 0,
+                parent: None,
+            },
+        };
+        let resumes = vec![
+            PendingCostMoveResume::Cast {
+                player: PlayerId(0),
+                pending: Some(dummy_pending_cast(hidden, CardId(70_001), PlayerId(0))),
+                chosen: vec![hidden],
+                paused_at_index: 0,
+                destination: Zone::Exile,
+                completion: PendingCostMoveCompletion::FinishPending,
+            },
+            PendingCostMoveResume::Foretell {
+                player: PlayerId(0),
+                object_id: hidden,
+                cost: ManaCost::generic(1),
+                turn_foretold: 7,
+            },
+            PendingCostMoveResume::DelveManaPayment {
+                player: PlayerId(0),
+                fuel_id: hidden,
+            },
+            mana_resume,
+        ];
+
+        for resume in resumes {
+            state.pending_cost_move_resume = Some(resume);
+            let authoritative_resume = serde_json::to_string(&state.pending_cost_move_resume)
+                .expect("the authoritative cost continuation serializes");
+            assert!(
+                authoritative_resume.contains("70001"),
+                "the authoritative continuation contains the private object ID"
+            );
+            if matches!(
+                &state.pending_cost_move_resume,
+                Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+            ) {
+                assert!(
+                    authoritative_resume.contains("Paused Cost Secret"),
+                    "the mana continuation contains the private cost-payment LKI"
+                );
+            }
+
+            let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+            assert!(
+                opponent_view.pending_cost_move_resume.is_none(),
+                "a non-acting opponent must not receive a paused cost continuation"
+            );
+            let wire = serde_json::to_string(&opponent_view)
+                .expect("the filtered multiplayer snapshot serializes");
+            assert!(
+                !wire.contains("\"pendingCostMoveResume\":{\"type\"")
+                    && !wire.contains("\"pending_cost_move_resume\":{\"type\""),
+                "the viewer snapshot must not serialize a paused continuation's IDs or LKI"
+            );
+        }
+
+        assert!(
+            state.pending_cost_move_resume.is_some(),
+            "filtering must not alter the authoritative server continuation"
+        );
+    }
+
+    #[test]
+    fn active_search_grants_only_exact_incarnation_and_filters_event_by_latched_audience() {
+        let mut state = GameState::new_two_player(7);
+        let looked = create_object(
+            &mut state,
+            CardId(91),
+            PlayerId(1),
+            "Looked Card".to_string(),
+            Zone::Library,
+        );
+        let unlooked = create_object(
+            &mut state,
+            CardId(92),
+            PlayerId(1),
+            "Unlooked Card".to_string(),
+            Zone::Library,
+        );
+        let exact = ObjectIncarnationRef::from_object(&state.objects[&looked]);
+        state.active_library_searches.insert(
+            ActiveLibrarySearch::try_new(
+                PlayerId(0),
+                PlayerId(1),
+                Some(PlayerId(1)),
+                vec![PlayerId(0)],
+                vec![(PlayerId(1), Zone::Library, exact)],
+            )
+            .unwrap(),
+        );
+        let event = GameEvent::HiddenSearchViewed {
+            searcher: PlayerId(0),
+            cards: vec![capture_library_search_card_view(&state.objects[&looked])],
+            audience: vec![PlayerId(0)],
+        };
+
+        let searcher_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(searcher_view.objects[&looked].name, "Looked Card");
+        assert_eq!(searcher_view.objects[&unlooked].name, HIDDEN_CARD_NAME);
+        assert_eq!(
+            filter_events_for_viewer(std::slice::from_ref(&event), &state, PlayerId(0)),
+            vec![event.clone()]
+        );
+        assert!(filter_events_for_viewer(&[event], &state, PlayerId(1)).is_empty());
+
+        state.objects.get_mut(&looked).unwrap().incarnation += 1;
+        let reincarnated_view = filter_state_for_viewer(&state, PlayerId(0));
+        assert_eq!(reincarnated_view.objects[&looked].name, HIDDEN_CARD_NAME);
+    }
+
+    #[test]
+    fn hidden_search_snapshot_captures_current_front_and_back_faces() {
+        let mut state = GameState::new_two_player(7);
+        let card = create_object(
+            &mut state,
+            CardId(93),
+            PlayerId(1),
+            "Front Face".to_string(),
+            Zone::Library,
+        );
+        let front_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "front-oracle".to_string(),
+            face_name: "Front Face".to_string(),
+        };
+        let current_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "current-oracle".to_string(),
+            face_name: "Current Face".to_string(),
+        };
+        let back_ref = crate::types::card::PrintedCardRef {
+            oracle_id: "back-oracle".to_string(),
+            face_name: "Back Face".to_string(),
+        };
+        {
+            let object = state.objects.get_mut(&card).unwrap();
+            object.base_name = "Front Face".to_string();
+            object.base_printed_ref = Some(front_ref.clone());
+            object.name = "Current Face".to_string();
+            object.printed_ref = Some(current_ref.clone());
+            let mut back = snapshot_object_face(object);
+            back.name = "Back Face".to_string();
+            back.printed_ref = Some(back_ref.clone());
+            object.back_face = Some(back);
+        }
+
+        let snapshot = capture_library_search_card_view(&state.objects[&card]);
+
+        assert_eq!(
+            snapshot.identity,
+            ObjectIncarnationRef::from_object(&state.objects[&card])
+        );
+        assert_eq!(snapshot.current_face.name, "Current Face");
+        assert_eq!(snapshot.current_face.printed_ref, Some(current_ref));
+        assert_eq!(snapshot.front_face.name, "Front Face");
+        assert_eq!(snapshot.front_face.printed_ref, Some(front_ref));
+        let back = snapshot.back_face.expect("stored back face is captured");
+        assert_eq!(back.name, "Back Face");
+        assert_eq!(back.printed_ref, Some(back_ref));
     }
 }

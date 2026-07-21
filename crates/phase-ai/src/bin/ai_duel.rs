@@ -52,6 +52,7 @@ fn main() {
     let mut output: Option<PathBuf> = None;
     let mut suite_filter: Option<String> = None;
     let mut attribution = AttributionMode::Disabled;
+    let mut harvest_output: Option<PathBuf> = None;
     let mut commander_feed = "feeds/mtggoldfish-commander.json".to_string();
 
     let mut args_iter = args.iter().skip(1).peekable();
@@ -81,6 +82,7 @@ fn main() {
             "--output" => output = args_iter.next().map(PathBuf::from),
             "--suite-filter" => suite_filter = args_iter.next().cloned(),
             "--show-attribution" => attribution = AttributionMode::Enabled,
+            "--harvest" => harvest_output = args_iter.next().map(PathBuf::from),
             "--feed" => {
                 if let Some(feed) = args_iter.next() {
                     commander_feed = feed.clone();
@@ -135,6 +137,7 @@ fn main() {
             options.output_path = output_path.clone();
             options.filter = suite_filter;
             options.attribution = attribution;
+            options.harvest_output = harvest_output;
             match run_suite(&db, &options) {
                 Ok(_) => {
                     eprintln!("\nSuite report written to {}", output_path.display());
@@ -682,6 +685,8 @@ fn print_usage() {
     eprintln!("  --suite-filter STR Only run matchups whose id contains STR");
     eprintln!("  --show-attribution Capture per-policy decision traces and include");
     eprintln!("                     them in the JSON + markdown output.");
+    eprintln!("  --harvest PATH     Harvest per-turn eval features to JSONL at PATH");
+    eprintln!("                     (Texel retrain corpus; forces sequential run).");
     eprintln!();
     eprintln!("Commander suite mode:");
     eprintln!("  --commander-suite  Run 4-player Commander candidate-seat rotations");

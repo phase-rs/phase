@@ -24,11 +24,12 @@ mod prelude {
     };
     pub(super) use super::super::oracle_ir::context::ParseContext;
     pub(super) use super::super::oracle_ir::static_ir::StaticIr;
-    pub(super) use super::super::oracle_nom::bridge::nom_on_lower;
+    pub(super) use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
     pub(super) use super::super::oracle_nom::condition as nom_condition;
     pub(super) use super::super::oracle_nom::error::OracleResult;
     pub(super) use super::super::oracle_nom::filter as nom_filter;
     pub(super) use super::super::oracle_nom::primitives as nom_primitives;
+    pub(super) use super::super::oracle_nom::quantity as nom_quantity;
     pub(super) use super::super::oracle_nom::target as nom_target;
     pub(super) use super::super::oracle_quantity::{
         parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause, parse_quantity_ref,
@@ -36,6 +37,7 @@ mod prelude {
     pub(super) use super::super::oracle_target::{
         distribute_controller_to_or, parse_combat_status_prefix, parse_counter_suffix,
         parse_mana_value_suffix, parse_target, parse_that_clause_suffix, parse_type_phrase,
+        scope_target_spell_phrase,
     };
     pub(super) use super::super::oracle_util::{
         has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
@@ -44,16 +46,18 @@ mod prelude {
     };
     pub(super) use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction,
-        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-        ContinuousModification, ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope,
-        ParsedCondition, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
-        SharedQuality, SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, ColorChangeMode,
+        CombatRelation, CombatRelationSubject, Comparator, ContinuousModification, ControllerRef,
+        CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition, PlayerFilter, PtStat,
+        PtValueScope, QuantityExpr, QuantityRef, RoundingMode, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     pub(super) use crate::types::card_type::{
         noncreature_subtype_set, CoreType, SubtypeSet, Supertype,
     };
     pub(super) use crate::types::counter::{parse_counter_type, CounterMatch};
+    pub(super) use crate::types::events::ActivatedAbilityKind;
     pub(super) use crate::types::keywords::{Keyword, KeywordKind};
     pub(super) use crate::types::mana::{ManaColor, ManaCost, ManaType, SpecialAction};
     pub(super) use crate::types::phase::Phase;
@@ -63,6 +67,7 @@ mod prelude {
         CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
         CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost, ExileCastTiming,
         HandSizeModification, ProhibitionScope, StaticMode, SuppressedTriggerEvent, TriggerCause,
+        ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;
 }
@@ -82,6 +87,7 @@ mod keyword_grant;
 mod loyalty;
 mod mana_transform;
 mod restriction;
+mod same_is_true;
 mod shared;
 mod static_helpers;
 mod type_change;
@@ -90,8 +96,10 @@ pub(crate) use shared::parse_commander_subject_filter_prefix;
 
 pub(crate) use dispatch::is_speed_unlock_sentence;
 pub(crate) use dispatch::parse_may_look_at_face_down_filter;
+pub(crate) use dispatch::try_parse_counts_as_named_static;
 use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
+pub(crate) use restriction::is_control_players_during_own_library_search;
 
 mod support {
     pub(super) use super::anthem::{
@@ -104,8 +112,8 @@ mod support {
     pub(super) use super::cost_mod::parse_cost_payment_prohibition_statics;
     pub(super) use super::evasion::{
         classify_block_exception, parse_compound_subject_keyword_static,
-        parse_compound_subject_rule_static, parse_property_descriptor,
-        parse_rule_static_separator_nom, try_parse_compound_subtypes,
+        parse_compound_subject_rule_static, parse_leading_except_for_rule_static,
+        parse_property_descriptor, parse_rule_static_separator_nom, try_parse_compound_subtypes,
         try_parse_scoped_must_attack_block, try_split_and_can_attack_despite_defender,
         try_split_and_can_block_additional, try_split_and_cant_activate_abilities,
         try_split_and_cant_attack, try_split_and_cant_attack_or_block,
@@ -123,7 +131,7 @@ mod support {
     };
     pub(super) use super::restriction::{
         parse_cant_be_activated_exemption_in_text, parse_cast_and_activate_only_during,
-        strip_casting_prohibition_subject,
+        parse_relative_count_typed_cast_prohibitions, strip_casting_prohibition_subject,
     };
     pub(super) use super::shared::*;
     pub(super) use super::static_helpers::*;
@@ -136,6 +144,7 @@ mod support {
 }
 
 pub(crate) use cost_mod::{
+    parse_activated_ability_cost_head, parse_alt_cost_frequency_prefix,
     parse_alternative_keyword_cost, parse_cast_spells_alternative_cost_multi,
     parse_collect_evidence_alt_cost, parse_spells_alternative_cost,
 };
@@ -144,6 +153,8 @@ pub(crate) use evasion::{
     parse_forced_block_blocker_slot,
 };
 pub(crate) use grammar::map_keyword;
+pub(crate) use grammar::parse_pt_mod;
+pub(crate) use grammar::promote_nested_ability_quotes;
 pub(crate) use keyword_grant::{
     classify_quoted_inner, parse_chosen_qualifier_subject, parse_continuous_modifications,
     parse_graveyard_granted_keyword_kind, parse_quoted_ability_modifications, split_keyword_list,
@@ -151,11 +162,13 @@ pub(crate) use keyword_grant::{
 };
 pub(crate) use mana_transform::try_parse_retain_unspent_mana_static;
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
+pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
 pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;
 pub(crate) use shared::parse_conditional_protection_grant_list;
+pub(crate) use shared::parse_continuous_subject_filter;
 pub(crate) use shared::parse_dynamic_x_clause;
 pub use shared::parse_static_line_multi;
 pub(crate) use shared::parse_subtype_or_list_insensitive_prefix;
@@ -166,10 +179,10 @@ pub(crate) use shared::{
     parse_tiered_enters_with_additional_counters_pattern,
 };
 pub(crate) use static_helpers::apply_raw_parenthetical_cant_cast_gate;
-pub(crate) use type_change::{
-    parse_additive_type_clause_modifications, parse_chosen_creature_type_static_prefix,
-    parse_every_creature_type_static_prefix,
-};
+pub(crate) use static_helpers::parse_basic_land_type_plural;
+pub(crate) use static_helpers::peel_compound_all_quantified_conjuncts;
+pub(crate) use type_change::parse_additive_type_clause_modifications;
+pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
 #[tracing::instrument(level = "debug")]

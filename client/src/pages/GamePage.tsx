@@ -11,7 +11,14 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { DeckCardCount, GameFormat, MatchConfig, ObjectId, SerializedAbilityCost } from "../adapter/types";
+import type {
+  CompanionRevealChoice,
+  DeckCardCount,
+  GameFormat,
+  MatchConfig,
+  ObjectId,
+  SerializedAbilityCost,
+} from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
@@ -27,6 +34,7 @@ import { RevealOverlay } from "../components/animation/RevealOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { DiceRollOverlay } from "../components/animation/DiceRollOverlay.tsx";
 import { flashStartingPlayerContest } from "../game/diceContest.ts";
+import { loopDetectionModeFromQuery } from "../game/loopDetectionMode.ts";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
 import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
@@ -34,6 +42,8 @@ import { DebugLibraryViewer } from "../components/chrome/DebugLibraryViewer.tsx"
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { BlockRequirementBadges } from "../components/combat/BlockRequirementBadges.tsx";
+import { AttackRequirementBadges } from "../components/combat/AttackRequirementBadges.tsx";
+import { BlockerConstraintBadges } from "../components/combat/BlockerConstraintBadges.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
 import { GameCardPreview } from "../components/card/GameCardPreview.tsx";
@@ -41,6 +51,8 @@ import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { MobilePhaseChip } from "../components/controls/MobilePhaseChip.tsx";
+import { MayTriggerAutoChoiceList } from "../components/board/MayTriggerAutoChoiceList.tsx";
 import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
@@ -71,7 +83,13 @@ import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
 import { OptionalCostModalContent } from "../components/modal/OptionalCostModal.tsx";
 import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
+import { LifeRedistributionModal } from "../components/modal/LifeRedistributionModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
+import { DeclareShortcutModal, RespondToShortcutModal } from "../components/modal/LoopShortcutModal.tsx";
+import {
+  PrecastCopyShortcutOfferModal,
+  RespondToPrecastCopyShortcutModal,
+} from "../components/modal/PrecastCopyShortcutModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
 import { TriggerOrderModal } from "../components/modal/TriggerOrderModal.tsx";
 import { PeekTab } from "../components/modal/DialogShell.tsx";
@@ -80,6 +98,8 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
+import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -95,7 +115,6 @@ import { TurnStatusLine } from "../components/hud/TurnStatusLine.tsx";
 import { GraveyardPile } from "../components/zone/GraveyardPile.tsx";
 import { LibraryPile } from "../components/zone/LibraryPile.tsx";
 import { ExilePile } from "../components/zone/ExilePile.tsx";
-import { CompanionZone } from "../components/zone/CompanionZone.tsx";
 import { ZoneViewer } from "../components/zone/ZoneViewer.tsx";
 import {
   PreferencesModal,
@@ -145,7 +164,7 @@ import {
   loyaltyBadge,
   stripLoyaltyCostPrefix,
 } from "../viewmodel/costLabel.ts";
-import { ManaFontIcon } from "../components/icons/ManaFontIcon.tsx";
+import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
 import {
   getCastableZoneViewerTarget,
   getBoardChoiceView,
@@ -266,7 +285,7 @@ export function GamePage() {
       match_type: matchParam?.toLowerCase() === "bo3" ? "Bo3" : "Bo1",
       // CR 732.2a: combo (infinite-loop) detector opt-in carried from the local
       // game-setup screen; immutable once the game starts (engine default Off).
-      loop_detection: loopParam?.toLowerCase() === "on" ? { type: "On" } : { type: "Off" },
+      loop_detection: loopDetectionModeFromQuery(loopParam),
     }),
     [matchParam, loopParam],
   );
@@ -798,7 +817,10 @@ function GamePageContent({
   const objects = useGameStore((s) => s.gameState?.objects);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
-  const engineWaitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  // Store `waitingFor`, not `gameState.waiting_for`: this is paired below with
+  // the store-slice `legalActionsByObject`, and only the store's own field is
+  // committed atomically with the legal actions.
+  const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
   const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
   const isSandboxGame = useGameStore(
@@ -1071,8 +1093,15 @@ function GamePageContent({
   }, [viewingZone]);
 
   const handleDeclareCompanion = useCallback(
-    (cardIndex: number | null) => {
-      dispatch({ type: "DeclareCompanion", data: { card_index: cardIndex } });
+    (choice: CompanionRevealChoice | null) => {
+      dispatch({
+        type: "DeclareCompanion",
+        data: {
+          choice: choice
+            ? { type: "Reveal", data: choice }
+            : { type: "Decline" },
+        },
+      });
     },
     [dispatch],
   );
@@ -1392,12 +1421,6 @@ function GamePageContent({
               />
             </div>
           </DraggableWidget>
-          <div
-            className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
-            style={playerZoneRailStyle}
-          >
-            <CompanionZone playerId={perspectivePlayerId} />
-          </div>
         </div>
       </div>
 
@@ -1421,11 +1444,12 @@ function GamePageContent({
             className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
           >
             <div className="flex flex-col gap-1 max-lg:gap-1">
-              <CombatPhaseIndicator />
+              <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
             </div>
             <div className="flex items-center gap-1.5">
               <PriorityYieldList />
+              <MayTriggerAutoChoiceList />
               <FullControlToggle className="w-full" />
             </div>
           </div>
@@ -1448,11 +1472,17 @@ function GamePageContent({
                 <TurnStatusLine />
               </div>
               <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
+                {/* <lg only: desktop conveys phase via the PhaseDot strips in
+                    PlayerHud, which are hidden on mobile. */}
+                <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
                     Full Control toggle (self-hides when no yields stand). */}
                 <PriorityYieldList />
+                {/* CR 603.5: standing "don't ask again" auto-choice summary chip,
+                    beside the priority-yield chip (self-hides when none stand). */}
+                <MayTriggerAutoChoiceList />
                 <FullControlToggle />
               </div>
               <ActionButton />
@@ -1658,6 +1688,13 @@ function GamePageContent({
           to attackers that carry a minimum-blocker requirement. */}
       <BlockRequirementBadges />
 
+      {/* Per-creature must-attack / can't-attack and must-block / can't-block
+          badges (CR 508.1c/d, CR 509.1b/c). Each self-gates: renders nothing
+          unless the local player is at the matching declare step and the engine
+          supplied constraints. Display-only. */}
+      <AttackRequirementBadges />
+      <BlockerConstraintBadges />
+
       {/* Card preview overlay. Owns its own inspect-state subscriptions so a
           hover doesn't re-render GamePageContent (and the whole battlefield). */}
       <GameCardPreview />
@@ -1684,15 +1721,23 @@ function GamePageContent({
         {waitingFor?.type === "OrderTriggers" &&
           canActForWaitingState && <TriggerOrderModal />}
         <BattleProtectorModal />
+        <MeldChoiceModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
+        <PileOpponentModal />
+        <AnnouncingOpponentModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
         <CastingVariantModal />
         <PermanentTypeSlotModal />
         <ModeChoiceModal />
+        <DeclareShortcutModal />
+        <RespondToShortcutModal />
+        <PrecastCopyShortcutOfferModal />
+        <RespondToPrecastCopyShortcutModal />
         <ChooseOneOfBranchModal />
+        <LifeRedistributionModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
         <SpellbookDraftModal />
@@ -2264,8 +2309,8 @@ function MulliganDecisionPrompt({
 }
 
 interface CompanionRevealPromptProps {
-  eligibleCompanions: [string, number][];
-  onChoose: (cardIndex: number | null) => void;
+  eligibleCompanions: CompanionRevealChoice[];
+  onChoose: (choice: CompanionRevealChoice | null) => void;
 }
 
 function CompanionRevealPrompt({
@@ -2293,17 +2338,17 @@ function CompanionRevealPrompt({
             >
               <button
                 onClick={() => onChoose(null)}
-                className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                className="min-h-11 rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 active:bg-white/12 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
                 {t("gamePage.companion.decline")}
               </button>
-              {eligibleCompanions.map(([name], i) => (
+              {eligibleCompanions.map((choice) => (
                 <button
-                  key={name}
-                  onClick={() => onChoose(i)}
-                  className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 sm:text-base"
+                  key={`${choice.name}-${choice.source.type}`}
+                  onClick={() => onChoose(choice)}
+                  className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200 active:bg-amber-300 sm:text-base"
                 >
-                  {t("gamePage.companion.reveal", { name })}
+                  {t("gamePage.companion.reveal", { name: choice.name })}
                 </button>
               ))}
             </motion.div>
@@ -2322,9 +2367,9 @@ function CompanionRevealPrompt({
       >
         <div className="w-full overflow-x-auto">
           <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
-            {eligibleCompanions.map(([name], index) => (
+            {eligibleCompanions.map((choice, index) => (
               <motion.div
-                key={name}
+                key={`${choice.name}-${choice.source.type}`}
                 className="flex-shrink-0 rounded-[18px] transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_24px_rgba(245,158,11,0.22)]"
                 style={{
                   marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
@@ -2343,7 +2388,7 @@ function CompanionRevealPrompt({
                 }}
               >
                 <CardImage
-                  cardName={name}
+                  cardName={choice.name}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
@@ -2841,16 +2886,13 @@ function AbilityChoiceModal() {
         if (badge) {
           return {
             id: String(i),
-            label: stripLoyaltyCostPrefix(label),
-            description,
-            // No `size`: mana-font scales the loyalty glyph off the parent's
-            // font-size (font-size:1.5em), so it inherits the option row size.
+            // The ability effect is the option's primary content. The loyalty
+            // badge already expresses its cost, so keeping the effect in the
+            // secondary description would visually detach it from that badge.
+            label: description ?? stripLoyaltyCostPrefix(label),
+            labelTone: "secondary",
             icon: (
-              <ManaFontIcon
-                iconClass={badge.iconClasses}
-                fallbackText={badge.text}
-                label={badge.text}
-              />
+              <LoyaltyBadge amount={badge.amount} kind="cost" />
             ),
           };
         }
@@ -2865,11 +2907,19 @@ function AbilityChoiceModal() {
   );
 }
 
+// ── Prompt modals ───────────────────────────────────────────────────────
+//
+// Every modal below reads the store's `waitingFor` — the SAME authority its
+// outer mount gate uses, and the one `commitEngineSnapshot` writes atomically
+// with the legal actions. Do NOT reach for `gameState.waiting_for` here: that
+// re-opens the split-authority gap where the outer gate opens a modal while the
+// inner component sees a different prompt and renders nothing.
+
 function SpellbookDraftModal() {
   const { t } = useTranslation("game");
   const canActForWaitingState = useCanActForWaitingState();
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const source = useGameStore((s) =>
     waitingFor?.type === "SpellbookDraft"
       ? s.gameState?.objects[waitingFor.data.source_id]
@@ -2901,7 +2951,7 @@ function SpellbookDraftModal() {
 
 function OptionalCostModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "OptionalCostChoice") return null;
 
@@ -2913,7 +2963,7 @@ function OptionalCostModal() {
 function DefilerPaymentModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "DefilerPayment") return null;
 
@@ -2939,7 +2989,7 @@ function DefilerPaymentModal() {
 
 function OptionalEffectModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
@@ -2951,7 +3001,7 @@ function OptionalEffectModal() {
 
 function TopOrBottomModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "TopOrBottomChoice" && waitingFor?.type !== "ClashCardPlacement") return null;
@@ -2963,7 +3013,7 @@ function TopOrBottomModal() {
 
 function MutateMergeModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "MutateMergeChoice") return null;
@@ -2973,7 +3023,7 @@ function MutateMergeModal() {
 
 function CipherEncodeModal() {
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "CipherEncodeChoice") return null;
@@ -2986,7 +3036,7 @@ function CipherEncodeModal() {
 function UntapChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "UntapChoice") return null;
@@ -3030,7 +3080,7 @@ function UntapChoiceModal() {
 function ExertChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "ExertChoice") return null;
@@ -3073,7 +3123,7 @@ function ExertChoiceModal() {
 function EnlistChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
   const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "EnlistChoice") return null;
@@ -3170,7 +3220,7 @@ function formatUnlessCost(
 function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -3229,7 +3279,7 @@ function UnlessPaymentPanel() {
 function UnlessPaymentChooseCostModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "UnlessPaymentChooseCost") return null;
 
@@ -3274,7 +3324,7 @@ function UnlessPaymentChooseCostModal() {
 function ActivationCostOneOfChoiceModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const waitingFor = useGameStore((s) => s.waitingFor);
 
   if (waitingFor?.type !== "ActivationCostOneOfChoice") return null;
 
@@ -3295,6 +3345,57 @@ function ActivationCostOneOfChoiceModal() {
       }
     />
   );
+}
+
+function MeldChoiceModal() {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type === "MeldPairChoice") {
+    const choices = waitingFor.data.choices;
+    return (
+      <ChoiceModal
+        title={t("gamePage.meld.choosePair")}
+        options={choices.map((choice, index) => ({
+          id: String(index),
+          label: `${objects?.[choice.source_id]?.name ?? choice.expected_source} + ${objects?.[choice.partner_id]?.name ?? choice.expected_partner}`,
+          description: t("gamePage.meld.into", { result: choice.result }),
+        }))}
+        onChoose={(id) => {
+          const choice = choices[Number.parseInt(id, 10)];
+          if (!choice) return;
+          dispatch({
+            type: "ChooseMeldPair",
+            data: { source_id: choice.source_id, partner_id: choice.partner_id },
+          });
+        }}
+      />
+    );
+  }
+
+  if (waitingFor?.type === "MeldAttackTargetChoice") {
+    const targets = waitingFor.data.valid_targets;
+    return (
+      <ChoiceModal
+        title={t("gamePage.meld.chooseAttackTarget")}
+        options={targets.map((target, index) => {
+          const label = target.type === "Player"
+            ? t("gamePage.meld.player", { id: target.data })
+            : objects?.[target.data]?.name ?? t("gamePage.meld.permanent", { id: target.data });
+          return { id: String(index), label };
+        })}
+        onChoose={(id) => {
+          const target = targets[Number.parseInt(id, 10)];
+          if (!target) return;
+          dispatch({ type: "ChooseEntryAttackTarget", data: { target } });
+        }}
+      />
+    );
+  }
+
+  return null;
 }
 
 function DebugModeBanner() {

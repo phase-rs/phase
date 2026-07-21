@@ -17,12 +17,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use crate::analysis::resource::ResourceAxis;
 use crate::game::ability_utils::flatten_targets_in_chain;
 use crate::game::game_object::AttachTarget;
-use crate::game::stack::{stack_display_groups, StackDisplayGroup};
+use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
     GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope,
     TargetRef,
 };
 use crate::types::card::TokenImageRef;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::format::GameFormat;
 use crate::types::game_state::{
@@ -34,6 +35,10 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 /// A single commander-damage badge the HUD renders: which victim received
 /// `damage` from `commander` (the ObjectId is stable across zone changes
@@ -80,6 +85,10 @@ pub struct StackEntryDisplay {
     pub kind_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_mode_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_pending: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<StackTargetDisplay>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -189,6 +198,18 @@ pub struct TurnOrderSlotView {
 /// otherwise have to compute game logic (a CLAUDE.md violation).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DerivedViews {
+    /// The sole player currently authorized to answer the live prompt. Omitted
+    /// when there is no actor or multiple distinct authorized submitters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_authorized_submitter: Option<PlayerId>,
+    /// The live (post-layer) keyword badges each battlefield permanent should
+    /// display. The engine classifies the complete keyword list so the client
+    /// can render the compact strip without reinterpreting keyword timing.
+    /// Keyed by object ID; absent when a permanent has no display-relevant
+    /// keyword.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
     /// Commander damage grouped by the attacking commander's current
     /// controller. Each inner entry preserves per-commander identity so
     /// partner commanders under one controller render as separate badges.
@@ -277,6 +298,30 @@ pub struct DerivedViews {
     /// family. Empty (and omitted) in the dominant case where no loop is active.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unbounded_resources: Vec<UnboundedResourceView>,
+
+    /// CR 732.2a / CR 110.1: the battlefield objects forming an accepted
+    /// object-growth loop's "∞ pile" — the winning controller's tapped fodder-class
+    /// members (projected from `GameState::unbounded_loop_pile`, filtered to objects
+    /// still on the battlefield). A per-object membership channel mirroring
+    /// `battlefield_keyword_badges`: the frontend renders `∞` (not `×N`) on any
+    /// battlefield group whose members are all in this set. Public board state — no
+    /// viewer filtering. Empty (and omitted) when no object-growth loop is active.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unbounded_pile: Vec<ObjectId>,
+
+    /// CR 732.2a / CR 701.34a: the per-object `∞` COUNTER channel — for each
+    /// battlefield object, the counter types whose preserved `Generic` counters an
+    /// accepted counter-growth loop (proliferate charge on Pentad Prism, burden on
+    /// The One Ring) pumps unboundedly (projected from
+    /// `GameState::unbounded_counter_targets`, filtered to objects still on the
+    /// battlefield). The counter analog of `unbounded_pile`: object-growth marks whole
+    /// objects, but a counter-growth loop's unbounded axis is object-agnostic, so this
+    /// keys the specific pumped counter so the frontend renders `∞` (not `×N`) on that
+    /// counter pill and nothing else. Keyed by ObjectId; DISPLAY-only (the real counter
+    /// count is unchanged). Public board state — no viewer filtering. Empty (and
+    /// omitted) when no counter-growth loop is active — the dominant case.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unbounded_counters: HashMap<ObjectId, Vec<CounterType>>,
 }
 
 /// Serialize-only wrapper: the WASM getter passes `&GameState` by reference
@@ -290,13 +335,27 @@ pub struct ClientGameStateRef<'a> {
 }
 
 impl<'a> ClientGameStateRef<'a> {
-    /// Wrap a borrowed `GameState` with its derived projections.
-    /// Invoke AFTER any viewer-side filtering (e.g. `filter_state_for_player`)
-    /// so the derived shape reflects what the viewer will actually see.
+    /// Wrap an unfiltered borrowed `GameState` with its derived projections.
+    /// Viewer-filtered paths must use [`Self::wrap_filtered`] so redaction cannot
+    /// erase an authoritative decision projection.
     pub fn wrap(state: &'a GameState, viewer: Option<PlayerId>) -> Self {
         Self {
             state,
             derived: derive_views(state, viewer),
+        }
+    }
+
+    /// Wrap a viewer-filtered state while deriving rules-authoritative fields
+    /// from the pre-filter state. Filtering may redact control/session records;
+    /// it must not change who can submit the current decision.
+    pub fn wrap_filtered(
+        authoritative_state: &GameState,
+        filtered_state: &'a GameState,
+        viewer: Option<PlayerId>,
+    ) -> Self {
+        Self {
+            state: filtered_state,
+            derived: derive_filtered_views(authoritative_state, filtered_state, viewer),
         }
     }
 }
@@ -386,7 +445,10 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
 }
 
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
-    let mut views = DerivedViews::default();
+    let mut views = DerivedViews {
+        unique_authorized_submitter: unique_authorized_submitter(state),
+        ..DerivedViews::default()
+    };
 
     // JIT short-circuit: grouping an empty stack is free, but this also
     // avoids the per-entry allocation path entirely for the dominant case
@@ -409,6 +471,15 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         };
         if obj.zone != Zone::Battlefield {
             continue;
+        }
+        let badges: Vec<Keyword> = obj
+            .keywords
+            .iter()
+            .filter(|keyword| keyword.is_battlefield_display_relevant())
+            .cloned()
+            .collect();
+        if !badges.is_empty() {
+            views.battlefield_keyword_badges.insert(obj_id, badges);
         }
         if let Some(AttachTarget::Player(host)) = obj.attached_to {
             views
@@ -504,6 +575,36 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
 
+    // CR 732.2a / CR 110.1: project the accepted object-growth loop's ∞ pile — the
+    // winning controller's tapped fodder-class members — dropping any that have since
+    // left the battlefield (stale member). Public board state (no viewer filtering);
+    // the frontend renders `∞` on any group whose members are all pile members.
+    for ids in state.unbounded_loop_pile.values() {
+        for id in ids {
+            if state.battlefield.contains(id) {
+                views.unbounded_pile.push(*id);
+            }
+        }
+    }
+
+    // CR 732.2a / CR 701.34a: project the accepted counter-growth loop's per-object ∞
+    // counter targets — the objects whose PRESERVED Generic counters (charge / burden)
+    // the certified-unbounded loop pumps each cycle — dropping any that have since left
+    // the battlefield (stale member). Display-only per-object channel mirroring
+    // `unbounded_pile`; the frontend renders `∞` (not `×N`) on any counter pill whose
+    // type is in this set. Runs in every format (BEFORE the Commander short-circuit).
+    for targets in state.unbounded_counter_targets.values() {
+        for (id, ct) in targets {
+            if state.battlefield.contains(id) {
+                views
+                    .unbounded_counters
+                    .entry(*id)
+                    .or_default()
+                    .push(ct.clone());
+            }
+        }
+    }
+
     if state.format_config.commander_damage_threshold.is_none() {
         return views;
     }
@@ -525,6 +626,26 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         }
     }
     views
+}
+
+/// Derive a viewer-safe presentation from `filtered_state`, retaining only the
+/// decision-authority projection from the pre-filter rules state. This keeps
+/// rules state pure and makes repeated filtering idempotent.
+pub fn derive_filtered_views(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    viewer: Option<PlayerId>,
+) -> DerivedViews {
+    let mut views = derive_views(filtered_state, viewer);
+    views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    views
+}
+
+fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
+    let mut submitters = crate::game::turn_control::authorized_submitters(state);
+    submitters.sort_unstable_by_key(|player| player.0);
+    submitters.dedup();
+    (submitters.len() == 1).then(|| submitters[0])
 }
 
 fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
@@ -574,20 +695,17 @@ fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
 /// - CR 704.5b: `LibraryDelta(p)` — a mill drives an opponent's library toward the
 ///   empty-draw loss and a self-mill the controller's own; the badge follows `p`.
 ///
+/// - CR 704.5c: `Poison(p)` — a poison ∞ drives the afflicted player toward the
+///   10-poison loss, so the badge belongs on the VICTIM's HUD.
+///
 /// Every aggregate axis carries no victim PlayerId and is attributed to the loop's
 /// `controller` (the player generating the unbounded resource).
-//
-// CR 704.5c: a player with ten or more poison counters loses the game — so the
-// *afflicted* player owns the win condition, and a poison ∞ belongs on the VICTIM's
-// HUD. But `Counter(Poison, ObjectClass::Player)` is AGGREGATE-keyed in ResourceVector
-// (no victim PlayerId; loop_check.rs:239-246 reads the summed (Poison, Player) pair),
-// so it falls into the aggregate `=> controller` arm and is controller-attributed here.
-// This is correct ONLY because no live producer emits a poison axis in PR-6 (the mana
-// toggle is the sole producer). PR-7 MUST NOT wire a live poison loop until the analysis
-// poison axis is re-keyed by victim PlayerId, or ∞ would render on the wrong HUD.
 fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
     match axis {
-        ResourceAxis::Life(p) | ResourceAxis::DamageDealt(p) | ResourceAxis::LibraryDelta(p) => p,
+        ResourceAxis::Life(p)
+        | ResourceAxis::DamageDealt(p)
+        | ResourceAxis::LibraryDelta(p)
+        | ResourceAxis::Poison(p) => p,
         ResourceAxis::Mana(_)
         | ResourceAxis::Counter(_, _)
         | ResourceAxis::Trigger(_)
@@ -701,6 +819,10 @@ fn player_status_views(state: &GameState) -> Vec<PlayerStatusView> {
             // CR 116.2a: "can't play cards from <zone>" is enforced at the cast
             // and play-land gates; no dedicated HUD badge yet, so no status row.
             ProhibitedActivity::ProhibitPlayFromZone { .. } => continue,
+            // CR 305.1: "can't play [matching] lands" is enforced at the
+            // play-land gate; no dedicated HUD badge yet, so no status row —
+            // mirrors `ProhibitPlayFromZone` above.
+            ProhibitedActivity::PlayLands { .. } => continue,
         };
         for pid in restriction_affected_players(state, affected_players, *source) {
             views.push(PlayerStatusView {
@@ -750,8 +872,11 @@ fn restriction_affected_players(
         // CR 109.5: `add_restriction` resolves the scoped player to
         // `SpecificPlayer` when the restriction is created, so a stored
         // restriction never carries an unresolved placeholder scope here.
+        // CR 109.4: `ParentObjectTargetController` is likewise resolved to
+        // `SpecificPlayer` by `add_restriction` at creation time.
         RestrictionPlayerScope::TargetedPlayer
         | RestrictionPlayerScope::ParentTargetedPlayer
+        | RestrictionPlayerScope::ParentObjectTargetController
         | RestrictionPlayerScope::ScopedPlayer => Vec::new(),
         // CR 508.5a: `add_restriction` resolves the defending player to
         // `SpecificPlayer` when the restriction is created, so a stored
@@ -770,6 +895,7 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
     let source_name = stack_source_name(state, entry);
+    let effective_ability = effective_stack_ability(state, entry);
     let (kind_label, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
             "Spell".to_string(),
@@ -800,6 +926,11 @@ fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDispla
         token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
         ability_description,
+        selected_mode_labels: effective_ability
+            .ability
+            .map(|ability| ability.selected_mode_labels.clone())
+            .unwrap_or_default(),
+        is_pending: effective_ability.is_pending,
         targets: stack_entry_targets(state, entry),
         paid: stack_paid_facts(state.stack_paid_facts.get(&entry.id)),
         trigger_context: stack_trigger_context(state, entry),
@@ -844,8 +975,8 @@ fn keyword_action_label(action: &KeywordAction) -> String {
 fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTargetDisplay> {
     let targets = match &entry.kind {
         StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
-        _ => entry
-            .ability()
+        _ => effective_stack_ability(state, entry)
+            .ability
             .map(flatten_targets_in_chain)
             .unwrap_or_default(),
     };
@@ -951,6 +1082,7 @@ fn stack_trigger_context(state: &GameState, entry: &StackEntry) -> Vec<TriggerCo
 
 fn trigger_event_display(state: &GameState, event: &GameEvent) -> Option<TriggerContextDisplay> {
     match event {
+        GameEvent::HiddenSearchViewed { .. } => None,
         GameEvent::ZoneChanged {
             object_id,
             record,
@@ -1074,12 +1206,14 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Effect, ResolvedAbility, RestrictionExpiry, TargetRef};
+    use crate::types::ability::{
+        Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, TargetRef,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
-        ZoneChangeRecord,
+        CommanderDamageEntry, PendingCast, StackEntry, StackEntryKind, StackPaidSnapshot,
+        WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -1122,6 +1256,45 @@ mod tests {
         assert!(
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
+        );
+    }
+
+    #[test]
+    fn derive_views_projects_only_battlefield_relevant_keyword_badges() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Keyword Test Creature".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&permanent).unwrap().keywords = vec![
+            Keyword::Flying,
+            Keyword::Ravenous,
+            Keyword::Evoke(crate::types::keywords::EvokeCost::Mana(ManaCost::NoCost)),
+            Keyword::Fading(3),
+        ];
+
+        let hand_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Off-Battlefield Flyer".into(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&hand_card).unwrap().keywords = vec![Keyword::Flying];
+
+        let views = derive_views(&state, None);
+
+        assert_eq!(
+            views.battlefield_keyword_badges.get(&permanent),
+            Some(&vec![Keyword::Flying, Keyword::Fading(3)]),
+            "the strip keeps live battlefield abilities but hides Ravenous and Evoke"
+        );
+        assert!(
+            !views.battlefield_keyword_badges.contains_key(&hand_card),
+            "only battlefield permanents receive keyword badge entries"
         );
     }
 
@@ -1550,6 +1723,120 @@ mod tests {
     }
 
     #[test]
+    fn pending_modal_spell_details_survive_filtering_and_client_wire_round_trip() {
+        let mut state = GameState::new_two_player(42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brotherhood's End".to_string(),
+            Zone::Stack,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Sol Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let mut pending_ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "destroy".to_string(),
+                description: None,
+            },
+            vec![TargetRef::Object(target)],
+            spell,
+            PlayerId(0),
+        );
+        pending_ability.selected_mode_labels = vec![
+            "Brotherhood's End deals 3 damage to each creature and each planeswalker.".to_string(),
+        ];
+        state.waiting_for = WaitingFor::ModeChoice {
+            player: PlayerId(0),
+            modal: ModalChoice::default(),
+            pending_cast: Box::new(PendingCast::new(
+                spell,
+                CardId(1),
+                pending_ability,
+                ManaCost::NoCost,
+            )),
+            unavailable_modes: Vec::new(),
+        };
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(1));
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(1)),
+        ))
+        .expect("serialize filtered opponent view");
+        let client: ClientGameState = serde_json::from_str(&json).expect("deserialize client view");
+        let details = client
+            .derived
+            .stack_entry_details
+            .get(&spell)
+            .expect("public pending spell has stack details");
+
+        assert!(
+            details.is_pending,
+            "the engine marks the matching entry pending"
+        );
+        assert_eq!(
+            details.selected_mode_labels,
+            ["Brotherhood's End deals 3 damage to each creature and each planeswalker."],
+            "the public selected mode reaches an opponent through filtering and the client wrapper",
+        );
+        assert_eq!(details.targets[0].label, "Sol Ring");
+    }
+
+    #[test]
+    fn stack_entry_display_selected_modes_are_wire_compatible_and_cloneable() {
+        let empty = StackEntryDisplay {
+            source_name: "Spell".to_string(),
+            token_image_ref: None,
+            kind_label: "Spell".to_string(),
+            ability_description: None,
+            selected_mode_labels: Vec::new(),
+            is_pending: false,
+            targets: Vec::new(),
+            paid: Vec::new(),
+            trigger_context: Vec::new(),
+        };
+        let empty_json = serde_json::to_string(&empty).expect("serialize empty display");
+        assert!(
+            !empty_json.contains("selected_mode_labels") && !empty_json.contains("is_pending"),
+            "empty additions must preserve the legacy wire shape",
+        );
+        let legacy: StackEntryDisplay =
+            serde_json::from_str(r#"{"source_name":"Spell","kind_label":"Spell"}"#)
+                .expect("legacy display payload deserializes");
+        assert!(legacy.selected_mode_labels.is_empty());
+        assert!(!legacy.is_pending);
+
+        let mut selected = empty;
+        selected.selected_mode_labels = vec!["Choose this mode.".to_string()];
+        selected.is_pending = true;
+        let copied = selected.clone();
+        let selected_json = serde_json::to_string(&selected).expect("serialize selected modes");
+        assert!(selected_json.contains("selected_mode_labels"));
+        assert_eq!(
+            copied, selected,
+            "derived display copies retain selected modes"
+        );
+    }
+
+    #[test]
     fn derive_views_uses_filtered_names_for_trigger_context() {
         let mut state = GameState::new_two_player(42);
         let trigger_source = create_object(
@@ -1578,6 +1865,7 @@ mod tests {
                 supertypes: Vec::new(),
                 keywords: Vec::new(),
                 trigger_definitions: Vec::new(),
+                trigger_source_context: None,
                 power: None,
                 toughness: None,
                 base_power: None,
@@ -1958,8 +2246,8 @@ mod tests {
     /// victim payload routes to the named victim — while every aggregate axis stays
     /// on the controller.
     ///
-    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta => p` arm to
-    /// `=> controller` → the three victim assertions (`p1` expected) fail.
+    /// REVERT-PROBE: change the `Life | DamageDealt | LibraryDelta | Poison => p` arm to
+    /// `=> controller` → the four victim assertions (`p1` expected) fail.
     #[test]
     fn attribution_player_routes_payload_axes_both_directions() {
         use crate::analysis::resource::{CounterClass, ObjectClass, TriggerKind};
@@ -1977,6 +2265,8 @@ mod tests {
         assert_eq!(attribution_player(ResourceAxis::Life(p1), p0), p1);
         assert_eq!(attribution_player(ResourceAxis::DamageDealt(p1), p0), p1);
         assert_eq!(attribution_player(ResourceAxis::LibraryDelta(p1), p0), p1);
+        // CR 704.5c: a poison ∞ belongs on the afflicted player's HUD, not the controller's.
+        assert_eq!(attribution_player(ResourceAxis::Poison(p1), p0), p1);
 
         // Aggregate axes (no victim PlayerId) attribute to the controller.
         assert_eq!(
@@ -2125,11 +2415,98 @@ mod tests {
         );
     }
 
+    /// DESIGN STEP 4 (∞-pile projection): `GameState::unbounded_loop_pile` projects into
+    /// `DerivedViews::unbounded_pile`, filtered to objects still on the battlefield — a
+    /// registered member that has since left is dropped (stale).
+    ///
+    /// REVERT-PROBE: delete the `derive_views` projection loop → `unbounded_pile` is empty
+    /// → the two positive `contains` assertions fail.
+    #[test]
+    fn derive_views_projects_unbounded_pile() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        // A registered id that is NOT on the battlefield (already left) — must be dropped.
+        let gone = ObjectId(9999);
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a, b, gone]));
+
+        let views = derive_views(&state, None);
+        assert!(
+            views.unbounded_pile.contains(&a),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            views.unbounded_pile.contains(&b),
+            "on-battlefield pile member projects"
+        );
+        assert!(
+            !views.unbounded_pile.contains(&gone),
+            "a member no longer on the battlefield is dropped (stale)"
+        );
+
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&empty, None).unbounded_pile.is_empty(),
+            "no object-growth loop → no pile (field omitted)"
+        );
+    }
+
+    /// DESIGN STEP 4 (serde wire shape + omission): `unbounded_pile` serializes through
+    /// `ClientGameStateRef` → JSON → `ClientGameState` as an ObjectId array, and the empty
+    /// case omits the key entirely (`skip_serializing_if = "Vec::is_empty"`).
+    #[test]
+    fn unbounded_pile_round_trip_through_wire() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let a = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Saproling".into(),
+            Zone::Battlefield,
+        );
+        state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([a]));
+
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("unbounded_pile"),
+            "pile key present when non-empty"
+        );
+
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            round.derived.unbounded_pile,
+            vec![a],
+            "the pile ObjectId survives the wire round-trip"
+        );
+
+        // Empty case: skip_serializing_if omits the key entirely.
+        let empty = GameState::new(FormatConfig::standard(), 2, 42);
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&empty, None))
+            .expect("serialize empty");
+        assert!(
+            !empty_json.contains("unbounded_pile"),
+            "empty pile → key omitted"
+        );
+    }
+
     /// PR-6 tests 4+5 (serde wire shape + round-trip): the `unbounded_resources`
     /// projection serializes through `ClientGameStateRef` → JSON → `ClientGameState`
     /// with the externally-tagged `ResourceAxis` shapes the TS mirror depends on
     /// (unit → bare string, single-data → `{"Mana":"Red"}`, PlayerId transparent
-    /// `{"Life":1}`, tuple → `{"Counter":["Poison","Player"]}`), and the empty case
+    /// `{"Life":1}` / `{"Poison":1}`, tuple → `{"Counter":["Energy","Player"]}`), and the empty case
     /// omits the key. Exercises the `Serialize`/`Deserialize` derives added to
     /// `ResourceAxis`/`CounterClass`/`ObjectClass`/`TriggerKind`.
     ///
@@ -2146,7 +2523,10 @@ mod tests {
             &[
                 ResourceAxis::Mana(ManaType::Red),
                 ResourceAxis::Life(PlayerId(1)),
-                ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player),
+                // Victim-keyed poison axis (PlayerId-transparent wire shape).
+                ResourceAxis::Poison(PlayerId(1)),
+                // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
+                ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
                 ResourceAxis::Trigger(TriggerKind::Proliferate),
                 ResourceAxis::TokensCreated,
             ],
@@ -2158,7 +2538,11 @@ mod tests {
         assert!(json.contains(r#"{"Mana":"Red"}"#), "single-data axis shape");
         assert!(json.contains(r#"{"Life":1}"#), "PlayerId transparent shape");
         assert!(
-            json.contains(r#"{"Counter":["Poison","Player"]}"#),
+            json.contains(r#"{"Poison":1}"#),
+            "poison PlayerId-transparent wire shape"
+        );
+        assert!(
+            json.contains(r#"{"Counter":["Energy","Player"]}"#),
             "tuple axis shape"
         );
         assert!(
@@ -2168,10 +2552,12 @@ mod tests {
 
         let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
         let rows = &round.derived.unbounded_resources;
-        assert_eq!(rows.len(), 5, "all five axis rows survive the round-trip");
-        // Aggregate poison axis attributes to the controller P0 (see attribution_player).
-        assert!(rows.iter().any(|r| r.player == PlayerId(0)
-            && r.axis == ResourceAxis::Counter(CounterClass::Poison, ObjectClass::Player)));
+        assert_eq!(rows.len(), 6, "all six axis rows survive the round-trip");
+        // CR 704.5c: the victim-keyed poison axis attributes to the afflicted P1, NOT the
+        // controller P0 (the re-key discharge — see attribution_player).
+        assert!(rows
+            .iter()
+            .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Poison(PlayerId(1))));
         // Victim-keyed life axis attributes to P1.
         assert!(rows
             .iter()
@@ -2185,5 +2571,117 @@ mod tests {
             !empty_json.contains("unbounded_resources"),
             "empty unbounded resources must omit the wire key"
         );
+    }
+
+    #[test]
+    fn unique_submitter_projection_uses_search_latch_and_omits_no_actor() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        assert_eq!(
+            derive_views(&state, None).unique_authorized_submitter,
+            Some(PlayerId(1))
+        );
+
+        state.waiting_for = WaitingFor::GameOver { winner: None };
+        assert_eq!(derive_views(&state, None).unique_authorized_submitter, None);
+    }
+
+    #[test]
+    fn filtered_search_views_preserve_latched_submitter_for_every_audience_role() {
+        use crate::types::ability::SearchSelectionConstraint;
+        use crate::types::game_state::{
+            ActiveLibrarySearch, ActiveSearchDecisionAuthority, ActiveSearchDecisionControl,
+            WaitingFor,
+        };
+
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        state.active_library_searches.insert(
+            ActiveLibrarySearch::try_new(
+                PlayerId(0),
+                PlayerId(0),
+                Some(PlayerId(0)),
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("valid search"),
+        );
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        // Live turn control has changed since the search decision was latched.
+        state.turn_decision_controller = Some(PlayerId(2));
+
+        for viewer in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+            let filtered_twice =
+                crate::game::visibility::filter_state_for_viewer(&filtered, viewer);
+            assert_eq!(filtered_twice, filtered, "filtering must be idempotent");
+            assert_eq!(
+                derive_filtered_views(&state, &filtered, Some(viewer)).unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "searcher, latched controller, and observer must share one authority projection"
+            );
+            let mut mutated_filtered = filtered.clone();
+            mutated_filtered
+                .active_search_decision_controls
+                .remove(&PlayerId(0));
+            mutated_filtered.turn_decision_controller = Some(PlayerId(2));
+            assert_eq!(
+                derive_filtered_views(&state, &mutated_filtered, Some(viewer))
+                    .unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "filtered-state mutation must not alter authoritative submission rights"
+            );
+            let wire = serde_json::to_value(ClientGameStateRef::wrap_filtered(
+                &state,
+                &filtered,
+                Some(viewer),
+            ))
+            .expect("serialize filtered search view");
+            assert_eq!(wire["derived"]["unique_authorized_submitter"], 1);
+        }
     }
 }

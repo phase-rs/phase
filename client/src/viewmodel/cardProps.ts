@@ -3,8 +3,14 @@ import { isChangeling } from "./keywordProps";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
 export const FACE_DOWN_CARD_NAME = "Face-down card";
-/** Convert a small integer (1–5) to a Roman numeral string. */
-export function toRoman(n: number): string { return ROMAN[n] ?? String(n); }
+/** Convert a small integer (1–5) to a Roman numeral string. Values outside the
+ *  table fall back to the arabic numeral for a positive integer, or "" for a
+ *  non-positive / non-integer input — so a missing/NaN class level renders blank
+ *  rather than the literal string "undefined"/"NaN" (`ROMAN[undefined]` is
+ *  `undefined`, and the old `?? String(n)` stringified it onto the card badge). */
+export function toRoman(n: number): string {
+  return ROMAN[n] ?? (Number.isInteger(n) && n > 0 ? String(n) : "");
+}
 
 export interface CardViewProps {
   id: ObjectId;
@@ -166,14 +172,26 @@ export function formatCounterTooltip(
   type: string,
   count: number,
   translate?: CounterTooltipTranslator,
+  isUnbounded?: boolean,
 ): string {
   const label = formatCounterType(type);
   if (translate) {
+    // CR 732.2a / CR 701.34a: an unbounded counter renders `∞` on the badge, so its
+    // tooltip summary must say "unbounded" rather than interpolate the finite count.
+    if (isUnbounded) {
+      return translate("counterTooltip.summaryUnbounded", {
+        label,
+        description: formatCounterDescription(type, translate),
+      });
+    }
     return translate("counterTooltip.summary", {
       count,
       label,
       description: formatCounterDescription(type, translate),
     });
+  }
+  if (isUnbounded) {
+    return `${label} counters: ∞`;
   }
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }

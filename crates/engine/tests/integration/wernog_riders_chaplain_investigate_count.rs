@@ -293,7 +293,7 @@ fn wernog_clause3_count_is_one_when_no_opponent_investigates() {
     );
 }
 
-/// CR 608.2c + CR 118.12 + CR 609.3: Mixed decline/accept — the clause-2
+/// CR 608.2c + CR 118.12 + CR 608.2d: Mixed decline/accept — the clause-2
 /// decline gate AND the unconditional clause-3 self-investigate must BOTH
 /// resolve correctly when the FINAL clause-1 iteration accepts. With 3 players
 /// (P0 controller, P1 + P2 opponents), P1 DECLINES and P2 ACCEPTS. P2's accept
@@ -307,7 +307,7 @@ fn wernog_clause3_count_is_one_when_no_opponent_investigates() {
 /// - P2 (accepted) loses nothing;
 /// - P0 (controller) is never a clause-2 subject;
 /// - the ledger records P2 and P0 (clause-3), but not P1;
-/// - Clues = P2(1) + P0(X = 1 + 1 = 2) = 3 (CR 609.3: only the 1 investigating
+/// - Clues = P2(1) + P0(X = 1 + 1 = 2) = 3 (CR 608.2c: only the 1 investigating
 ///   opponent counts toward X).
 #[test]
 fn wernog_mixed_decline_and_accept_gate_and_clause3() {
@@ -405,7 +405,7 @@ fn wernog_mixed_decline_and_accept_gate_and_clause3() {
         state.player_actions_this_way
     );
 
-    // CR 609.3: X = 1 + (1 investigating opponent) = 2 → Clues = P2(1) + P0(2) =
+    // CR 608.2c: X = 1 + (1 investigating opponent) = 2 → Clues = P2(1) + P0(2) =
     // 3. If clause 3 were dropped on the condition-false path, this would be 1.
     assert_eq!(
         count_clues(&state),

@@ -1,0 +1,80 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 93,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards."
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "DealDamage",
+            "amount": {
+              "type": "Fixed",
+              "value": 5
+            },
+            "target": {
+              "type": "Player"
+            }
+          },
+          "cost": null,
+          "sub_ability": {
+            "kind": "Spell",
+            "effect": {
+              "type": "Draw",
+              "count": {
+                "type": "Fixed",
+                "value": 3
+              },
+              "target": {
+                "type": "Player"
+              }
+            },
+            "cost": null,
+            "sub_ability": null,
+            "duration": null,
+            "description": null,
+            "target_prompt": null,
+            "condition": {
+              "type": "Not",
+              "condition": {
+                "type": "EffectOutcome",
+                "signal": "OptionalEffectPerformed"
+              }
+            },
+            "optional_targeting": false,
+            "optional": false,
+            "forward_result": false
+          },
+          "duration": null,
+          "description": "Any player may have ~ deal 5 damage to them. If no one does, target player draws three cards.",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": true,
+          "optional_for": "AnyPlayer",
+          "forward_result": false
+        }
+      }
+    }
+  ],
+  "source_text": "Any player may have Browbeat deal 5 damage to them. If no one does, target player draws three cards.",
+  "card_name": "Browbeat"
+}

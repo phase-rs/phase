@@ -1,24 +1,27 @@
-{
-  "identifier": "default",
-  "description": "Default capabilities for the main window",
-  "windows": ["main"],
-  "permissions": [
-    "core:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "name": "binaries/phase-server",
-          "sidecar": true,
-          "args": []
-        }
-      ]
+[
+  {
+    "identifier": "default",
+    "description": "Local permissions for the bundled bootstrap page",
+    "windows": ["main"],
+    "permissions": ["core:default", "allow-stash-legacy-storage"]
+  },
+  {
+    "identifier": "remote-shell",
+    "description": "Remote permissions for the first-party thin-shell content",
+    "local": false,
+    "windows": ["main"],
+    "remote": {
+      "urls": ["https://phase-rs.dev/*", "https://preview.phase-rs.dev/*"]
     },
-    "shell:allow-kill",
-    "shell:allow-stdin-write",
-    "shell:allow-open",
-    "process:allow-exit",
-    "process:allow-restart",
-    "updater:default"
-  ]
-}
+    "permissions": [
+      "core:default",
+      "shell:allow-open",
+      "process:allow-exit",
+      "process:allow-restart",
+      "updater:default",
+      "allow-take-legacy-storage",
+      "allow-confirm-legacy-import",
+      "allow-mark-remote-load-ok"
+    ]
+  }
+]

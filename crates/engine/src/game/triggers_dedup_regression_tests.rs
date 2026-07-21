@@ -5,7 +5,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::actions::GameAction;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, GameState, MayTriggerAutoChoiceKey, MayTriggerOrigin, WaitingFor,
@@ -18,6 +18,18 @@ use crate::types::zones::Zone;
 
 fn setup() -> GameState {
     GameState::new_two_player(42)
+}
+
+fn live_trigger_origin(
+    state: &GameState,
+    source_id: ObjectId,
+    live_index: usize,
+) -> MayTriggerOrigin {
+    let source = state.objects.get(&source_id).unwrap();
+    let entry = source.trigger_definitions.get(live_index).unwrap();
+    MayTriggerOrigin::Definition {
+        definition_ref: source.trigger_definition_ref(entry),
+    }
 }
 
 fn make_creature(
@@ -90,6 +102,7 @@ fn etb_observer_fires_once_per_event() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
 
     let new_etb = create_object(
@@ -864,6 +877,7 @@ fn landfall_fires_once_per_land_etb() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     // Narrow the valid_card to lands to mimic landfall's filter.
     state
@@ -871,6 +885,7 @@ fn landfall_fires_once_per_land_etb() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .valid_card = Some(TargetFilter::Typed(
         crate::types::ability::TypedFilter::land(),
     ));
@@ -928,6 +943,7 @@ fn panharmonicon_still_doubles_after_dedup() {
         .get_mut(&observer_id)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
 
     // Put a Panharmonicon on the battlefield with its static.
@@ -1016,6 +1032,177 @@ fn install_doubler(state: &mut GameState, cause: TriggerCause) -> ObjectId {
     id
 }
 
+/// CR 603.2d + CR 603.6a + CR 603.6c: Gandalf the White-class doubler.
+fn install_gandalf_doubler(state: &mut GameState) -> ObjectId {
+    use crate::types::statics::{TriggerCause, ZoneChangeQualifier};
+    install_doubler(
+        state,
+        TriggerCause::BattlefieldTransition {
+            enter: true,
+            leave: true,
+            qualifiers: vec![
+                ZoneChangeQualifier::Supertype(Supertype::Legendary),
+                ZoneChangeQualifier::CoreType(CoreType::Artifact),
+            ],
+        },
+    )
+}
+
+/// CR 603.2d: Gandalf doubles ETB triggers caused by a legendary permanent.
+#[test]
+fn gandalf_doubles_legendary_etb_triggers() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .trigger_definitions[0]
+        .definition
+        .destination = Some(Zone::Battlefield);
+    let _gandalf = install_gandalf_doubler(&mut state);
+
+    let norin = create_object(
+        &mut state,
+        CardId(5332),
+        PlayerId(0),
+        "Norin the Wary".to_string(),
+        Zone::Battlefield,
+    );
+    state.objects.get_mut(&norin).unwrap().card_types = crate::types::card_type::CardType {
+        core_types: vec![CoreType::Creature],
+        supertypes: vec![Supertype::Legendary],
+        subtypes: vec![],
+    };
+
+    let event = GameEvent::ZoneChanged {
+        object_id: norin,
+        from: Some(Zone::Exile),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            name: "Norin the Wary".to_string(),
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![Supertype::Legendary],
+            ..ZoneChangeRecord::test_minimal(norin, Some(Zone::Exile), Zone::Battlefield)
+        }),
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Gandalf must double ETB triggers caused by a legendary permanent re-entering"
+    );
+}
+
+/// CR 603.2d: Gandalf doubles ETB triggers caused by an artifact.
+#[test]
+fn gandalf_doubles_artifact_etb_triggers() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .trigger_definitions[0]
+        .definition
+        .destination = Some(Zone::Battlefield);
+    let _gandalf = install_gandalf_doubler(&mut state);
+
+    let genesis = create_object(
+        &mut state,
+        CardId(5333),
+        PlayerId(0),
+        "Genesis Chamber".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&genesis)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Artifact);
+
+    let event = GameEvent::ZoneChanged {
+        object_id: genesis,
+        from: Some(Zone::Hand),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            name: "Genesis Chamber".to_string(),
+            core_types: vec![CoreType::Artifact],
+            ..ZoneChangeRecord::test_minimal(genesis, Some(Zone::Hand), Zone::Battlefield)
+        }),
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Gandalf must double ETB triggers caused by an artifact entering"
+    );
+}
+
+/// CR 603.2d: Gandalf does not double ETB triggers from ordinary non-artifact creatures.
+#[test]
+fn gandalf_does_not_double_ordinary_creature_etb_triggers() {
+    let (mut state, observer) = setup_with_observer(TriggerMode::ChangesZone);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .trigger_definitions[0]
+        .definition
+        .destination = Some(Zone::Battlefield);
+    let _gandalf = install_gandalf_doubler(&mut state);
+
+    let greeter = create_object(
+        &mut state,
+        CardId(5334),
+        PlayerId(0),
+        "Gala Greeters".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&greeter)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+
+    let event = GameEvent::ZoneChanged {
+        object_id: greeter,
+        from: Some(Zone::Hand),
+        to: Zone::Battlefield,
+        record: Box::new(ZoneChangeRecord {
+            name: "Gala Greeters".to_string(),
+            core_types: vec![CoreType::Creature],
+            ..ZoneChangeRecord::test_minimal(greeter, Some(Zone::Hand), Zone::Battlefield)
+        }),
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Gandalf must not double ETB triggers caused by a non-legendary non-artifact creature"
+    );
+}
+
 /// CR 603.2d: Isshin (CreatureAttacking cause) doubles attack triggers
 /// of a permanent the controller owns.
 #[test]
@@ -1069,6 +1256,7 @@ fn isshin_does_not_double_etb_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _isshin = install_doubler(&mut state, TriggerCause::CreatureAttacking);
 
@@ -1153,6 +1341,152 @@ fn panharmonicon_does_not_double_attack_triggers() {
     assert_eq!(
         observer_triggers, 1,
         "Panharmonicon must NOT double attack triggers — cause is EntersBattlefield"
+    );
+}
+
+/// CR 603.2d + CR 601.2 + CR 707.10: Veyran, Voice of Duality
+/// (`ControllerCastOrCopiedSpell { [Instant, Sorcery] }`) doubles a
+/// magecraft-style trigger when its controller casts an instant.
+#[test]
+fn veyran_doubles_trigger_caused_by_controller_casting_instant() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::SpellCastOrCopy);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    // An instant spell on the stack, cast by the doubler's controller.
+    let spell = create_object(
+        &mut state,
+        CardId(200),
+        PlayerId(0),
+        "Opt".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Instant);
+
+    let event = GameEvent::SpellCast {
+        card_id: CardId(200),
+        controller: PlayerId(0),
+        object_id: spell,
+    };
+
+    process_triggers(&mut state, &[event]);
+    // CR 603.3b (#531): drain the per-controller ordering prompt.
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 2,
+        "Veyran must double a trigger caused by its controller casting an instant"
+    );
+}
+
+/// CR 603.2d: Veyran does NOT double attack triggers — the cause predicate is
+/// `ControllerCastOrCopiedSpell`, not `CreatureAttacking`. Regression for
+/// issue #5291 (Veyran was copying an attack trigger).
+#[test]
+fn veyran_does_not_double_attack_triggers() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::Attacks);
+    state
+        .objects
+        .get_mut(&observer)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Creature);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    let event = GameEvent::AttackersDeclared {
+        attacker_ids: vec![observer],
+        defending_player: PlayerId(1),
+        attacks: vec![(
+            observer,
+            crate::game::combat::AttackTarget::Player(PlayerId(1)),
+        )],
+    };
+
+    process_triggers(&mut state, &[event]);
+    // CR 603.3b (#531): drain the per-controller ordering prompt.
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Veyran must NOT double attack triggers — cause is ControllerCastOrCopiedSpell (#5291)"
+    );
+}
+
+/// CR 603.2d + CR 601.2: Veyran does NOT double a trigger caused by an
+/// OPPONENT casting a spell — "you casting or copying" scopes the cause to
+/// the doubler's controller.
+#[test]
+fn veyran_does_not_double_opponent_cast_trigger() {
+    use crate::types::statics::TriggerCause;
+
+    let (mut state, observer) = setup_with_observer(TriggerMode::SpellCastOrCopy);
+    let _veyran = install_doubler(
+        &mut state,
+        TriggerCause::ControllerCastOrCopiedSpell {
+            core_types: vec![CoreType::Instant, CoreType::Sorcery],
+        },
+    );
+
+    // An instant spell on the stack, cast by the OPPONENT.
+    let spell = create_object(
+        &mut state,
+        CardId(201),
+        PlayerId(1),
+        "Opt".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Instant);
+
+    let event = GameEvent::SpellCast {
+        card_id: CardId(201),
+        controller: PlayerId(1),
+        object_id: spell,
+    };
+
+    process_triggers(&mut state, &[event]);
+    super::drain_order_triggers_with_identity(&mut state);
+    let observer_triggers = state
+        .stack
+        .iter()
+        .filter(|e| e.source_id == observer)
+        .count();
+    assert_eq!(
+        observer_triggers, 1,
+        "Veyran must NOT double a trigger caused by an opponent's cast"
     );
 }
 
@@ -1548,6 +1882,7 @@ fn drivnod_doubles_dies_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Graveyard);
     let _drivnod = install_doubler(&mut state, TriggerCause::CreatureDying);
 
@@ -1653,6 +1988,7 @@ fn wayta_does_not_double_unrelated_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
 
@@ -2575,6 +2911,7 @@ fn make_phase_trigger_source(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.trigger_definitions.push(trig_def.clone());
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    obj.materialize_base_trigger_definitions();
     id
 }
 
@@ -2607,7 +2944,77 @@ fn make_optional_phase_trigger_with_no_legal_target(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.trigger_definitions.push(trig_def.clone());
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    obj.materialize_base_trigger_definitions();
     id
+}
+
+/// Helper: install an optional upkeep trigger whose accepted resolution runs
+/// `effect`. Used with effects that surface no stack-time target slot (CR 115.1):
+/// context-refs whose "target" is the controller / "you" (`Effect::Draw`,
+/// `Effect::Token`), and resolution-time selections (`Effect::Sacrifice`). All
+/// are ALWAYS resolvable, so an auto-accepted instance must NOT be suppressed as
+/// inert.
+fn make_optional_phase_trigger_effect(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: &str,
+    effect: Effect,
+) -> ObjectId {
+    let id = make_creature(state, owner, name, 1, 1);
+    let trig_def = TriggerDefinition::new(TriggerMode::Phase)
+        .phase(Phase::Upkeep)
+        .optional()
+        .execute(AbilityDefinition::new(AbilityKind::Database, effect).optional())
+        .description(format!("{name}: at the beginning of upkeep, you may."));
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.trigger_definitions.push(trig_def.clone());
+    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    id
+}
+
+/// A context-ref "you may draw a card" effect (target is the controller).
+fn optional_draw_effect() -> Effect {
+    Effect::Draw {
+        count: QuantityExpr::Fixed { value: 1 },
+        target: TargetFilter::Controller,
+    }
+}
+
+/// A context-ref "you may create a 1/1 token" effect (owner is the controller) —
+/// the Brood Sliver class. Goes through a DIFFERENT `target_filter()` match arm
+/// than `Effect::Draw`, so it independently exercises the context-ref guard.
+fn optional_create_token_effect() -> Effect {
+    Effect::Token {
+        name: "Sliver".into(),
+        power: crate::types::ability::PtValue::Fixed(1),
+        toughness: crate::types::ability::PtValue::Fixed(1),
+        types: vec!["Creature".into()],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    }
+}
+
+/// A "you may sacrifice a creature" effect. CR 701.21a: Sacrifice chooses its
+/// permanents at RESOLUTION (via `EffectZoneChoice`), so
+/// `extract_target_filter_from_effect` returns `None` (no stack-time slot) even
+/// though raw `target_filter()` yields a NON-context-ref filter. This is the
+/// discriminator between the single-authority fix and a narrow context-ref-only
+/// guard: only delegating to the slot builder keeps this trigger off the inert
+/// list.
+fn optional_sacrifice_effect() -> Effect {
+    Effect::Sacrifice {
+        target: TargetFilter::Typed(TypedFilter::creature()),
+        count: QuantityExpr::Fixed { value: 1 },
+        min_count: 0,
+    }
 }
 
 /// Read the source IDs of the current stack entries in stack-bottom-to-top
@@ -2739,7 +3146,7 @@ fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
             MayTriggerAutoChoiceKey {
                 player: PlayerId(0),
                 source_id,
-                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+                origin: live_trigger_origin(&state, source_id, 0),
             },
             AutoMayChoice::Accept,
         );
@@ -2764,6 +3171,76 @@ fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
         state.stack.is_empty(),
         "suppressed inert triggers must not reach the stack"
     );
+}
+
+/// CR 603.3d + CR 115.1 — regression for the "don't ask again → Yes silently
+/// answers No" report. An auto-ACCEPTED optional trigger that surfaces no
+/// stack-time target slot is ALWAYS resolvable, so it MUST reach the stack — it
+/// is not an inert no-op.
+///
+/// The perf refactor (#3917) gated inert-suppression on raw
+/// `target_filter().is_some() && slots.is_empty()`. But `target_filter()` is not
+/// the authority for "surfaces a chooseable slot": `extract_target_filter_from_effect`
+/// is, and it returns `None` for both context-refs (CR 121.1 "you may draw a
+/// card", the controller is never a declared target) AND resolution-time
+/// selections (CR 701.21a "you may sacrifice a creature", chosen during
+/// resolution). All report a `Some(non-context-ref)` from raw `target_filter()`
+/// yet build zero slots, so the gate mistook a remembered Accept for "no legal
+/// targets" and dropped the trigger — indistinguishable from a decline.
+///
+/// Three arms cover the class through THREE distinct `target_filter()`/authority
+/// paths: "you may draw a card" (`Effect::Draw`), Brood Sliver's "you may create
+/// a Sliver token" (`Effect::Token`), and "you may sacrifice a creature"
+/// (`Effect::Sacrifice`). The Sacrifice arm is the discriminator that a
+/// context-ref-only guard would still drop — it forces the fix to delegate to
+/// the slot-builder authority rather than re-derive a subset.
+///
+/// This drives `process_triggers` — the trigger-collection/stack path where the
+/// drop happens — so it cannot be satisfied by the resolution-path coverage in
+/// `effects/mod.rs` (`saved_accept_for_may_trigger_resolves_without_prompt`).
+#[test]
+fn auto_accepted_optional_context_ref_effect_reaches_stack() {
+    for (label, effect) in [
+        ("you may draw a card", optional_draw_effect()),
+        ("you may create a token", optional_create_token_effect()),
+        ("you may sacrifice a creature", optional_sacrifice_effect()),
+    ] {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = Phase::Upkeep;
+        let src = make_optional_phase_trigger_effect(&mut state, PlayerId(0), "Remembered", effect);
+
+        // Player remembered "yes, do it every time" for this trigger.
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: src,
+                origin: live_trigger_origin(&state, src, 0),
+            },
+            AutoMayChoice::Accept,
+        );
+
+        process_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: Phase::Upkeep,
+            }],
+        );
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "[{label}] a single auto-accepted trigger needs no ordering prompt; got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "[{label}] an auto-accepted context-ref trigger is always resolvable \
+             (its controller target is never chosen) and must reach the stack — \
+             not be dropped as an inert no-op"
+        );
+    }
 }
 
 /// CR 603.3b: Two genuinely INDISTINGUISHABLE no-input triggers (same

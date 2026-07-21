@@ -20,7 +20,7 @@ export interface ParsedDeck {
   companion?: string;
 }
 
-const DECK_NAME_LINE_PATTERN = /^(?:deck\s+name|name|title)\s*:?\s+(.+)$/i;
+const DECK_NAME_LINE_PATTERN = /^(?:deck\s+name|name|title)\s*(?::|=)?\s*(.+)$/i;
 
 /**
  * Flat deck shape consumed by the engine (`PlayerDeckList` in Rust) and by
@@ -38,6 +38,8 @@ export interface ExpandedDeck {
   sticker_sheets: string[];
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
+  /** Commander-family companion outside the 100-card deck. */
+  companion: string[];
 }
 
 function expandEntries(entries: DeckEntry[]): string[] {
@@ -66,10 +68,18 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
     scheme_deck: deck.scheme_deck ?? [],
     sticker_sheets: deck.sticker_sheets ?? [],
     signature_spell: deck.signature_spell ?? [],
+    companion: deck.companion ? [deck.companion] : [],
   };
 }
 
-type DeckSection = "main" | "sideboard" | "commander" | "companion" | "planar_deck" | "scheme_deck";
+type DeckSection =
+  | "main"
+  | "sideboard"
+  | "commander"
+  | "companion"
+  | "signature_spell"
+  | "planar_deck"
+  | "scheme_deck";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
 const COLON_SECTION_RE = /:$/;
 
@@ -84,6 +94,11 @@ const COMPANION_ANNOTATION_RE = /\s*(?:\[Companion(?:\s*\{[^}]*\})?\]|\*Companio
 //   "1 Bolt (FDN) 123 *F*"  /  "... *E*"  /  "[Foil]"  /  "(Etched)"  /  "*Foil*"  /  "F"
 const FOIL_INDICATOR_RE =
   /\s+(?:\*F\*|\*E\*|\*Foil\*|\*Etched\*|\[Foil\]|\[Etched\]|\(Foil\)|\(Etched\)|F)\s*$/i;
+
+// Forge serializes a selected printing as `count Card Name+|SET|[collector]`.
+// The optional `+` marks a foil; finishes are not represented in ParsedDeck,
+// so it is intentionally discarded while retaining the printing information.
+const FORGE_LINE_PATTERN = /^(\d+)x?\s+(.+?)\|([A-Za-z0-9]+)\|\[([^\]]+)\](?:\|#.*)?$/;
 
 // "Commanders" is the section label Archidekt uses when exporting with categories.
 function getNamedSection(line: string): DeckSection | null {
@@ -113,6 +128,12 @@ function getNamedSection(line: string): DeckSection | null {
     || normalized === "[commanders]"
   ) return "commander";
   if (normalized === "companion" || normalized === "[companion]") return "companion";
+  if (
+    normalized === "signature spell"
+    || normalized === "signature spells"
+    || normalized === "[signature spell]"
+    || normalized === "[signature spells]"
+  ) return "signature_spell";
   return null;
 }
 
@@ -136,13 +157,33 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
 
   remainder = remainder.replace(FOIL_INDICATOR_RE, "");
 
+  const forgeMatch = remainder.match(FORGE_LINE_PATTERN);
+  if (forgeMatch) {
+    const name = forgeMatch[2].replace(/\+$/, "").trim();
+    return {
+      entry: {
+        count: parseInt(forgeMatch[1], 10),
+        name,
+        sourcePrinting: {
+          setCode: forgeMatch[3].toLowerCase(),
+          collectorNumber: forgeMatch[4],
+        },
+      },
+      annotation,
+    };
+  }
+
   // Collector number is the first token after the set parens. Tolerate (and
   // discard) any trailing annotation the foil/finish strip above didn't catch
   // — e.g. an unrecognized finish code or a language tag — mirroring the
   // trailing-group allowance in MTGA_LINE_PATTERN so a detected MTGA line is
   // never demoted to the simple matcher (which would swallow the set/number
   // into the card name).
-  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
+  // The set code may be lowercase (Scryfall-style, e.g. `(2xm) 123`); several
+  // exporters emit it that way. `setCode.toLowerCase()` below already normalizes
+  // case, so widening the char class only keeps the line from being demoted to
+  // the simple matcher (which would swallow the set/number into the card name).
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];
@@ -215,6 +256,7 @@ export function parsedDeckHasCards(deck: ParsedDeck): boolean {
     || (deck.commander?.length ?? 0) > 0
     || (deck.planar_deck?.length ?? 0) > 0
     || (deck.scheme_deck?.length ?? 0) > 0
+    || (deck.signature_spell?.length ?? 0) > 0
     || deck.companion !== undefined
   );
 }
@@ -291,6 +333,26 @@ function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
   return { ...deck, main };
 }
 
+/**
+ * Moves the user-selected Oathbreaker and signature spell out of the main
+ * deck and into their dedicated command-zone slots. Candidate legality comes
+ * from the engine; this helper only preserves the parsed deck partition.
+ */
+export function assignOathbreakerSlots(
+  deck: ParsedDeck,
+  oathbreaker: string,
+  signatureSpell: string,
+): ParsedDeck {
+  const normalized = repairParsedDeck(deck);
+  const mainWithoutOathbreaker = removeOneCopy(normalized.main, oathbreaker);
+  return {
+    ...normalized,
+    main: removeOneCopy(mainWithoutOathbreaker, signatureSpell),
+    commander: [oathbreaker],
+    signature_spell: [signatureSpell],
+  };
+}
+
 function normalizeParsedDeck(
   deck: ParsedDeck,
   options: { explicitCommander: boolean; explicitSideboard: boolean },
@@ -301,6 +363,7 @@ function normalizeParsedDeck(
     planar_deck: normalizeNames(deck.planar_deck),
     scheme_deck: normalizeNames(deck.scheme_deck),
     sticker_sheets: deck.sticker_sheets ? [...deck.sticker_sheets] : undefined,
+    signature_spell: normalizeNames(deck.signature_spell),
   };
 
   if (deck.commander?.length) {
@@ -413,10 +476,12 @@ export function parseDeckFile(content: string): ParsedDeck {
         commanderEntries.push(entry);
         if (annotation === "commander") explicitCommander = true;
       } else if (annotation === "companion" || currentSection === "companion") {
-        // CR 702.139a: Record companion name only — the Sideboard section
-        // will include the card. loadActiveDeck (storage.ts:98) ensures
-        // companion is in sideboard if a source omits it.
+        // Preserve the companion declaration. The format-aware migration and
+        // engine projection decide whether it is a dedicated Commander-family
+        // slot or a traditional sideboard companion.
         deck.companion = entry.name;
+      } else if (currentSection === "signature_spell") {
+        deck.signature_spell = [entry.name];
       } else if (currentSection === "planar_deck") {
         pushPlanarDeckEntry(deck, entry);
       } else if (currentSection === "scheme_deck") {
@@ -439,7 +504,7 @@ export function parseDeckFile(content: string): ParsedDeck {
 
 // MTGA format detection: count + name + (set) + collector#, with optional
 // trailing Archidekt category annotation (e.g. "[Commander {top}]").
-const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Z0-9]*\)\s+\S+(\s+\S.*)?$/;
+const MTGA_LINE_PATTERN = /^\d+x?\s+.+\s+\([A-Za-z0-9]*\)\s+\S+(\s+\S.*)?$/;
 
 /**
  * Parse an MTGA text format deck.
@@ -498,11 +563,12 @@ export function parseMtgaDeck(content: string): ParsedDeck {
         commanderEntries.push(entry);
         if (annotation === "commander") explicitCommander = true;
       } else if (annotation === "companion" || currentSection === "companion") {
-        // CR 702.139a: Record companion name only — the Sideboard section
-        // will include the card. loadActiveDeck (storage.ts:98) ensures
-        // companion is in sideboard if a source omits it.
+        // Preserve the declaration for format-aware migration/projection.
         deck.companion = entry.name;
         if (currentSection === "companion") currentSection = "main";
+      } else if (currentSection === "signature_spell") {
+        deck.signature_spell = [entry.name];
+        currentSection = "main";
       } else if (currentSection === "planar_deck") {
         pushPlanarDeckEntry(deck, entry);
       } else if (currentSection === "scheme_deck") {
@@ -566,6 +632,18 @@ export function exportDeckFile(deck: ParsedDeck): string {
     }
   }
 
+  if (deck.signature_spell && deck.signature_spell.length > 0) {
+    lines.push("[Signature Spell]");
+    for (const name of deck.signature_spell) {
+      lines.push(`1 ${name}`);
+    }
+  }
+
+  if (deck.companion) {
+    lines.push("[Companion]");
+    lines.push(`1 ${deck.companion}`);
+  }
+
   if (deck.main.length > 0) {
     lines.push("[Main]");
     for (const entry of deck.main) {
@@ -611,6 +689,20 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
     for (const name of deck.commander) {
       lines.push(`1 ${name}`);
     }
+    lines.push("");
+  }
+
+  if (deck.signature_spell && deck.signature_spell.length > 0) {
+    lines.push("Signature Spell");
+    for (const name of deck.signature_spell) {
+      lines.push(`1 ${name}`);
+    }
+    lines.push("");
+  }
+
+  if (deck.companion) {
+    lines.push("Companion");
+    lines.push(`1 ${deck.companion}`);
     lines.push("");
   }
 

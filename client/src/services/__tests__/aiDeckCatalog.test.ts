@@ -5,7 +5,7 @@ import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
 import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
 import { buildDeckCatalog } from "../deckCatalog";
-import { getCachedFeed, listSubscriptions } from "../feedService";
+import { getCachedFeed, getDeckFeedOrigin, listSubscriptions } from "../feedService";
 import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
@@ -35,6 +35,7 @@ vi.mock("../feedService", () => ({
     commander: deck.commander,
   })),
   getCachedFeed: vi.fn(),
+  getDeckFeedOrigin: vi.fn(),
   listSubscriptions: vi.fn(),
 }));
 
@@ -72,6 +73,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.mocked(listSubscriptions).mockReturnValue([]);
   vi.mocked(getCachedFeed).mockReturnValue(null);
+  vi.mocked(getDeckFeedOrigin).mockReturnValue(null);
   vi.mocked(loadPreconDeckMap).mockResolvedValue(null);
   vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
     compatibility(parsed.main[0]?.name !== "Illegal Starter")

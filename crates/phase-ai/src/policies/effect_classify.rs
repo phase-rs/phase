@@ -129,6 +129,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Draw { .. }
         | Effect::Token { .. }
         | Effect::Scry { .. }
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Explore
         | Effect::Investigate
         | Effect::Mana { .. }
@@ -279,7 +280,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExchangeLifeWithStat { .. }
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileHaunting { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::ExileTop { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }
@@ -288,7 +289,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::FlipCoinUntilLose { .. }
         | Effect::Forage
         | Effect::ForceAttack { .. }
-        | Effect::ForEachCategoryExile { .. }
+        | Effect::ForEachCategory { .. }
         | Effect::FreeCastFromZones { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::GainControlAll { .. }
@@ -331,6 +332,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ReassembleContraption { .. }
         | Effect::ReassembleContraptionOnSprocket { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::RedistributeLifeTotals
         | Effect::RegisterBending { .. }
         | Effect::RememberCard { .. }
         | Effect::RemoveFromCombat { .. }
@@ -770,7 +772,11 @@ pub(crate) fn aura_polarity(source: &GameObject) -> EffectPolarity {
     // gifting one to an opponent is a strict negative for itself. A
     // `TapsForMana` trigger that adds mana is unambiguously beneficial to
     // the host's controller.
-    for trigger in source.trigger_definitions.iter_unchecked() {
+    for trigger in source
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+    {
         match trigger_mode_polarity_for_host(trigger) {
             EffectPolarity::Contextual => continue,
             polarity => return polarity,
