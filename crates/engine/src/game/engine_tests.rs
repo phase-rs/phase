@@ -4508,24 +4508,25 @@ fn attach_fertile_ground(state: &mut GameState, land_id: ObjectId, owner: Player
     obj.card_types.subtypes.push("Aura".to_string());
     obj.attached_to = Some(land_id.into());
     obj.entered_battlefield_turn = Some(1);
-    obj.trigger_definitions.push(
-        TriggerDefinition::new(TriggerMode::TapsForMana)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Database,
-                Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                        color_options: crate::types::mana::ManaColor::ALL.to_vec(),
-                        contribution: ManaContribution::Additional,
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            ))
-            .valid_card(TargetFilter::AttachedTo),
-    );
+    obj.install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+        TriggerMode::TapsForMana,
+    )
+    .execute(AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                color_options: crate::types::mana::ManaColor::ALL.to_vec(),
+                contribution: ManaContribution::Additional,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    ))
+    .valid_card(TargetFilter::AttachedTo)]))
+        .expect("Fertile Ground's base trigger must materialize");
     aura
 }
 
