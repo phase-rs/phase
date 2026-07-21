@@ -16,7 +16,7 @@
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TypedFilter,
+    PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TriggerDefinitionRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
@@ -234,10 +234,10 @@ pub struct ManaSourceOption {
     /// rejected after production.
     pub restrictions: Vec<ManaRestriction>,
     /// Per-aura color overrides for inline `TapsForMana` trigger resolution.
-    /// Each entry maps an aura's `ObjectId` to the `ProductionOverride` the
+    /// Each entry maps an exact live trigger definition to the `ProductionOverride` the
     /// auto-tap resolver should use when that aura's triggered mana ability fires.
     /// Empty for options that carry no aura bonus.
-    pub taps_for_mana_overrides: Vec<(ObjectId, ProductionOverride)>,
+    pub taps_for_mana_overrides: Vec<(TriggerDefinitionRef, ProductionOverride)>,
 }
 
 /// Check whether an ability cost includes a tap component.
@@ -1665,12 +1665,13 @@ fn land_mana_options(
         Some(sources) => taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources),
         None => taps_for_mana_aura_bonus(state, object_id, controller),
     };
-    for (aura_id, aura_choices) in aura_bonus {
+    for (trigger_ref, aura_choices) in aura_bonus {
         // aura_choices: [ManaType; N] where N=1 for Fixed, N=5 for any-color.
         // Cross-product: replace each option with N options (one per choice).
         options = options
             .into_iter()
             .flat_map(|opt| {
+                let trigger_ref = trigger_ref.clone();
                 aura_choices.iter().map(move |&bonus| {
                     let mut combined = opt
                         .atomic_combination
@@ -1684,7 +1685,7 @@ fn land_mana_options(
                         .len();
                     // Carry the existing overrides plus this aura's choice.
                     let mut overrides = opt.taps_for_mana_overrides.clone();
-                    overrides.push((aura_id, ProductionOverride::SingleColor(bonus)));
+                    overrides.push((trigger_ref.clone(), ProductionOverride::SingleColor(bonus)));
                     ManaSourceOption {
                         object_id: opt.object_id,
                         ability_index: opt.ability_index,
@@ -2255,10 +2256,10 @@ pub(crate) fn opponent_land_color_options(
 /// or `{G}` as the bonus color.  `max_mana_yield` just takes `.len()` on the
 /// outer vec (one bonus unit per aura regardless of color count).
 ///
-/// Reuses `taps_for_mana_card_matches` — the same predicate the trigger
-/// resolver uses — so planning and firing cannot drift.
-/// Returns `(aura_object_id, color_choices)` per attached TapsForMana aura.
-/// Callers use `aura_object_id` to build `taps_for_mana_overrides` on the
+/// Reuses the card and player matching predicates from the trigger resolver so
+/// planning and firing cannot drift.
+/// Returns `(trigger_definition_ref, color_choices)` per attached TapsForMana trigger.
+/// Callers use `trigger_definition_ref` to build `taps_for_mana_overrides` on the
 /// resulting `ManaSourceOption` so the resolver can thread the chosen color
 /// into the aura's triggered mana ability at inline resolution time.
 /// Battlefield objects carrying at least one `TapsForMana` trigger. The hot
@@ -2286,7 +2287,7 @@ pub(crate) fn taps_for_mana_aura_bonus(
     state: &GameState,
     land_id: ObjectId,
     controller: PlayerId,
-) -> Vec<(ObjectId, Vec<ManaType>)> {
+) -> Vec<(TriggerDefinitionRef, Vec<ManaType>)> {
     let sources = taps_for_mana_trigger_sources(state);
     taps_for_mana_aura_bonus_indexed(state, land_id, controller, &sources)
 }
@@ -2294,15 +2295,15 @@ pub(crate) fn taps_for_mana_aura_bonus(
 /// Indexed arity of `taps_for_mana_aura_bonus`: iterates only the precomputed
 /// `sources` (trigger-bearing permanents) instead of the whole battlefield.
 /// Byte-identical to the full scan — preserves the `land_id` self-skip, the
-/// per-source `taps_for_mana_card_matches` card-identity authority, and the
-/// deliberate absence of a controller filter (Aura-Theft semantics).
+/// per-source card and player matcher authorities, and the deliberate absence
+/// of a trigger-source controller filter (Aura-Theft semantics).
 pub(crate) fn taps_for_mana_aura_bonus_indexed(
     state: &GameState,
     land_id: ObjectId,
     controller: PlayerId,
     sources: &[ObjectId],
-) -> Vec<(ObjectId, Vec<ManaType>)> {
-    let mut per_aura: Vec<(ObjectId, Vec<ManaType>)> = Vec::new();
+) -> Vec<(TriggerDefinitionRef, Vec<ManaType>)> {
+    let mut per_aura: Vec<(TriggerDefinitionRef, Vec<ManaType>)> = Vec::new();
     for &object_id in sources.iter() {
         // Skip the land itself — we're looking for OTHER permanents whose
         // TapsForMana trigger fires when `land_id` is tapped.
@@ -2317,8 +2318,8 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
         // control an aura attached to your land (e.g., via Aura Theft), and
         // the trigger still fires for the tapping player when the land is
         // tapped. `taps_for_mana_card_matches` handles the attachment check.
-        for entry in obj.trigger_definitions.iter_all() {
-            let trigger = entry.definition();
+        for active in super::functioning_abilities::active_trigger_definitions(state, obj) {
+            let trigger = active.definition;
             if trigger.mode != TriggerMode::TapsForMana {
                 continue;
             }
@@ -2326,6 +2327,14 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
                 trigger,
                 state,
                 land_id,
+                &source_context,
+            ) {
+                continue;
+            }
+            if !super::trigger_matchers::valid_player_matches(
+                trigger,
+                state,
+                controller,
                 &source_context,
             ) {
                 continue;
@@ -2341,7 +2350,7 @@ pub(crate) fn taps_for_mana_aura_bonus_indexed(
             // `mana_options_from_production` already does this enumeration.
             let choices = mana_options_from_production(state, controller, object_id, produced);
             if !choices.is_empty() {
-                per_aura.push((object_id, choices));
+                per_aura.push((active.definition_ref, choices));
             }
         }
     }
@@ -4162,7 +4171,10 @@ mod tests {
         assert!(!opt.source_could_produce_two_or_more_colors);
         // Resolver override: Wild Growth's trigger must produce Green.
         assert_eq!(opt.taps_for_mana_overrides.len(), 1);
-        assert_eq!(opt.taps_for_mana_overrides[0].0, wild_growth);
+        assert_eq!(
+            opt.taps_for_mana_overrides[0].0.source.object_id,
+            wild_growth
+        );
         assert_eq!(
             opt.taps_for_mana_overrides[0].1,
             ProductionOverride::SingleColor(ManaType::Green),
@@ -4368,7 +4380,10 @@ mod tests {
             assert_eq!(combo.len(), 2, "two-element combination: land + aura");
             // Resolver override: one entry pointing to Fertile Ground.
             assert_eq!(opt.taps_for_mana_overrides.len(), 1);
-            assert_eq!(opt.taps_for_mana_overrides[0].0, fertile_ground);
+            assert_eq!(
+                opt.taps_for_mana_overrides[0].0.source.object_id,
+                fertile_ground
+            );
             // Override matches the bonus color for this option.
             assert_eq!(
                 opt.taps_for_mana_overrides[0].1,

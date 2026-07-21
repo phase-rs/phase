@@ -1845,12 +1845,13 @@ pub(super) fn resolve_tap_mana_triggers_inline(
         // `is_triggered_mana_ability` the single CR 605.1b classifier — the same
         // predicate the post-action scan's skip guard uses, so "resolved here"
         // and "skipped there" cannot diverge.
-        let mut coupled: Vec<ResolvedAbility> = Vec::new();
+        let mut coupled: Vec<(TriggerDefinitionRef, ResolvedAbility)> = Vec::new();
         for obj in state.objects.values() {
             if obj.zone != Zone::Battlefield {
                 continue;
             }
             for active in super::functioning_abilities::active_trigger_definitions(state, obj) {
+                let definition_ref = active.definition_ref.clone();
                 let trig_idx = active.live_index;
                 let trig_def = active.definition;
                 if !matches!(trig_def.mode, TriggerMode::TapsForMana) {
@@ -1869,22 +1870,22 @@ pub(super) fn resolve_tap_mana_triggers_inline(
                     state,
                     trig_def,
                     &source_context,
-                    Some(&active.definition_ref),
+                    Some(&definition_ref),
                 );
                 ability.ability_index = Some(trig_idx);
                 if super::mana_abilities::is_triggered_mana_ability(&ability, Some(&tap_event)) {
-                    coupled.push(ability);
+                    coupled.push((definition_ref, ability));
                 }
             }
         }
-        for ability in coupled {
+        for (definition_ref, ability) in coupled {
             // Look up the color override the auto-tap planner chose for this aura's
             // triggered mana ability. Only non-None for AnyOneColor bonus triggers
             // (Fertile Ground) when called from the auto-tap path; None for manual
             // play and Fixed bonus triggers (Wild Growth already has no choice).
             let color_override = state
                 .pending_taps_for_mana_overrides
-                .get(&ability.source_id)
+                .get(&definition_ref)
                 .cloned();
             super::mana_abilities::resolve_triggered_mana_ability_inline(
                 state,

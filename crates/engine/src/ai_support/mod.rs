@@ -796,10 +796,10 @@ fn resolve_mana_option_for_trigger_probe(
     let mut probe = state.clone();
     let mut events = Vec::new();
 
-    for (aura_id, override_value) in &option.taps_for_mana_overrides {
+    for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
         probe
             .pending_taps_for_mana_overrides
-            .insert(*aura_id, override_value.clone());
+            .insert(trigger_ref.clone(), override_value.clone());
     }
 
     if let Some(ability_index) = option.ability_index {
