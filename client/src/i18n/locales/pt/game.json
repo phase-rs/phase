@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloqueada",
+    "cantBeActivated": "Esta habilidade não pode ser ativada",
+    "cantActivateDuring": "Não pode ser ativada agora",
+    "prohibited": "Ativar esta habilidade é proibido"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -21,6 +27,16 @@
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
     }
+  },
+  "precastShortcut": {
+    "offerTitle": "Copy Shortcut",
+    "offerSubtitle": "The engine verified a finite copy route. Propose it or continue normally.",
+    "propose": "Propose route",
+    "routeCount_one": "1 verified route is available.",
+    "routeCount_other": "{{count}} verified routes are available.",
+    "respondTitle": "Copy Shortcut Proposed",
+    "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
+    "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
   "resolutionProgress": {
     "label": "Resolvendo {{resolved}} / {{total}}",
@@ -235,10 +251,14 @@
     "ringBearer": "Anel",
     "ringBearerTooltip": "Portador do Anel",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_one": "Mostrar {{count}} carta anexada oculta",
+    "hiddenAttachmentsAria_other": "Mostrar {{count}} cartas anexadas ocultas",
     "fanPick": "Escolher",
     "fanConfirm": "Confirmar ({{count}})",
     "viewAttachments_one": "Ver carta anexada",
     "viewAttachments_other": "Ver {{count}} cartas anexadas",
+    "viewAttachmentsFor_one": "Ver carta anexada a {{name}}",
+    "viewAttachmentsFor_other": "Ver {{count}} cartas anexadas a {{name}}",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -279,6 +299,11 @@
     "creatureFallback": "Criatura #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Jogador — {{life}} de vida)",
+    "playerTargetProjected": "{{name}} (Jogador — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Jogador — {{life}} → {{projectedLife}} · Letal)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Batalha)",
     "you": "Você",
     "ally": "Aliado",
     "restoreDialog": "Restaurar diálogo",
@@ -302,7 +327,7 @@
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
     "confirmDistribute_other": "Declarar {{count}} Atacantes",
-    "mustAttackPlayer": "{{creature}} deve atacar {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Controle",
@@ -348,7 +373,14 @@
     "scopeOwnTurn": "Para apenas nos seus turnos.",
     "scopeOpponentsTurns": "Para apenas nos turnos dos oponentes.",
     "tooltipCurrentPhase": "Fase atual.",
-    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase atual: {{phase}}. Abrir configurações de paradas de fase.",
+    "sheetTitle": "Fases do turno",
+    "sheetSubtitle": "Toque em uma etapa para mudar quando o passe automático para ali.",
+    "scopeShortOff": "Desativado",
+    "scopeShortAllTurns": "Todos os turnos",
+    "scopeShortOwnTurn": "Seus turnos",
+    "scopeShortOpponentsTurns": "Turnos dos oponentes"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -388,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 marcador {{label}}\n{{description}}",
     "summary_other": "{{count}} marcadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ marcadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada marcador +1/+1 dá +1/+1 à permanente.",
       "m1m1": "Cada marcador -1/-1 dá -1/-1 à permanente.",
@@ -487,6 +520,11 @@
     "castCommander": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
     "castCommanderTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — clique para devolver um atacante não bloqueado à mão e colocar este comandante no campo de batalha virado e atacando",
+    "signatureSpell": "Magia assinatura",
+    "signatureSpellTitle": "Magia assinatura: {{name}}",
+    "signatureSpellTitleTax": "Magia assinatura: {{name}} (Taxa: +{{tax}})",
+    "castSignatureSpell": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
+    "castSignatureSpellTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "tax": "Taxa: +{{tax}}",
     "companion": "Companheiro",
     "companionTitle": "Companheiro: {{name}}",
@@ -546,6 +584,15 @@
     "resourceMana": "mana",
     "resourceCounters": "marcadores",
     "resourceSpeed": "velocidade",
+    "loopCollapseTitleTokens": "Escolha quantas fichas criar",
+    "loopCollapseTitleCounters": "Escolha quantas vezes adicionar marcadores",
+    "loopCollapseTitleLife": "Escolha quantas vezes ganhar vida",
+    "loopCollapseTitleMixed": "Escolha quantas vezes repetir o ciclo",
+    "loopCollapseAmountTokens_one": "Criar {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Criar {{count}} fichas",
+    "loopCollapseAmountCounters": "Adicionar marcadores {{value}}×",
+    "loopCollapseAmountLife": "Ganhar vida {{value}}×",
+    "loopCollapseAmountMixed": "Repetir o ciclo {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Mana manual — apenas esta partida. Vire suas próprias terras e mana para pagar.",
     "spendHint": "Clique no seu mana para gastá-lo neste custo",
@@ -609,8 +656,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Atribuir {{amount}} de Dano de Combate",
@@ -629,6 +674,7 @@
     "dockLeft": "Encaixar a pilha à esquerda",
     "dockRight": "Encaixar a pilha à direita",
     "casting": "Conjurando…",
+    "selectedModes": "Modos selecionados",
     "next": "Próximo",
     "activated": "Ativada",
     "triggered": "Disparada",
@@ -693,6 +739,7 @@
     "confirmTap": "Confirmar Virar ({{selected}}/{{count}})",
     "keepCurrentTargets": "Manter Alvos Atuais",
     "skip": "Pular",
+    "opponentChoice": "(à escolha do oponente)",
     "chooseNewTarget": "Escolha o novo alvo da mágica",
     "chooseNewTargetForSpell": "Escolha um novo alvo para {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1016,6 +1063,13 @@
     "activationCost": {
       "title": "Escolher Custo de Ativação"
     },
+    "meld": {
+      "choosePair": "Escolha os cards para fundir",
+      "into": "Fundir em {{result}}",
+      "chooseAttackTarget": "Escolha o que ele ataca",
+      "player": "Jogador {{id}}",
+      "permanent": "Permanente {{id}}"
+    },
     "debug": {
       "modeBanner": "MODO DE DEPURAÇÃO - Clique em qualquer carta",
       "modeButtonOff": "MODO DE CLIQUE DESLIGADO"
@@ -1232,6 +1286,7 @@
       "titleTopdeck": "Colocar no Grimório",
       "titleBattlefield": "Colocar no Campo de Batalha",
       "titleHand": "Devolver",
+      "titleExile": "Exilar",
       "titleUntap": "Desvirar",
       "titleTap": "Virar",
       "titleAttach": "Attach",
@@ -1253,6 +1308,12 @@
       "subtitleBattlefieldUpTo_other": "Escolha até {{count}} cartas para colocar no campo de batalha",
       "subtitleBattlefieldRange_one": "Escolha {{min}}-{{count}} carta para colocar no campo de batalha",
       "subtitleBattlefieldRange_other": "Escolha {{min}}-{{count}} cartas para colocar no campo de batalha",
+      "subtitleExileExact_one": "Escolha {{count}} carta para exilar",
+      "subtitleExileExact_other": "Escolha {{count}} cartas para exilar",
+      "subtitleExileUpTo_one": "Escolha até {{count}} carta para exilar",
+      "subtitleExileUpTo_other": "Escolha até {{count}} cartas para exilar",
+      "subtitleExileRange_one": "Escolha {{min}}-{{count}} carta para exilar",
+      "subtitleExileRange_other": "Escolha {{min}}-{{count}} cartas para exilar",
       "subtitleHandExact_one": "Escolha {{count}} permanente para devolver à mão do dono",
       "subtitleHandExact_other": "Escolha {{count}} permanentes para devolver à mão dos donos",
       "subtitleHandUpTo_one": "Escolha até {{count}} permanente para devolver à mão do dono",
@@ -1284,6 +1345,7 @@
       "labelTop": "Topo ({{selected}}/{{count}})",
       "labelPut": "Colocar ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
+      "labelExile": "Exilar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Topo"
     },
@@ -1495,7 +1557,11 @@
     "manaCombination": {
       "title": "Escolher Combinação de Mana",
       "subtitleAny": "Selecione cada cor de mana a produzir",
-      "subtitle": "Selecione qual combinação de mana produzir"
+      "subtitle": "Selecione qual combinação de mana produzir",
+      "amount": "{{selected}} / {{count}} manas selecionadas",
+      "decrease": "Remover mana {{color}}",
+      "increase": "Adicionar mana {{color}}",
+      "quantity": "Mana {{color}}: {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",
@@ -1628,6 +1694,13 @@
     "battleFallback": "Batalha",
     "subtitle": "{{name}} precisa de um novo protetor. Escolha qual oponente a defenderá."
   },
+  "announcingOpponent": {
+    "title": "Escolher oponente que anuncia ({{current}} de {{total}})",
+    "subtitle": "Escolha qual oponente anuncia {{target}} ({{current}} de {{total}}).",
+    "targetLand": "o alvo de terreno",
+    "targetCreature": "o alvo de criatura",
+    "targetChoice": "esta escolha de alvo"
+  },
   "clashOpponent": {
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
@@ -1709,6 +1782,13 @@
     "variantBestow": "Conjurar com Conceder",
     "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
+    "variantMutate": "Conjurar com Mutate",
+    "variantAwaken": "Conjurar com Despertar",
+    "variantCleave": "Conjurar com Remover",
+    "variantImpending": "Conjurar com Iminente",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Conjurar com Protótipo",
+    "variantFaceDown": "Conjurar Virada para Baixo",
     "variantFallback": "Conjurar com {{type}}"
   },
   "categoryChoice": {
@@ -2001,6 +2081,7 @@
     "fromSideboard": "Do sideboard"
   },
   "phaseName": {
+    "Untap": "Desvirar",
     "Upkeep": "Manutenção",
     "Draw": "Compra",
     "PreCombatMain": "Fase principal 1",

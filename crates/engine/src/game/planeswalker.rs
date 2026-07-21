@@ -1,6 +1,8 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCast, StackEntry, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    GameState, PendingCast, PendingCostMoveResume, StackEntry, StackEntryKind, WaitingFor,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -141,6 +143,17 @@ fn can_activate_loyalty_ability_impl(
         return false;
     }
 
+    // CR 602.5 + CR 603.2a: A `CantBeActivated` prohibition scoped to loyalty
+    // abilities (The Immortal Sun — `kind = Some(Loyalty)`) blocks activation on
+    // the loyalty path too. The untaxed loyalty fast path in
+    // `handle_activate_loyalty` does NOT route through
+    // `casting::handle_activate_ability`, so the shared prohibition gate must be
+    // consulted here — this function is the single legality authority for both the
+    // available-actions enumeration and `handle_activate_loyalty` (CR 606.3).
+    if super::casting::is_blocked_by_cant_be_activated(state, player, planeswalker_id, ability) {
+        return false;
+    }
+
     match restriction_gates {
         Some(gates) => super::restrictions::check_activation_restrictions_with_static_gates(
             state,
@@ -228,7 +241,18 @@ pub fn handle_activate_loyalty(
     }
 
     // Build a ResolvedAbility for the stack from the typed definition
-    let resolved = build_pw_resolved(&ability_def, pw_id, player);
+    let mut resolved = build_pw_resolved(&ability_def, pw_id, player);
+
+    // CR 606.1 + CR 602.2b: a loyalty ability IS an activated ability, so activating it
+    // follows rules 601.2b-i exactly as casting a spell does — including CR 601.2b's
+    // announcement of X. This mana-free fast path is an optimization of that same
+    // announcement (it bypasses `casting::handle_activate_ability`, which publishes for
+    // every other activated ability), so a text-defined, announce-locked X ("where X is
+    // <count> as you activate this ability" — Lukka, Bound to Ruin's [-4]) must be
+    // published HERE too, or it is never announced at all and every `Variable("X")` on the
+    // ability resolves to 0. Same single computation authority, same position: at
+    // announcement, before targets are chosen (CR 601.2c, immediately below).
+    super::ability_utils::publish_announced_x(state, &mut resolved, player, pw_id);
 
     // CR 602.2b + CR 601.2c: Targets are announced before costs are paid.
     // If this ability requires targets, prompt for selection first.
@@ -277,13 +301,19 @@ pub fn handle_activate_loyalty(
         pending.activation_ability_index = Some(ability_index);
         pending.target_constraints = target_constraints;
         // CR 606.4: Loyalty cost is paid after targets are chosen.
-        // Stored here so handle_select_targets can call pay_ability_cost.
+        // Stored here so handle_select_targets can call pay_ability_cost and
+        // record the CR 606.3 activation only after target selection completes.
         pending.activation_cost = Some(crate::types::ability::AbilityCost::Loyalty {
             amount: loyalty_cost,
         });
-        record_loyalty_activation(state, pw_id, player);
+        // CR 601.2c + CR 606.3: first slot's announcer (controller unless the slot
+        // is "of an opponent's choice").
+        let initial_player = target_slots
+            .first()
+            .and_then(|slot| slot.chooser)
+            .unwrap_or(player);
         return Ok(WaitingFor::TargetSelection {
-            player,
+            player: initial_player,
             pending_cast: Box::new(pending),
             target_slots,
             mode_labels: Vec::new(),
@@ -347,7 +377,7 @@ fn build_pw_resolved(
 /// CR 606.4: Pay the loyalty cost, push the ability onto the stack, and return Priority.
 /// Single exit point for non-targeted (and auto-target-resolved) loyalty activations.
 ///
-/// Loyalty counter adjustment is delegated to `casting::pay_ability_cost` — the single
+/// Loyalty counter adjustment is delegated to `casting::pay_ability_cost_for_activation` — the single
 /// authority for all ability cost resolution — to avoid duplicating counter logic here.
 fn finalize_loyalty_activation(
     state: &mut GameState,
@@ -362,8 +392,45 @@ fn finalize_loyalty_activation(
     let cost = crate::types::ability::AbilityCost::Loyalty {
         amount: loyalty_cost,
     };
-    super::casting::pay_ability_cost(state, player, pw_id, &cost, events)
-        .expect("loyalty validation passed in handle_activate_loyalty");
+    match super::casting::pay_ability_cost_for_activation(state, player, pw_id, &cost, None, events)
+        .expect("loyalty validation passed in handle_activate_loyalty")
+    {
+        super::casting::PaymentOutcome::Paid => {
+            complete_loyalty_activation(state, player, pw_id, resolved, ability_index, events)
+        }
+        // CR 606.4 + CR 614.1a + CR 616.1: a count-modifying counter replacement
+        // (Doubling Season vs an opponent's Vorinclex) can require a CR 616.1
+        // ordering choice while the loyalty counters are placed. Park the
+        // activation tail and surface the replacement prompt the payment already
+        // set on `state.waiting_for`; the tail runs once the choice is settled.
+        super::casting::PaymentOutcome::Paused { .. } => {
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::LoyaltyActivation {
+                player,
+                pw_id,
+                resolved: Box::new(resolved),
+                ability_index,
+            });
+            state.waiting_for.clone()
+        }
+        super::casting::PaymentOutcome::Failed { .. } => {
+            unreachable!("loyalty cost cannot fail after can_activate_loyalty_ability passed")
+        }
+    }
+}
+
+/// CR 606.4 / CR 606.5: Post-payment tail of a loyalty activation — records the
+/// activation, emits targeting events, pushes the ability onto the stack, and
+/// returns Priority. Single authority for the tail: reached either directly (cost
+/// `Paid`) or via [`resume_loyalty_activation`] after a paused counter-replacement
+/// ordering choice. Never re-pays the loyalty cost.
+fn complete_loyalty_activation(
+    state: &mut GameState,
+    player: PlayerId,
+    pw_id: ObjectId,
+    resolved: ResolvedAbility,
+    ability_index: usize,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
     record_loyalty_activation(state, pw_id, player);
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
@@ -402,6 +469,33 @@ fn finalize_loyalty_activation(
     priority::clear_priority_passes(state);
 
     WaitingFor::Priority { player }
+}
+
+/// CR 606.4 + CR 616.1: Resume a loyalty activation parked while its loyalty
+/// counter cost waited on a replacement ordering choice. The counter has already
+/// been applied by the replacement pipeline; only the activation tail remains, so
+/// this dispatches straight to [`complete_loyalty_activation`] without re-paying.
+pub(crate) fn resume_loyalty_activation(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let Some(PendingCostMoveResume::LoyaltyActivation {
+        player,
+        pw_id,
+        resolved,
+        ability_index,
+    }) = state.pending_cost_move_resume.take()
+    else {
+        unreachable!("loyalty-activation resume requires its typed continuation")
+    };
+    Ok(complete_loyalty_activation(
+        state,
+        player,
+        pw_id,
+        *resolved,
+        ability_index,
+        events,
+    ))
 }
 
 #[cfg(test)]
@@ -971,8 +1065,9 @@ mod tests {
             Some(4),
             "loyalty unchanged before target selection"
         );
-        // But activation is marked to prevent re-activation this turn.
-        assert!(state.objects[&pw].loyalty_activations_this_turn > 0);
+        // Activation is recorded only after target selection completes and the
+        // loyalty cost is paid.
+        assert_eq!(state.objects[&pw].loyalty_activations_this_turn, 0);
         // Engine waits for the player to select a target.
         assert!(
             matches!(result, WaitingFor::TargetSelection { .. }),

@@ -81,7 +81,8 @@ pub fn resolve_combine_host(
                 source: CombineSource::SpecificObject { id: augment_id },
                 host: Box::new(TargetFilter::ParentTarget),
             };
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: hosts,
@@ -146,7 +147,8 @@ pub fn resolve_choose_augment_and_combine(
                 source: CombineSource::ParentTarget,
                 host: Box::new(frozen_host),
             };
-            state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+            state
+                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: candidates,
@@ -292,12 +294,15 @@ fn combine_card_with_host(
     events: &mut Vec<GameEvent>,
 ) {
     if let Some(zone) = state.objects.get(&augment_id).map(|obj| obj.zone) {
-        let owner = state.objects[&augment_id].owner;
-        zones::apply_zone_exit_cleanup(state, augment_id, zone, Zone::Battlefield);
-        zones::remove_from_zone(state, augment_id, zone, owner);
-    }
-    if let Some(augment) = state.objects.get_mut(&augment_id) {
-        augment.zone = Zone::Battlefield;
+        // CR 608.2h: no sever has run on this path, so the live attachment list is still
+        // intact — capture it here for the LKI, through the one shared authority.
+        let attachments = state
+            .objects
+            .get(&augment_id)
+            .map(|obj| zones::capture_attachment_snapshot(state, obj))
+            .unwrap_or_default();
+        zones::apply_zone_exit_cleanup(state, augment_id, zone, Zone::Battlefield, attachments);
+        zones::absorb_component(state, augment_id, Some(zone));
     }
 
     let Some((values, display_source, printed_ref, token_image_ref)) =
@@ -459,7 +464,7 @@ fn merged_ability_sets(
     let replacements = augment
         .base_replacement_definitions
         .iter()
-        .filter(|definition| !printed_cards::is_runtime_control_gated_replacement(definition))
+        .filter(|definition| !printed_cards::is_runtime_non_copiable_replacement(definition))
         .cloned()
         .collect();
 

@@ -5,7 +5,9 @@ description: Use when adding or modifying static abilities, continuous effects, 
 
 # Adding a Static Ability
 
-Static abilities produce continuous effects that modify game objects through the layer system (MTG Rule 613). Unlike triggered or activated abilities, they don't use the stack — they simply exist while their source is on the battlefield.
+Static abilities produce continuous effects that modify game objects through the layer system (CR 613). Unlike triggered or activated abilities, they don't use the stack — they apply continuously while their source is in the zone that ability functions in (CR 611.3b).
+
+> **The affected population is OBJECTS, not permanents.** CR 613.1 computes the characteristics of an *object*, so a static can modify a card in hand, a spell on the stack, or a card in a graveyard — not just a battlefield permanent. The layer pass does **not** own every zone, though: read [Zone Boundary](#zone-boundary--which-zones-the-layer-pass-owns) before you assume your modification will land.
 
 **Before you start:** Trace how Changeling's `AddAllCreatureTypes` works from parser to layers. It's the best reference for type-changing effects: `synthesize_changeling_cda()` in `synthesis.rs` → `StaticDefinition` with `ContinuousModification::AddAllCreatureTypes` → `gather_active_continuous_effects()` → `apply_continuous_effect()` in `layers.rs`.
 
@@ -111,12 +113,15 @@ state.layers_dirty = true  (set after zone changes, control changes, etc.)
     ↓
 evaluate_layers() in crates/engine/src/game/layers.rs:
     ↓
-Step 1: Reset all battlefield objects to base characteristics
-    power ← base_power, toughness ← base_toughness
-    keywords ← base_keywords, color ← base_color
+Step 1: Reset every object in a zone THIS PASS OWNS to base characteristics
+    Battlefield: full characteristic set
+        power ← base_power, toughness ← base_toughness
+        keywords ← base_keywords, color ← base_color
+    Hand / Stack: keywords only
+    (library / graveyard / exile are NOT reset here — see Zone Boundary below)
     ↓
 Step 2: gather_active_continuous_effects()
-    For each battlefield object:
+    For each object in a scanned zone:
         For each static_definition where mode == Continuous:
             Check condition (devotion, presence, during-your-turn)
             Get affected filter
@@ -141,6 +146,44 @@ Step 4: Apply counter-based P/T (layer 7e)
     ↓
 Step 5: Clear layers_dirty flag
 ```
+
+## Zone Boundary — Which Zones the Layer Pass Owns
+
+**There are TWO keyword authorities, split by zone. Writing into the wrong one is a silent
+no-op, and it is the defect class PR #5803 (Taigam's stack-keyword grant) was opened for.**
+
+`layer_pass_materializes_keywords(zone)` (`game/layers.rs`) is the boundary:
+
+```rust
+fn layer_pass_materializes_keywords(zone: Zone) -> bool {
+    matches!(zone, Zone::Battlefield | Zone::Hand | Zone::Stack)
+}
+```
+
+| Zone | Who computes keywords | Notes |
+|------|----------------------|-------|
+| `Battlefield` | **Layer pass** — materialized onto the object | Full characteristic reset (`seed_live_characteristics_from_base`) |
+| `Hand` | **Layer pass** — materialized | Keywords-only reset (hand-functioning grants, e.g. Miracle, CR 702.94a) |
+| `Stack` | **Layer pass** — materialized | Keywords-only reset (CR 613.1 stack-object grants: Taigam's rebound, `StackSpell`-filtered statics) |
+| `Library` / `Graveyard` / `Exile` | **`game/off_zone_characteristics`** — computed ON DEMAND from base + active effects; never materialized | `keywords::object_has_effective_keyword_kind` is the reader that routes by exactly this split |
+
+**The materialize set and the reset set are the same set by construction** — the pass may
+only write a characteristic into a zone where it also clears it at the top of the next
+pass, or the write is a leak nothing ever reclaims.
+
+**What this means for you:**
+
+- Adding a static whose `affected` filter reaches a zone the pass does *not* own
+  (`InZone(Graveyard)`, `InZone(Exile)`, …)? The keyword will **not** appear on the object.
+  Either route the read through `off_zone_characteristics`, or extend
+  `layer_pass_materializes_keywords` **and** the Step-1 reset in `evaluate_layers` **in the
+  same change**. Extending one without the other is the leak.
+- Never read keywords off `obj.keywords` directly for a non-battlefield object. Go through
+  `keywords::object_has_effective_keyword_kind()`, which routes to the correct authority for
+  the object's current zone (it delegates to
+  `off_zone_characteristics::off_zone_has_keyword_kind` when the object is off-zone).
+- CR 611.3b is the rules basis for a static functioning outside the battlefield at all
+  ("…or the object generating it is in the appropriate zone").
 
 ### `apply_continuous_effect()` — `layers.rs`
 
@@ -181,6 +224,9 @@ match modification {
 
 - [ ] **`crates/engine/src/game/layers.rs` — `gather_active_continuous_effects()`** (if new condition)
   If you added a new `StaticCondition`, add evaluation logic in the condition-checking block.
+
+- [ ] **`crates/engine/src/game/layers.rs` — `layer_pass_materializes_keywords()`** (if the static reaches a new zone)
+  If your `affected` filter targets a zone the pass does not already own, extend this predicate **and** the Step-1 reset in `evaluate_layers()` in the same change — see [Zone Boundary](#zone-boundary--which-zones-the-layer-pass-owns). A grant into an unowned zone is a silent no-op that still reports as supported.
 
 - [ ] **`crates/engine/src/game/layers.rs` — post-fixup** (if interaction with keywords)
   If your modification interacts with keywords that might be granted in layer 6, check whether the post-fixup block (Changeling handling) needs extension.
@@ -261,6 +307,7 @@ It handles:
 | Missing `apply_continuous_effect()` arm | New modification variant compiles but no-ops at runtime | Add the match arm in `layers.rs` |
 | `affected: None` instead of `Some(SelfRef)` | Effect applies to everything, not just the source | Set `affected` correctly |
 | Forgetting `characteristic_defining: true` for CDAs | CDA doesn't function in non-battlefield zones | Set the flag for CDAs |
+| Granting a keyword to an object in a zone the layer pass doesn't materialize | Static parses, effect gathers, resolution runs — and the keyword never appears. A LYING GREEN: the card renders as fully supported | Check `layer_pass_materializes_keywords` (`layers.rs`). Read via `keywords::object_has_effective_keyword_kind`, or extend the materialize set **and** the Step-1 reset together |
 | Using `StaticMode::Continuous` for restrictions | Restriction evaluated through layers but needs direct checks | Use `CantAttack`/`CantBlock`/etc. modes |
 | Not resetting to base values in step 1 | Modifications stack additively across evaluations | `evaluate_layers()` handles reset — just ensure base values are set correctly |
 | Layer 7c modification with dependency ordering | P/T modifications should use timestamp, not dependency | The `Layer` impl handles this — just map to correct sub-layer |
@@ -281,8 +328,10 @@ After completing work using this skill:
 rg -q "fn evaluate_layers" crates/engine/src/game/layers.rs && \
 rg -q "fn gather_active_continuous_effects" crates/engine/src/game/layers.rs && \
 rg -q "fn apply_continuous_effect" crates/engine/src/game/layers.rs && \
-rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static.rs && \
-rg -q "fn parse_continuous_modifications" crates/engine/src/parser/oracle_static.rs && \
+rg -q "fn layer_pass_materializes_keywords" crates/engine/src/game/layers.rs && \
+rg -q "off_zone_characteristics" crates/engine/src/game/keywords.rs && \
+rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static/mod.rs && \
+rg -q "fn parse_continuous_modifications" crates/engine/src/parser/oracle_static/keyword_grant.rs && \
 rg -q "fn is_static_pattern" crates/engine/src/parser/oracle_classifier.rs && \
 rg -q "enum ContinuousModification" crates/engine/src/types/ability.rs && \
 rg -q "struct StaticDefinition" crates/engine/src/types/ability.rs && \

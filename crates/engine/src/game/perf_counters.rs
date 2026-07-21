@@ -4,6 +4,7 @@ use std::cell::Cell;
 pub struct PerfCounterSnapshot {
     pub state_clone_for_legality: u64,
     pub static_full_scans: u64,
+    pub spell_keyword_grant_scans: u64,
     pub layers_full_eval: u64,
     pub layers_incremental: u64,
     pub layers_escalated: u64,
@@ -47,6 +48,7 @@ thread_local! {
     static COUNTERS: Cell<PerfCounterSnapshot> = const { Cell::new(PerfCounterSnapshot {
         state_clone_for_legality: 0,
         static_full_scans: 0,
+        spell_keyword_grant_scans: 0,
         layers_full_eval: 0,
         layers_incremental: 0,
         layers_escalated: 0,
@@ -100,6 +102,13 @@ pub fn record_state_clone_for_legality() {
 /// counter stays at 0 across an entire target enumeration.
 pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
+}
+
+/// Counts full `game_active_statics` scans for `CastWithKeyword` spell grants.
+/// The O(1) `static_kind_present(CastWithKeyword)` gate should keep this at zero
+/// during candidate generation when no functioning spell-keyword grant exists.
+pub fn record_spell_keyword_grant_scan() {
+    with_mut(|s| s.spell_keyword_grant_scans += 1);
 }
 
 /// Counts every full-body execution of `blocker_can_block_shadow` (each a

@@ -32,8 +32,16 @@ jobs:
     if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: read
     outputs:
       card_data_filename: ${{ steps.card-data-hash.outputs.filename }}
+      card_data_sha256: ${{ steps.card-data-hash.outputs.card_data_sha256 }}
+      card_data_hash16: ${{ steps.card-data-hash.outputs.hash }}
+      draft_pools_sha256: ${{ steps.card-data-hash.outputs.draft_pools_sha256 }}
+      draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
+      engine_fingerprint: ${{ steps.engine-fingerprint.outputs.fingerprint }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,8 +58,11 @@ jobs:
       - name: Set cache keys
         id: cache-keys
         run: |
-          echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
           echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Derive MTGJSON cache key
+        id: mtgjson-key
+        uses: ./.github/actions/mtgjson-cache-key
 
       - name: Cache MTGJSON data
         # Full data/mtgjson dir under the `mtgjson-full-` namespace: this job
@@ -60,15 +71,17 @@ jobs:
         # `mtgjson-atomic-`/`mtgjson-sets-` caches; all stay under the
         # `mtgjson-` prefix that clear-caches.yml deletes.
         #
-        # Exact weekly key, NO restore-keys: a new week misses so gen-card-data.sh
-        # re-fetches fresh MTGJSON data (its `[ ! -f ]` guards download whatever
-        # the empty dir is missing); a restore-keys fallback would pin the
-        # file-existence-gated fetches to last week's data forever.
+        # Exact published-version key (week-based fallback when the probe
+        # fails — see the mtgjson-cache-key action), NO restore-keys: the key
+        # misses exactly when MTGJSON publishes, so gen-card-data.sh re-fetches
+        # fresh data (its `[ ! -f ]` guards download whatever the empty dir is
+        # missing); a restore-keys fallback would pin the file-existence-gated
+        # fetches to stale data forever.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
           path: data/mtgjson
-          key: mtgjson-full-${{ steps.cache-keys.outputs.week }}
+          key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
 
       # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
       # download when the file already exists, so a stale restore-key hit would
@@ -127,11 +140,30 @@ jobs:
         # immutable card-data-<hash>.json URL baked into the JS bundle. New
         # deploys publish a new hash; old browser caches keep resolving theirs.
         run: |
-          HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "filename=card-data-$HASH.json" >> "$GITHUB_OUTPUT"
-          cp "data/card-data.json" "client/public/card-data-$HASH.json"
-          echo "Content-addressed card-data: card-data-$HASH.json"
+          CARD_DATA_SHA256=$(sha256sum data/card-data.json | awk '{print $1}')
+          CARD_DATA_HASH16=${CARD_DATA_SHA256:0:16}
+          DRAFT_POOLS_SHA256=$(sha256sum client/public/draft-pools.json | awk '{print $1}')
+          DRAFT_POOLS_HASH16=${DRAFT_POOLS_SHA256:0:16}
+          echo "card_data_sha256=$CARD_DATA_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$CARD_DATA_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=card-data-$CARD_DATA_HASH16.json" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_sha256=$DRAFT_POOLS_SHA256" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_hash16=$DRAFT_POOLS_HASH16" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_filename=draft-pools-$DRAFT_POOLS_HASH16.json" >> "$GITHUB_OUTPUT"
+          cp data/card-data.json "client/public/card-data-$CARD_DATA_HASH16.json"
+          echo "Content-addressed data: card-data-$CARD_DATA_HASH16.json, draft-pools-$DRAFT_POOLS_HASH16.json"
+
+      - name: Compute engine fingerprint
+        id: engine-fingerprint
+        # The fingerprint is computed exactly once, after both generated data
+        # files exist. It keys preview native artifacts and the frontend define.
+        run: |
+          FINGERPRINT=$(./scripts/engine-fingerprint.sh \
+            "$DEPLOY_SHA" \
+            data/card-data.json \
+            client/public/draft-pools.json)
+          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
+          echo "Engine fingerprint: $FINGERPRINT"
 
       - name: Generate Scryfall data
         run: |
@@ -170,6 +202,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+          DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
         run: |
           # The r2.dev public endpoint does NOT compress on the fly, so these
           # JSONs were served raw (~77 MB of scryfall data per cold game load).
@@ -180,10 +213,8 @@ jobs:
           # reduction at a fraction of q11's CPU, which matters on an
           # every-merge path.
           #
-          # Compress into a temp dir, never client/public: card-data.json and
-          # draft-pools.json are re-read AFTER this step (Stage server data
-          # artifact) and baked UNCOMPRESSED into the server image, which loads
-          # them from disk — a stray .br or in-place overwrite would break it.
+          # Compress into a temp dir, never client/public: content hashes and
+          # native manifests are over the original uncompressed bytes.
           command -v brotli >/dev/null || { sudo apt-get update && sudo apt-get install -y brotli; }
           BRDIR="$(mktemp -d)"
 
@@ -191,6 +222,11 @@ jobs:
           # over the uncompressed file, so the URL stays a valid content key.
           brotli -q 9 -c "client/public/$CARD_DATA_FILENAME" > "$BRDIR/card-data.br"
           npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+
+          # Draft pools are a second immutable input to native/server data
+          # manifests. Keep the mutable draft-pools.json below for web clients.
+          brotli -q 9 -c client/public/draft-pools.json > "$BRDIR/draft-pools.br"
+          npx wrangler r2 object put "phase-rs-data/staging/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
           while IFS= read -r f; do
@@ -215,6 +251,7 @@ jobs:
         # actually reachable. Reads from data-files.json — same source as upload.
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+          DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
         run: |
           BASE="https://data.phase-rs.dev/staging"
           fail=0
@@ -235,6 +272,7 @@ jobs:
             fi
           }
           check "$CARD_DATA_FILENAME"
+          check "$DRAFT_POOLS_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON. The 200
@@ -243,24 +281,29 @@ jobs:
             || { echo "::error::brotli round-trip failed for scryfall-sets.json"; fail=1; }
           [ "$fail" = "0" ]
 
-      - name: Stage server data artifact
-        # card-data.json + draft-pools.json are baked into the server image by
-        # push-server-image. They are NOT in data-files.json (the server reads them
-        # from disk, not R2), so they ship via artifact instead.
+      - name: Dispatch preview server artifact build
+        # A dispatch miss self-heals on the next deploy for this fingerprint;
+        # never cancel the content deploy over a transient GitHub API failure.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FINGERPRINT: ${{ steps.engine-fingerprint.outputs.fingerprint }}
+          CARD_DATA_SHA256: ${{ steps.card-data-hash.outputs.card_data_sha256 }}
+          CARD_DATA_HASH16: ${{ steps.card-data-hash.outputs.hash }}
+          DRAFT_POOLS_SHA256: ${{ steps.card-data-hash.outputs.draft_pools_sha256 }}
+          DRAFT_POOLS_HASH16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
         run: |
-          mkdir -p server-data
-          cp data/card-data.json server-data/card-data.json
-          cp client/public/draft-pools.json server-data/draft-pools.json
-          test -s server-data/card-data.json
-          test -s server-data/draft-pools.json
-
-      - name: Upload server data artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-data
-          path: server-data/*
-          if-no-files-found: error
-          retention-days: 1
+          # Dispatch from main (workflow_dispatch refs must be a branch/tag,
+          # never a bare SHA — same pattern as nightly-release.yml); the exact
+          # source tree is pinned separately by the `commit` input below.
+          if ! gh workflow run preview-server.yml --ref main \
+            -f "fingerprint=$FINGERPRINT" \
+            -f "commit=$DEPLOY_SHA" \
+            -f "card_data_sha256=$CARD_DATA_SHA256" \
+            -f "card_data_hash16=$CARD_DATA_HASH16" \
+            -f "draft_pools_sha256=$DRAFT_POOLS_SHA256" \
+            -f "draft_pools_hash16=$DRAFT_POOLS_HASH16"; then
+            echo "::warning::Could not dispatch preview-server.yml for $FINGERPRINT; a later deploy will retry."
+          fi
 
   # ── WASM build (parallel with card-data) ────────────────────────────────────
   # Compiles the engine + draft WASM bundles. Depends on nothing the data
@@ -280,6 +323,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # An env RUSTFLAGS (this action's default is "-D warnings") overrides
+          # ALL .cargo/config.toml rustflags, silently dropping the
+          # [target.wasm32-unknown-unknown] 16 MiB shadow-stack link-arg that
+          # build-wasm.sh's assert_wasm_stack guard requires. Keep config.toml
+          # authoritative.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         with:
@@ -298,6 +347,13 @@ jobs:
 
       - name: Add binaryen to PATH
         run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+
+      # build-wasm.sh's assert_wasm_stack guard parses the shipped wasm's memory
+      # section with node; declare the dependency explicitly (release.yml already
+      # sets up node for its build-wasm job).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
@@ -362,6 +418,7 @@ jobs:
           # card-data it was built against (filename from the card-data job).
           DATA_BASE_URL: "https://data.phase-rs.dev/staging"
           CARD_DATA_URL: "https://data.phase-rs.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
+          ENGINE_FINGERPRINT: ${{ needs.card-data.outputs.engine_fingerprint }}
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
           # access control), so it's baked into the bundle. Empty (secret unset) →
@@ -413,9 +470,9 @@ jobs:
 
   # ── Server binary compile (parallel with card-data) ─────────────────────────
   # phase-server is compiled NATIVELY as a static musl binary, then uploaded as
-  # an artifact for push-server-image to bake into the runtime image. The compile
-  # needs nothing the data pipeline produces, so it deliberately has no `needs:`
-  # and overlaps card-data's ~10min run instead of serializing behind it.
+  # an artifact for push-server-image. The compile needs nothing the data
+  # pipeline produces, so it deliberately has no `needs:` and overlaps card-data's
+  # ~10min run instead of serializing behind it.
   #
   # NOTE: this is a cold ~10min compile every run. Swatinem's rust-cache (via
   # setup-rust-toolchain) caches registry/git deps but prunes the workspace
@@ -454,7 +511,11 @@ jobs:
         # No chmod here: upload-artifact strips the executable bit anyway;
         # push-server-image re-applies it (and the Dockerfile chmods in-image).
         run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          # -p scopes feature unification to phase-server's own graph: an
+          # unscoped workspace build unifies feed-scraper's native-tls reqwest
+          # features into phase-server, dragging openssl-sys into the musl
+          # cross-compile (which has no OpenSSL and fails).
+          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
@@ -465,13 +526,21 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Server image push (needs binary + data) ─────────────────────────────────
-  # Pure packaging step: pulls the prebuilt musl binary and the server data,
-  # then BINARY_STAGE=prebuilt makes Docker just apt + COPY (no compile). Gated
-  # on both producers so it starts the moment the slower of the two finishes.
+  # ── Server image push (needs binary) ────────────────────────────────────────
+  # Pure packaging step: pulls the prebuilt musl binary, then BINARY_STAGE=prebuilt
+  # makes Docker just apt + COPY (no compile).
+  #
+  # NOTE: this binary is compiled WITHOUT a PHASE_CHANNEL identity (it builds in
+  # parallel with card-data, so the fingerprint cannot exist yet), which means
+  # the image cannot self-bootstrap its data: booting it against an empty
+  # PHASE_DATA_DIR is a clear fatal error. Any consumer must either
+  # pre-provision the data volume or set PHASE_DATA_MANIFEST_URL to a signed
+  # release-shaped data manifest. No in-repo deployment currently runs this
+  # image (beebs deploy-server is disabled); see GH #6287 for publishing a
+  # signed staging data manifest before re-enabling one.
   push-server-image:
     name: Build & push server image
-    needs: [build-server-binary, card-data]
+    needs: [build-server-binary]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -488,18 +557,10 @@ jobs:
           name: server-binary
           path: .
 
-      - name: Download server data artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: server-data
-          path: data
-
       - name: Verify build context
         run: |
           test -s phase-server
           chmod +x phase-server
-          test -s data/card-data.json
-          test -s data/draft-pools.json
 
       - name: Compute image tags
         id: image

@@ -229,6 +229,11 @@
       "remove": "Usuń czar sygnaturowy",
       "mustBeInstantOrSorcery": "Czar sygnaturowy musi być błyskawicznym lub czarem",
       "outsideColorIdentity": "{{name}}: poza tożsamością kolorów Przysięgołamacza"
+    },
+    "companion": {
+      "heading": "Towarzysz",
+      "noCompanion": "Nie wybrano towarzysza",
+      "remove": "Usuń towarzysza"
     }
   },
   "manaCurve": {

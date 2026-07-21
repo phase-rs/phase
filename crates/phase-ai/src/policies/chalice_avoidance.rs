@@ -29,7 +29,7 @@ use engine::game::functioning_abilities::{
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::types::ability::{
     AbilityDefinition, Comparator, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    TargetFilter, TriggerDefinition,
+    TargetFilter, TriggerEntry,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -171,29 +171,32 @@ fn chalice_matches<'a>(
 /// trigger that counters the cast spell when its mana value equals the count of
 /// some counter type on this permanent. Returns that counter type so the caller
 /// can read the live count. Covers any card with this shape — not just Chalice.
-fn chalice_counter_type(triggers: &[TriggerDefinition]) -> Option<CounterType> {
-    triggers.iter().find_map(|trigger| {
-        if !matches!(
-            trigger.mode,
-            TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
-        ) {
-            return None;
-        }
-        // CR 701.6a: the trigger must actually counter the spell.
-        if !trigger
-            .execute
-            .as_deref()
-            .is_some_and(ability_counters_spell)
-        {
-            return None;
-        }
-        // CR 202.3 + CR 122.1: the cast filter must gate on mana value equal to
-        // the count of one of this permanent's own counters.
-        trigger
-            .valid_card
-            .as_ref()
-            .and_then(filter_counter_type_for_cmc_eq_self_counters)
-    })
+fn chalice_counter_type(triggers: &[TriggerEntry]) -> Option<CounterType> {
+    triggers
+        .iter()
+        .map(|entry| &entry.definition)
+        .find_map(|trigger| {
+            if !matches!(
+                trigger.mode,
+                TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
+            ) {
+                return None;
+            }
+            // CR 701.6a: the trigger must actually counter the spell.
+            if !trigger
+                .execute
+                .as_deref()
+                .is_some_and(ability_counters_spell)
+            {
+                return None;
+            }
+            // CR 202.3 + CR 122.1: the cast filter must gate on mana value equal to
+            // the count of one of this permanent's own counters.
+            trigger
+                .valid_card
+                .as_ref()
+                .and_then(filter_counter_type_for_cmc_eq_self_counters)
+        })
 }
 
 /// True when an ability's effect chain counters a spell/ability (CR 701.6).
@@ -239,7 +242,9 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, StaticDefinition, TypedFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, StaticDefinition, TriggerDefinition, TypedFilter,
+    };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
     use engine::types::identifiers::CardId;

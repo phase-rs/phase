@@ -17,7 +17,8 @@ use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_type_phrase, parse_type_phrase_with_ctx,
+    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase,
+    parse_type_phrase_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::lower::parse_for_each_multiplier_prefix;
@@ -974,22 +975,57 @@ fn resolve_remove_counter_from_target(text: &str, ctx: &mut ParseContext) -> Tar
     resolve_counter_target(text, ctx)
 }
 
-/// Resolve a counter target from text: self-ref, pronoun, or parse_target.
-/// Shared by put/remove/multiply counter parsers.
-fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+/// Classification of a counter target phrase, distinguishing forms the runtime
+/// can resolve (`Supported`) from a non-targeted descriptor scope
+/// (`NonTargetedDescriptor`) that a targeted-only effect cannot enumerate.
+///
+/// Both arms carry a `TargetFilter`: `resolve_counter_target` unwraps them
+/// uniformly (put/remove/multiply counters resolve identically either way),
+/// while the counter-doubling arm of `try_parse_double_effect` consults the
+/// discriminant to gate the non-targeted mass form to an honest `Unimplemented`
+/// (CR 701.10e — see there).
+enum CounterTargetKind {
+    Supported(TargetFilter),
+    NonTargetedDescriptor(TargetFilter),
+}
+
+/// Classify a counter target from text: self-ref, pronoun, trigger anaphor, or a
+/// parsed target phrase. The anaphor guards run FIRST and in this exact order
+/// (order is load-bearing: `it`/`that creature` resolve against the parse
+/// context before any descriptor fallback), each yielding a single-object
+/// `Supported` filter. A parsed phrase is `Supported` only when it used the
+/// "target" keyword (CR 115.1 `TargetKeyword`); a bare descriptor scope is
+/// `NonTargetedDescriptor`.
+///
+/// The fallback parses with a fresh `ParseContext` so it stays byte-for-byte
+/// equivalent to the prior `parse_target(text)` call — the shared `ctx` is read
+/// only by the anaphor guards, exactly as before.
+fn classify_counter_target(text: &str, ctx: &mut ParseContext) -> CounterTargetKind {
     if is_self_ref(text) {
-        TargetFilter::SelfRef
+        CounterTargetKind::Supported(TargetFilter::SelfRef)
     } else if is_it_pronoun(text) {
         // CR 608.2k: Bare pronoun — context-dependent
-        resolve_it_pronoun(ctx)
+        CounterTargetKind::Supported(resolve_it_pronoun(ctx))
     } else if resolve_that_creature_in_trigger(text, ctx).is_some() {
         // CR 608.2k + CR 301.5a: Trigger-context "that creature" → triggering source.
-        TargetFilter::TriggeringSource
+        CounterTargetKind::Supported(TargetFilter::TriggeringSource)
     } else {
-        let (t, _rem) = parse_target(text);
+        let (t, _rem, syntax) = parse_target_with_syntax(text, &mut ParseContext::default());
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        t
+        match syntax {
+            TargetSyntax::TargetKeyword => CounterTargetKind::Supported(t),
+            TargetSyntax::Descriptor => CounterTargetKind::NonTargetedDescriptor(t),
+        }
+    }
+}
+
+/// Resolve a counter target from text: self-ref, pronoun, or parsed target.
+/// Shared by put/remove/multiply counter parsers, which resolve identically for
+/// both target classes — so the `CounterTargetKind` discriminant is unwrapped.
+fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    match classify_counter_target(text, ctx) {
+        CounterTargetKind::Supported(t) | CounterTargetKind::NonTargetedDescriptor(t) => t,
     }
 }
 
@@ -1229,15 +1265,30 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &mut ParseContext) ->
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
 /// mana-doubling, or P/T-doubling.
 pub(super) fn try_parse_double_effect(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
-    // CR 701.10e: "double the number of each kind of counter on ..." → all counter types
+    // CR 701.10e: "double the number of each kind of counter on ..." → all counter
+    // kinds. The doubled amount is intrinsic to the resolver ("give as many of
+    // those counters as already present"), never a `QuantityExpr` carrier — the
+    // same reasoning as the `MultiplyCounter` escape hatch in swallow_check.
+    //
+    // `Effect::Double` is targeted-only (there is no battlefield-enumeration tier
+    // in `targeting::resolved_targets`), so a NON-targeted descriptor target such
+    // as "each creature you control" would double nothing at runtime. Gate that
+    // mass form to an honest `Unimplemented` until the DoubleCountersAll mass
+    // runtime exists; the targeted form resolves normally.
     if let Some(((), rest)) = nom_on_lower(lower, lower, |i| {
         value((), tag("double the number of each kind of counter on ")).parse(i)
     }) {
-        let target = resolve_counter_target(rest, ctx);
-        return Some(Effect::Double {
-            target_kind: DoubleTarget::Counters { counter_type: None },
-            target,
-        });
+        return match classify_counter_target(rest, ctx) {
+            CounterTargetKind::Supported(target) => Some(Effect::Double {
+                target_kind: DoubleTarget::Counters { counter_type: None },
+                target,
+            }),
+            // Fragment is the full lowercased clause (diagnostics-only); the
+            // parser receives no original-case copy at this dispatch depth.
+            CounterTargetKind::NonTargetedDescriptor(_) => {
+                Some(Effect::unimplemented("double_counters_nontargeted", lower))
+            }
+        };
     }
 
     // Counter doubling: "double the number of ..."
@@ -1476,6 +1527,116 @@ mod tests {
                 target: TargetFilter::ParentTargetController,
             })
         ));
+    }
+
+    /// §5 honest-red gate (CR 701.10e): `Effect::Double` is targeted-only, so a
+    /// NON-targeted descriptor population ("... on each creature you control")
+    /// has no runtime path and must lower to an honest `Effect::Unimplemented`;
+    /// the targeted form ("... on target creature") still lowers to
+    /// `Effect::Double`.
+    #[test]
+    fn double_each_kind_counter_gates_nontargeted_mass_form_to_unimplemented() {
+        let mass = try_parse_double_effect(
+            "double the number of each kind of counter on each creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(mass, Some(Effect::Unimplemented { .. })),
+            "non-targeted mass form must be honest-red Unimplemented, got {mass:?}"
+        );
+
+        // The §5 gate keys on `Descriptor` ALONE (no plurality sub-condition), so a
+        // SINGULAR non-targeted descriptor must gate identically to the plural mass
+        // form — `Effect::Double` is targeted-only and would double nothing at
+        // runtime for either. Pins against a future plurality branch
+        // (`if plural { NonTargetedDescriptor } else { Supported }`) that would
+        // silently re-support the singular form as a non-functional `Effect::Double`.
+        let singular = try_parse_double_effect(
+            "double the number of each kind of counter on a creature you control",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(singular, Some(Effect::Unimplemented { .. })),
+            "singular non-targeted descriptor form must gate identically to the mass \
+             form (honest-red Unimplemented), got {singular:?}"
+        );
+
+        let targeted = try_parse_double_effect(
+            "double the number of each kind of counter on target creature",
+            &mut default_ctx(),
+        );
+        assert!(
+            matches!(
+                targeted,
+                Some(Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    ..
+                })
+            ),
+            "targeted form must still resolve to Effect::Double, got {targeted:?}"
+        );
+    }
+
+    /// §5 F2 ordering (CR 608.2k): the anaphor guards run BEFORE the descriptor
+    /// fallback, so "... on it" inside a trigger whose subject is a non-self
+    /// creature filter resolves to the triggering object (`TriggeringSource`) as
+    /// a Supported single-object target — NOT an honest-red Unimplemented.
+    #[test]
+    fn double_each_kind_counter_on_it_binds_triggering_source_in_trigger_context() {
+        let mut ctx = default_ctx();
+        ctx.subject = Some(TargetFilter::Typed(TypedFilter::creature()));
+        let text = "double the number of each kind of counter on it";
+        let effect =
+            try_parse_double_effect(text, &mut ctx).expect("parse double-counter on-it anaphor");
+        assert!(
+            matches!(
+                effect,
+                Effect::Double {
+                    target_kind: DoubleTarget::Counters { counter_type: None },
+                    target: TargetFilter::TriggeringSource,
+                }
+            ),
+            "on-it anaphor in trigger context must bind TriggeringSource, got {effect:?}"
+        );
+    }
+
+    /// §5 real-card (CR 701.10e): Ultimate Spider-Man's back-face "Whenever you
+    /// attack, double the number of each kind of counter on each Spider and
+    /// legendary creature you control" is a NON-targeted descriptor population.
+    /// The YouAttack trigger's effect must be the honest-red Unimplemented from
+    /// the mass gate, not a silently non-functional `Effect::Double`.
+    #[test]
+    fn ultimate_spider_man_mass_double_counter_trigger_is_honest_unimplemented() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let parsed = parse_oracle_text(
+            "First strike, haste\n\
+             Camouflage — {2}: Put a +1/+1 counter on Ultimate Spider-Man. He gains hexproof and becomes colorless until end of turn.\n\
+             Whenever you attack, double the number of each kind of counter on each Spider and legendary creature you control.",
+            "Ultimate Spider-Man",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+
+        let has_mass_double_unimplemented = parsed.triggers.iter().any(|t| {
+            t.execute.as_ref().is_some_and(|ability| {
+                matches!(
+                    &*ability.effect,
+                    // allow-noncombinator: test assertion on emitted Unimplemented category name
+                    Effect::Unimplemented { name, .. } if name == "double_counters_nontargeted"
+                )
+            })
+        });
+        assert!(
+            has_mass_double_unimplemented,
+            "USM's YouAttack mass counter-double must be an honest Unimplemented; triggers: {:?}",
+            parsed
+                .triggers
+                .iter()
+                .map(|t| t.execute.as_ref().map(|a| &a.effect))
+                .collect::<Vec<_>>()
+        );
     }
 
     /// CR 701.10a: "double target creature's power and toughness" → factor 2.

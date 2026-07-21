@@ -106,7 +106,11 @@ fn free_cast_offered_during_resolution_then_no_lingering_permission() {
     // lingering-permission driver, the runtime asserts below would no longer
     // discriminate, so anchor the input shape here.
     let trigger = &runner.state().objects[&attacker].trigger_definitions[0];
-    let execute = trigger.execute.as_ref().expect("trigger execute");
+    let execute = trigger
+        .definition
+        .execute
+        .as_ref()
+        .expect("trigger execute");
     let cast = execute.sub_ability.as_ref().expect("cast sub-ability");
     let Effect::CastFromZone {
         without_paying_mana_cost,

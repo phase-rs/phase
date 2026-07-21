@@ -106,6 +106,12 @@ pub enum ClientMessage {
     Action {
         action: GameAction,
     },
+    /// Read-only simulation of an exact automatic spell-cast action. The
+    /// authenticated session, rather than the client, determines the actor.
+    PreviewManaPayment {
+        request_id: u64,
+        action: GameAction,
+    },
     Reconnect {
         game_code: String,
         player_token: String,
@@ -340,6 +346,16 @@ pub enum ServerMessage {
     ActionRejected {
         reason: String,
     },
+    /// Mana sources the engine's automatic payment path would use for one
+    /// `PreviewManaPayment` request. Sent only to the requesting player.
+    ManaPaymentPreview {
+        request_id: u64,
+        source_ids: Vec<ObjectId>,
+    },
+    ManaPaymentPreviewRejected {
+        request_id: u64,
+        reason: String,
+    },
     OpponentDisconnected {
         grace_seconds: u32,
         #[serde(default)]
@@ -550,6 +566,68 @@ mod tests {
                 assert_eq!(action, GameAction::PassPriority);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_mana_payment_preview_roundtrips() {
+        let msg = ClientMessage::PreviewManaPayment {
+            request_id: 7,
+            action: GameAction::PassPriority,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::PreviewManaPayment { request_id, action } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(action, GameAction::PassPriority);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_mana_payment_preview_roundtrips() {
+        let msg = ServerMessage::ManaPaymentPreview {
+            request_id: 7,
+            source_ids: vec![ObjectId(12)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::ManaPaymentPreview {
+                request_id,
+                source_ids,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(source_ids, vec![ObjectId(12)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn meld_actions_roundtrip() {
+        use engine::game::combat::AttackTarget;
+        use engine::types::identifiers::ObjectId;
+
+        for action in [
+            GameAction::ChooseMeldPair {
+                source_id: ObjectId(10),
+                partner_id: ObjectId(11),
+            },
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Battle(ObjectId(12)),
+            },
+        ] {
+            let json = serde_json::to_string(&ClientMessage::Action {
+                action: action.clone(),
+            })
+            .unwrap();
+            let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+            assert!(
+                matches!(parsed, ClientMessage::Action { action: parsed_action } if parsed_action == action)
+            );
         }
     }
 
@@ -1806,8 +1884,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_13() {
-        assert_eq!(PROTOCOL_VERSION, 13);
+    fn protocol_version_is_20() {
+        assert_eq!(PROTOCOL_VERSION, 20);
     }
 
     #[test]

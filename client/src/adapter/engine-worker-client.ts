@@ -167,6 +167,18 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
   }
 
+  async getCardFaceData(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardFaceData", cardName });
+  }
+
+  async getCardParseDetails(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardParseDetails", cardName });
+  }
+
+  async getCardRulings(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardRulings", cardName });
+  }
+
   /**
    * Build the game-scoped AI card-DB subset for THIS game. Returns the
    * serialized `AiCardSubsetResult` tagged union (parse with `JSON.parse`).
@@ -210,6 +222,13 @@ export class EngineWorkerClient {
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
+    return this.request<number[]>(
+      { type: "previewManaPayment", actor, action },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

@@ -38,6 +38,8 @@ export interface ExpandedDeck {
   sticker_sheets: string[];
   /** Oathbreaker RC: signature spell card name (empty for non-Oathbreaker formats). */
   signature_spell: string[];
+  /** Commander-family companion outside the 100-card deck. */
+  companion: string[];
 }
 
 function expandEntries(entries: DeckEntry[]): string[] {
@@ -66,10 +68,18 @@ export function expandParsedDeck(deck: ParsedDeck): ExpandedDeck {
     scheme_deck: deck.scheme_deck ?? [],
     sticker_sheets: deck.sticker_sheets ?? [],
     signature_spell: deck.signature_spell ?? [],
+    companion: deck.companion ? [deck.companion] : [],
   };
 }
 
-type DeckSection = "main" | "sideboard" | "commander" | "companion" | "planar_deck" | "scheme_deck";
+type DeckSection =
+  | "main"
+  | "sideboard"
+  | "commander"
+  | "companion"
+  | "signature_spell"
+  | "planar_deck"
+  | "scheme_deck";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
 const COLON_SECTION_RE = /:$/;
 
@@ -118,6 +128,12 @@ function getNamedSection(line: string): DeckSection | null {
     || normalized === "[commanders]"
   ) return "commander";
   if (normalized === "companion" || normalized === "[companion]") return "companion";
+  if (
+    normalized === "signature spell"
+    || normalized === "signature spells"
+    || normalized === "[signature spell]"
+    || normalized === "[signature spells]"
+  ) return "signature_spell";
   return null;
 }
 
@@ -240,6 +256,7 @@ export function parsedDeckHasCards(deck: ParsedDeck): boolean {
     || (deck.commander?.length ?? 0) > 0
     || (deck.planar_deck?.length ?? 0) > 0
     || (deck.scheme_deck?.length ?? 0) > 0
+    || (deck.signature_spell?.length ?? 0) > 0
     || deck.companion !== undefined
   );
 }
@@ -316,6 +333,26 @@ function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
   return { ...deck, main };
 }
 
+/**
+ * Moves the user-selected Oathbreaker and signature spell out of the main
+ * deck and into their dedicated command-zone slots. Candidate legality comes
+ * from the engine; this helper only preserves the parsed deck partition.
+ */
+export function assignOathbreakerSlots(
+  deck: ParsedDeck,
+  oathbreaker: string,
+  signatureSpell: string,
+): ParsedDeck {
+  const normalized = repairParsedDeck(deck);
+  const mainWithoutOathbreaker = removeOneCopy(normalized.main, oathbreaker);
+  return {
+    ...normalized,
+    main: removeOneCopy(mainWithoutOathbreaker, signatureSpell),
+    commander: [oathbreaker],
+    signature_spell: [signatureSpell],
+  };
+}
+
 function normalizeParsedDeck(
   deck: ParsedDeck,
   options: { explicitCommander: boolean; explicitSideboard: boolean },
@@ -326,6 +363,7 @@ function normalizeParsedDeck(
     planar_deck: normalizeNames(deck.planar_deck),
     scheme_deck: normalizeNames(deck.scheme_deck),
     sticker_sheets: deck.sticker_sheets ? [...deck.sticker_sheets] : undefined,
+    signature_spell: normalizeNames(deck.signature_spell),
   };
 
   if (deck.commander?.length) {
@@ -438,10 +476,12 @@ export function parseDeckFile(content: string): ParsedDeck {
         commanderEntries.push(entry);
         if (annotation === "commander") explicitCommander = true;
       } else if (annotation === "companion" || currentSection === "companion") {
-        // CR 702.139a: Record companion name only — the Sideboard section
-        // will include the card. loadActiveDeck (storage.ts:98) ensures
-        // companion is in sideboard if a source omits it.
+        // Preserve the companion declaration. The format-aware migration and
+        // engine projection decide whether it is a dedicated Commander-family
+        // slot or a traditional sideboard companion.
         deck.companion = entry.name;
+      } else if (currentSection === "signature_spell") {
+        deck.signature_spell = [entry.name];
       } else if (currentSection === "planar_deck") {
         pushPlanarDeckEntry(deck, entry);
       } else if (currentSection === "scheme_deck") {
@@ -523,11 +563,12 @@ export function parseMtgaDeck(content: string): ParsedDeck {
         commanderEntries.push(entry);
         if (annotation === "commander") explicitCommander = true;
       } else if (annotation === "companion" || currentSection === "companion") {
-        // CR 702.139a: Record companion name only — the Sideboard section
-        // will include the card. loadActiveDeck (storage.ts:98) ensures
-        // companion is in sideboard if a source omits it.
+        // Preserve the declaration for format-aware migration/projection.
         deck.companion = entry.name;
         if (currentSection === "companion") currentSection = "main";
+      } else if (currentSection === "signature_spell") {
+        deck.signature_spell = [entry.name];
+        currentSection = "main";
       } else if (currentSection === "planar_deck") {
         pushPlanarDeckEntry(deck, entry);
       } else if (currentSection === "scheme_deck") {
@@ -591,6 +632,18 @@ export function exportDeckFile(deck: ParsedDeck): string {
     }
   }
 
+  if (deck.signature_spell && deck.signature_spell.length > 0) {
+    lines.push("[Signature Spell]");
+    for (const name of deck.signature_spell) {
+      lines.push(`1 ${name}`);
+    }
+  }
+
+  if (deck.companion) {
+    lines.push("[Companion]");
+    lines.push(`1 ${deck.companion}`);
+  }
+
   if (deck.main.length > 0) {
     lines.push("[Main]");
     for (const entry of deck.main) {
@@ -636,6 +689,20 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
     for (const name of deck.commander) {
       lines.push(`1 ${name}`);
     }
+    lines.push("");
+  }
+
+  if (deck.signature_spell && deck.signature_spell.length > 0) {
+    lines.push("Signature Spell");
+    for (const name of deck.signature_spell) {
+      lines.push(`1 ${name}`);
+    }
+    lines.push("");
+  }
+
+  if (deck.companion) {
+    lines.push("Companion");
+    lines.push(`1 ${deck.companion}`);
     lines.push("");
   }
 

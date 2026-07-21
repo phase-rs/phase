@@ -932,6 +932,17 @@ pub(crate) enum TargetedImperativeAst {
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,
+        /// CR 115.1d + CR 601.2c: Variable object count for a non-targeted
+        /// "return up to N cards from your graveyard to your hand" (Ill-Gotten
+        /// Gains) or "return that many cards from your graveyard to your hand"
+        /// (dynamic count) — mirrors [`TargetedImperativeAst::Tap`]. `None` for
+        /// the common single-object "return a card from your graveyard to your
+        /// hand". Carried onto `ParsedEffectClause.multi_target` at lowering;
+        /// the runtime's `EffectZoneChoice` picker already resolves bounded
+        /// at-resolution bounce counts generically (Wrenn and Six precedent),
+        /// so no game-logic change is needed — only the parser previously
+        /// dropped the quantifier before it ever reached that machinery.
+        multi_target: Option<MultiTargetSpec>,
         /// CR 115.1 + Whitemane Lion ruling: Captured at parse time from the
         /// `TargetSyntax` discriminator. `Descriptor` Oracle text without
         /// "target" (e.g. "return a creature you control to its owner's hand")
@@ -982,6 +993,17 @@ pub(crate) enum TargetedImperativeAst {
         /// CR 107.1c: "return any number of [filter] cards" — zero-or-more
         /// resolution-time zone selection (Grave Sifter class).
         up_to: bool,
+        /// CR 115.1d + CR 601.2c: Variable object count for a non-targeted
+        /// "return up to N cards from your graveyard to your hand"
+        /// (Ill-Gotten Gains) or "return that many cards …" (dynamic count).
+        /// `None` for the common single-object "return a card from your
+        /// graveyard to your hand" and for the unrelated unbounded `up_to`
+        /// shape above (Grave Sifter class), which keeps using its own flag.
+        /// Carried onto `ParsedEffectClause.multi_target` at lowering,
+        /// mirroring `ZoneCounterImperativeAst::Exile`'s `multi_target` (#5649
+        /// / Forage precedent) — `Effect::ChangeZone` has no count slot of its
+        /// own, so the quantity rides the clause's `MultiTargetSpec` instead.
+        multi_target: Option<MultiTargetSpec>,
     },
     /// CR 400.7 + CR 608.2c: Mass return to a non-default zone. Lowers to
     /// `ChangeZoneAll` so the resolver scans every matching object instead of
@@ -1015,6 +1037,15 @@ pub(crate) enum TargetedImperativeAst {
         /// True for the untargeted mass form ("gain control of all/each …"),
         /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
         all: bool,
+        /// CR 115.1d + CR 601.2c: Variable target count for "gain control of up to N target
+        /// …" (The Super Hero Civil War's "up to two target creatures with total
+        /// mana value 6 or less"; Jace, Ingenious Mind-Mage's "up to three target
+        /// creatures"). `None` for the common single-target "gain control of
+        /// target creature". Carried onto `ParsedEffectClause.multi_target` at
+        /// lowering so the targeting system surfaces N optional slots — without
+        /// it the count collapsed to one and only a single creature could be
+        /// chosen (issue #6205). Mirrors the same field on `Tap`/`Untap`.
+        multi_target: Option<MultiTargetSpec>,
     },
     ControlNextTurn {
         target: TargetFilter,
@@ -1688,8 +1719,25 @@ pub(crate) fn with_clause_duration(
         }
         Effect::BecomeCopy {
             duration: ref mut effect_duration,
+            recipient,
             ..
         } => {
+            // CR 611.2b + CR 301.5: a leading "for as long as ~ remains
+            // attached to it" binds a singular become-copy to the attachment
+            // host. The duration is stripped before the body is parsed, so
+            // this is the first point where both the copy and its final
+            // duration are available.
+            if matches!(
+                &duration,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+                }
+            ) && *recipient == TargetFilter::SelfRef
+            {
+                *recipient = TargetFilter::AttachedTo;
+            }
             *effect_duration = Some(duration);
         }
         _ => {}
@@ -1795,6 +1843,21 @@ pub(crate) struct ModalHeaderAst {
     /// CR 700.2 + CR 107.3m: Dynamic max ("choose up to X —") — `Some` carries
     /// the cost {X} reference resolved live at runtime; `None` for fixed caps.
     pub(crate) dynamic_max_choices: Option<crate::types::ability::QuantityExpr>,
+    /// CR 608.2c: Triggered modal headers of the form "you may choose N"
+    /// (Shadrix Silverquill) make the entire triggered ability optional — the
+    /// controller may decline to choose any modes. Distinct from "you may choose
+    /// up to N", which only lowers `min_choices` to 0 while the trigger remains
+    /// mandatory.
+    pub(crate) optionality: ModalOptionality,
+}
+
+/// CR 608.2c: Whether a modal header makes its enclosing triggered ability
+/// optional. This remains distinct from a modal's `min_choices`, which models
+/// how many modes a mandatory ability may select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) enum ModalOptionality {
+    Mandatory,
+    MayDecline,
 }
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---

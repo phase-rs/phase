@@ -28,52 +28,112 @@ echo "=== Card Data Generation ==="
 # with GATED_SETS_AS_OF=YYYY-MM-DD.
 export GATED_SETS_AS_OF="${GATED_SETS_AS_OF:-$(date -u +%Y-%m-%d)}"
 
-# Download MTGJSON AtomicCards if not present. mtgjson_download prefers the
-# gzipped artifact (~50 MB vs ~156 MB uncompressed) and retries the
-# mid-transfer connection resets mtgjson hands out on large anonymous reads.
-MTGJSON_FILE="$DATA_DIR/mtgjson/AtomicCards.json"
-if [ ! -f "$MTGJSON_FILE" ]; then
+# A local MTGJSON cache is deliberately reusable for fast, offline generator
+# runs, but an unbounded cache turns it into a stale-input writer. Match CI's
+# weekly cache cadence in UTC so every normal run uses one coherent vintage;
+# the stamp is written only after all input downloads finish below, so a failed
+# refresh retries instead of certifying a mixture of old and new files.
+MTGJSON_DIR="$DATA_DIR/mtgjson"
+MTGJSON_REFRESH_STAMP="$MTGJSON_DIR/.refresh-week"
+CURRENT_WEEK="$(date -u +%Y-W%V)"
+REFRESH=0
+if [ "${PHASE_REFRESH_MTGJSON:-0}" = "1" ]; then
+  REFRESH=1
+elif [ "${MTGJSON_SKIP_REFRESH:-0}" != "1" ]; then
+  if [ ! -f "$MTGJSON_REFRESH_STAMP" ] || [ "$(cat "$MTGJSON_REFRESH_STAMP")" != "$CURRENT_WEEK" ]; then
+    REFRESH=1
+  fi
+fi
+
+# mtgjson_download prefers the gzipped artifact (~50 MB vs ~156 MB
+# uncompressed), retries the mid-transfer connection resets MTGJSON hands out
+# on large anonymous reads, and atomically replaces an existing cache entry.
+# Keeping that old entry until the replacement lands lets an interrupted weekly
+# refresh remain usable on its next attempt.
+MTGJSON_FILE="$MTGJSON_DIR/AtomicCards.json"
+if [ ! -f "$MTGJSON_FILE" ] || [ "$REFRESH" = "1" ]; then
   echo "Downloading MTGJSON AtomicCards..."
-  mkdir -p "$DATA_DIR/mtgjson"
+  mkdir -p "$MTGJSON_DIR"
   mtgjson_download "AtomicCards.json" "$MTGJSON_FILE"
   echo "Downloaded MTGJSON data."
 fi
 
 # Download ancillary MTGJSON sidecar files (small, cheap to refresh)
-MTGJSON_META_FILE="$DATA_DIR/mtgjson/Meta.json"
-if [ ! -f "$MTGJSON_META_FILE" ]; then
+MTGJSON_META_FILE="$MTGJSON_DIR/Meta.json"
+if [ ! -f "$MTGJSON_META_FILE" ] || [ "$REFRESH" = "1" ]; then
   echo "Downloading MTGJSON Meta..."
-  mkdir -p "$DATA_DIR/mtgjson"
+  mkdir -p "$MTGJSON_DIR"
   mtgjson_download "Meta.json" "$MTGJSON_META_FILE"
 fi
 
-MTGJSON_CARD_TYPES_FILE="$DATA_DIR/mtgjson/CardTypes.json"
-if [ ! -f "$MTGJSON_CARD_TYPES_FILE" ]; then
+MTGJSON_CARD_TYPES_FILE="$MTGJSON_DIR/CardTypes.json"
+if [ ! -f "$MTGJSON_CARD_TYPES_FILE" ] || [ "$REFRESH" = "1" ]; then
   echo "Downloading MTGJSON CardTypes..."
-  mkdir -p "$DATA_DIR/mtgjson"
+  mkdir -p "$MTGJSON_DIR"
   mtgjson_download "CardTypes.json" "$MTGJSON_CARD_TYPES_FILE"
 fi
 
-MTGJSON_SET_LIST_FILE="$DATA_DIR/mtgjson/SetList.json"
-if [ ! -f "$MTGJSON_SET_LIST_FILE" ]; then
+MTGJSON_SET_LIST_FILE="$MTGJSON_DIR/SetList.json"
+if [ ! -f "$MTGJSON_SET_LIST_FILE" ] || [ "$REFRESH" = "1" ]; then
   echo "Downloading MTGJSON SetList..."
-  mkdir -p "$DATA_DIR/mtgjson"
+  mkdir -p "$MTGJSON_DIR"
   mtgjson_download "SetList.json" "$MTGJSON_SET_LIST_FILE"
 fi
 
 echo "Ensuring MTGJSON token set files..."
+if [ "$REFRESH" = "1" ]; then
+  # fetch-token-sets owns per-set retry/missing-marker handling. Its existing
+  # force switch refreshes both present files and prior failure markers, so the
+  # weekly cache cannot silently retain an older subset beside fresh sidecars.
+  export PHASE_REFRESH_MTGJSON=1
+fi
 ./scripts/fetch-token-sets.sh
 
 # AllDeckFiles is shipped as a tarball of per-deck JSONs. Extract to
 # data/mtgjson/decks/ once; refreshing means deleting the directory.
-MTGJSON_DECKS_DIR="$DATA_DIR/mtgjson/decks"
-if [ ! -d "$MTGJSON_DECKS_DIR" ]; then
+MTGJSON_DECKS_DIR="$MTGJSON_DIR/decks"
+if [ ! -d "$MTGJSON_DECKS_DIR" ] || [ "$REFRESH" = "1" ]; then
   echo "Downloading MTGJSON AllDeckFiles..."
+  # Deck JSONs are an all-or-nothing archive rather than independently atomic
+  # fetches. Restrict their destructive refresh to this bounded cache and do
+  # it only after every other input is safely replaced above.
+  if [ "$REFRESH" = "1" ]; then
+    rm -rf "$MTGJSON_DECKS_DIR"
+  fi
   mkdir -p "$MTGJSON_DECKS_DIR"
-  MTGJSON_DECKS_ARCHIVE="$DATA_DIR/mtgjson/AllDeckFiles.tar.gz"
+  MTGJSON_DECKS_ARCHIVE="$MTGJSON_DIR/AllDeckFiles.tar.gz"
   "${MTGJSON_CURL[@]}" -o "$MTGJSON_DECKS_ARCHIVE" "$MTGJSON_BASE/AllDeckFiles.tar.gz"
   tar -xzf "$MTGJSON_DECKS_ARCHIVE" -C "$MTGJSON_DECKS_DIR" --strip-components=1
   rm -f "$MTGJSON_DECKS_ARCHIVE"
+fi
+
+if [ "$REFRESH" = "1" ]; then
+  printf '%s\n' "$CURRENT_WEEK" > "$MTGJSON_REFRESH_STAMP"
+fi
+
+# The tracked token and subtype catalogs must never be regenerated from an
+# older local cache: those files are watched engine inputs, so a backward
+# promotion both discards newer data and repeatedly wakes Tilt. A missing
+# vintage is intentionally permissive for rollout bootstrap; later writes use
+# the monotonic comparison below.
+MTGJSON_VINTAGE_FILE="crates/engine/data/mtgjson-vintage"
+INPUT_DATE="$(jq -r '.meta.date' "$MTGJSON_META_FILE" | tr -d '\r')"
+# Meta.json is an external download; jq maps an absent .meta.date to the
+# literal string "null", which sorts ABOVE every ISO date — it would pass the
+# monotonic gate, get committed into the vintage sidecar, and then wedge every
+# future promotion behind a bogus ceiling. Hard-fail instead, mirroring
+# oracle-gen's refusal to run --write-subtypes without its sidecar.
+case "$INPUT_DATE" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+  *)
+    echo "Malformed .meta.date '$INPUT_DATE' in $MTGJSON_META_FILE; refusing to vintage-gate tracked catalogs against it. Re-download with PHASE_REFRESH_MTGJSON=1." >&2
+    exit 1
+    ;;
+esac
+STAMP_DATE="$(cat "$MTGJSON_VINTAGE_FILE" 2>/dev/null || echo "0000-00-00")"
+ALLOW_TRACKED_WRITES=1
+if [[ "$INPUT_DATE" < "$STAMP_DATE" ]]; then
+  ALLOW_TRACKED_WRITES=0
 fi
 
 # Build and run the Oracle-based card data generator
@@ -157,7 +217,8 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 
 # --- Group 1: card-data + card-names (expensive, independent of coverage) ---
 # Build every generator bin in ONE cargo invocation, then run the binaries
-# directly from target/tool/. Two reasons this matters for build time:
+# directly from the tool-profile output dir. Two reasons this matters for
+# build time:
 #   1. Unified feature set: mixing `--features cli` and no-feature invocations
 #      re-fingerprints the engine crate and recompiles it on each switch.
 #   2. Single invocation "shape": cargo's tool-profile artifacts stabilize per
@@ -165,7 +226,10 @@ META_OUTPUT_TMP="${META_OUTPUT}.tmp"
 #      alone vs the others) recompiles the engine on each switch. One shape for
 #      every build keeps the warm case a true no-op.
 TOOL_BINS=(--bin tokens-gen --bin oracle-gen --bin coverage-report --bin card-data-validate --bin coverage-parse-diff)
-TOOL_BIN="target/tool"
+# Execute from the SAME target dir cargo built into: `cargo build` honors
+# CARGO_TARGET_DIR, so a hardcoded `target/tool` here would silently run stale
+# binaries from a different build whenever the variable is set.
+TOOL_BIN="${CARGO_TARGET_DIR:-target}/tool"
 cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
 
 # The token catalog is baked into the engine lib at compile time (build.rs
@@ -193,7 +257,7 @@ track_tmp "$TOKENS_TMP"
 if cmp -s "$TOKENS_TMP" "$TOKENS_FILE"; then
   rm -f "$TOKENS_TMP"
   untrack_tmp "$TOKENS_TMP"
-else
+elif [ "$ALLOW_TRACKED_WRITES" = "1" ]; then
   # promote_tmp, not a bare `mv`: it deregisters the path so the EXIT trap
   # cannot delete the file it was just promoted onto.
   promote_tmp "$TOKENS_TMP" "$TOKENS_FILE"
@@ -202,6 +266,10 @@ else
   # one case where an engine recompile is genuinely required.
   echo "Token catalog changed; rebuilding generators to embed it..."
   cargo build --profile tool --features "$FEATURES" "${TOOL_BINS[@]}"
+else
+  echo "WARNING: refusing to promote $TOKENS_FILE: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2
+  rm -f "$TOKENS_TMP"
+  untrack_tmp "$TOKENS_TMP"
 fi
 
 track_tmp "$OUTPUT_TMP"
@@ -214,9 +282,35 @@ track_tmp "$NAMES_OUTPUT_TMP"
 # this flag if that sidecar is missing, rather than regenerating a vocabulary
 # with all 26 of them silently deleted. Every other caller (CI, ai-gate, a bare
 # `cargo export-cards`) omits the flag and leaves the tracked file untouched.
-run_tool_with_recovery \
-  "$OUTPUT_TMP" \
-  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR" --write-subtypes
+ORACLE_GEN_ARGS=(
+  "$TOOL_BIN/oracle-gen" "$DATA_DIR" --stats --names-out "$NAMES_OUTPUT_TMP" --sidecar-dir "$OUTPUT_DIR"
+)
+if [ "$ALLOW_TRACKED_WRITES" = "1" ]; then
+  ORACLE_GEN_ARGS+=(--write-subtypes)
+else
+  # oracle-gen already avoids touching an unchanged sidecar, but that cannot
+  # make an older CardTypes snapshot safe. Omit its write mode entirely so a
+  # stale cache cannot regress this watched, committed vocabulary.
+  echo "WARNING: refusing to update crates/engine/data/oracle-subtypes.json: MTGJSON input date $INPUT_DATE is older than committed vintage $STAMP_DATE. Refresh MTGJSON inputs (rerun without MTGJSON_SKIP_REFRESH=1 or set PHASE_REFRESH_MTGJSON=1) before retrying." >&2
+fi
+run_tool_with_recovery "$OUTPUT_TMP" "${ORACLE_GEN_ARGS[@]}"
+
+# A forward vintage may produce byte-identical catalogs, but it still proves
+# the committed inputs are current. Stage the sidecar beside its watched final
+# path and retain the existing compare-before-promote discipline: a needless
+# mtime change here would requeue every engine watcher, while an interruption
+# cannot expose a partial date that later re-admits older inputs.
+if [[ "$INPUT_DATE" > "$STAMP_DATE" ]]; then
+  VINTAGE_TMP="$(mktemp "${MTGJSON_VINTAGE_FILE}.tmp.XXXXXX")"
+  track_tmp "$VINTAGE_TMP"
+  printf '%s\n' "$INPUT_DATE" > "$VINTAGE_TMP"
+  if cmp -s "$VINTAGE_TMP" "$MTGJSON_VINTAGE_FILE"; then
+    rm -f "$VINTAGE_TMP"
+    untrack_tmp "$VINTAGE_TMP"
+  else
+    promote_tmp "$VINTAGE_TMP" "$MTGJSON_VINTAGE_FILE"
+  fi
+fi
 # Cheap presence guard only. The full JSON/object/non-empty/integrity
 # validation is done by card-data-validate below (CardDatabase::from_export),
 # which is strictly stronger than a jq shape check — so an extra jq parse of
@@ -319,8 +413,10 @@ GEN_COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 MTGJSON_VERSION="unknown"
 MTGJSON_DATE="unknown"
 if [ -s "$MTGJSON_META_FILE" ]; then
-  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE")
-  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE")
+  # tr strips Windows jq's trailing \r, which would otherwise embed a raw
+  # control character inside the JSON string values written to META_OUTPUT.
+  MTGJSON_VERSION=$(jq -r '.meta.version // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
+  MTGJSON_DATE=$(jq -r '.meta.date // "unknown"' "$MTGJSON_META_FILE" | tr -d '\r')
 fi
 track_tmp "$META_OUTPUT_TMP"
 cat > "$META_OUTPUT_TMP" <<METAEOF
@@ -365,6 +461,7 @@ FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)
 # Count entries in the small names array (648K) rather than grepping the 90MB
 # card-data for `"name"` — the latter is slower and overcounts nested keys.
-CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT")
+# tr strips Windows jq's trailing \r, which would otherwise corrupt this summary line.
+CARD_COUNT=$(jq 'length' "$NAMES_OUTPUT" | tr -d '\r')
 echo "Generated $OUTPUT ($FILE_SIZE, ~$CARD_COUNT cards)"
 echo "Generated $NAMES_OUTPUT ($NAMES_SIZE)"

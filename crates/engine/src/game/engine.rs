@@ -10,14 +10,16 @@ use crate::types::actions::{
 };
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
-    ActionResult, AssistState, AutoPassMode, AutoPassRequest, CastOfferKind, ConvokeMode,
-    CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey, PayCostKind,
-    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
+    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey,
+    PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+#[cfg(debug_assertions)]
+use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -52,6 +54,8 @@ use super::splice;
 use super::triggers;
 use super::turn_control;
 use super::turns;
+use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
+#[cfg(test)]
 use super::zones;
 
 pub use super::engine_resolve_batch::{
@@ -74,6 +78,24 @@ pub enum EngineError {
 pub enum PublicFinalizeMode {
     Immediate,
     DeferredDisplay,
+}
+
+/// CR 601.2h + CR 702.132a: Assist remains cancellable while it is only a
+/// selected contribution. Once helper payment has started or completed, its
+/// resources may have changed and cancellation cannot roll that prefix back.
+fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), EngineError> {
+    if matches!(
+        state
+            .pending_cast
+            .as_deref()
+            .map(|pending| pending.assist_state),
+        Some(AssistState::PaymentStarted { .. } | AssistState::Paid { .. })
+    ) {
+        return Err(EngineError::ActionNotAllowed(
+            "Cannot cancel a cast after an Assist contribution is committed".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn handle_unlock_room_door(
@@ -252,6 +274,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         finalize_display_state(state);
     }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    #[cfg(debug_assertions)]
+    debug_assert_runtime_resolution_invariants(state);
     Ok(result)
 }
 
@@ -438,16 +462,18 @@ fn reconcile_terminal_result(state: &mut GameState, result: &mut ActionResult) {
     // PR-7 Phase 4d-ii (CR 732.2a): the EMPTY-STACK dual of the ring-gated bridge above.
     // A self-returning (buyback) recast that creates an inert token settles with an EMPTY
     // stack, so the sampler clears the ring at that beat and the `!stack.is_empty()` bridge
-    // is structurally unreachable for it. Detect it here by driving the captured recast on
-    // a clone. Gated identically (opt-in + top-level-only) plus a cheap `last_recast_context`
-    // precondition (set only on a buyback-paid, token-creating cast — so the clone-drive runs
-    // ~never). INV-2: this OFFERS the interactive shortcut (never auto-resolves — CR 732.2a).
+    // is structurally unreachable for it. Detect it here by driving the captured loop-action
+    // sequence on a clone. Gated identically (opt-in + top-level-only) plus a cheap
+    // `last_loop_action_sequence` precondition (non-empty only on a buyback-paid token-creating
+    // cast or a multi-activation engine's accumulated beats — so the clone-drive runs ~never for
+    // the recast class; a mana engine arms per mana activation but its drive aborts fast when
+    // unsustainable). INV-2: this OFFERS the interactive shortcut (never auto-resolves — CR 732.2a).
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
         && state.stack.is_empty()
         && state.loop_detection.samples()
         && !in_simulation_probe()
-        && state.last_recast_context.is_some()
+        && !state.last_loop_action_sequence.is_empty()
     {
         if let Some((certificate, schema)) = try_offer_object_growth_shortcut(state) {
             let WaitingFor::Priority { player: proposer } = state.waiting_for else {
@@ -774,16 +800,37 @@ fn build_shortcut_schema(
                     kind: DecisionPointKind::ConvokeTaps { tappable },
                 })
             }
-            // No Stage-1 offer path reifies a targeted / modal / may / unless decision (targeted
-            // loops reach the offer only after the Stage-2 gate-relax). Fail-loud in dev,
-            // fail-safe (drop) in prod — no producer emits one yet.
-            PinnedDecision::Targets { .. }
-            | PinnedDecision::Mode { .. }
+            // FIX-1 (B1): reify the recorded fixed in-cycle choices. The drive replays these SAME
+            // pins via `decision_template::resolve` (CR 608.2b ByIdentity live re-binding), so the
+            // offer schema carries their read-side dual (one template = single source of truth).
+            // CR 608.2b: resolve each pinned target to its live legal `TargetRef` — the pinned
+            // identity IS the singleton legal set (a fixed declinable ∞ offer, no FE re-selection).
+            PinnedDecision::Targets { slot, targets } => {
+                let legal_targets: Vec<crate::types::ability::TargetRef> = targets
+                    .iter()
+                    .filter_map(|t| {
+                        crate::analysis::decision_template::resolve_target_ref(t, slot, 0, state)
+                    })
+                    .collect();
+                Some(DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Targets { legal_targets },
+                })
+            }
+            // CR 608.2d: the latched mana color — a read-only fixed point (no legal set to bound).
+            PinnedDecision::ManaColor { slot, color } => Some(DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::ManaColor { color: *color },
+            }),
+            // No Stage-1 offer path reifies a modal / may / unless decision (those loops reach the
+            // offer only after the Stage-2 gate-relax). Fail-loud in dev, fail-safe (drop) in prod
+            // — no producer emits one yet.
+            PinnedDecision::Mode { .. }
             | PinnedDecision::MayChoice { .. }
             | PinnedDecision::UnlessBreak { .. } => {
                 debug_assert!(
                     false,
-                    "Stage-1 schema builder: only ConvokeTaps is reified; Targets/Mode/MayChoice/UnlessBreak are Stage-2 producers"
+                    "Stage-1 schema builder: only ConvokeTaps/Targets/ManaColor are reified; Mode/MayChoice/UnlessBreak are Stage-2 producers"
                 );
                 None
             }
@@ -928,20 +975,23 @@ fn apply_until_lethal_shortcut(
     let period = shortcut_drive_period(proposal.template.as_ref());
 
     // DRIVE one representative cycle to produce the measured post-drive `work` state.
-    let work: GameState = if let Some(ctx) = committed.last_recast_context.clone() {
-        // Object-growth recast loop (buyback + convoke + affinity) declared `UntilLethal`
-        // by the AI (which hardcodes it for every optional offer). Drive one real recast on a
-        // clone under the re-entrancy guard; an inert Advantage token loop has NO life/poison
-        // faller ⇒ `live_mandatory_loop_winner` returns None below ⇒ manual fallback (this is
-        // the latent AI-mis-crown fix, first-class).
-        let template = build_recast_template(&ctx);
+    let work: GameState = if !committed.last_loop_action_sequence.is_empty() {
+        // Object-growth loop period (recast buyback+convoke, or a multi-activation mana engine)
+        // declared `UntilLethal` by the AI (which hardcodes it for every optional offer). Drive
+        // one real period on a clone under the re-entrancy guard; an inert Advantage token/mana
+        // loop has NO life/poison faller ⇒ `live_mandatory_loop_winner` returns None below ⇒
+        // manual fallback (this is the latent AI-mis-crown fix, first-class).
+        let seq = committed.last_loop_action_sequence.clone();
+        let controller = seq[0].controller;
+        let expected_defs: Vec<Option<crate::types::ability::AbilityDefinition>> = seq
+            .iter()
+            .map(|c| loop_action_expected_def(&committed, c))
+            .collect();
         let _probe = SimulationProbeGuard::enter();
         let mut w = committed.clone();
         priority::reset_priority(&mut w);
-        w.waiting_for = WaitingFor::Priority {
-            player: ctx.controller,
-        };
-        match drive_recast_iteration(&mut w, &template, &ctx, 0) {
+        w.waiting_for = WaitingFor::Priority { player: controller };
+        match drive_loop_sequence_iteration(&mut w, &seq, 0, &expected_defs) {
             Ok(()) => w,
             Err(RecastAbort) => {
                 return until_lethal_fallback(state, result, committed);
@@ -1070,12 +1120,12 @@ fn until_lethal_fallback(state: &mut GameState, result: &mut ActionResult, commi
     *state = committed;
     // CR 732.2c: a declined shortcut must not instantly re-offer the SAME loop in this same
     // `apply()`. Clear both re-offer signals: the drain offer's `loop_detect_ring` AND the
-    // object-growth offer's `last_recast_context` routing signal (a non-drain object-growth
+    // object-growth offer's `last_loop_action_sequence` routing signal (a non-drain object-growth
     // loop, e.g. an AI-declared UntilLethal on an inert Advantage recast, would otherwise
     // re-fire `try_offer_object_growth_shortcut` on the next reconcile and livelock). A later
-    // real re-cast re-captures the context and re-detects genuinely.
+    // real re-cast re-captures the sequence and re-detects genuinely.
     state.loop_detect_ring.clear();
-    state.last_recast_context = None;
+    state.last_loop_action_sequence.clear();
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -1235,7 +1285,7 @@ fn drive_one_shortcut_cycle(
 }
 
 /// PR-7 Combo-UI Stage 2: answer ONE mid-drive prompt during a loop-shortcut cycle, using the
-/// INTERNAL reconcile-free `apply_action` path (mirrors `drive_recast_iteration`, so the
+/// INTERNAL reconcile-free `apply_action` path (mirrors `drive_loop_action_iteration`, so the
 /// detection hook cannot recurse mid-drive). Fail-closed: any prompt kind with no Stage-2
 /// producer ⇒ `Err(RecastAbort)`.
 ///
@@ -1328,15 +1378,16 @@ fn materialize_fixed_shortcut(
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     n: u32,
 ) {
-    // PR-7 Phase 4d-ii (CR 732.2a): an object-growth recast loop (buyback + convoke +
-    // affinity) settles with an EMPTY stack and grows the board, so the per-beat
-    // auto-pass drive below never recognizes its recurrence. Route it to the recast
-    // INJECTOR instead, which drives one real recast per cycle on a clone. The presence
-    // of `last_recast_context` (set only on a buyback-paid, token-creating cast) is the
-    // routing signal; the `ctx` rides `state.last_recast_context` (carried on the clone
-    // since the offer). The drain path below is left byte-identical for every other loop.
-    if let Some(ctx) = state.last_recast_context.clone() {
-        materialize_object_growth_shortcut(state, result, &ctx, n);
+    // PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): an object-growth loop (buyback recast, or a
+    // multi-activation mana engine) settles with an EMPTY stack and grows a projected resource,
+    // so the per-beat auto-pass drive below never recognizes its recurrence. Route it to the
+    // INJECTOR instead, which drives one real period per cycle on a clone. A non-empty
+    // `last_loop_action_sequence` (armed only on a buyback token cast or an accumulated
+    // activation period) is the routing signal; the `seq` rides `state.last_loop_action_sequence`
+    // (carried on the clone since the offer). The drain path below is byte-identical for every
+    // other loop.
+    if !state.last_loop_action_sequence.is_empty() {
+        materialize_object_growth_shortcut(state, result, proposal);
         return;
     }
 
@@ -1441,6 +1492,153 @@ fn materialize_fixed_shortcut(
 #[derive(Debug)]
 struct RecastAbort;
 
+/// CR 602.2a / CR 732.2a (G4): capture the `AbilityDefinition` an `Activate` loop-action
+/// names, so the drive can re-validate the positional `ability_index` by `Eq` each iteration
+/// (a layer re-eval that reorders/removes the granted ability ⇒ fail-closed abort). `None`
+/// for a `Recast` (which re-finds its card + combined spell def live instead).
+fn loop_action_expected_def(
+    state: &GameState,
+    ctx: &crate::types::game_state::LoopActionContext,
+) -> Option<crate::types::ability::AbilityDefinition> {
+    match &ctx.action {
+        crate::types::game_state::LoopAction::Recast { .. } => None,
+        crate::types::game_state::LoopAction::Activate {
+            source_id,
+            ability_index,
+        } => state
+            .objects
+            .get(source_id)?
+            .abilities
+            .get(*ability_index)
+            .cloned(),
+    }
+}
+
+/// P7 v3 (CR 602.2a + CR 732.2a): append a driving activation to the current loop-action period
+/// (`state.last_loop_action_sequence`). A CONTROLLER CHANGE resets to a fresh single-step period
+/// (a period belongs to one controller — a mid-period controller switch is a different loop); a
+/// LENGTH CAP bounds an adversarial/incidental run of unrelated activations. Callers gate on
+/// `samples() && !in_simulation_probe()`, so the detection/materialize drive never grows the
+/// sequence (it is COMPARED byte-for-byte across the cover frames, resource.rs).
+fn accumulate_loop_action_step(
+    state: &mut GameState,
+    step: crate::types::game_state::LoopActionContext,
+) {
+    // ponytail: cap at 16 steps — a real loop period is 2-4 activations; raise only if a real
+    // >16-action period appears. Bounds a hostile/incidental run before the drive+cover reject it.
+    const MAX_LOOP_PERIOD_STEPS: usize = 16;
+    let controller_changed = state
+        .last_loop_action_sequence
+        .first()
+        .is_some_and(|s| s.controller != step.controller);
+    if controller_changed || state.last_loop_action_sequence.len() >= MAX_LOOP_PERIOD_STEPS {
+        state.last_loop_action_sequence.clear();
+    }
+    state.last_loop_action_sequence.push(step);
+}
+
+/// FIX-1 (CR 732.2a): append a recorded fixed in-cycle player choice (tap-cost target, mana
+/// color, or proliferate target) to the CURRENT loop-period step — the driving `Activate` step
+/// the choice belongs to (`last_mut`; the Relic activation for the Kilo loop, whose cost/trigger
+/// choices are all answered before the next driving activation appends a new step). Gated EXACTLY
+/// like the samplers (`samples() && !in_simulation_probe()`): #4603-Off never records, and the
+/// detection/materialize drive (under `SimulationProbeGuard`) REPLAYS pins without re-recording
+/// them — keeping the sequence byte-stable across the cover's `s_n`/`s_n1`/`s_n2` frames. No-op
+/// unless a period is accumulating for `controller` (there is no step to attach the pin to
+/// otherwise, and a mid-period controller mismatch is a different loop).
+fn record_loop_pin(
+    state: &mut GameState,
+    controller: PlayerId,
+    pin: crate::analysis::decision_template::PinnedDecision,
+) {
+    if !state.loop_detection.samples() || in_simulation_probe() {
+        return;
+    }
+    if let Some(step) = state.last_loop_action_sequence.last_mut() {
+        if step.controller == controller {
+            step.pins.push(pin);
+        }
+    }
+}
+
+/// FIX-1 (CR 608.2d): the WUBRG color of a `SingleColor` mana choice, for pinning an "add one mana
+/// of any color" loop-neutrality choice. `None` for a colorless single choice or a `Combination`
+/// (not this pinnable loop class — the drive then aborts unpinned at the `ChooseManaColor` beat,
+/// fail-safe: no false offer).
+fn pinnable_mana_color(
+    choice: &crate::types::game_state::ManaChoice,
+) -> Option<crate::types::mana::ManaColor> {
+    use crate::types::game_state::ManaChoice;
+    use crate::types::mana::{ManaColor, ManaType};
+    match choice {
+        ManaChoice::SingleColor(ManaType::White) => Some(ManaColor::White),
+        ManaChoice::SingleColor(ManaType::Blue) => Some(ManaColor::Blue),
+        ManaChoice::SingleColor(ManaType::Black) => Some(ManaColor::Black),
+        ManaChoice::SingleColor(ManaType::Red) => Some(ManaColor::Red),
+        ManaChoice::SingleColor(ManaType::Green) => Some(ManaColor::Green),
+        ManaChoice::SingleColor(ManaType::Colorless) | ManaChoice::Combination(_) => None,
+    }
+}
+
+/// FIX-1 (CR 400.7): a live-object identity source for a pin — `ThisObject` bound to the object's
+/// CURRENT incarnation, so a re-entered permanent (new incarnation) stops matching and the loop is
+/// correctly re-detected rather than falsely replayed. `None` if the object is absent.
+fn object_decision_source(
+    state: &GameState,
+    id: ObjectId,
+) -> Option<crate::types::game_state::YieldTarget> {
+    let o = state.objects.get(&id)?;
+    Some(crate::types::game_state::YieldTarget::ThisObject {
+        source_id: id,
+        incarnation: Some(o.incarnation),
+        trigger_description: None,
+    })
+}
+
+/// FIX-1 (CR 608.2b): the concrete targets of the recorded `Targets` pin whose slot source
+/// re-binds LIVE to `source_id` this iteration (the beat's cost / trigger source, e.g. the Relic
+/// cost source for a tap-cost pin or the Kilo trigger source for a proliferate pin). Resolving the
+/// WHOLE `template` means ANY pin that no longer resolves to a live legal object (a target left
+/// its zone) aborts the whole beat fail-closed — a broken loop never certifies. `Err(RecastAbort)`
+/// if no `Targets` pin's source matches `source_id`.
+fn pinned_targets_for_source(
+    template: &crate::analysis::decision_template::DecisionTemplate,
+    iteration: crate::analysis::decision_template::IterationIndex,
+    clone: &GameState,
+    source_id: ObjectId,
+) -> Result<Vec<crate::analysis::decision_template::ConcreteTarget>, RecastAbort> {
+    use crate::analysis::decision_template::{resolve, resolve_source, ConcreteDecision};
+    let decisions = resolve(template, iteration, clone).map_err(|_| RecastAbort)?;
+    for d in decisions {
+        if let ConcreteDecision::Targets { slot, targets } = d {
+            if resolve_source(&slot.source, clone) == Some(source_id) {
+                return Ok(targets);
+            }
+        }
+    }
+    Err(RecastAbort)
+}
+
+/// FIX-1 (CR 608.2d): the recorded mana color of the `ManaColor` pin whose slot source is
+/// `source_id` (the driving mana ability's source). `Err(RecastAbort)` if unpinned.
+fn pinned_mana_color_for_source(
+    template: &crate::analysis::decision_template::DecisionTemplate,
+    iteration: crate::analysis::decision_template::IterationIndex,
+    clone: &GameState,
+    source_id: ObjectId,
+) -> Result<crate::types::mana::ManaColor, RecastAbort> {
+    use crate::analysis::decision_template::{resolve, resolve_source, ConcreteDecision};
+    let decisions = resolve(template, iteration, clone).map_err(|_| RecastAbort)?;
+    for d in decisions {
+        if let ConcreteDecision::ManaColor { slot, color } = d {
+            if resolve_source(&slot.source, clone) == Some(source_id) {
+                return Ok(color);
+            }
+        }
+    }
+    Err(RecastAbort)
+}
+
 /// CR 601.2b + CR 608.2b + CR 400.7: drive ONE full recast iteration on the clone by
 /// answering each mid-cast prompt from `template` (the ConvokeTaps pin) + `ctx` (the
 /// buyback decision). Reuses the ENTIRE cast state machine via the INTERNAL `apply_action`
@@ -1448,48 +1646,91 @@ struct RecastAbort;
 /// recurse), adding ZERO casting rules. EXHAUSTIVE over `WaitingFor`: any unpinned prompt
 /// ⇒ `Err(RecastAbort)` ⇒ fail-closed to manual (no silent `_` that would fabricate a
 /// bogus offer). `clone` MUST be at `Priority{ctx.controller}` with an empty stack.
-fn drive_recast_iteration(
+fn drive_loop_action_iteration(
     clone: &mut GameState,
     template: &crate::analysis::decision_template::DecisionTemplate,
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
     iteration: crate::analysis::decision_template::IterationIndex,
+    expected_def: Option<&crate::types::ability::AbilityDefinition>,
 ) -> Result<(), RecastAbort> {
-    // CR 400.7: re-find the recast card LIVE in its castable zone (a fresh incarnation on
-    // each hand-return). Absent ⇒ abort (B3: a no-buyback recast went to the graveyard, so
-    // the card is not here). Lowest ObjectId ⇒ deterministic.
-    let recast_id = clone
-        .objects
-        .values()
-        .filter(|o| {
-            o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
-        })
-        .map(|o| o.id)
-        .min_by_key(|id| id.0)
-        .ok_or(RecastAbort)?;
-    apply_action(
-        clone,
-        ctx.controller,
-        GameAction::CastSpell {
-            object_id: recast_id,
-            card_id: ctx.card_id,
-            targets: vec![],
-            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
-        },
-        None,
-    )
-    .map_err(|_| RecastAbort)?;
+    use crate::types::game_state::LoopAction;
+    // Dispatch the OPENER on the captured action; the beat-loop tail below is action-agnostic.
+    match &ctx.action {
+        // CR 400.7 + CR 601.2a: re-find the recast card LIVE in its castable zone (a fresh
+        // incarnation on each hand-return). Absent ⇒ abort (B3: a no-buyback recast went to
+        // the graveyard). Lowest ObjectId ⇒ deterministic.
+        LoopAction::Recast { from_zone, .. } => {
+            let recast_id = clone
+                .objects
+                .values()
+                .filter(|o| {
+                    o.card_id == ctx.card_id
+                        && o.zone == *from_zone
+                        && o.controller == ctx.controller
+                })
+                .map(|o| o.id)
+                .min_by_key(|id| id.0)
+                .ok_or(RecastAbort)?;
+            apply_action(
+                clone,
+                ctx.controller,
+                GameAction::CastSpell {
+                    object_id: recast_id,
+                    card_id: ctx.card_id,
+                    targets: vec![],
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+        }
+        // CR 602.2a: re-activate the pinned permanent's ability. G3: pin by `ObjectId` (a plain
+        // token is `CardId(0)`, so a card-identity re-find would match the fodder the loop
+        // manufactures). G4: re-validate the positional `ability_index` against the captured
+        // def by `Eq` — a layer re-eval that reordered/removed it ⇒ fail-closed abort (CR 602.5a
+        // legality is then the reducer's job — an illegal 2nd activation returns Err below).
+        LoopAction::Activate {
+            source_id,
+            ability_index,
+        } => {
+            let expected = expected_def.ok_or(RecastAbort)?;
+            let src = clone.objects.get(source_id).ok_or(RecastAbort)?;
+            if src.zone != Zone::Battlefield
+                || src.controller != ctx.controller
+                || src.card_id != ctx.card_id
+                || src.abilities.get(*ability_index) != Some(expected)
+            {
+                return Err(RecastAbort);
+            }
+            apply_action(
+                clone,
+                ctx.controller,
+                GameAction::ActivateAbility {
+                    source_id: *source_id,
+                    ability_index: *ability_index,
+                },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+        }
+    }
 
     let beat_cap = auto_pass_loop_max_iterations(clone);
     for _ in 0..beat_cap {
         let actor = crate::game::turn_control::authorized_submitter(clone).ok_or(RecastAbort)?;
         match clone.waiting_for.clone() {
-            // CR 601.2f/702.27a: re-pay (or decline) the buyback additional cost.
+            // CR 601.2f/702.27a: re-pay (or decline) the buyback additional cost — RECAST-only.
+            // CR 732.2a "can't include conditional actions": an activation that opens an
+            // optional-cost window is not a pinned shortcut ⇒ fail-closed abort.
             WaitingFor::OptionalCostChoice { .. } => {
+                let LoopAction::Recast { uses_buyback, .. } = &ctx.action else {
+                    return Err(RecastAbort);
+                };
                 apply_action(
                     clone,
                     actor,
                     GameAction::DecideOptionalCost {
-                        pay: ctx.uses_buyback.pays(),
+                        pay: uses_buyback.pays(),
                     },
                     None,
                 )
@@ -1528,7 +1769,10 @@ fn drive_recast_iteration(
                         | ConcreteDecision::Targets { .. }
                         | ConcreteDecision::Mode { .. }
                         | ConcreteDecision::MayChoice { .. }
-                        | ConcreteDecision::UnlessBreak { .. } => return Err(RecastAbort),
+                        | ConcreteDecision::UnlessBreak { .. }
+                        // CR 608.2d: a ManaColor pin is consumed at the `ChooseManaColor` beat
+                        // (E11), never at a convoke `ManaPayment` beat ⇒ fail-closed here.
+                        | ConcreteDecision::ManaColor { .. } => return Err(RecastAbort),
                     }
                 }
                 apply_action(clone, actor, GameAction::PassPriority, None)
@@ -1543,6 +1787,85 @@ fn drive_recast_iteration(
                 apply_action(clone, actor, GameAction::PassPriority, None)
                     .map_err(|_| RecastAbort)?;
             }
+            // FIX-1 (E11) CR 605.1a + CR 608.2b: the driving mana ability's tap cost ("tap an
+            // untapped legendary creature you control") — replay the recorded tap-target pin,
+            // matched by the mana-ability COST SOURCE (from `resume`). Only a `TapCreatures` cost
+            // resuming a MANA ABILITY is a pinned loop cost; every other PayCost shape is unpinned
+            // for this class ⇒ falls to the fail-closed `_` below.
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => {
+                let cost_source = mana_ability.source_id;
+                let targets = pinned_targets_for_source(template, iteration, clone, cost_source)?;
+                let cards: Vec<ObjectId> = targets
+                    .into_iter()
+                    .map(|t| match t {
+                        crate::analysis::decision_template::ConcreteTarget::Object(id) => Ok(id),
+                        // A tap cost taps OBJECTS; a player pin here is malformed ⇒ fail-closed.
+                        crate::analysis::decision_template::ConcreteTarget::Player(_) => {
+                            Err(RecastAbort)
+                        }
+                    })
+                    .collect::<Result<_, _>>()?;
+                apply_action(clone, actor, GameAction::SelectCards { cards }, None)
+                    .map_err(|_| RecastAbort)?;
+            }
+            // FIX-1 (E11) CR 608.2d: "add one mana of any color" — replay the recorded color pin
+            // (matched by the mana-ability source), fixing the loop's mana-neutrality color (Blue
+            // to pay Freed's `{U}`). A resolving-effect color choice is not a pinned mana-ability
+            // loop cost ⇒ fail-closed.
+            WaitingFor::ChooseManaColor { context, .. } => {
+                let source = match &context {
+                    crate::types::game_state::ManaChoiceContext::ManaAbility(p) => p.source_id,
+                    crate::types::game_state::ManaChoiceContext::ResolvingEffect(_) => {
+                        return Err(RecastAbort)
+                    }
+                };
+                let color = pinned_mana_color_for_source(template, iteration, clone, source)?;
+                apply_action(
+                    clone,
+                    actor,
+                    GameAction::ChooseManaColor {
+                        choice: crate::types::game_state::ManaChoice::SingleColor(color.into()),
+                        count: 1,
+                    },
+                    None,
+                )
+                .map_err(|_| RecastAbort)?;
+            }
+            // FIX-1 (E11) CR 701.34a: the driving permanent's becomes-tapped proliferate trigger —
+            // replay the recorded proliferate-target pin, matched by the pending proliferate's
+            // trigger source id (Kilo). Replaying the RECORDED selection (never "all eligible")
+            // keeps an opponent's counters/poison out of the growth ⇒ no loss axis introduced.
+            WaitingFor::ProliferateChoice { .. } => {
+                let prolif_source = clone
+                    .active_proliferate_frame()
+                    .map(|pending| pending.source_id)
+                    .ok_or(RecastAbort)?;
+                let targets = pinned_targets_for_source(template, iteration, clone, prolif_source)?;
+                let target_refs: Vec<crate::types::ability::TargetRef> = targets
+                    .into_iter()
+                    .map(|t| match t {
+                        crate::analysis::decision_template::ConcreteTarget::Object(id) => {
+                            crate::types::ability::TargetRef::Object(id)
+                        }
+                        crate::analysis::decision_template::ConcreteTarget::Player(p) => {
+                            crate::types::ability::TargetRef::Player(p)
+                        }
+                    })
+                    .collect();
+                apply_action(
+                    clone,
+                    actor,
+                    GameAction::SelectTargets {
+                        targets: target_refs,
+                    },
+                    None,
+                )
+                .map_err(|_| RecastAbort)?;
+            }
             // CR 732.2a "no conditional actions": any other prompt (target / mode / X /
             // may) is unpinned for this recast class ⇒ fail-closed abort.
             _ => return Err(RecastAbort),
@@ -1551,12 +1874,36 @@ fn drive_recast_iteration(
     Err(RecastAbort)
 }
 
+/// P7 v3 (CR 732.2a): drive ONE full loop PERIOD — the ordered sequence of driving actions — on
+/// the clone by driving each captured step in order through `drive_loop_action_iteration` (which
+/// settles every beat to its OWN empty-stack `Priority` boundary, CR 601.2i). A 1-element
+/// sequence is the single-action recast/token case (byte-identical to the pre-P7 single drive); a
+/// 2+ element sequence is a multi-activation engine (e.g. Basalt Monolith's off-stack mana beat,
+/// CR 605.3b, then its on-stack `{3}: Untap` beat). Each step's `expected_def` re-validates its
+/// `Activate` `ability_index` by `Eq` (G4); a `Recast` step's is `None`. ANY step's `RecastAbort`
+/// aborts the whole period fail-closed — a partial/broken period never certifies (the drive+cover
+/// IS the period-boundary check, so no explicit boundary detection is needed in the reducer).
+fn drive_loop_sequence_iteration(
+    clone: &mut GameState,
+    seq: &[crate::types::game_state::LoopActionContext],
+    iteration: crate::analysis::decision_template::IterationIndex,
+    expected_defs: &[Option<crate::types::ability::AbilityDefinition>],
+) -> Result<(), RecastAbort> {
+    for (step, expected) in seq.iter().zip(expected_defs.iter()) {
+        // Each step's template carries its OWN convoke pin (only a `Recast` step has convoke; an
+        // `Activate` step yields an empty template) — build per-step so a mixed period stays honest.
+        let template = build_recast_template(step);
+        drive_loop_action_iteration(clone, &template, step, iteration, expected.as_ref())?;
+    }
+    Ok(())
+}
+
 /// CR 601.2h + CR 702.51a: the CR 732.2a decision template for a buyback+convoke recast
 /// loop. Carries a single `ConvokeTaps` pin (when the recast pays convoke) whose slot is
 /// the CARD-identity source (`AllCopies` — survives the per-iteration incarnation churn,
 /// CR 400.7). The presence of the pin is the object-growth routing signal.
 fn build_recast_template(
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
 ) -> crate::analysis::decision_template::DecisionTemplate {
     use crate::analysis::decision_template::{
         DecisionGroupKey, DecisionKind, DecisionSlot, IterationCount, PinnedDecision, ReplayMode,
@@ -1565,16 +1912,19 @@ fn build_recast_template(
         card_id: ctx.card_id,
         trigger_description: None,
     };
-    let decisions = if ctx.convoke.is_some() {
-        vec![PinnedDecision::ConvokeTaps {
+    // FIX-1 (B2#8): the recorded fixed in-cycle choices (tap-cost target, mana color, proliferate
+    // target) drive the replay; a convoke recast additionally carries its live-rebinding
+    // ConvokeTaps pin. `build_shortcut_schema` reifies this SAME list (one template, single source
+    // of truth — CR 608.2b live re-binding).
+    let mut decisions = ctx.pins.clone();
+    if ctx.convoke.is_some() {
+        decisions.push(PinnedDecision::ConvokeTaps {
             slot: DecisionSlot {
                 source: source.clone(),
                 index: 0,
             },
-        }]
-    } else {
-        vec![]
-    };
+        });
+    }
     crate::analysis::decision_template::DecisionTemplate {
         owner: ctx.controller,
         decisions,
@@ -1598,24 +1948,30 @@ fn build_recast_template(
 /// every frame is fail-safe — any OTHER stable object still compares by id.
 fn normalize_recast_frame(
     state: &GameState,
-    ctx: &crate::types::game_state::RecastContext,
+    ctx: &crate::types::game_state::LoopActionContext,
 ) -> GameState {
     let mut s = state.clone();
-    let ids: Vec<ObjectId> = s
-        .objects
-        .values()
-        .filter(|o| {
-            o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
-        })
-        .map(|o| o.id)
-        .collect();
-    for id in &ids {
-        s.objects.remove(id);
-    }
-    if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
-        p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-        p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
-        p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+    // CR 400.7 (M15-b): stripping the self-returning recast card is RECAST-ONLY. An `Activate`
+    // ctx has `from_zone == Battlefield` (its source is a resident permanent), so applying the
+    // strip would DELETE the driving permanent from every comparison frame. The three token-id
+    // bookkeeping clears below apply to BOTH actions.
+    if let crate::types::game_state::LoopAction::Recast { from_zone, .. } = &ctx.action {
+        let ids: Vec<ObjectId> = s
+            .objects
+            .values()
+            .filter(|o| {
+                o.card_id == ctx.card_id && o.zone == *from_zone && o.controller == ctx.controller
+            })
+            .map(|o| o.id)
+            .collect();
+        for id in &ids {
+            s.objects.remove(id);
+        }
+        if let Some(p) = s.players.iter_mut().find(|p| p.id == ctx.controller) {
+            p.hand.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+            p.graveyard.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+            p.library.retain(|id| !ids.contains(id)); // allow-raw-zone: prunes a discarded recast comparison-frame CLONE (fn takes &GameState, returns a normalized clone) - not a gameplay zone event
+        }
     }
     // CR 608.2 anaphora / display bookkeeping: the "last created token / revealed /
     // zone-changed" id slots churn a fresh id each cycle. No observer reads them at the
@@ -1646,6 +2002,136 @@ fn derived_fodder_class(
     after.objects.get(&id).cloned()
 }
 
+/// The reproduced fodder class of one accepted object-growth period, plus whether that
+/// period's per-cycle cost TAPS a fodder member. CR 702.51a: a convoke/tap-cost period taps a
+/// fodder each cycle → the ∞ pile is genuinely TAPPED; a mana-paid period creates the fodder
+/// untapped (CR 110.5b) and taps nothing → untapped-growth. Both measured on the SAME
+/// clone-drive that derives the class.
+struct PeriodFodder {
+    class: crate::game::game_object::GameObject,
+    taps_fodder: bool,
+}
+
+/// CR 732.2a / CR 111.1: seed a `Priority{controller}` window and drive ONE iteration of
+/// `last_loop_action_sequence` on THROWAWAY clones, returning the `(before, after)` frames.
+/// The shared seed+drive kernel of the accept-time re-derivations — `current_period_fodder`
+/// (object-growth ∞ pile) and `current_period_counter_targets` (counter-growth ∞ targets)
+/// both diff these two frames. `None` when the sequence is empty. Mirrors the detection
+/// drive exactly: same `SimulationProbeGuard` re-entrancy guard (HELD across the drive so
+/// the injector's internal `apply_action` never recurses into the shortcut hooks), same
+/// `drive_loop_sequence_iteration`.
+///
+/// The accept beat's `waiting_for` is `RespondToShortcut`, NOT `Priority`, so the recast
+/// cannot proceed from `state` as-is — seed a `Priority{controller}` window on the driven
+/// frame exactly as `apply_until_lethal_shortcut` does before its identical drive.
+///
+/// INV (clone-only): takes `&GameState` (SHARED borrow) ⇒ a live write is TYPE-IMPOSSIBLE.
+/// The `Priority{controller}` seed and the drive both mutate `before`/`after`, which are
+/// THROWAWAY clones (`state.clone()` → `before.clone()`); live `state.waiting_for` is never
+/// touched, so this cannot corrupt the real accept flow (INV-1, mirrors
+/// `try_offer_object_growth_shortcut`).
+fn drive_one_period_frames(state: &GameState) -> Option<(GameState, GameState)> {
+    let seq = state.last_loop_action_sequence.clone();
+    if seq.is_empty() {
+        return None;
+    }
+    let controller = seq[0].controller;
+    let expected_defs: Vec<Option<crate::types::ability::AbilityDefinition>> = seq
+        .iter()
+        .map(|c| loop_action_expected_def(state, c))
+        .collect();
+    let _probe = SimulationProbeGuard::enter();
+    // Seed + drive on THROWAWAY clones only (never `state`): `before` is the pre-drive frame,
+    // `after` the post-one-period frame; callers diff the two clones.
+    let mut before = state.clone();
+    priority::reset_priority(&mut before);
+    before.waiting_for = WaitingFor::Priority { player: controller };
+    let mut after = before.clone();
+    drive_loop_sequence_iteration(&mut after, &seq, 0, &expected_defs).ok()?;
+    Some((before, after))
+}
+
+/// CR 732.2a / CR 111.1: re-derive the reproduced fodder class of the accepted
+/// object-growth period by driving ONE iteration of `last_loop_action_sequence` on a
+/// clone (`drive_one_period_frames`), and measure whether that period taps a fodder member.
+/// `None` when the sequence is empty or the period reproduces no single new battlefield
+/// object (a multi-activation mana engine → no fodder pile to display). Same
+/// `derived_fodder_class` single-new-object rule as the detection drive. Called at
+/// materialize (with the sequence still intact) to snapshot the ∞ pile and its tapped-growth
+/// axis. The post-drive `derived_fodder_class` / `tapped_fodder_members` inspections are pure
+/// (they never read the probe flag), so running them after the shared kernel's guard has
+/// dropped is behavior-preserving.
+fn current_period_fodder(state: &GameState) -> Option<PeriodFodder> {
+    let controller = state.last_loop_action_sequence.first()?.controller;
+    let (before, after) = drive_one_period_frames(state)?;
+    let class = derived_fodder_class(&before, &after)?;
+    // CR 702.51a: the period taps a fodder iff the driven tapped-fodder multiset GREW across the
+    // one-period drive. `select_convoke_taps` sorts fodder (`is_token`) FIRST, so a convoke/
+    // tap-cost period taps a reproduced fodder → this grows; a mana-paid untapped-growth period
+    // taps nothing → this is FALSE. This is exactly the tapped-growth axis the
+    // `board_covers_modulo_fodder` `>=` untapped cover (resource.rs) does not distinguish.
+    let taps_fodder = crate::analysis::resource::tapped_fodder_members(&after, controller, &class)
+        .len()
+        > crate::analysis::resource::tapped_fodder_members(&before, controller, &class).len();
+    Some(PeriodFodder { class, taps_fodder })
+}
+
+/// CR 732.2a / CR 701.34a (proliferate): re-derive the per-object `(ObjectId, CounterType)`
+/// targets whose PRESERVED `Generic` counters strictly grew across one accepted
+/// counter-growth period — the DISPLAY-only `∞` counter channel. The offer certificate's
+/// unbounded axis is object-AGNOSTIC (`Counter(Other, Other)`), so the concrete object id /
+/// counter type is NOT recoverable from the axis; re-derive it the same way
+/// `current_period_fodder` derives the fodder class — drive ONE period on a clone (shared
+/// `drive_one_period_frames`) and diff `Generic` counters (`grown_generic_counter_targets`).
+/// Empty when the sequence is empty or the period grows no `Generic` counter (a mana / token
+/// / object-growth loop). General over the class (proliferate charge / One-Ring burden),
+/// never one card. DISPLAY-ONLY: the caller marks the pill to render `∞` without mutating the
+/// real counter count.
+fn current_period_counter_targets(
+    state: &GameState,
+) -> Vec<(ObjectId, crate::types::counter::CounterType)> {
+    let Some((before, after)) = drive_one_period_frames(state) else {
+        return Vec::new();
+    };
+    crate::analysis::resource::grown_generic_counter_targets(&before, &after)
+}
+
+/// CR 122.1 + CR 732.2a: re-derive the per-object BENEFICIAL counter growth (with per-cycle
+/// δ) of the accepted period by driving ONE iteration on a clone (`drive_one_period_frames`)
+/// and diffing beneficial-materializable counters (`grown_beneficial_counter_deltas`). The
+/// batched-collapse δ source for the whole beneficial class (+1/+1 / loyalty / defense /
+/// charge) — the widened analog of `current_period_counter_targets` (DISPLAY, Generic-only).
+/// Empty when the sequence is empty or the period grows no beneficial counter (a mana / token
+/// / life loop). Only reached in the UNOBSERVED batched route (the firewall gates it).
+fn current_period_counter_growth(
+    state: &GameState,
+) -> Vec<crate::types::game_state::CounterGrowth> {
+    let Some((before, after)) = drive_one_period_frames(state) else {
+        return Vec::new();
+    };
+    crate::analysis::resource::grown_beneficial_counter_deltas(&before, &after)
+        .into_iter()
+        .map(
+            |(object, counter, per_cycle_delta)| crate::types::game_state::CounterGrowth {
+                object,
+                counter,
+                per_cycle_delta,
+            },
+        )
+        .collect()
+}
+
+/// CR 119.3 + CR 732.2a: re-derive the per-player life GAIN δ of the accepted period by
+/// driving ONE iteration on a clone and diffing life totals (`grown_life_deltas`). The
+/// batched-collapse δ source for the life axis. Empty when the sequence is empty or the
+/// period gains no life. Only reached in the UNOBSERVED batched route (the firewall gates it).
+fn current_period_life_growth(state: &GameState) -> Vec<(PlayerId, u32)> {
+    let Some((before, after)) = drive_one_period_frames(state) else {
+        return Vec::new();
+    };
+    crate::analysis::resource::grown_life_deltas(&before, &after)
+}
+
 /// CR 732.2a: detect an object-growth recast loop by driving TWO iterations on a clone;
 /// on success returns the offer certificate for the CALLER to install. Takes a SHARED
 /// `&GameState` ⇒ a live write is TYPE-IMPOSSIBLE (INV-1); the sole live write
@@ -1659,40 +2145,71 @@ fn try_offer_object_growth_shortcut(
     crate::analysis::loop_check::LoopCertificate,
     crate::analysis::decision_template::ShortcutDecisionSchema,
 )> {
-    let ctx = state.last_recast_context.clone()?;
+    let seq = state.last_loop_action_sequence.clone();
+    if seq.is_empty() {
+        return None;
+    }
     let WaitingFor::Priority { player: caster } = state.waiting_for else {
         return None;
     };
-    if ctx.controller != caster {
+    // The whole PERIOD must belong to the priority holder. A multi-controller / interleaved
+    // sequence is fail-closed here; the per-step drive's controller re-find is the runtime
+    // backstop (T-HET). Faithful generalization of the pre-P7 `ctx.controller != caster` check.
+    if seq.iter().any(|c| c.controller != caster) {
         return None;
     }
-    // The recast card must be in its castable origin zone right now (recastable) —
-    // capture it so the recast spell ability can be scanned for randomness below.
-    let recast_obj = state.objects.values().find(|o| {
-        o.card_id == ctx.card_id && o.zone == ctx.from_zone && o.controller == ctx.controller
-    })?;
-    // CR 732.2a: a shortcut "can't include conditional actions, where the outcome of a
-    // game event determines the next action." A recast whose spell body bears an
-    // auto-resolved coin flip (CR 705.1) / die roll (CR 706.1a) / random selection
-    // (CR 701.9a/b) has more than one equally-likely outcome ⇒ not a legal shortcut.
-    // Reject it STATICALLY, before driving (cheap + compile-time exhaustive over
-    // `Effect`). Fail-closed: an undeterminable spell ability (no combined Spell def)
-    // also does not offer. (A2 determinism gate — the static half; the post-drive
-    // rng-position check below is the complete runtime backstop that additionally
-    // catches external triggered/replacement randomness firing in the cycle.)
-    let spell_def = crate::game::casting::combined_spell_ability_def(recast_obj)?;
-    if crate::game::ability_scan::spell_ability_bears_randomness(&spell_def) {
+    // STEP D (CR 104.4b / CR 601.2a / CR 602.2 / CR 605.3a): only OFFER a VOLUNTARILY-repeatable
+    // (optional) loop — every driving step must be a player-initiated cast/activation. Replaces
+    // the pre-P7 `no_living_player_has_meaningful_priority_action` offer gate (HAZARD A: that
+    // predicate + its leaf `is_meaningful_priority_activation` (mana_sources.rs) stay byte-identical
+    // for the MANDATORY `:431`/`:515` lethal/draw paths). A mana engine's activations are voluntary
+    // (CR 605.3a) so it offers; a future mandatory driving variant is forced to return `false`.
+    if !seq.iter().all(|c| c.action.is_voluntarily_repeatable()) {
         return None;
+    }
+    // CR 602.2a / CR 732.2a (G4): the per-step ability def each `Activate` step names, so the drive
+    // can re-validate its positional `ability_index` by `Eq` each iteration; `None` for `Recast`.
+    let expected_defs: Vec<Option<crate::types::ability::AbilityDefinition>> = seq
+        .iter()
+        .map(|c| loop_action_expected_def(state, c))
+        .collect();
+    // CR 732.2a: a shortcut "can't include conditional actions, where the outcome of a game
+    // event determines the next action." A driving ability whose body bears an auto-resolved
+    // coin flip (CR 705.1) / die roll (CR 706.1a) / random selection (CR 701.9a/b) has more
+    // than one equally-likely outcome ⇒ not a legal shortcut. Reject it STATICALLY, before
+    // driving (cheap + compile-time exhaustive over `Effect`), scanning EVERY step of the period
+    // (exhaustive): a `Recast` re-finds its card in the castable origin zone (which ALSO proves
+    // recastability) and scans the combined spell ability; an `Activate` pins the driving
+    // permanent by `ObjectId` (G3) and scans the activated ability's own def. Fail-closed: an
+    // undeterminable ability (no combined Spell def, or a missing source/index) does not offer.
+    // (A2 determinism gate — the static half; the post-drive rng-position check below is the
+    // complete runtime backstop that additionally catches external triggered/replacement
+    // randomness firing in the cycle.)
+    for (c, expected_def) in seq.iter().zip(expected_defs.iter()) {
+        let bears_randomness = match &c.action {
+            crate::types::game_state::LoopAction::Recast { from_zone, .. } => {
+                let recast_obj = state.objects.values().find(|o| {
+                    o.card_id == c.card_id && o.zone == *from_zone && o.controller == c.controller
+                })?;
+                let spell_def = crate::game::casting::combined_spell_ability_def(recast_obj)?;
+                crate::game::ability_scan::spell_ability_bears_randomness(&spell_def)
+            }
+            crate::types::game_state::LoopAction::Activate { .. } => {
+                crate::game::ability_scan::spell_ability_bears_randomness(expected_def.as_ref()?)
+            }
+        };
+        if bears_randomness {
+            return None;
+        }
     }
 
-    // Drive two iterations (three settle frames) under the re-entrancy guard.
+    // Drive two whole PERIODS (three settle frames) under the re-entrancy guard.
     let _probe = SimulationProbeGuard::enter();
-    let template = build_recast_template(&ctx);
     let s_n = state.clone();
     let mut clone = state.clone();
-    drive_recast_iteration(&mut clone, &template, &ctx, 0).ok()?;
+    drive_loop_sequence_iteration(&mut clone, &seq, 0, &expected_defs).ok()?;
     let s_n1 = clone.clone();
-    drive_recast_iteration(&mut clone, &template, &ctx, 1).ok()?;
+    drive_loop_sequence_iteration(&mut clone, &seq, 1, &expected_defs).ok()?;
     let s_n2 = clone;
 
     // CR 732.2a: any randomness CONSUMED during the deterministic detection drive means the
@@ -1714,26 +2231,48 @@ fn try_offer_object_growth_shortcut(
         return None;
     }
 
-    // CR 111.10: derive the reproduced token class from the first driven cycle, normalized
-    // through the same per-object projection the cover applies to its frames (so the class
-    // compares in the P/T-zeroed form, not the raw Some(1) form).
-    let mut fodder = derived_fodder_class(&s_n, &s_n1)?;
-    crate::analysis::resource::project_object_for_loop(&mut fodder);
-
-    // CR 732.2a board recurrence on BOTH pairs: pure inert tapped-fodder growth. Normalize
-    // each frame first (strip the self-returning recast card + clear churning token-id
-    // bookkeeping, CR 400.7) so the id-keyed stable compare does not read fresh-each-cycle
-    // ObjectIds as a board drift.
+    // CR 400.7: normalize each frame (strip the self-returning recast card + clear churning
+    // token-id bookkeeping) BEFORE the cover fork so both arms share the normalized frames. Uses
+    // `seq[0]`'s action to dispatch the recast-strip — an all-`Activate` period (the mana-engine
+    // class) only clears token-id bookkeeping; a 1-element `Recast` strips its card as before.
     let (cs_n, cs_n1, cs_n2) = (
-        normalize_recast_frame(&s_n, &ctx),
-        normalize_recast_frame(&s_n1, &ctx),
-        normalize_recast_frame(&s_n2, &ctx),
+        normalize_recast_frame(&s_n, &seq[0]),
+        normalize_recast_frame(&s_n1, &seq[0]),
+        normalize_recast_frame(&s_n2, &seq[0]),
     );
-    if !crate::analysis::resource::loop_states_cover_modulo_fodder_growth(&cs_n, &cs_n1, &fodder)
-        || !crate::analysis::resource::loop_states_cover_modulo_fodder_growth(
-            &cs_n1, &cs_n2, &fodder,
-        )
-    {
+    // CR 732.2a board recurrence on BOTH pairs — two disjoint recurrence shapes:
+    //  - fodder-growth (a token was reproduced each period, `derived_fodder_class` is `Some`):
+    //    cover modulo the inert reproduced fodder class (the P3 object-growth path, unchanged).
+    //  - pure resource growth (NO new battlefield object — the multi-activation mana-engine class):
+    //    the board returns EQUAL modulo projected resources (mana grows +N/period, board identical).
+    //    PROBE-1 measured `loop_states_equal_modulo_resources` TRUE on real Basalt+Power sequence
+    //    boundaries. A PARTIAL period never reaches here board-equal (the drive re-taps a tapped
+    //    source and aborts first), so the drive+cover IS the period-boundary check.
+    let cover_ok = match derived_fodder_class(&s_n, &s_n1) {
+        Some(mut fodder) => {
+            crate::analysis::resource::project_object_for_loop(&mut fodder);
+            crate::analysis::resource::loop_states_cover_modulo_fodder_growth(
+                &cs_n, &cs_n1, &fodder,
+            ) && crate::analysis::resource::loop_states_cover_modulo_fodder_growth(
+                &cs_n1, &cs_n2, &fodder,
+            )
+        }
+        None => {
+            // FIX-2 (CR 732.2a / CR 104.4b): the multi-activation / pure-counter class returns
+            // EQUAL modulo projected resources OR covers modulo preserved-`Generic` counter growth
+            // (Pentad charge, One Ring burden — the whole preserved-`Generic` family, not one
+            // card). The base `loop_states_equal_modulo_resources` PRESERVES `Generic` counters, so
+            // a +1-charge/cycle loop is UNEQUAL there; the counter-growth cover accepts it. Sound:
+            // the offer is declinable and never crowns a `GameOver` (the cover's own doc,
+            // `resource.rs`), and is deliberately NOT wired into any Path-A/Path-B lethal seam.
+            let cover = |a: &GameState, b: &GameState| {
+                crate::analysis::resource::loop_states_equal_modulo_resources(a, b)
+                    || crate::analysis::resource::loop_states_cover_modulo_counter_growth(a, b)
+            };
+            cover(&cs_n, &cs_n1) && cover(&cs_n1, &cs_n2)
+        }
+    };
+    if !cover_ok {
         return None;
     }
 
@@ -1760,66 +2299,270 @@ fn try_offer_object_growth_shortcut(
         return None;
     }
 
-    // CR 104.4b: only OFFER an OPTIONAL loop (a player could choose not to repeat it). A
-    // mandatory board-growth loop would draw (Path B) / be handled elsewhere, not offered.
-    if no_living_player_has_meaningful_priority_action(state) {
-        return None;
-    }
-
+    // (The CR 104.4b optionality gate moved ABOVE the drive as STEP D's
+    // `seq.iter().all(is_voluntarily_repeatable)` — HAZARD A: it no longer routes through
+    // `no_living_player_has_meaningful_priority_action`, which stays scoped to the mandatory
+    // `:431`/`:515` lethal/draw paths.)
     let certificate = build_cert(&s_n1, &s_n2, &delta, caster);
     // CR 732.2a (CARRY, don't re-derive): the schema's decision list is the SAME
-    // `build_recast_template` output driven above — `[ConvokeTaps]` when the recast has convoke,
-    // else `[]`. Legal sets are derived against the live offer-time board.
-    let schema = build_shortcut_schema(&template.decisions, certificate.win_kind, state, caster);
+    // `build_recast_template` output the drive uses — `[ConvokeTaps]` when `seq[0]` is a convoke
+    // recast, else `[]` (a multi-activation period carries no convoke pin). Legal sets are derived
+    // against the live offer-time board.
+    let schema_template = build_recast_template(&seq[0]);
+    let schema = build_shortcut_schema(
+        &schema_template.decisions,
+        certificate.win_kind,
+        state,
+        caster,
+    );
     Some((certificate, schema))
 }
 
-/// PR-7 Phase 4d-ii (CR 732.2a): materialize a confirmed `Fixed(N)` object-growth recast
-/// shortcut by driving N real recast cycles on a clone via the injector, committing each
-/// completed cycle atomically. The recurrence boundary is the injector's OWN settle
-/// condition (`Priority` + empty stack) — one successful `drive_recast_iteration` IS one
-/// materialized cycle of real game actions, so the result is ground-truth (contrast the
-/// drain path, which re-derives recurrence from `loop_states_*`). Any injector abort
-/// (e.g. the loop stopped being sustainable — CR 702.51b unpayable convoke) ⇒ commit the
-/// completed cycles + hand priority back (CR 800.4a). Runs under the re-entrancy guard.
+/// PR-7 Phase 4d-ii / P7 v3 (CR 732.2a): "materialize" a confirmed UNBOUNDED object-growth
+/// shortcut (fodder/token reproduction, or a multi-activation mana engine). An unbounded loop is
+/// NOT replayed a discrete number of times — that would both CAP the infinite at N and be O(N)
+/// (measured ≈0.4 s per materialized token; 500 Saprolings drove for 212 s). Instead persist the
+/// certificate's unbounded axes for the controller through the SAME single writer the reconcile /
+/// determinate crown uses (`mark_unbounded_loop`; see the reconcile seam above). The ω-cover has
+/// already proved the growing class is inert + unobserved, and `board_covers_modulo_fodder`'s
+/// tapped-split proved the UNTAPPED remainder is B1-preserved (finite) while the total strictly
+/// grows — so the TAPPED members are exactly the unbounded pile. The board therefore needs NO
+/// mutation: the finite untapped reals stay as-is, and the pre-existing tapped fodder ARE the ∞
+/// pile (the HUD / battlefield render the marked axis as `∞`). For a mana engine the axes are
+/// `Mana(_)`, feeding the existing infinite-mana pool reseed. Every OFFERED growth loop is
+/// certified-unbounded, so `proposal.unbounded` is non-empty (an empty set is a harmless no-op).
+/// Then consume the recast context + hand priority to the living seat (CR 800.4a) — exactly as the
+/// old drive did — so this same `apply()` does not instantly re-offer; a later manual recast
+/// re-arms the context and a later beat re-detects genuinely.
 fn materialize_object_growth_shortcut(
     state: &mut GameState,
     result: &mut ActionResult,
-    ctx: &crate::types::game_state::RecastContext,
-    n: u32,
+    proposal: &crate::analysis::loop_check::ShortcutProposal,
 ) {
-    let template = build_recast_template(ctx);
-    let _probe = SimulationProbeGuard::enter();
-    // Last fully-completed cycle (owned O(1) rollback); the board is unchanged since the
-    // offer (Declare/Accept touch only the protocol).
-    let mut committed = state.clone();
-
-    for i in 0..n {
-        // Seed the caster's settle priority beat so the injector's first action (CastSpell)
-        // is authorized (the entry `waiting_for` is RespondToShortcut / LoopShortcut).
-        let mut work = committed.clone();
-        priority::reset_priority(&mut work);
-        work.priority_player = ctx.controller;
-        work.waiting_for = WaitingFor::Priority {
-            player: ctx.controller,
+    // CR 732.2a: reuse the single `unbounded_resources` writer (never mutate the map inline). The
+    // proposer is the loop controller (the offer required the whole period to be theirs).
+    state.mark_unbounded_loop(proposal.proposer, &proposal.unbounded);
+    // CR 732.2a / CR 110.1: snapshot the ∞ pile — the proposer's tapped fodder-class members —
+    // for `DerivedViews::unbounded_pile`. Re-derive the fodder class HERE (the sequence is still
+    // intact; the `.clear()` below wipes it) by driving one period on a clone. A mana-engine loop
+    // reproduces no token ⇒ `current_period_fodder` is `None` ⇒ no pile (correct).
+    // DISPLAY (hoisted, unconditional — runs for BOTH the observed and unobserved routes so an
+    // observed token+X loop keeps its on-battlefield ∞ pile accept→boundary): seed the pile's
+    // anchors and register it, capturing the token copiable profile for the batched Tokens stash.
+    let token_profile: Option<crate::types::ability::CopiableValues> =
+        if let Some(period) = current_period_fodder(state) {
+            let class = &period.class;
+            // CR 732.2a / CR 707.2: capture the fodder's copiable profile NOW, while the recast
+            // sequence is still intact (`.clear()` below wipes it and `current_period_fodder`
+            // derives from it). At the next phase/step boundary the loop controller names a finite
+            // N and N tapped copy-tokens are minted from this profile (the deferred shortcut
+            // count). Stored as CopiableValues, NOT an ObjectId: the board is not frozen
+            // accept→boundary, and a token's oracle_id is empty so a ResidualPermanent could not
+            // recreate it. A mana-engine loop has no fodder class (`None`) → no token stash.
+            let profile = crate::game::printed_cards::intrinsic_copiable_values(class);
+            // CR 702.51a (convoke optional) + CR 732.2a: seed the ∞ pile's tapped anchor AND the
+            // W+1 untapped remainder ONLY when the certified period actually TAPS a fodder each
+            // cycle (`period.taps_fodder`) AND the live board has no tapped fodder yet (a one-shot
+            // bootstrap tapped a creature OUTSIDE the fodder class, e.g. convoking the {B}{G}
+            // cost-reducer for {G}). `board_covers_modulo_fodder`'s `>=` untapped cover
+            // (resource.rs) admits pure untapped-partition growth, so a mana-paid untapped-growth
+            // loop also reaches here with an empty tapped-fodder set — `is_empty()` alone
+            // over-fires; `period.taps_fodder == false` there → no spurious seed. The untapped
+            // seed is CR 702.51a's optional-convoke final cast (pay {G} from mana, make a
+            // Saproling without tapping one → +1 untapped); it is excluded from the ∞ pile because
+            // `tapped_fodder_members` filters `o.tapped`.
+            if period.taps_fodder
+                && crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, class)
+                    .is_empty()
+            {
+                seed_representative_fodder(
+                    state,
+                    result,
+                    proposal.proposer,
+                    &profile,
+                    /*tapped=*/ true,
+                );
+                seed_representative_fodder(
+                    state,
+                    result,
+                    proposal.proposer,
+                    &profile,
+                    /*tapped=*/ false,
+                );
+            }
+            // Re-read AFTER the mint so the pile names the freshly-seeded tapped anchor (if any);
+            // `register_unbounded_loop_pile` is a no-op on the still-empty set for the untapped
+            // (non-seeded) case, preserving pre-existing untapped-growth behavior. The untapped
+            // remainder seed is EXCLUDED here (`tapped_fodder_members` filters `o.tapped`).
+            let pile =
+                crate::analysis::resource::tapped_fodder_members(state, proposal.proposer, class);
+            state.register_unbounded_loop_pile(proposal.proposer, pile);
+            Some(profile)
+        } else {
+            None
         };
-        if drive_recast_iteration(&mut work, &template, ctx, i).is_err() {
-            break; // loop no longer sustainable ⇒ keep the completed cycles
+    // CR 732.2a / CR 701.34a: snapshot the per-object ∞ COUNTER targets for DISPLAY
+    // (DerivedViews::unbounded_counters). Distinct from the object-growth ∞ pile above: a
+    // counter-growth loop's certified unbounded axis is object-agnostic (Counter(Other,
+    // Other)), so re-derive the concrete (object, counter) pairs by driving one period on a
+    // clone and diffing Generic counters — WHILE the recast sequence is still intact (the
+    // `.clear()` below wipes it). DISPLAY-ONLY: the object's real counter count is NOT mutated
+    // (CR 701.34a already added the real counter on each live cycle; this only marks the pill
+    // to render ∞). A mana / token / object-growth loop grows no Generic counter ⇒ empty ⇒
+    // no-op writer. Runs in BOTH routes (display is unconditional).
+    let counter_targets = current_period_counter_targets(state);
+    state.register_unbounded_counter_targets(proposal.proposer, counter_targets);
+    // ROUTE the STASH element only (the DISPLAY above is unconditional). `proposal.unbounded` IS
+    // the ∞-mark set `mark_unbounded_loop` wrote. Capture-before-clear: `last_loop_action_sequence`
+    // and the δ derivations all read BEFORE the `.clear()` tail below.
+    //
+    // AXIS-AWARE routing: a loop that grows a batchable COUNTER or LIFE axis OBSERVED by the current
+    // board must DRIVE the whole loop (the batched δ apply would miscount the observer — a lump
+    // life gain fires a "whenever you gain life" trigger once not N×, and `apply_counter_addition`
+    // bypasses the counter doubler pipeline). Everything else BATCHES. A pure token/mana loop grows
+    // no counter/life axis (`growths`/`life` empty) → its only observer surface is token creation,
+    // already vetted by the OFFER-time fodder firewall → it always batches even when the board
+    // carries an unrelated life/counter observer (plan §5 Note; the observedness firewall is
+    // AXIS-SPECIFIC so an incidental board observer never mis-routes a disjoint-axis loop).
+    let growths = current_period_counter_growth(state);
+    let life = current_period_life_growth(state);
+    let counter_observed =
+        !growths.is_empty() && crate::analysis::resource::counter_growth_is_observed(state);
+    let life_observed =
+        !life.is_empty() && crate::analysis::resource::life_growth_is_observed(state);
+    if counter_observed || life_observed {
+        // CR 732.2a: OBSERVED batchable growth — one DriveSequence collapses the WHOLE loop (all
+        // axes); replaying the captured sequence recreates every per-cycle effect honoring
+        // observers. Do NOT also register batched items (the routes are exclusive per accept).
+        let sequence = state.last_loop_action_sequence.clone();
+        if !sequence.is_empty() {
+            state.register_pending_materialization(
+                proposal.proposer,
+                crate::types::game_state::PersistentAxisMaterialization::DriveSequence {
+                    sequence,
+                    collapsed_axes: proposal.unbounded.clone(),
+                },
+            );
         }
-        committed = work; // ATOMIC: one real recast cycle committed
+    } else {
+        // UNOBSERVED fast path — register each grown persistent axis for the batched N×δ collapse.
+        if let Some(profile) = token_profile {
+            state.register_pending_materialization(
+                proposal.proposer,
+                crate::types::game_state::PersistentAxisMaterialization::Tokens(Box::new(profile)),
+            );
+        }
+        if !growths.is_empty() {
+            state.register_pending_materialization(
+                proposal.proposer,
+                crate::types::game_state::PersistentAxisMaterialization::Counters(growths),
+            );
+        }
+        for (player, per_cycle_delta) in life {
+            state.register_pending_materialization(
+                proposal.proposer,
+                crate::types::game_state::PersistentAxisMaterialization::Life {
+                    player,
+                    per_cycle_delta,
+                },
+            );
+        }
     }
-
-    *state = committed;
-    // Ring-clear + consume the recast context BEFORE handback so this same `apply()` does
-    // not instantly re-offer the just-materialized loop; a later manual recast re-arms the
-    // context and a later beat re-detects genuinely.
     state.loop_detect_ring.clear();
-    state.last_recast_context = None;
+    state.last_loop_action_sequence.clear();
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
     };
     result.waiting_for = state.waiting_for.clone();
+}
+
+/// CR 732.2a: replay a captured loop-action period `n` times through real `apply()` at the CR
+/// 500.5 step/phase boundary, committing each period atomically — observers (Heliod / Corpsejack)
+/// fire each cycle, so an OBSERVED loop's N-cycle result is exact where a single batched N×δ would
+/// be wrong. The simulation guard is HELD across the whole drive so the injector's internal
+/// `apply_action` never recurses into the shortcut offer/detection hooks (`in_simulation_probe`
+/// gates those only). Aborts to the successful prefix if the loop can no longer replay — the
+/// machinery left the board between accept and boundary (CR 800.4a / CR 400.7) — committing the
+/// cycles that did replay. `n` is pre-clamped `[0, MAX_SHORTCUT_CYCLES]` at the prompt. This is the
+/// re-introduction of the removed accept-time drive (commit 6d9344af1), bounded to observed loops
+/// at the boundary; the private `drive_loop_sequence_iteration` / `loop_action_expected_def` /
+/// `RecastAbort` cannot be named from `engine_resolution_choices`, so the drive lives here.
+pub(crate) fn drive_persistent_axis_collapse(
+    state: &mut GameState,
+    seq: &[crate::types::game_state::LoopActionContext],
+    n: u32,
+) {
+    let Some(controller) = seq.first().map(|c| c.controller) else {
+        return;
+    };
+    // Derive `expected_defs` ONCE from the base (reloaded) boundary state — each `Activate` step's
+    // named ability def for `Eq` re-validation; `Recast` re-finds its card + combined spell def live.
+    let expected_defs: Vec<Option<crate::types::ability::AbilityDefinition>> = seq
+        .iter()
+        .map(|c| loop_action_expected_def(state, c))
+        .collect();
+    let _guard = SimulationProbeGuard::enter(); // held across the whole drive
+    let mut committed = state.clone();
+    for i in 0..n {
+        let mut work = committed.clone();
+        // The accept beat cleared the sequence and handed priority to the living seat; re-seed a
+        // Priority window for the loop CONTROLLER (not `active_player`: `reset_priority` grants the
+        // active player, but the loop may be an instant-speed period on an opponent's turn).
+        priority::reset_priority(&mut work);
+        work.priority_player = controller;
+        work.waiting_for = WaitingFor::Priority { player: controller };
+        if drive_loop_sequence_iteration(&mut work, seq, i, &expected_defs).is_err() {
+            break; // commit the successful prefix (CR 800.4a hands priority back)
+        }
+        committed = work;
+    }
+    *state = committed;
+    // `_guard` drops HERE — before the caller re-drains — so the restored beat is offer-eligible.
+}
+
+/// CR 732.2a / CR 111.1 / CR 110.5b / CR 707.2: when an accepted convoke/tap-cost object-growth
+/// loop was DEMONSTRATED by tapping a creature OUTSIDE the reproduced fodder class (e.g. convoking
+/// the {B}{G} cost-reducer for {G}), no tapped fodder member exists on the live board yet. Mint
+/// ONE representative fodder token from the sustainable period's captured copiable profile — the
+/// SAME copy-token mint the boundary collapse uses (single token authority) — so Part-1's
+/// `unbounded_loop_pile`/`∞` badge has a live anchor (`tapped: true`) and CR 702.51a's mana-paid
+/// capping cast's untapped remainder is realized (`tapped: false`). CR 111.1: the mint creates a
+/// token. CR 110.5b: a permanent enters untapped unless told otherwise — `tapped` names that
+/// status directly. CR 707.2: copiable values carry name/P-T/color/abilities but NOT tapped
+/// status, so `CopyTokenSpec.tapped` sets it explicitly. The untapped working set is untouched (a
+/// new token is added; no existing fodder is tapped), so the finite remainder is preserved.
+fn seed_representative_fodder(
+    state: &mut GameState,
+    result: &mut ActionResult,
+    owner: PlayerId,
+    profile: &crate::types::ability::CopiableValues,
+    tapped: bool,
+) {
+    let batch = crate::types::game_state::PendingCopyTokenBatch {
+        owner,
+        count: 1,
+        copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+            values: Box::new(profile.clone()),
+            display_source: crate::game::game_object::DisplaySource::Token,
+            printed_ref: None,
+            token_image_ref: None,
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: owner,
+        }),
+    };
+    crate::game::effects::token_copy::drive_copy_token_batches(
+        state,
+        VecDeque::from([batch]),
+        EffectKind::CopyTokenOf,
+        ObjectId(0),
+        &mut result.events,
+    );
 }
 
 /// Immutable data from a `WaitingFor::LoopShortcut` offer, grouped for declaration handling.
@@ -1955,9 +2698,9 @@ fn handle_declare_shortcut(
 ///   the ring (re-clearing would special-case `DeclineShortcut` to distrust an engine-wide
 ///   invariant). The interactive e2e's "no re-offer" assertion guards this end-to-end: a future
 ///   regression excluding `DeclineShortcut` from that allowlist would fail it loudly.
-/// - Object-growth (Seam 2, gated by `last_recast_context.is_some()`): the deliberate-action
-///   clear does NOT touch `last_recast_context`, so `state.last_recast_context = None` here is
-///   the genuinely load-bearing suppressor — without it the post-return reconcile re-fires
+/// - Object-growth (Seam 2, gated by `!last_loop_action_sequence.is_empty()`): the deliberate-action
+///   clear does NOT touch `last_loop_action_sequence`, so `state.last_loop_action_sequence.clear()` here
+///   is the genuinely load-bearing suppressor — without it the post-return reconcile re-fires
 ///   `try_offer_object_growth_shortcut` within this same `apply()`.
 ///
 /// A genuine re-recurrence or a fresh re-cast re-arms the offer naturally. Proposer-only
@@ -1974,7 +2717,7 @@ fn handle_decline_shortcut(
     };
     // Seam 1 (loop_detect_ring) is already invalidated by apply_action's deliberate-action
     // ring-clear (engine.rs:3006-3011) — see doc. Only Seam 2 is the handler's gap:
-    state.last_recast_context = None; // Seam 2: load-bearing object-growth offer-gate clear (CR 732.2a)
+    state.last_loop_action_sequence.clear(); // Seam 2: load-bearing object-growth offer-gate clear (CR 732.2a)
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -2052,7 +2795,8 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
 ///   their behalf (CR 104.3a).
-/// - **Preference actions** (SetPhaseStops, CancelAutoPass) are per-player UI
+/// - **Preference actions** (SetPhaseStops, SetPriorityPassingMode,
+///   CancelAutoPass) are per-player UI
 ///   settings. They have no CR semantics, mutate only the submitter's own
 ///   preference slot, and may legitimately fire at any time — e.g. the human
 ///   toggles a phase stop while the AI holds priority. The downstream handlers
@@ -2075,6 +2819,7 @@ fn check_actor_authorization(
     if matches!(
         action,
         GameAction::SetPhaseStops { .. }
+            | GameAction::SetPriorityPassingMode { .. }
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
@@ -2154,14 +2899,177 @@ fn apply_as_current_with_mode(
     apply_action_boundary(state, actor, action, mode)
 }
 
+/// The action boundary at which a typed cost-move root is allowed to resume.
+/// Keeping this finite boundary vocabulary prevents a cost payment from being
+/// drained by an unrelated effect continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostMoveDrainBoundary {
+    ReplacementDelivered { action_event_start: usize },
+    ReplacementPrevented { action_event_start: usize },
+    PriorityBoundary,
+}
+
+/// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: Drain the one typed cost-move
+/// root eligible at this exact reducer boundary. Replacement delivery happens
+/// before ordinary continuations; the common Priority boundary only resumes
+/// Delve and mana-ability cursors after those continuations have settled.
+pub(crate) fn drain_pending_cost_move_resume(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    boundary: CostMoveDrainBoundary,
+) -> Result<Option<WaitingFor>, EngineError> {
+    let eligible = match boundary {
+        CostMoveDrainBoundary::ReplacementDelivered { .. } => matches!(
+            state.pending_cost_move_resume,
+            Some(
+                PendingCostMoveResume::Cast { .. }
+                    | PendingCostMoveResume::SacrificeForCost { .. }
+                    | PendingCostMoveResume::WardSacrificePayment { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
+                    | PendingCostMoveResume::DelveManaPayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
+            )
+        ),
+        // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
+        // opponent's Solemnity would prevent the counters) must still complete the
+        // parked activation instead of wedging, so `LoyaltyActivation` is eligible
+        // at the Prevented boundary as well.
+        CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
+            state.pending_cost_move_resume,
+            Some(
+                PendingCostMoveResume::Cast { .. }
+                    | PendingCostMoveResume::SacrificeForCost { .. }
+                    | PendingCostMoveResume::WardSacrificePayment { .. }
+                    | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::Foretell { .. }
+                    | PendingCostMoveResume::CollectEvidencePayment { .. }
+                    | PendingCostMoveResume::UnlessBouncePayment { .. }
+                    | PendingCostMoveResume::DelveManaPayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+                    | PendingCostMoveResume::LoyaltyActivation { .. }
+            )
+        ),
+        CostMoveDrainBoundary::PriorityBoundary => matches!(
+            state.pending_cost_move_resume,
+            Some(
+                PendingCostMoveResume::DelveManaPayment { .. }
+                    | PendingCostMoveResume::ManaAbilityPayment { .. }
+            )
+        ),
+    };
+    if !eligible {
+        return Ok(None);
+    }
+
+    let action_event_start = match boundary {
+        CostMoveDrainBoundary::ReplacementDelivered { action_event_start }
+        | CostMoveDrainBoundary::ReplacementPrevented { action_event_start } => {
+            Some(action_event_start)
+        }
+        CostMoveDrainBoundary::PriorityBoundary => None,
+    };
+    let waiting_for = if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Cast { .. } | PendingCostMoveResume::SacrificeForCost { .. })
+    ) {
+        casting_costs::resume_interrupted_cost_payment(state, events, action_event_start)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::WardSacrificePayment { .. })
+    ) {
+        engine_payment_choices::resume_ward_sacrifice_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ReplacementMayCost { .. })
+    ) {
+        super::costs::resume_replacement_may_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::Foretell { .. })
+    ) {
+        super::casting::resume_foretell_cost_move(state, events)
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::CollectEvidencePayment { .. })
+    ) {
+        super::effects::collect_evidence::resume_cost_move_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::UnlessBouncePayment { .. })
+    ) {
+        engine_payment_choices::resume_unless_bounce_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::DelveManaPayment { .. })
+    ) {
+        resume_delve_mana_payment(state)
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+    ) {
+        mana_abilities::resume_mana_ability_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::LoyaltyActivation { .. })
+    ) {
+        super::planeswalker::resume_loyalty_activation(state, events)?
+    } else {
+        unreachable!("eligible cost-move root must remain parked")
+    };
+    state.waiting_for = waiting_for.clone();
+    Ok(Some(waiting_for))
+}
+
 pub(super) fn resume_pending_continuation_if_priority(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            effects::resume_resolution_frames(state, events);
+        }
+        // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
+        // boundary only after ordinary continuations drain. The shared typed
+        // dispatcher owns the remaining eligible payment roots.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            let _ = drain_pending_cost_move_resume(
+                state,
+                events,
+                CostMoveDrainBoundary::PriorityBoundary,
+            )?;
+        }
     }
     Ok(())
+}
+
+/// CR 702.66a: Finish one Delve payment after its graveyard-to-exile cost move
+/// was delivered or fully replaced. The move's `TrackBySource` delivery tail
+/// records only cards actually delivered to exile; this typed root restores the
+/// exact Delve payment prompt and its one-generic cost reduction without
+/// finalizing the pending cast.
+pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
+    let Some(PendingCostMoveResume::DelveManaPayment { player, fuel_id }) =
+        state.pending_cost_move_resume.take()
+    else {
+        unreachable!("delve cost-move resume requires its typed continuation")
+    };
+    // CR 118.3a: The generic-only marker is consumed by the shared mana-payment
+    // finalizer and cannot be pinned or spent on a colored cost.
+    state.add_mana_to_pool(
+        player,
+        crate::types::mana::ManaUnit::convoke_payment(
+            crate::types::mana::ManaType::Colorless,
+            fuel_id,
+        ),
+    );
+    WaitingFor::ManaPayment {
+        player,
+        convoke_mode: Some(ConvokeMode::Delve),
+    }
 }
 
 /// Decision emitted by the auto-pass loop's per-iteration check.
@@ -2229,6 +3137,11 @@ fn pass_priority_once_with_pipeline(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> Result<WaitingFor, EngineError> {
+    if let WaitingFor::Priority { player } = &state.waiting_for {
+        if super::precast_copy_shortcut::blocks_pass(state, *player) {
+            return Ok(state.waiting_for.clone());
+        }
+    }
     state.cancelled_casts.clear();
     // CR 117.4 + 608.1: When all players pass in succession the stack begins
     // resolving; at that moment the AI guard against re-activating pending
@@ -2262,9 +3175,7 @@ fn pass_priority_once_with_pipeline(
     // this drain, a continuation queued after a no-choice effect would sit
     // until an unrelated action, by which point referenced stack objects may
     // have left the stack.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-        effects::drain_pending_continuation(state, events);
-    }
+    resume_pending_continuation_if_priority(state, events)?;
 
     let skip_triggers =
         stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage;
@@ -2408,7 +3319,9 @@ fn finish_completed_or_interrupted_until_stack_empty_sessions(state: &mut GameSt
 // would force ~4.3e9 GameState clones — a byte cap cannot see it, only this count cap can.
 // 1_000 is generous vs any honest Fixed count (~10x KCI-style loops); worst-case bounded
 // cost is 1_000 cycles x <=10_000 beats = 1e7.
-const MAX_SHORTCUT_CYCLES: u32 = 1_000;
+// `pub(crate)`: also the CR 732.2a boundary-collapse `PayableResource::LoopCollapse`
+// prompt max (turns.rs), reusing the one existing loop-count safety bound.
+pub(crate) const MAX_SHORTCUT_CYCLES: u32 = 1_000;
 
 fn auto_pass_loop_max_iterations(state: &GameState) -> usize {
     let living_players = state
@@ -2476,6 +3389,9 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
         match &result.waiting_for {
             WaitingFor::Priority { player } => {
                 let player = *player;
+                if super::precast_copy_shortcut::blocks_pass(state, player) {
+                    break;
+                }
                 let decision = priority_auto_pass_decision(state, player);
                 match decision {
                     AutoPassDecision::Exit => {
@@ -2709,7 +3625,7 @@ fn finalize_copy_retarget(
         }
         state.waiting_for = wf;
         state.priority_player = player;
-        effects::drain_pending_continuation(state, events);
+        resume_pending_continuation_if_priority(state, events)?;
         return Ok(());
     }
     state.waiting_for = if let Some(remaining) = paradigm_remaining_offers {
@@ -2718,7 +3634,7 @@ fn finalize_copy_retarget(
         WaitingFor::Priority { player }
     };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    resume_pending_continuation_if_priority(state, events)?;
     Ok(())
 }
 
@@ -2799,6 +3715,22 @@ fn apply_action(
         });
     }
 
+    // Priority-passing mode is a standing, actor-scoped UI preference. It may
+    // be changed in any state and does not itself pass priority, advance the
+    // game, emit events, clear yields, or disturb takeback/loop state.
+    if let GameAction::SetPriorityPassingMode { mode } = &action {
+        if *mode == crate::types::game_state::PriorityPassingMode::Standard {
+            state.priority_passing_modes.remove(&actor);
+        } else {
+            state.priority_passing_modes.insert(actor, *mode);
+        }
+        return Ok(ActionResult {
+            events: vec![],
+            waiting_for: state.waiting_for.clone(),
+            log_entries: vec![],
+        });
+    }
+
     // CR 117.3d: SetPriorityYield propagates the actor's standing priority-yield
     // preference — a pre-committed decision to pass priority while a class of
     // triggered ability resolves. Pure preference state, routed by `actor`, and
@@ -2837,7 +3769,7 @@ fn apply_action(
             MayTriggerAutoChoiceOp::Remove { key } => {
                 let actor_key = MayTriggerAutoChoiceKey {
                     player: actor,
-                    ..*key
+                    ..key.clone()
                 };
                 state.remove_may_trigger_auto_choice(&actor_key);
             }
@@ -2852,58 +3784,11 @@ fn apply_action(
         });
     }
 
-    // CR 603.3b: SetTriggerOrderTemplate propagates the actor's saved trigger-ordering
-    // templates (persistent, `AllCopies`-keyed). Mirrors SetMayTriggerAutoChoice: pure
-    // preference state, routed by `actor`, handled before the loop-ring / auto-pass
-    // teardown so it is a legal any-state mutation. Actor scoping is enforced by forcing
-    // `owner`/key player to `actor`, so a player can only mutate their own templates.
+    // CR 603.3b: Preferences are written only by a live `OrderTriggers` response.
+    // This public action can only forget the actor's saved preferences and remains a
+    // legal any-state, actor-scoped preference action.
     if let GameAction::SetTriggerOrderTemplate { op } = &action {
-        use crate::analysis::decision_template::{
-            DecisionGroupKey, DecisionKind, DecisionTemplate, PinnedDecision, ReplayMode,
-        };
-        use crate::types::game_state::YieldTarget;
         match op {
-            TriggerOrderTemplateOp::Save { sources, order } => {
-                // `order[pos]` = index into `sources` of the trigger the player placed
-                // at ordering position `pos` (same convention as `OrderTriggers`).
-                // Resolve each source id → its `AllCopies` card identity (CR 704.5d, so
-                // the template survives token death / re-entry) and pin it at `pos`. A
-                // source that no longer resolves is skipped defensively — a divergent
-                // template simply won't cover a future batch (re-prompt), never a wrong
-                // order.
-                let mut decisions = Vec::with_capacity(order.len());
-                let mut key_sources = Vec::with_capacity(order.len());
-                for (pos, &src_idx) in order.iter().enumerate() {
-                    let Some(&source_id) = sources.get(src_idx) else {
-                        continue;
-                    };
-                    let Some(card_id) = state.objects.get(&source_id).map(|o| o.card_id) else {
-                        continue;
-                    };
-                    let src = YieldTarget::AllCopies {
-                        card_id,
-                        trigger_description: None,
-                    };
-                    decisions.push(PinnedDecision::Order {
-                        source: src.clone(),
-                        pos: pos as u8,
-                    });
-                    key_sources.push(src);
-                }
-                let tmpl = DecisionTemplate {
-                    owner: actor,
-                    decisions,
-                    replay: ReplayMode::Static,
-                    key: DecisionGroupKey::from_sources(
-                        &key_sources,
-                        DecisionKind::TriggerOrdering,
-                    ),
-                };
-                state.set_trigger_order_template(tmpl);
-            }
-            TriggerOrderTemplateOp::Remove { key } => {
-                state.remove_trigger_order_template(actor, key);
-            }
             TriggerOrderTemplateOp::ClearAll => {
                 state.clear_trigger_order_templates(actor);
             }
@@ -3067,7 +3952,8 @@ fn apply_action(
     // non-pass action (cast / activate / play-land) breaks a self-refilling mandatory
     // cascade, so the accumulated detection window is stale and must be dropped.
     // Placed AFTER every preference early-return (CancelAutoPass / SetPhaseStops /
-    // ReorderHand / Debug / Grant- & RevokeDebugPermission) so a no-op preference
+    // SetPriorityPassingMode / ReorderHand / Debug / Grant- & RevokeDebugPermission)
+    // so a no-op preference
     // toggle never reaches here; PassPriority and OrderTriggers are the only actions
     // that CONTINUE a cascade and so must NOT clear (see the CR 603.3b note below).
     // `run_auto_pass_loop` and `resolve_all_fast_forward`
@@ -3084,6 +3970,12 @@ fn apply_action(
     ) {
         state.loop_detect_ring.clear();
     }
+
+    // Keep the semantic owner of the prompt before reducing it. Under turn
+    // control this can differ from the authenticated submitter; a successful
+    // action discharges a shortened shortcut only for that owner.
+    let semantic_actor = state.waiting_for.acting_player().unwrap_or(actor);
+    let action_for_divergence = action.clone();
 
     // Any deliberate player action (not auto-pass-related or a simple pass) cancels their auto-pass.
     // CR 103.5: Use the authenticated `actor` directly so the simultaneous mulligan
@@ -3127,6 +4019,12 @@ fn apply_action(
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
+            }
+            if super::precast_copy_shortcut::blocks_pass(state, *player) {
+                return Err(EngineError::ActionNotAllowed(
+                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                        .to_string(),
+                ));
             }
             let wf = pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
             return Ok(ActionResult {
@@ -3237,12 +4135,49 @@ fn apply_action(
                 // allows undo — painlands (damage on resolution), pay-life
                 // sources, and sacrifice sources all commit irreversible
                 // state atomically with CR 605.3b resolution.
-                if is_land && mana_sources::mana_ability_penalty(&ability_def).is_undoable() {
+                if is_land
+                    && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
+                        .is_undoable()
+                {
                     state
                         .lands_tapped_for_mana
                         .entry(state.priority_player)
                         .or_default()
                         .push(source_id);
+                }
+                // P7 v3 (CR 605.3b + CR 732.2a): accumulate this off-stack mana activation as a
+                // driving step of the current loop period — the OPENER of a multi-activation engine
+                // (e.g. Basalt Monolith's `{T}: Add {C}{C}{C}` before its separate `{3}: Untap`
+                // beat). Gated by `samples()` (#4603 Off never writes) + `!in_simulation_probe()`
+                // (the detection/materialize drive must NOT grow the seq — it is COMPARED across the
+                // cover frames). A lone mana tap seeds a 1-step period whose drive aborts fast
+                // (re-tapping a now-tapped source), so no false offer. Off / a probe leave the
+                // field untouched (mana-arm was a no-op pre-P7). A non-battlefield mana source
+                // clears the accumulator (an invalid loop driver).
+                if state.loop_detection.samples() && !in_simulation_probe() {
+                    match state
+                        .objects
+                        .get(&source_id)
+                        .filter(|o| o.zone == Zone::Battlefield)
+                    {
+                        Some(o) => {
+                            let step = crate::types::game_state::LoopActionContext {
+                                card_id: o.card_id,
+                                controller: *player,
+                                action: crate::types::game_state::LoopAction::Activate {
+                                    source_id,
+                                    ability_index,
+                                },
+                                convoke: None,
+                                // FIX-1: the driving-action step is recorded pinless here; the
+                                // fixed in-cycle choices (tap-cost/color/proliferate) are appended
+                                // to this step's `pins` at their own apply arms via `record_loop_pin`.
+                                pins: Vec::new(),
+                            };
+                            accumulate_loop_action_step(state, step);
+                        }
+                        None => state.last_loop_action_sequence.clear(),
+                    }
                 }
                 wf
             } else if obj.loyalty.is_some()
@@ -3264,13 +4199,75 @@ fn apply_action(
             } else {
                 // Non-mana activated ability — clear tracking
                 state.lands_tapped_for_mana.remove(player);
-                casting::handle_activate_ability(
+                let wf = casting::handle_activate_ability(
                     state,
                     *player,
                     source_id,
                     ability_index,
                     &mut events,
-                )?
+                )?;
+                // P7 v3 (CR 602.2a + CR 732.2a): accumulate this on-stack activation into the
+                // current loop period. (1) if a period is already accumulating for THIS controller
+                // → APPEND (the multi-activation engine's continuation beat, e.g. Basalt's
+                // `{3}: Untap` after its mana beat); (2) else if this activation CREATES A TOKEN →
+                // SEED a fresh 1-step period (the P3 object-growth path — the activation-shaped dual
+                // of the recast capture's STATIC `is_token_creating` predicate); (3) else → CLEAR (a
+                // lone non-token, non-continuing activation seeds nothing). ⛔ A `battlefield.len() >
+                // before` gate is STRUCTURALLY DEAD (B1): the ability only goes on the STACK at this
+                // beat; its token appears on RESOLUTION. The clone-drive is the oracle (M8): an
+                // illegal 2nd activation returns `Err(RecastAbort)`, no offer. Gated by `samples()`
+                // (#4603 Off never writes) + `!in_simulation_probe()` (the drive must NOT grow the
+                // seq — it is COMPARED across the cover frames); Off clears (byte-identical to
+                // pre-PR-7's `= None`), a probe leaves the field untouched.
+                if in_simulation_probe() {
+                    // Detection/materialize drive: leave the sequence byte-stable.
+                } else if !state.loop_detection.samples() {
+                    // Off (#4603): a non-mana activation clears the field (was `= None` pre-PR-7).
+                    state.last_loop_action_sequence.clear();
+                } else {
+                    match state
+                        .objects
+                        .get(&source_id)
+                        // Capture guard: only a live battlefield permanent is a valid source.
+                        .filter(|o| o.zone == Zone::Battlefield)
+                    {
+                        Some(o) => {
+                            let card_id = o.card_id;
+                            let creates_token =
+                                o.abilities.get(ability_index).is_some_and(|def| {
+                                    let mut es = Vec::new();
+                                    crate::analysis::ability_graph::collect_effects(def, &mut es);
+                                    es.iter().any(|e| {
+                                        matches!(e, crate::types::ability::Effect::Token { .. })
+                                    })
+                                });
+                            let continuing = state
+                                .last_loop_action_sequence
+                                .first()
+                                .is_some_and(|s| s.controller == *player);
+                            let step = crate::types::game_state::LoopActionContext {
+                                card_id,
+                                controller: *player,
+                                action: crate::types::game_state::LoopAction::Activate {
+                                    source_id,
+                                    ability_index,
+                                },
+                                convoke: None,
+                                // FIX-1: pinless at capture; fixed choices appended at their apply arms.
+                                pins: Vec::new(),
+                            };
+                            if continuing {
+                                accumulate_loop_action_step(state, step);
+                            } else if creates_token {
+                                state.last_loop_action_sequence = vec![step];
+                            } else {
+                                state.last_loop_action_sequence.clear();
+                            }
+                        }
+                        None => state.last_loop_action_sequence.clear(),
+                    }
+                }
+                wf
             }
         }
         (WaitingFor::Priority { player }, GameAction::UnlockRoomDoor { object_id, door }) => {
@@ -3789,6 +4786,11 @@ fn apply_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
+            CostResume::Resolution => {
+                return Err(EngineError::InvalidAction(
+                    "Counter-cost distribution is not valid for resolution costs".to_string(),
+                ));
+            }
         },
         (
             WaitingFor::PayCost {
@@ -3827,6 +4829,15 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                PayCostKind::Reveal => engine_casting::handle_reveal_for_cost(
+                    state,
+                    *player,
+                    *pending_cast.clone(),
+                    *count,
+                    choices,
+                    &chosen,
+                    &mut events,
+                )?,
 	                PayCostKind::Sacrifice => engine_casting::handle_sacrifice_for_cost(
 	                    state,
 	                    *player,
@@ -3849,6 +4860,24 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
+                // CR 601.2h: A ChangeZone effect-as-cost carries the optional
+                // any-number exile selection and its cast-time reduction.
+                PayCostKind::ExileFromZone { zone }
+                    if paid_cost.as_ref().is_some_and(|payment| {
+                        casting_costs::is_exile_any_number_effect_cost(payment.cost)
+                    }) =>
+                {
+                    casting_costs::handle_exile_any_number_for_cost(
+                        state,
+                        *player,
+                        *zone,
+                        *pending_cast.clone(),
+                        *count,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?
+                }
                 PayCostKind::ExileFromZone { zone } => engine_casting::handle_exile_for_cost(
                     state,
                     *player,
@@ -3981,14 +5010,44 @@ fn apply_action(
                 // CR 605.1a: mana-ability tap costs are always fixed-count; the
                 // aggregate form never resumes a mana ability.
                 PayCostKind::TapCreatures { .. } => {
-                    engine_casting::handle_tap_creatures_for_mana_ability(
+                    let wf = engine_casting::handle_tap_creatures_for_mana_ability(
                         state,
                         *count,
                         choices,
                         pending_mana_ability,
                         &chosen,
                         &mut events,
-                    )?
+                    )?;
+                    // FIX-1 (CR 605.1a + CR 608.2b): record the tap-cost target choice on the
+                    // current loop-period step so the object-growth detection drive can replay
+                    // "tap this legendary (Kilo) for the Relic mana ability". Slot source = the
+                    // mana-ability cost source (distinct from the proliferate pin's Kilo source);
+                    // `index: 0` (the color pin on the same source takes `index: 1`).
+                    if let Some(source) =
+                        object_decision_source(state, pending_mana_ability.source_id)
+                    {
+                        let targets: Vec<crate::analysis::decision_template::TargetPin> = chosen
+                            .iter()
+                            .filter_map(|&id| {
+                                object_decision_source(state, id)
+                                    .map(crate::analysis::decision_template::TargetPin::ByIdentity)
+                            })
+                            .collect();
+                        if !targets.is_empty() {
+                            record_loop_pin(
+                                state,
+                                *player,
+                                crate::analysis::decision_template::PinnedDecision::Targets {
+                                    slot: crate::analysis::decision_template::DecisionSlot {
+                                        source,
+                                        index: 0,
+                                    },
+                                    targets,
+                                },
+                            );
+                        }
+                    }
+                    wf
                 }
                 PayCostKind::Discard => engine_casting::handle_discard_for_mana_ability(
                     state,
@@ -4016,12 +5075,13 @@ fn apply_action(
                     &chosen,
                     &mut events,
                 )?,
-                // ReturnToHand, ExileFromZone, RemoveCounter, and Behold do not
-                // have mana-ability cost handlers wired today. If a future mana
-                // ability uses one of these CR-valid cost shapes, add the
-                // corresponding mana-ability handler instead of routing it
-                // through the spell pipeline.
+                // ReturnToHand, Reveal, ExileFromZone, RemoveCounter, and Behold
+                // do not have mana-ability cost handlers wired today. If a
+                // future mana ability uses one of these CR-valid cost shapes,
+                // add the corresponding mana-ability handler instead of
+                // routing it through the spell pipeline.
                 PayCostKind::ReturnToHand
+                | PayCostKind::Reveal
                 | PayCostKind::ExileFromZone { .. }
                 | PayCostKind::ExileMaterials { .. }
                 | PayCostKind::ExilePermanent { .. }
@@ -4038,6 +5098,40 @@ fn apply_action(
                     );
                     return Err(EngineError::InvalidAction(
                         "Cost kind cannot resume a mana ability".into(),
+                    ));
+                }
+            },
+            CostResume::Resolution => match kind {
+                PayCostKind::TapCreatures { aggregate } => {
+                    casting_costs::pay_tap_creatures_selection(
+                        state,
+                        *count,
+                        *aggregate,
+                        choices,
+                        &chosen,
+                        &mut events,
+                    )?;
+                    state.last_effect_count = Some(chosen.len() as i32);
+                    if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
+                        state.waiting_for = WaitingFor::Priority { player: *player };
+                    }
+                    effects::drain_pending_continuation(state, &mut events);
+                    state.waiting_for.clone()
+                }
+                PayCostKind::Discard
+                | PayCostKind::Reveal
+                | PayCostKind::Sacrifice
+                | PayCostKind::ReturnToHand
+                | PayCostKind::ExileFromZone { .. }
+                | PayCostKind::ExilePermanent { .. }
+                | PayCostKind::UnattachFrom { .. }
+                | PayCostKind::ExileMaterials { .. }
+                | PayCostKind::ExileAggregate { .. }
+                | PayCostKind::RemoveCounter { .. }
+                | PayCostKind::Behold { .. }
+                | PayCostKind::ExileFromManaZone { .. } => {
+                    return Err(EngineError::InvalidAction(
+                        "Cost kind cannot resume a resolution PayCost".into(),
                     ));
                 }
             },
@@ -4164,6 +5258,28 @@ fn apply_action(
                         chosen.clone(),
                         &mut events,
                     )?;
+                    // FIX-1 (CR 608.2d): record the fixed mana-color choice on the current
+                    // loop-period step (slot `index: 1` — distinct from the tap-cost `Targets`
+                    // pin at `index: 0` on the SAME mana-ability source) so the object-growth
+                    // detection drive replays the exact color that keeps the loop mana-neutral
+                    // (Blue → Freed's `{U}`). Only a WUBRG `SingleColor` choice is pinnable.
+                    if let Some(color) = pinnable_mana_color(&chosen) {
+                        if let Some(source) =
+                            object_decision_source(state, pending_mana_ability.source_id)
+                        {
+                            record_loop_pin(
+                                state,
+                                pending_mana_ability.player,
+                                crate::analysis::decision_template::PinnedDecision::ManaColor {
+                                    slot: crate::analysis::decision_template::DecisionSlot {
+                                        source,
+                                        index: 1,
+                                    },
+                                    color,
+                                },
+                            );
+                        }
+                    }
                     // CR 605.3a: one color choice may bulk-activate the player's
                     // other identical, choice-free mana sources (their remaining
                     // Treasures, etc.) with the same color. Sibling cost/mana
@@ -4319,7 +5435,7 @@ fn apply_action(
             subject: None,});
             state.waiting_for = WaitingFor::Priority { player: *player };
             state.priority_player = *player;
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         (
@@ -4374,6 +5490,13 @@ fn apply_action(
         (WaitingFor::LoopShortcut { .. }, GameAction::DeclineShortcut) => {
             return handle_decline_shortcut(state, &mut events);
         }
+        // The finite pre-cast protocol is intentionally isolated from the
+        // legacy generic loop-shortcut handlers above.
+        (
+            WaitingFor::PrecastCopyShortcutOffer { .. }
+            | WaitingFor::RespondToPrecastCopyShortcut { .. },
+            GameAction::PrecastCopyShortcut { epoch, response },
+        ) => super::precast_copy_shortcut::handle(state, actor, epoch, response, &mut events)?,
         // CR 732.2b/c: an opponent answers the loop-shortcut offer.
         (
             WaitingFor::RespondToShortcut {
@@ -4507,6 +5630,7 @@ fn apply_action(
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
             // its origin zone via `cancel_pending_cast`.
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
@@ -4612,6 +5736,39 @@ fn apply_action(
             casting::apply_post_x_cost_modifiers(state, player, object_id);
             casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
+        // CR 601.2c + CR 115.1: The spell controller chose which opponent announces
+        // an "of an opponent's choice" target slot. Record it on the in-flight cast
+        // and resume the (deferred) target declaration; `resolve_effect_player_ref`
+        // now routes that slot's chooser to the controller-selected opponent.
+        (
+            WaitingFor::ChooseAnnouncingOpponent {
+                player,
+                candidates,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseAnnouncingOpponent { opponent },
+        ) => {
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Player {opponent:?} is not an eligible announcing opponent"
+                )));
+            }
+            let caster = *player;
+            let chosen = opponent;
+            let mut pending = (**pending_cast).clone();
+            // CR 601.2c + CR 115.1: Record the announcer for the FIRST still-
+            // unassigned "of an opponent's choice" slot group only. Each such
+            // effect is decided independently; `begin_deferred_target_selection`
+            // re-prompts for any remaining groups, so the controller may pick the
+            // same or different opponents per effect (Volcanic Offering).
+            if !casting_costs::assign_next_announcing_opponent(&mut pending.ability, chosen) {
+                return Err(EngineError::InvalidAction(
+                    "No opponent-choice effect is awaiting an announcing opponent".to_string(),
+                ));
+            }
+            casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
+        }
         // CR 702.132a: Assist — caster chooses another player to help pay generic,
         // or declines. `assist_state` was set to `Offered` when the offer was made,
         // so both branches simply (re)enter the payment step from where they resume.
@@ -4661,11 +5818,11 @@ fn apply_action(
                     .to_string(),
             ));
         }
-        // CR 702.132a: Assist — the chosen player commits how much generic mana to
-        // pay. The caster's owed generic is reduced now, and the commitment is
-        // recorded on the pending cast; the helper's sources are tapped only at
-        // `finalize_cast` (the non-cancellable commit), so a later CancelCast can
-        // never leak the helper's lands or spent mana.
+        // CR 702.132a + CR 601.2h: Assist records the selected generic
+        // contribution and reduces the caster's owed generic now, but helper
+        // resources stay untouched until final payment begins. The typed
+        // PaymentStarted boundary, not this deferred intent, makes cancellation
+        // unavailable once a helper source can have changed state.
         (
             WaitingFor::AssistPayment {
                 caster,
@@ -4696,11 +5853,12 @@ fn apply_action(
                 let mut sim = state.clone();
                 let mut sink = Vec::new();
                 casting_costs::auto_tap_mana_sources(&mut sim, chosen, &probe, &mut sink, None);
-                let feasible = sim
-                    .players
-                    .iter()
-                    .find(|p| p.id == chosen)
-                    .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
+                let feasible = casting::mana_ability_cost_payment_is_paused(&sim)
+                    || sim
+                        .players
+                        .iter()
+                        .find(|p| p.id == chosen)
+                        .is_some_and(|p| mana_payment::can_pay(&p.mana_pool, &probe));
                 if !feasible {
                     return Err(EngineError::InvalidAction(format!(
                         "Assisting player cannot produce {generic} generic mana"
@@ -4817,25 +5975,25 @@ fn apply_action(
                     ));
                 }
                 for (choice, shard) in choices.iter().zip(current_shards.iter()) {
-                    match (choice, shard.options) {
-                        (
-                            crate::types::game_state::ShardChoice::PayLife,
-                            crate::types::game_state::ShardOptions::ManaOnly,
-                        ) => {
-                            return Err(EngineError::ActionNotAllowed(
-                                "Cannot pay life for shard — only mana available".to_string(),
-                            ));
-                        }
-                        (
-                            crate::types::game_state::ShardChoice::PayMana,
-                            crate::types::game_state::ShardOptions::LifeOnly,
-                        ) => {
-                            return Err(EngineError::ActionNotAllowed(
-                                "Cannot pay mana for shard — only life available".to_string(),
-                            ));
-                        }
-                        _ => {}
+                    if let (
+                        crate::types::game_state::ShardChoice::PayLife,
+                        crate::types::game_state::ShardOptions::ManaOnly,
+                    ) = (choice, shard.options)
+                    {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay life for shard — only mana available".to_string(),
+                        ));
                     }
+                }
+                if !casting::pending_phyrexian_route_is_payable(
+                    state,
+                    player,
+                    spell_object,
+                    &choices,
+                ) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay mana cost with selected Phyrexian route".to_string(),
+                    ));
                 }
             }
             // CR 118.3a: `finalize_mana_payment_with_phyrexian_choices` clears
@@ -4850,6 +6008,7 @@ fn apply_action(
         // CR 601.2i: CancelCast during Phyrexian payment rolls back the cast —
         // mirrors the ManaPayment CancelCast path.
         (WaitingFor::PhyrexianPayment { player, .. }, GameAction::CancelCast) => {
+            ensure_assist_cancellation_is_allowed(state)?;
             let player = *player;
             match state.pending_cast.take() {
                 Some(pending) => {
@@ -4886,13 +6045,20 @@ fn apply_action(
                     &ability_def,
                     &mut events,
                     crate::types::game_state::ManaAbilityResume::ManaPayment {
+                        outer_player: Some(*player),
                         convoke_mode: *convoke_mode,
                     },
                     None,
                 )?;
                 // CR 605.1b: Process TapsForMana triggers inline during mana payment
                 // (same rationale as the TapLandForMana arm below).
-                if events.len() > events_before {
+                // CR 605.3b + CR 616.1 + CR 603.3b: A paused costed mana
+                // ability serializes its unscanned events in its typed cursor.
+                // The cursor is their single settlement authority, so do not
+                // scan them here and again when the replacement choice resumes.
+                if events.len() > events_before
+                    && !casting::mana_ability_cost_payment_is_paused(state)
+                {
                     let mana_events: Vec<_> = events[events_before..].to_vec();
                     super::triggers::process_triggers(state, &mana_events);
                 }
@@ -5118,9 +6284,7 @@ fn apply_action(
         // generic mana. Unlike convoke/improvise (which tap a permanent), the
         // source is a graveyard card that is exiled. The contribution is a
         // generic-only colorless marker (like Improvise) that can't leak into the
-        // pool. (Tracking which cards were exiled — for Murktide Regent's "+1/+1
-        // for each card exiled with it" — is a follow-up that also needs the
-        // QuantityRef/parser wiring; the core payment is independent of it.)
+        // pool.
         (
             WaitingFor::ManaPayment {
                 player,
@@ -5146,24 +6310,32 @@ fn apply_action(
                     "Can only delve a card from your own graveyard".to_string(),
                 ));
             }
-            zones::move_to_zone(state, object_id, Zone::Exile, &mut events);
-            // CR 702.66a + CR 607.2a: Delved cards are exiled "with" the spell
-            // being cast (Murktide Regent ETB counters — issue #1322).
-            if let Some(spell_id) = state.pending_cast.as_ref().map(|p| p.object_id) {
-                crate::game::exile_links::push_tracked_by_source(state, object_id, spell_id);
-            }
-            // CR 118.3a: route through the stamping authority (delve marker is a
-            // generic-only convoke marker, never pinned).
-            state.add_mana_to_pool(
+            let spell_id = state
+                .pending_cast
+                .as_ref()
+                .map(|pending| pending.object_id)
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for delve".to_string())
+                })?;
+            state.pending_cost_move_resume = Some(PendingCostMoveResume::DelveManaPayment {
                 player,
-                crate::types::mana::ManaUnit::convoke_payment(
-                    crate::types::mana::ManaType::Colorless,
-                    object_id,
-                ),
-            );
-            WaitingFor::ManaPayment {
-                player,
-                convoke_mode: Some(ConvokeMode::Delve),
+                fuel_id: object_id,
+            });
+            // CR 702.66a + CR 614.1 + CR 616.1: The cost move must consult Moved
+            // replacements. `track_exiled_by_source` carries
+            // `ExileLinkSpec { duration: None, tracking: TrackBySource }`, so the
+            // delivery tail links only fuel that actually reaches exile.
+            match zone_pipeline::move_object(
+                state,
+                ZoneMoveRequest::cost(object_id, Zone::Exile, spell_id)
+                    .track_exiled_by_source(),
+                &mut events,
+            ) {
+                ZoneMoveResult::Done => resume_delve_mana_payment(state),
+                ZoneMoveResult::NeedsChoice(_) => state.waiting_for.clone(),
+                ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a delve cost move to exile cannot require an Aura attachment")
+                }
             }
         }
         (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { choice }) => {
@@ -5468,8 +6640,9 @@ fn apply_action(
                             old_target,
                         });
                     }
-                    let resumes_change_zone_iteration =
-                        state.pending_change_zone_iteration.is_some();
+                    let resumes_change_zone_iteration = state
+                        .active_change_zone_frame()
+                        .is_some_and(|frame| frame.pending.is_some());
                     if !resumes_change_zone_iteration {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
@@ -5486,10 +6659,10 @@ fn apply_action(
                     // here — the replacement-choice resume path drains it for the
                     // CR 616.1 case, but the aura-host resume is the ONLY drain
                     // site for an `NeedsAuraAttachmentChoice` pause.
-                    if state.pending_batch_deliveries.is_some() {
+                    if state.active_batch_delivery().is_some() {
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
-                    effects::drain_pending_continuation(state, &mut events);
+                    resume_pending_continuation_if_priority(state, &mut events)?;
                     return Ok(ActionResult {
                         events,
                         waiting_for: state.waiting_for.clone(),
@@ -5524,10 +6697,10 @@ fn apply_action(
             state.priority_player = active_player;
             // CR 603.10a + CR 616.1: drain a deferred batch completion parked
             // behind this aura-attachment pause (see the sibling path above).
-            if state.pending_batch_deliveries.is_some() {
+            if state.active_batch_delivery().is_some() {
                 super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
             }
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         (
@@ -6044,13 +7217,14 @@ fn apply_action(
             super::morph::play_face_down(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
-        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id }) => {
+        (WaitingFor::Priority { player }, GameAction::TurnFaceUp { object_id, x }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
             }
             let p = *player;
+            let announced_x = x;
             // CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 106.6: turning
             // a face-down permanent face up is a special action whose morph/disguise/
             // manifest cost must be paid *before* the flip. `turn_face_up_prepare`
@@ -6060,12 +7234,47 @@ fn apply_action(
             // Gossip) is eligible here while other-context mana is rejected. Mirrors
             // the `UnlockDoor` special-action handler.
             let cost = super::morph::turn_face_up_prepare(state, object_id, p)?;
-            let cost = casting::apply_special_action_cost_reduction(
+            let mut cost = casting::apply_special_action_cost_reduction(
                 state,
                 p,
                 crate::types::mana::SpecialAction::TurnFaceUp,
                 cost,
             );
+
+            // CR 107.3d: "If a cost associated with a special action, such as a suspend
+            // cost or a morph cost, has an {X} ... in it, the value of X is chosen by the
+            // player taking the special action immediately before they pay that cost."
+            // The announcement happens HERE — inside the action, with no priority window
+            // between choosing X and paying it, exactly as the rule describes.
+            //
+            // Warbreak Trumpeter (Morph {X}{X}{R}), Bane of the Living (Morph {X}{B}{B})
+            // and Aurelia's Vindicator (Disguise {X}{3}{W}) are the live faces.
+            let has_x = casting_costs::cost_has_x(&cost);
+            if has_x {
+                // CR 118.3: a player can't announce an X they cannot pay for. The cap is
+                // computed with `object_id: None` deliberately — this is a SPECIAL ACTION,
+                // not a cast, so cast-time cost modifiers and floors must not apply (the
+                // special-action reduction was already applied above).
+                let max_x = casting_costs::max_x_value(state, p, &cost, None);
+                if announced_x > max_x {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={announced_x} exceeds the maximum payable value of {max_x} for this \
+                         turn-face-up cost"
+                    )));
+                }
+                // CR 107.1b + CR 601.2f: each `{X}` shard becomes `announced_x` generic, so
+                // Warbreak Trumpeter's `{X}{X}{R}` costs 2X + {R}. Without this the X shards
+                // reach mana payment unresolved and are dropped — the permanent flips for
+                // its non-X remainder alone.
+                cost.concretize_x(announced_x);
+            } else if announced_x != 0 {
+                // A cost with no {X} admits no choice: CR 107.3d only grants one "if a cost
+                // ... has an {X} ... in it". Reject rather than silently ignore, so a client
+                // bug cannot masquerade as a legal flip.
+                return Err(EngineError::InvalidAction(
+                    "This permanent's turn-face-up cost has no {X}, so X must be 0".to_string(),
+                ));
+            }
             casting::pay_special_action_mana_cost(
                 state,
                 p,
@@ -6074,6 +7283,29 @@ fn apply_action(
                 crate::types::mana::SpecialAction::TurnFaceUp,
                 &mut events,
             )?;
+
+            // CR 702.37f (morph) / CR 702.168e (disguise): "If a permanent's morph cost
+            // includes X, other abilities of that permanent may also refer to X. The value
+            // of X in those abilities is equal to the value of X chosen as the morph special
+            // action was taken." Publish the announced X on the source-keyed carrier BEFORE
+            // the flip emits `TurnedFaceUp`, so `triggers::build_triggered_ability` — the
+            // single trigger-instantiation authority — stamps it onto the turn-face-up
+            // trigger's `chosen_x`.
+            //
+            // The stamp must land at INSTANTIATION, not resolution: Aurelia's Vindicator
+            // spends its X in `multi_target.max` ("exile up to X other target creatures"),
+            // which is consumed during target selection, before the trigger ever resolves.
+            //
+            // Published only when the cost actually HAS an {X} (CR 107.3d grants a choice
+            // only then). A no-X flip leaves the carrier untouched rather than clobbering it
+            // with `Some((.., 0))`: an unrelated activated ability of ANOTHER object may be
+            // on the stack with its own announced X in flight, and that value must survive.
+            // The carrier is cleared at the start of the next `resolve_top`, so this
+            // publication cannot outlive the trigger it is for.
+            if has_x {
+                state.announced_source_x = Some((object_id, announced_x));
+            }
+
             super::morph::turn_face_up(state, p, object_id, &mut events)?;
             WaitingFor::Priority { player: p }
         }
@@ -6146,13 +7378,12 @@ fn apply_action(
         // CR 702.139a: Pre-game companion reveal
         (
             WaitingFor::CompanionReveal { player, .. },
-            GameAction::DeclareCompanion { card_index },
-        ) => super::companion::handle_declare_companion(state, *player, card_index, &mut events),
+            GameAction::DeclareCompanion { choice },
+        ) => super::companion::handle_declare_companion(state, *player, choice, &mut events)
+            .map_err(EngineError::InvalidAction)?,
         // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
-            state.lands_tapped_for_mana.remove(player);
-            super::companion::handle_companion_to_hand(state, *player, &mut events)
-                .map_err(EngineError::InvalidAction)?
+            super::companion::handle_companion_to_hand(state, *player, &mut events)?
         }
         // CR 722.3c / CR 601.2: Prepare (Strixhaven) — cast a copy of the
         // prepared face through the normal spell-casting pipeline (costs,
@@ -6225,6 +7456,12 @@ fn apply_action(
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
         (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
+            if super::precast_copy_shortcut::blocks_pass(state, *player) {
+                return Err(EngineError::ActionNotAllowed(
+                    "A shortened pre-cast shortcut requires a different meaningful action before passing"
+                        .to_string(),
+                ));
+            }
             // Convert request to stored mode, capturing engine state as needed.
             let stored_mode = match mode {
                 AutoPassRequest::UntilStackEmpty => AutoPassMode::UntilStackEmpty {
@@ -6269,12 +7506,46 @@ fn apply_action(
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
             });
-            let completion_source = state
-                .pending_proliferate_actions
-                .as_ref()
-                .map(|pending| pending.source_id)
-                .unwrap_or(ObjectId(0));
-            if !effects::proliferate::resume_pending_proliferate_actions(state, &mut events) {
+            let pending = state
+                .take_active_proliferate_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No active proliferate frame to resume".to_string())
+                })?;
+            let completion_source = pending.source_id;
+            // FIX-1 (CR 701.34a): record the proliferate-target choice on the current loop-period
+            // step so the object-growth detection drive replays the EXACT permanent(s) grown
+            // (Pentad's charge) — never "all eligible", which could grow an opponent's
+            // counters/poison and introduce a loss axis. Slot source = the trigger source (Kilo);
+            // `index: 0` (distinct source from the Relic tap-cost/color pins).
+            if let Some(source) = object_decision_source(state, completion_source) {
+                let target_pins: Vec<crate::analysis::decision_template::TargetPin> = targets
+                    .iter()
+                    .filter_map(|t| match t {
+                        crate::types::ability::TargetRef::Object(id) => object_decision_source(
+                            state, *id,
+                        )
+                        .map(crate::analysis::decision_template::TargetPin::ByIdentity),
+                        crate::types::ability::TargetRef::Player(pl) => {
+                            Some(crate::analysis::decision_template::TargetPin::Player(*pl))
+                        }
+                    })
+                    .collect();
+                if !target_pins.is_empty() {
+                    record_loop_pin(
+                        state,
+                        p,
+                        crate::analysis::decision_template::PinnedDecision::Targets {
+                            slot: crate::analysis::decision_template::DecisionSlot {
+                                source,
+                                index: 0,
+                            },
+                            targets: target_pins,
+                        },
+                    );
+                }
+            }
+            if !effects::proliferate::resume_proliferate_actions(state, pending, &mut events) {
                 return Ok(ActionResult {
                     events,
                     waiting_for: state.waiting_for.clone(),
@@ -6287,7 +7558,7 @@ fn apply_action(
             subject: None,});
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
-            effects::drain_pending_continuation(state, &mut events);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 701.56a: Time travel — player selected objects for the current phase
@@ -6335,7 +7606,7 @@ fn apply_action(
                     subject: None,});
                     state.waiting_for = WaitingFor::Priority { player: p };
                     state.priority_player = p;
-                    effects::drain_pending_continuation(state, &mut events);
+                    resume_pending_continuation_if_priority(state, &mut events)?;
                     state.waiting_for.clone()
                 }
             } else {
@@ -6345,7 +7616,7 @@ fn apply_action(
                 subject: None,});
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                resume_pending_continuation_if_priority(state, &mut events)?;
                 state.waiting_for.clone()
             }
         }
@@ -6403,8 +7674,11 @@ fn apply_action(
             let previous_trigger_event = state.current_trigger_event.clone();
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
-            effects::drain_pending_continuation(state, &mut events);
+            state.current_trigger_match_count = state
+                .active_ability_continuation()
+                .and_then(|continuation| continuation.trigger_context.as_ref())
+                .and_then(|context| context.match_count);
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;
             state.waiting_for.clone()
@@ -6622,24 +7896,20 @@ fn apply_action(
             // CR 601.2d: Resume casting pipeline after distribution.
             if state.pending_cast.is_some() {
                 let pending = state.pending_cast.take().unwrap();
-                if let Some(ability_index) = pending.activation_ability_index {
+                if pending.activation_ability_index.is_some() {
                     // CR 602.2b + CR 601.2d: an activated ability that divides
                     // damage among targets goes on the stack as an ActivatedAbility
                     // after the division is announced — not as a spell (Captain
-                    // America's Throw). `push_activated_ability_to_stack` pays the
-                    // residual mana leg and no-ops the already-paid UnattachFrom.
+                    // America's Throw). The payment boundary retains the original
+                    // target-first root while it pays the residual mana leg.
                     // The spell-only cost-determination authority used in the `else`
                     // branch (`finish_pending_cast_cost_or_pay`) must NOT be reached
                     // here: it routes into `finalize_cast`, which would commit the
                     // source permanent to the stack as a spell.
-                    casting_costs::push_activated_ability_to_stack(
+                    casting_costs::finish_target_selected_activated_ability_at_payment_boundary(
                         state,
                         p,
-                        pending.object_id,
-                        ability_index,
-                        pending.ability,
-                        pending.activation_cost.as_ref(),
-                        pending.activation_residual,
+                        *pending,
                         &mut events,
                     )?
                 } else {
@@ -6723,7 +7993,7 @@ fn apply_action(
                 // Resolution-time distribution continuation path.
                 state.waiting_for = WaitingFor::Priority { player: p };
                 state.priority_player = p;
-                effects::drain_pending_continuation(state, &mut events);
+                resume_pending_continuation_if_priority(state, &mut events)?;
                 state.waiting_for.clone()
             }
         }
@@ -6751,9 +8021,7 @@ fn apply_action(
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::counters::drain_pending_counter_moves(state, &mut events);
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                effects::drain_pending_continuation(state, &mut events);
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 107.1c + CR 608.2d: Submit the "remove any number of counters"
@@ -6782,9 +8050,7 @@ fn apply_action(
             state.waiting_for = WaitingFor::Priority { player: p };
             state.priority_player = p;
             effects::counters::drain_pending_counter_removals(state, &mut events);
-            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                effects::drain_pending_continuation(state, &mut events);
-            }
+            resume_pending_continuation_if_priority(state, &mut events)?;
             state.waiting_for.clone()
         }
         // CR 115.7: Retarget a spell or ability on the stack via the dialog
@@ -6847,6 +8113,16 @@ fn apply_action(
         }
     };
 
+    // A shortened shortcut is discharged only by an action the normal reducer
+    // accepted. In particular, a rejected cast/land attempt must leave the
+    // CR 732.2c divergence requirement armed; preference actions returned
+    // earlier and priority passes never reach this successful-reducer seam.
+    super::precast_copy_shortcut::note_meaningful_action(
+        state,
+        semantic_actor,
+        &action_for_divergence,
+    );
+
     // Run post-action pipeline (SBAs, triggers, layers) and check for terminal states.
     // When triggers were already processed inline (e.g., DeclareAttackers, combat damage),
     // pass the flag to skip the trigger scan but still run SBAs, delayed triggers, and layers.
@@ -6866,6 +8142,26 @@ fn apply_action(
         return Ok(ActionResult {
             events,
             waiting_for: wf,
+            log_entries: vec![],
+        });
+    }
+
+    // CR 603.2 + CR 603.3b + CR 608.2g: a cast made during an unresolved
+    // effect can leave the reducer at that effect's next choice (not Priority).
+    // Park its SpellCast observers now; they are drained only when the parent
+    // resolution reaches a genuine priority boundary.
+    if let Some(waiting_for) =
+        engine_resolution_choices::park_cast_during_resolution_cast_observers(
+            state,
+            &mut events,
+            0,
+            &waiting_for,
+        )?
+    {
+        state.waiting_for = waiting_for.clone();
+        return Ok(ActionResult {
+            events,
+            waiting_for,
             log_entries: vec![],
         });
     }
@@ -6982,8 +8278,36 @@ fn apply_retarget(
     });
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
-    effects::drain_pending_continuation(state, events);
+    resume_pending_continuation_if_priority(state, events)?;
     Ok(state.waiting_for.clone())
+}
+
+/// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
+/// was declined before mode choice.
+pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
+    if let Some(entry_id) = state.pending_trigger_entry.take() {
+        if state.stack.back().map(|e| e.id) == Some(entry_id) {
+            state.stack.pop_back();
+            state.stack_paid_facts.remove(&entry_id);
+            state.stack_trigger_event_batches.remove(&entry_id);
+        }
+    }
+    state.pending_trigger = None;
+}
+
+/// Clear optionality after the controller accepts a "you may choose N" gate so
+/// mode choice can proceed and resolution does not re-prompt.
+pub(super) fn clear_pending_trigger_optional(state: &mut GameState) {
+    if let Some(trigger) = state.pending_trigger.as_mut() {
+        trigger.ability.optional = false;
+    }
+    if let Some(entry_id) = state.pending_trigger_entry {
+        if let Some(entry) = state.stack.iter_mut().find(|e| e.id == entry_id) {
+            if let Some(ability) = entry.ability_mut() {
+                ability.optional = false;
+            }
+        }
+    }
 }
 
 /// Run state-based actions, exile returns, delayed triggers, and trigger processing
@@ -7011,26 +8335,40 @@ pub(super) fn begin_pending_trigger_target_selection(
             let source_id = trigger.source_id;
             let mode_abilities = trigger.mode_abilities.clone();
             let trigger_event = trigger.trigger_event.clone();
+            // Clone optional-gate fields before any `&mut state` borrow so the
+            // `pending_trigger` imm borrow from `trigger` does not overlap.
+            let ability_optional = trigger.ability.optional;
+            let may_trigger_origin = trigger.may_trigger_origin.clone();
+            let trigger_description = trigger.description.clone();
             let trigger_events = if state.pending_trigger_event_batch.is_empty() {
                 trigger_event.iter().cloned().collect::<Vec<_>>()
             } else {
                 state.pending_trigger_event_batch.clone()
             };
             let subject_match_count = trigger.subject_match_count;
-            let modal = modal_choice_for_player(
-                state,
-                player,
-                source_id,
-                modal,
-                &crate::types::ability::SpellContext::default(),
-            );
-            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
+            let modal = modal.clone();
+            // CR 603.3c + CR 603.3d: a triggered modal's mode choice is announced as
+            // the ability is put on the stack, by the same process as casting a spell
+            // (CR 601.2c-d). The triggering event must be live for the ENTIRE choice,
+            // including the "choose up to X" dynamic cap resolved by
+            // modal_choice_for_player -- push the event window BEFORE cap resolution,
+            // not just around target-legality filtering, so event-context quantity
+            // refs (e.g. EventContextSourceModesChosen, Riku of Many Paths) resolve
+            // against the triggering spell rather than an unset event.
             let context_snapshot = super::triggers::push_trigger_event_context(
                 state,
                 trigger_event.as_ref(),
                 &trigger_events,
                 subject_match_count,
             );
+            let modal = modal_choice_for_player(
+                state,
+                player,
+                source_id,
+                &modal,
+                &crate::types::ability::SpellContext::default(),
+            );
+            let mut unavailable_modes = compute_unavailable_modes(state, source_id, &modal);
             super::ability_utils::filter_modes_by_target_legality(
                 state,
                 source_id,
@@ -7102,6 +8440,48 @@ pub(super) fn begin_pending_trigger_target_selection(
                 }
                 state.pending_trigger = None;
                 return Ok(None);
+            }
+
+            // CR 608.2c: "you may choose N" (Shadrix Silverquill) — modes are
+            // chosen as the triggered ability is put on the stack (CR 700.2b +
+            // CR 603.3d). Offer the decline first so accepting still requires
+            // exactly `min_choices` modes; declining removes the mid-construction
+            // stack entry without choosing zero modes (count stays fixed).
+            if ability_optional {
+                let may_trigger_key = may_trigger_origin.map(|origin| MayTriggerAutoChoiceKey {
+                    player,
+                    source_id,
+                    origin,
+                });
+                if let Some(ref key) = may_trigger_key {
+                    if let Some(choice) = state.may_trigger_auto_choice(key) {
+                        match choice {
+                            AutoMayChoice::Decline => {
+                                drop_mid_construction_pending_trigger(state);
+                                return Ok(None);
+                            }
+                            AutoMayChoice::Accept => {
+                                clear_pending_trigger_optional(state);
+                                return Ok(Some(WaitingFor::AbilityModeChoice {
+                                    player,
+                                    modal,
+                                    source_id,
+                                    mode_abilities,
+                                    is_activated: false,
+                                    ability_index: None,
+                                    ability_cost: None,
+                                    unavailable_modes,
+                                }));
+                            }
+                        }
+                    }
+                }
+                return Ok(Some(WaitingFor::OptionalEffectChoice {
+                    player,
+                    source_id,
+                    description: trigger_description,
+                    may_trigger_key,
+                }));
             }
 
             return Ok(Some(WaitingFor::AbilityModeChoice {
@@ -7355,6 +8735,15 @@ fn handle_play_land(
         if super::casting::is_blocked_by_prohibit_play_from_zone(state, obj, player) {
             return Err(EngineError::ActionNotAllowed(
                 "A temporary effect prevents playing cards from this zone (CR 116.2a)".to_string(),
+            ));
+        }
+        // CR 305.1 + CR 116.2a: A `PlayLands` restriction denies playing THIS
+        // specific land (e.g. Conjurer's Ban: "lands with the chosen name can't
+        // be played") — the filter-scoped counterpart to the blanket
+        // `CantPlayLand` check above.
+        if super::casting::is_blocked_by_cant_play_lands(state, player, obj) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
             ));
         }
     }
@@ -9572,6 +10961,379 @@ mod stage2_injector_tests {
             shortcut_drive_period(Some(&oversized)),
             MAX_SHORTCUT_CYCLES,
             "RoundRobin(MAX+5) clamps to MAX_SHORTCUT_CYCLES"
+        );
+    }
+}
+
+/// FIX-1 interruptibility (memory: combo-interruptibility-acceptance-criterion) — the Kilo loop's
+/// CR 732.2a offer must FLIP off when the loop is defused. Driven from the REAL 4p dump through the
+/// public `apply()` boundary (recording live), then the offer is re-derived at the private
+/// `try_offer_object_growth_shortcut` seam (the plan's sanctioned private-fn revert-probe form).
+#[cfg(test)]
+mod kilo_interruptibility_tests {
+    use super::*;
+    use crate::analysis::decision_template::{PinnedDecision, TargetPin};
+    use crate::types::ability::TargetRef;
+    use crate::types::game_state::{ManaChoice, PayCostKind, YieldTarget};
+    use crate::types::mana::{ManaColor, ManaType};
+
+    const P0: PlayerId = PlayerId(0);
+    const KILO: ObjectId = ObjectId(402);
+    const FREED: ObjectId = ObjectId(403);
+    const RELIC: ObjectId = ObjectId(404);
+    const PENTAD: ObjectId = ObjectId(405);
+    const RELIC_TAP_MANA: usize = 1;
+    const FREED_UNTAP: usize = 1;
+
+    fn load_migrated_dump() -> GameState {
+        use crate::types::game_state::PersistedGameState;
+        use std::io::Read;
+        let gz: &[u8] = include_bytes!("../../tests/fixtures/kilo_freed_relic_pentad_4p.json.gz");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(gz)
+            .read_to_string(&mut json)
+            .expect("fixture inflates");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        // Route through the REAL production restore chokepoint so the FIX-3 migration hook
+        // (`migrate_transient_loop_sequence`) drops the dump's 6 stale pinless steps on load —
+        // exactly as the integration helper does. Deserializing directly would bypass the hook,
+        // leaving the stale prefix so the live drive yields an 8-step (not 2-step) sequence.
+        let raw: GameState =
+            serde_json::from_value(envelope["gameState"].clone()).expect("gameState deserializes");
+        PersistedGameState::Raw(Box::new(raw)).into_game_state()
+    }
+
+    fn beat_actor(state: &GameState) -> PlayerId {
+        match &state.waiting_for {
+            WaitingFor::Priority { player }
+            | WaitingFor::PayCost { player, .. }
+            | WaitingFor::ChooseManaColor { player, .. }
+            | WaitingFor::ProliferateChoice { player, .. } => *player,
+            WaitingFor::LoopShortcut { proposer, .. } => *proposer,
+            other => panic!("unexpected beat: {other:?}"),
+        }
+    }
+
+    /// Drive ONE full live cycle via the public boundary, recording the pinned period.
+    fn drive_one_live_cycle(state: &mut GameState) {
+        apply(
+            state,
+            P0,
+            GameAction::ActivateAbility {
+                source_id: RELIC,
+                ability_index: RELIC_TAP_MANA,
+            },
+        )
+        .expect("activate Relic mana ability");
+        let mut freed_activated = false;
+        for _ in 0..200 {
+            let actor = beat_actor(state);
+            match state.waiting_for.clone() {
+                WaitingFor::LoopShortcut { .. } => return,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::TapCreatures { .. },
+                    ..
+                } => {
+                    apply(state, actor, GameAction::SelectCards { cards: vec![KILO] })
+                        .expect("tap Kilo");
+                }
+                WaitingFor::ChooseManaColor { .. } => {
+                    apply(
+                        state,
+                        actor,
+                        GameAction::ChooseManaColor {
+                            choice: ManaChoice::SingleColor(ManaType::Blue),
+                            count: 1,
+                        },
+                    )
+                    .expect("choose Blue");
+                }
+                WaitingFor::ProliferateChoice { .. } => {
+                    apply(
+                        state,
+                        actor,
+                        GameAction::SelectTargets {
+                            targets: vec![TargetRef::Object(PENTAD)],
+                        },
+                    )
+                    .expect("proliferate Pentad");
+                }
+                WaitingFor::Priority { .. } => {
+                    if state.stack.is_empty() {
+                        if freed_activated {
+                            return;
+                        }
+                        freed_activated = true;
+                        apply(
+                            state,
+                            P0,
+                            GameAction::ActivateAbility {
+                                source_id: FREED,
+                                ability_index: FREED_UNTAP,
+                            },
+                        )
+                        .expect("activate Freed untap");
+                    } else {
+                        apply(state, actor, GameAction::PassPriority).expect("pass priority");
+                    }
+                }
+                other => panic!("unexpected beat: {other:?}"),
+            }
+        }
+        panic!("drive did not settle");
+    }
+
+    /// Matched pair: with the loop intact the offer re-derives (`Some`); removing Freed (Kilo can
+    /// no longer untap, the cycle is no longer mana-neutral) means the recorded `Activate 403#1`
+    /// step's ability definition can no longer be resolved (its object is gone), so `try_offer`
+    /// aborts at the pre-drive ability-def resolution ⇒ `None`. Pass-vs-defuse FLIPS the outcome.
+    #[test]
+    fn freed_removed_defuses_the_offer() {
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven);
+        assert_eq!(
+            driven.last_loop_action_sequence.len(),
+            2,
+            "the live cycle recorded the clean 2-step pinned period"
+        );
+
+        // Re-derive the empty-stack priority window the offer fires from (the recorded period is
+        // intact; the board is a valid loop state — Kilo untapped, mana-neutral).
+        let mut intact = driven.clone();
+        intact.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(intact.stack.is_empty(), "settled to an empty stack");
+        assert!(
+            try_offer_object_growth_shortcut(&intact).is_some(),
+            "undefused: the intact loop re-derives the CR 732.2a offer"
+        );
+
+        // Defuse: remove Freed AFTER recording. The re-drive can no longer re-find/re-activate it.
+        let mut defused = intact.clone();
+        defused.objects.remove(&FREED);
+        defused.battlefield.retain(|id| *id != FREED);
+        assert!(
+            try_offer_object_growth_shortcut(&defused).is_none(),
+            "defused (Freed removed): the re-drive aborts ⇒ NO offer — the outcome flips"
+        );
+    }
+
+    /// Reset a driven state (which settles at `LoopShortcut`) back to the empty-stack priority
+    /// window the offer re-derives from, so `try_offer_object_growth_shortcut` can be probed
+    /// directly (the plan's sanctioned private-fn revert-probe form). The board is the valid
+    /// post-cycle loop state (Kilo untapped, mana-neutral).
+    fn at_priority_window(mut state: GameState) -> GameState {
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert!(
+            state.stack.is_empty(),
+            "the driven cycle settled to an empty stack"
+        );
+        state
+    }
+
+    /// Hostile fixture — two-legendary identity binding (memory: verify-the-seam-not-the-line).
+    /// The tap-cost pin stores the EXACT tapped `ObjectId` (`TargetPin::ByIdentity`), so with two
+    /// legal untapped legendary creatures on the board the detection re-drive must re-bind to the
+    /// RECORDED Kilo (402), NOT the decoy. Positive: record tapping Kilo ⇒ offer. Revert-probe
+    /// (FLIP, run in-test): repoint ONLY the tap-cost pin's identity to the decoy (an equally-legal
+    /// legendary) on the SAME board + recording ⇒ the re-drive taps the decoy, whose becomes-tapped
+    /// proliferate trigger (source = decoy) has NO matching pin (the proliferate pin is keyed to
+    /// Kilo 402) ⇒ `RecastAbort` ⇒ NO offer. If replay ignored the pin identity (re-bound to "any
+    /// legal legendary" or always Kilo) this mutation would NOT change the outcome — so the flip
+    /// proves the recorded identity is load-bearing.
+    #[test]
+    fn tap_pin_rebinds_to_recorded_legendary_not_a_decoy() {
+        let mut state = load_migrated_dump();
+
+        // Add a SECOND untapped legendary creature P0 controls (a Kilo clone with a fresh id) so
+        // the Relic tap cost has two legal choices the identity binding must disambiguate.
+        let decoy_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        let mut decoy = state.objects[&KILO].clone();
+        decoy.id = decoy_id;
+        // Distinct name: CR 704.5j (the legend rule) would otherwise force a ChooseLegend SBA
+        // between two same-named legends — we want two co-existing legal legendary tap targets.
+        decoy.name = "Decoy Legend".to_string();
+        decoy.base_name = "Decoy Legend".to_string();
+        decoy.attachments = Vec::new(); // the clone is NOT the Freed-enchanted creature
+        decoy.tapped = false;
+        state.objects.insert(decoy_id, decoy);
+        state.battlefield.push_back(decoy_id);
+
+        drive_one_live_cycle(&mut state);
+        assert_eq!(
+            state.last_loop_action_sequence.len(),
+            2,
+            "reach-guard: the live cycle recorded the clean 2-step pinned period"
+        );
+
+        // Positive: the recorded ByIdentity(Kilo 402) tap pin re-binds to Kilo on replay ⇒ offer.
+        let intact = at_priority_window(state.clone());
+        assert!(
+            try_offer_object_growth_shortcut(&intact).is_some(),
+            "two legal legendaries present + recorded Kilo ⇒ the offer fires"
+        );
+
+        // Revert-probe (FLIP): repoint ONLY the tap-cost pin (its slot source resolves to Relic
+        // 404) to the decoy. Board, recording, and the proliferate pin (keyed to Kilo 402) are all
+        // unchanged.
+        let mut repointed = intact.clone();
+        let mut mutated = false;
+        for step in repointed.last_loop_action_sequence.iter_mut() {
+            for pin in step.pins.iter_mut() {
+                if let PinnedDecision::Targets { slot, targets } = pin {
+                    if matches!(&slot.source, YieldTarget::ThisObject { source_id, .. } if *source_id == RELIC)
+                    {
+                        *targets = vec![TargetPin::ByIdentity(YieldTarget::ThisObject {
+                            source_id: decoy_id,
+                            incarnation: None,
+                            trigger_description: None,
+                        })];
+                        mutated = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            mutated,
+            "reach-guard: the tap-cost pin (slot source Relic) was found + repointed"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&repointed).is_none(),
+            "repointing the tap pin to the decoy FLIPS the offer OFF ⇒ recorded identity is load-bearing"
+        );
+    }
+
+    /// Hostile fixture — wrong-color drive. The `ManaColor` pin latches the color the player
+    /// produced (Blue, to pay Freed's `{U}`, CR 608.2d). Positive: Blue ⇒ mana-neutral cycle ⇒
+    /// offer. Revert-probe (FLIP, run in-test): relatch the color to Red on the SAME recording ⇒
+    /// the re-drive produces Red, Freed's `{U}` untap is unpayable ⇒ the second step aborts ⇒ NO
+    /// offer. The latched color value is load-bearing.
+    #[test]
+    fn mana_color_pin_replays_recorded_color() {
+        let mut state = load_migrated_dump();
+        drive_one_live_cycle(&mut state);
+        let state = at_priority_window(state);
+
+        // Positive: the latched Blue color pays Freed's {U} ⇒ offer.
+        assert!(
+            try_offer_object_growth_shortcut(&state).is_some(),
+            "the recorded Blue mana-color pin completes the mana-neutral cycle ⇒ offer"
+        );
+
+        // Revert-probe (FLIP): relatch the color to Red.
+        let mut wrong = state.clone();
+        let mut mutated = false;
+        for step in wrong.last_loop_action_sequence.iter_mut() {
+            for pin in step.pins.iter_mut() {
+                if let PinnedDecision::ManaColor { color, .. } = pin {
+                    *color = ManaColor::Red;
+                    mutated = true;
+                }
+            }
+        }
+        assert!(
+            mutated,
+            "reach-guard: the ManaColor pin was found + relatched"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&wrong).is_none(),
+            "a Red mana-color pin cannot pay Freed's {{U}} ⇒ the drive aborts ⇒ NO offer"
+        );
+    }
+
+    /// Synthetic positive/negative drive-replay reach-guard (plan §7 unit c). The SAME recorded
+    /// 2-step period is driven WITH pins (offer) and WITHOUT (abort). The `len()==2` anchor holds
+    /// in BOTH variants, so the negative's None is a drive-abort at the unpinned
+    /// `PayCost{TapCreatures}`, NOT a vacuous "no sequence to drive" upstream short-circuit
+    /// (memory: discriminator-vacuous-if-upstream-conjunct-dominates).
+    #[test]
+    fn drive_replay_requires_the_recorded_pins() {
+        let mut state = load_migrated_dump();
+        drive_one_live_cycle(&mut state);
+        let state = at_priority_window(state);
+
+        // Anchor (holds in BOTH variants): the recorded 2-step period is present.
+        assert_eq!(
+            state.last_loop_action_sequence.len(),
+            2,
+            "reach-guard anchor: the recorded period exists ⇒ any None is a drive-abort, not a missing seq"
+        );
+
+        // Positive: the recorded pins drive the replay to completion ⇒ offer.
+        assert!(
+            try_offer_object_growth_shortcut(&state).is_some(),
+            "with the recorded pins the replay completes ⇒ offer"
+        );
+
+        // Negative: strip the pins from the SAME period ⇒ the replay hits the unpinned tap cost ⇒
+        // abort ⇒ NO offer. The anchor proves the None is the drive-abort, not an empty sequence.
+        let mut unpinned = state.clone();
+        for step in unpinned.last_loop_action_sequence.iter_mut() {
+            step.pins.clear();
+        }
+        assert_eq!(
+            unpinned.last_loop_action_sequence.len(),
+            2,
+            "reach-guard anchor: the period is still present in the negative variant"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&unpinned).is_none(),
+            "without the pins the drive aborts at the unpinned tap cost ⇒ NO offer"
+        );
+    }
+
+    /// [LOW-1] declined-axis ∞ lifecycle — characterization/regression guard (memory:
+    /// combo-interruptibility-acceptance-criterion). A declined `Counters`/`Life` axis leaves its
+    /// ∞ capability marker in `unbounded_resources` intentionally (CR 732.2b never forces a
+    /// shortcut). This test guards the MEASURED retirement path (a) documented at the boundary
+    /// seam: the empty-stack offer hook `try_offer_object_growth_shortcut` (engine.rs:472) is NOT
+    /// gated by existing ∞ marks, so a later genuine re-detection RE-OFFERS the loop and can
+    /// re-collapse the declined axis once the observer is gone.
+    ///
+    /// DISCRIMINATING LEG (the re-offer assertion): with a pre-existing declined ∞ mark injected
+    /// for P0, the offer STILL fires. If a future regression ∞-gated the offer hook (e.g. to
+    /// suppress re-offering a declined axis), this flips to `None`. Positive control / reach-guard:
+    /// the SAME state WITHOUT the mark also offers (proving the mark is what the assertion isolates,
+    /// and the recorded 2-step period is intact — a `None` would be a drive-abort, not a missing
+    /// sequence).
+    #[test]
+    fn declined_infinity_mark_does_not_suppress_reoffer() {
+        use crate::analysis::resource::ResourceAxis;
+
+        let mut driven = load_migrated_dump();
+        drive_one_live_cycle(&mut driven);
+        let base = at_priority_window(driven);
+
+        // Reach-guard anchor: the recorded period is present (a `None` below is a real gating
+        // decision, never an empty-sequence artifact).
+        assert_eq!(
+            base.last_loop_action_sequence.len(),
+            2,
+            "reach-guard: the live cycle recorded the clean 2-step pinned period"
+        );
+        // Positive control: without any ∞ mark the intact loop re-derives the offer.
+        assert!(
+            try_offer_object_growth_shortcut(&base).is_some(),
+            "positive control: the intact loop offers when no ∞ mark is present"
+        );
+
+        // Inject a pre-existing DECLINED ∞ axis for P0 (as if an earlier boundary declined the life
+        // axis and left it ∞-marked for manual play). The offer hook reads `waiting_for` + stack +
+        // `samples()` + `last_loop_action_sequence` — never `unbounded_resources` — so the mark
+        // must NOT suppress the re-offer.
+        let mut marked = base.clone();
+        marked.mark_unbounded_loop(P0, &[ResourceAxis::Life(P0)]);
+        assert!(
+            marked
+                .unbounded_resources
+                .get(&P0)
+                .is_some_and(|axes| axes.contains(&ResourceAxis::Life(P0))),
+            "reach-guard: the declined ∞ Life mark is present on the probed state"
+        );
+        assert!(
+            try_offer_object_growth_shortcut(&marked).is_some(),
+            "the empty-stack offer hook is NOT ∞-gated: a persisted declined ∞ axis does not \
+             suppress a genuine re-detection re-offering the loop (CR 732.2a / CR 732.2b)"
         );
     }
 }

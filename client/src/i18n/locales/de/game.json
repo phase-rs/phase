@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Blockiert",
+    "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
+    "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
+    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -21,6 +27,16 @@
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
     }
+  },
+  "precastShortcut": {
+    "offerTitle": "Copy Shortcut",
+    "offerSubtitle": "The engine verified a finite copy route. Propose it or continue normally.",
+    "propose": "Propose route",
+    "routeCount_one": "1 verified route is available.",
+    "routeCount_other": "{{count}} verified routes are available.",
+    "respondTitle": "Copy Shortcut Proposed",
+    "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
+    "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
   "resolutionProgress": {
     "label": "Auflösen {{resolved}} / {{total}}",
@@ -235,10 +251,14 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_one": "{{count}} verborgene angelegte Karte anzeigen",
+    "hiddenAttachmentsAria_other": "{{count}} verborgene angelegte Karten anzeigen",
     "fanPick": "Wählen",
     "fanConfirm": "Bestätigen ({{count}})",
     "viewAttachments_one": "Angelegte Karte ansehen",
     "viewAttachments_other": "{{count}} angelegte Karten ansehen",
+    "viewAttachmentsFor_one": "Angelegte Karte von {{name}} ansehen",
+    "viewAttachmentsFor_other": "{{count}} angelegte Karten von {{name}} ansehen",
     "hiddenExileCards": "+{{count}} more exiled",
     "sacrifice": "Sacrifice",
     "boardChoiceBadges": {
@@ -279,6 +299,11 @@
     "creatureFallback": "Kreatur #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Spieler — {{life}} Leben)",
+    "playerTargetProjected": "{{name}} (Spieler — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Spieler — {{life}} → {{projectedLife}} · Tödlich)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Schlacht)",
     "you": "Du",
     "ally": "Verbündeter",
     "restoreDialog": "Dialog wiederherstellen",
@@ -302,7 +327,7 @@
     "assignRemaining_other": "Noch {{count}} zuweisen",
     "confirmDistribute_one": "{{count}} Angreifer erklären",
     "confirmDistribute_other": "{{count}} Angreifer erklären",
-    "mustAttackPlayer": "{{creature}} muss {{player}} angreifen"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Kontrolle",
@@ -348,7 +373,14 @@
     "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
     "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
-    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Aktuelle Phase: {{phase}}. Phasenstopp-Einstellungen öffnen.",
+    "sheetTitle": "Zugphasen",
+    "sheetSubtitle": "Tippe auf einen Schritt, um festzulegen, wann das automatische Passen dort stoppt.",
+    "scopeShortOff": "Aus",
+    "scopeShortAllTurns": "Alle Züge",
+    "scopeShortOwnTurn": "Deine Züge",
+    "scopeShortOpponentsTurns": "Gegnerzüge"
   },
   "phaseTracker": {
     "turn": "Zug {{number}}"
@@ -388,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}}-Marke\n{{description}}",
     "summary_other": "{{count}} {{label}}-Marken\n{{description}}",
+    "summaryUnbounded": "∞ {{label}}-Marken\n{{description}}",
     "descriptions": {
       "p1p1": "Jede +1/+1-Marke gibt der bleibenden Karte +1/+1.",
       "m1m1": "Jede -1/-1-Marke gibt der bleibenden Karte -1/-1.",
@@ -487,6 +520,11 @@
     "castCommander": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
     "castCommanderTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "ninjutsuCommander": "Kommandeur-Ninjutsu: {{name}} — klicken, um einen ungeblockten Angreifer auf die Hand zurückzunehmen und diesen Kommandeur getappt und angreifend ins Spiel zu bringen",
+    "signatureSpell": "Signaturzauber",
+    "signatureSpellTitle": "Signaturzauber: {{name}}",
+    "signatureSpellTitleTax": "Signaturzauber: {{name}} (Steuer: +{{tax}})",
+    "castSignatureSpell": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
+    "castSignatureSpellTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "tax": "Steuer: +{{tax}}",
     "companion": "Gefährte",
     "companionTitle": "Gefährte: {{name}}",
@@ -546,6 +584,15 @@
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo",
+    "loopCollapseTitleTokens": "Wähle, wie viele Spielsteine erzeugt werden",
+    "loopCollapseTitleCounters": "Wähle, wie oft Marken hinzugefügt werden",
+    "loopCollapseTitleLife": "Wähle, wie oft Leben dazugewonnen wird",
+    "loopCollapseTitleMixed": "Wähle, wie oft die Schleife wiederholt wird",
+    "loopCollapseAmountTokens_one": "{{count}} Spielstein erzeugen",
+    "loopCollapseAmountTokens_other": "{{count}} Spielsteine erzeugen",
+    "loopCollapseAmountCounters": "Marken hinzufügen {{value}}×",
+    "loopCollapseAmountLife": "Leben dazugewinnen {{value}}×",
+    "loopCollapseAmountMixed": "Schleife wiederholen {{value}}×",
     "manualMana": "Manuell",
     "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
     "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
@@ -609,8 +656,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "{{amount}} Kampfschaden zuteilen",
@@ -629,6 +674,7 @@
     "dockLeft": "Stapel links andocken",
     "dockRight": "Stapel rechts andocken",
     "casting": "Wird gewirkt…",
+    "selectedModes": "Ausgewählte Modi",
     "next": "Weiter",
     "activated": "Aktiviert",
     "triggered": "Ausgelöst",
@@ -693,6 +739,7 @@
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
     "skip": "Überspringen",
+    "opponentChoice": "(nach Wahl des Gegners)",
     "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
     "chooseNewTargetForSpell": "Wähle ein neues Ziel für {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1016,6 +1063,13 @@
     "activationCost": {
       "title": "Aktivierungskosten wählen"
     },
+    "meld": {
+      "choosePair": "Wähle die zu verschmelzenden Karten",
+      "into": "Zu {{result}} verschmelzen",
+      "chooseAttackTarget": "Wähle, was angegriffen wird",
+      "player": "Spieler {{id}}",
+      "permanent": "Bleibende Karte {{id}}"
+    },
     "debug": {
       "modeBanner": "DEBUG-MODUS - Klicke eine beliebige Karte",
       "modeButtonOff": "KLICKMODUS AUS"
@@ -1232,6 +1286,7 @@
       "titleTopdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
       "titleHand": "Zurückgeben",
+      "titleExile": "Ins Exil schicken",
       "titleUntap": "Enttappen",
       "titleTap": "Tappen",
       "titleAttach": "Attach",
@@ -1253,6 +1308,12 @@
       "subtitleBattlefieldUpTo_other": "Wähle bis zu {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldRange_one": "Wähle {{min}}-{{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldRange_other": "Wähle {{min}}-{{count}} Karten, um sie auf das Schlachtfeld zu legen",
+      "subtitleExileExact_one": "Wähle {{count}} Karte zum Ins-Exil-Schicken",
+      "subtitleExileExact_other": "Wähle {{count}} Karten zum Ins-Exil-Schicken",
+      "subtitleExileUpTo_one": "Wähle bis zu {{count}} Karte zum Ins-Exil-Schicken",
+      "subtitleExileUpTo_other": "Wähle bis zu {{count}} Karten zum Ins-Exil-Schicken",
+      "subtitleExileRange_one": "Wähle {{min}}-{{count}} Karte zum Ins-Exil-Schicken",
+      "subtitleExileRange_other": "Wähle {{min}}-{{count}} Karten zum Ins-Exil-Schicken",
       "subtitleHandExact_one": "Wähle {{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
       "subtitleHandExact_other": "Wähle {{count}} bleibende Karten, um sie in die Hand ihrer Besitzer zurückzugeben",
       "subtitleHandUpTo_one": "Wähle bis zu {{count}} bleibende Karte, um sie in die Hand ihres Besitzers zurückzugeben",
@@ -1284,6 +1345,7 @@
       "labelTop": "Oben ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
+      "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Oben"
     },
@@ -1495,7 +1557,11 @@
     "manaCombination": {
       "title": "Manakombination wählen",
       "subtitleAny": "Wähle jede zu erzeugende Manafarbe",
-      "subtitle": "Wähle, welche Manakombination erzeugt wird"
+      "subtitle": "Wähle, welche Manakombination erzeugt wird",
+      "amount": "{{selected}} / {{count}} Mana ausgewählt",
+      "decrease": "{{color}}-Mana entfernen",
+      "increase": "{{color}}-Mana hinzufügen",
+      "quantity": "{{color}}-Mana: {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",
@@ -1628,6 +1694,13 @@
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
   },
+  "announcingOpponent": {
+    "title": "Ansagenden Gegner wählen ({{current}} von {{total}})",
+    "subtitle": "Wähle, welcher Gegner {{target}} ansagt ({{current}} von {{total}}).",
+    "targetLand": "das Länderziel",
+    "targetCreature": "das Kreaturenziel",
+    "targetChoice": "diese Zielwahl"
+  },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
@@ -1709,6 +1782,13 @@
     "variantBestow": "Mit Verleihen wirken",
     "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
+    "variantMutate": "Mit Mutate wirken",
+    "variantAwaken": "Mit Erwecken wirken",
+    "variantCleave": "Mit Abspalten wirken",
+    "variantImpending": "Mit Drohend wirken",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Mit Prototyp wirken",
+    "variantFaceDown": "Verdeckt wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
   "categoryChoice": {
@@ -2001,6 +2081,7 @@
     "fromSideboard": "Aus dem Sideboard"
   },
   "phaseName": {
+    "Untap": "Enttappen",
     "Upkeep": "Versorgung",
     "Draw": "Ziehen",
     "PreCombatMain": "Hauptphase 1",

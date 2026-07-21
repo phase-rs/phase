@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Essayer l'aperçu",
-      "tooltip": "Jouez la dernière version d'aperçu — les nouvelles cartes et corrections arrivent ici avant chaque sortie."
+      "tooltip": "Jouez la dernière version d'aperçu — les nouvelles cartes et corrections arrivent ici avant chaque sortie.",
+      "backCta": "Retour à la version stable",
+      "backTooltip": "Revenir à la version de sortie actuelle."
     },
     "coverage": {
       "title": "Ouvrir le tableau de bord de couverture",
@@ -153,9 +155,20 @@
     "urlHint": "Importe un deck public depuis Moxfield ou Archidekt.",
     "import": "Importer",
     "importing": "Importation…",
+    "importAsOathbreaker": "Configurer comme deck Oathbreaker",
+    "oathbreakerSetupTitle": "Configurer Oathbreaker",
+    "oathbreakerSetupDescription": "Choisissez l'Oathbreaker et le sort signature dans cette liste.",
+    "oathbreakerLabel": "Oathbreaker",
+    "signatureSpellLabel": "Sort signature",
+    "chooseOathbreaker": "Choisissez un Oathbreaker",
+    "chooseSignatureSpell": "Choisissez un sort signature",
+    "confirmOathbreakerImport": "Importer le deck Oathbreaker",
+    "backToImport": "Retour à l'import",
     "errorInvalidUrl": "Saisissez une URL de deck Moxfield ou Archidekt valide.",
     "errorNetworkFailure": "Impossible de contacter le service d'import. Vérifiez votre connexion et réessayez.",
     "errorGeneric": "Échec de l'import du deck.",
+    "errorNoOathbreaker": "Cette liste ne contient aucun Oathbreaker valide.",
+    "errorNoSignatureSpell": "Cet Oathbreaker n'a aucun sort signature valide dans cette liste.",
     "errorNoCards": "Aucune carte trouvée. Collez un deck au format MTGA ou .dck.",
     "fileSupports": "Prend en charge les formats .dck, .dec, .txt et MTGA",
     "chooseFile": "Choisir un fichier",

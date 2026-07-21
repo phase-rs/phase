@@ -60,6 +60,7 @@ function makeGroups(count: number): GroupedPermanentType[] {
       ids: [id],
       count: 1,
       representative: {} as GroupedPermanentType["representative"],
+      isUnboundedPile: false,
     };
   });
 }
@@ -154,8 +155,8 @@ describe("BattlefieldZoneOverflow", () => {
     // stacks (what the player actually sees), not raw object count.
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
     const groups: GroupedPermanentType[] = [
-      { name: "Forest", ids: [1, 2, 3, 4, 5, 6, 7], count: 7, representative: {} as GroupedPermanentType["representative"] },
-      { name: "Vernal Fen", ids: [8, 9], count: 2, representative: {} as GroupedPermanentType["representative"] },
+      { name: "Forest", ids: [1, 2, 3, 4, 5, 6, 7], count: 7, representative: {} as GroupedPermanentType["representative"], isUnboundedPile: false },
+      { name: "Vernal Fen", ids: [8, 9], count: 2, representative: {} as GroupedPermanentType["representative"], isUnboundedPile: false },
     ];
 
     renderOverflow({ groups });

@@ -11,14 +11,16 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  ObjectId,
   PlayerId,
+  PersistedGameState,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveGame } from "../services/gamePersistence";
+import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -36,6 +38,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
 export type { ActiveGameMeta, PersistedP2PHostSession } from "../services/gamePersistence";
 export {
   saveGame,
+  saveAuthoritativeGame,
   loadGame,
   clearGame,
   saveCheckpoints,
@@ -50,6 +53,7 @@ export {
 
 export type GameMode =
   | "ai"
+  | "native-ai"
   | "online"
   | "local"
   | "p2p-host"
@@ -62,7 +66,8 @@ export type GameMode =
  * must not build a stateHistory or expose an Undo affordance. */
 export function isMultiplayerMode(mode: GameMode | null): boolean {
   return (
-    mode === "online"
+    mode === "native-ai"
+    || mode === "online"
     || mode === "p2p-host"
     || mode === "p2p-join"
     || mode === "draft-match"
@@ -73,12 +78,20 @@ export function isMultiplayerMode(mode: GameMode | null): boolean {
 interface GameStoreState {
   gameId: string | null;
   gameMode: GameMode | null;
+  /** Transport selected for the current solo-AI game. F.5 telemetry reads this
+   * alongside `nativeEngineFallbackReason`; neither field drives game rules. */
+  engineMode: "native" | "wasm" | null;
+  nativeEngineFallbackReason: string | null;
   gameState: GameState | null;
   events: GameEvent[];
   eventHistory: GameEvent[];
   logHistory: GameLogEntry[];
   nextLogSeq: number;
   adapter: EngineAdapter | null;
+  /** Monotonically unique local game lifecycle identity. Unlike gameId, it
+   * changes for a fresh init/resume/reset even when the adapter and id are
+   * reused. Transient: never persisted or restored from engine snapshots. */
+  gameSessionGeneration: number;
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
@@ -143,6 +156,17 @@ interface GameStoreState {
    * with the rest of `initialState` on `reset`.
    */
   lastCommittedSeq: number;
+  /**
+   * Monotonic local commit counter. Unlike `lastCommittedSeq`, this advances
+   * for an accepted equal-sequence snapshot too, so asynchronous display
+   * previews can prove they still describe the current engine snapshot.
+   */
+  engineCommitEpoch: number;
+  /**
+   * Engine-returned mana sources for the spell currently being dragged. This
+   * display state is cleared with every accepted engine snapshot.
+   */
+  manaPaymentPreviewSourceIds: ObjectId[];
 }
 
 /**
@@ -160,7 +184,9 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "spellCosts"
   | "legalActionsByObject"
   | "stuckDiagnostic"
-  | "lastCommittedSeq">>;
+  | "lastCommittedSeq"
+  | "engineCommitEpoch"
+  | "manaPaymentPreviewSourceIds">>;
 
 interface GameStoreActions {
   initGame: (
@@ -172,7 +198,7 @@ interface GameStoreActions {
     matchConfig?: MatchConfig,
     firstPlayer?: number,
   ) => Promise<void>;
-  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: GameState) => Promise<void>;
+  resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
    * Resume a P2P host game. Distinct from `resumeGame` because the
    * adapter already loaded engine state internally via
@@ -232,11 +258,21 @@ interface GameStoreActions {
     },
   ) => boolean;
   setGameMode: (mode: GameMode) => void;
+  setEngineMode: (mode: "native" | "wasm" | null, fallbackReason?: string | null) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
   setIsResolvingAll: (isResolvingAll: boolean) => void;
+  setManaPaymentPreviewSourceIds: (sourceIds: ObjectId[]) => void;
+  clearManaPaymentPreview: () => void;
   /** Clear the starting-player contest after the overlay has consumed it. */
   clearStartingContest: () => void;
+}
+
+let latestGameSessionGeneration = 0;
+
+export function nextGameSessionGeneration(): number {
+  latestGameSessionGeneration += 1;
+  return latestGameSessionGeneration;
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
@@ -244,12 +280,15 @@ export type GameStore = GameStoreState & GameStoreActions;
 const initialState: GameStoreState = {
   gameId: null,
   gameMode: null,
+  engineMode: null,
+  nativeEngineFallbackReason: null,
   gameState: null,
   events: [],
   eventHistory: [],
   logHistory: [],
   nextLogSeq: 0,
   adapter: null,
+  gameSessionGeneration: nextGameSessionGeneration(),
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
@@ -264,6 +303,8 @@ const initialState: GameStoreState = {
   startingContest: null,
   aiSeatIds: [],
   lastCommittedSeq: 0,
+  engineCommitEpoch: 0,
+  manaPaymentPreviewSourceIds: [],
 };
 
 export const useGameStore = create<GameStore>()(
@@ -292,6 +333,8 @@ export const useGameStore = create<GameStore>()(
                 waitingFor: snapshot.state.waiting_for,
                 ...legalResultState(snapshot.legalResult),
                 lastCommittedSeq: snapshot.seq,
+                engineCommitEpoch: prev.engineCommitEpoch + 1,
+                manaPaymentPreviewSourceIds: [],
               }
             : {}),
           // 2. History — ordered by arrival, so applied unconditionally.
@@ -352,6 +395,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: initLogEntries,
@@ -361,7 +405,7 @@ export const useGameStore = create<GameStore>()(
           startingContest,
         },
       });
-      saveGame(gameId, state);
+      void saveAuthoritativeGame(gameId, adapter, state);
     },
 
     resumeGame: async (gameId, adapter, savedState) => {
@@ -377,6 +421,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: [],
@@ -403,6 +448,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: [],
@@ -451,7 +497,7 @@ export const useGameStore = create<GameStore>()(
         stateHistory,
       });
 
-      if (gameId) saveGame(gameId, snapshot.state);
+      if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
 
       return result.events;
     },
@@ -483,7 +529,7 @@ export const useGameStore = create<GameStore>()(
       if (adapter) {
         adapter.dispose();
       }
-      set(initialState);
+      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration() });
     },
 
     setAdapter: (adapter) => {
@@ -492,6 +538,10 @@ export const useGameStore = create<GameStore>()(
 
     setGameMode: (mode) => {
       set({ gameMode: mode });
+    },
+
+    setEngineMode: (mode, fallbackReason = null) => {
+      set({ engineMode: mode, nativeEngineFallbackReason: fallbackReason });
     },
 
     setLobbyProgress: (progress) => {
@@ -504,6 +554,14 @@ export const useGameStore = create<GameStore>()(
 
     setIsResolvingAll: (isResolvingAll) => {
       set({ isResolvingAll });
+    },
+
+    setManaPaymentPreviewSourceIds: (sourceIds) => {
+      set({ manaPaymentPreviewSourceIds: sourceIds });
+    },
+
+    clearManaPaymentPreview: () => {
+      set({ manaPaymentPreviewSourceIds: [] });
     },
 
     clearStartingContest: () => {

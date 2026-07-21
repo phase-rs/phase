@@ -1,10 +1,12 @@
 mod admin;
+mod data_bootstrap;
 mod draft_pools;
 mod logging;
 mod persistence;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -17,16 +19,17 @@ use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
-    auto_pass_recommended as engine_auto_pass, legal_actions_full as engine_legal_actions_full,
+    auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
+    legal_actions_full as engine_legal_actions_full,
 };
 use engine::database::CardDatabase;
-use engine::game::derived_views::derive_views;
+use engine::game::derived_views::derive_filtered_views;
 use engine::game::validate_name_deck_for_format_full;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
-use http::HeaderValue;
+use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
     Outbound, NOT_OWNED_RESERVATION,
@@ -66,7 +69,8 @@ use server_core::spectator_wire_guard::{
     guard_spectator_join,
 };
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::io::AsyncReadExt;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use url::Url;
@@ -218,6 +222,17 @@ async fn switch_draft_spectator_slot(
     Ok(())
 }
 
+/// Derive presentation state for any server transport after viewer filtering.
+/// Rules authority must always come from the pre-filter snapshot: search-control
+/// provenance is intentionally absent from some viewer-safe states.
+fn derive_transport_views(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    viewer: Option<PlayerId>,
+) -> engine::game::derived_views::DerivedViews {
+    derive_filtered_views(authoritative_state, filtered_state, viewer)
+}
+
 /// Build the `GameStarted` message for a single seat.
 ///
 /// `events` carries the engine's start-of-game events (the d20 first-player
@@ -234,8 +249,8 @@ fn build_game_started_message(
     events: Vec<GameEvent>,
 ) -> ServerMessage {
     let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
-    let auto_pass = engine_auto_pass(&session.state, &legal_actions);
     let is_actor = server_core::is_acting(&session.state, player);
+    let auto_pass = engine_auto_pass_for_viewer(&session.state, player, &legal_actions);
     let filtered = server_core::filter_state_for_player(&session.state, player);
     let opponent_name = engine::game::players::opponents(&session.state, player)
         .first()
@@ -247,7 +262,7 @@ fn build_game_started_message(
                 Some(name.clone())
             }
         });
-    let derived = derive_views(&filtered, Some(player));
+    let derived = derive_transport_views(&session.state, &filtered, Some(player));
 
     ServerMessage::GameStarted {
         state: filtered,
@@ -255,7 +270,7 @@ fn build_game_started_message(
         opponent_name,
         player_names: session.display_names.clone(),
         legal_actions: if is_actor { legal_actions } else { Vec::new() },
-        auto_pass_recommended: if is_actor { auto_pass } else { false },
+        auto_pass_recommended: auto_pass,
         spell_costs: if is_actor {
             spell_costs_all
         } else {
@@ -299,7 +314,7 @@ fn build_state_update_message(
         events,
         legal_actions,
         log_entries,
-        auto_pass,
+        _auto_pass,
         spell_costs,
         legal_actions_by_object,
     ) = result;
@@ -311,9 +326,9 @@ fn build_state_update_message(
         legal_actions_by_object,
         spell_costs,
     })?;
-    let is_actor = raw_state.waiting_for.acting_players().contains(&player);
+    let is_actor = server_core::is_acting(raw_state, player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
-    let derived = derive_views(&filtered, Some(player));
+    let derived = derive_transport_views(raw_state, &filtered, Some(player));
 
     Ok(ServerMessage::StateUpdate {
         state: filtered,
@@ -323,7 +338,7 @@ fn build_state_update_message(
         } else {
             Vec::new()
         },
-        auto_pass_recommended: if is_actor { *auto_pass } else { false },
+        auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
         eliminated_players: Vec::new(),
         log_entries: log_entries.clone(),
         spell_costs: if is_actor {
@@ -347,7 +362,7 @@ fn build_state_update_message(
 fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerMessage, String> {
     guard_game_state_for_broadcast(&session.state)?;
     let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
-    let derived = derive_views(&filtered, None);
+    let derived = derive_transport_views(&session.state, &filtered, None);
 
     Ok(ServerMessage::GameStarted {
         state: filtered,
@@ -378,7 +393,7 @@ fn build_spectator_state_update_message(
         spell_costs: &HashMap::new(),
     })?;
     let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
-    let derived = derive_views(&filtered, None);
+    let derived = derive_transport_views(raw_state, &filtered, None);
     let eliminated_players = raw_state.eliminated_players.clone();
 
     Ok(ServerMessage::StateUpdate {
@@ -466,9 +481,33 @@ struct Cli {
     #[arg(short, long, default_value = "9374", env = "PORT")]
     port: u16,
 
+    /// Address to bind. Defaults to all interfaces for LAN and tunnel hosting.
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: IpAddr,
+
+    /// Exit cleanly when stdin closes. Used by the desktop shell so an orphaned
+    /// native server terminates after its parent process dies.
+    #[arg(long)]
+    exit_on_stdin_close: bool,
+
+    /// Accept WebSocket handshakes only from this Origin when one is supplied.
+    /// Clients without an Origin header remain accepted for self-hosted tooling.
+    #[arg(long)]
+    allowed_origin: Option<String>,
+
     /// Path to card data directory (must contain card-data.json)
     #[arg(short, long, default_value = "data", env = "PHASE_DATA_DIR")]
-    data_dir: String,
+    data_dir: PathBuf,
+
+    /// Signed data-manifest URL for bootstrapping a missing PHASE_DATA_DIR.
+    /// This overrides the manifest resolved from the binary's embedded channel.
+    #[arg(long, env = "PHASE_DATA_MANIFEST_URL")]
+    data_manifest_url: Option<Url>,
+
+    /// Refuse to download missing startup data. Intended for air-gapped hosts
+    /// with a pre-provisioned PHASE_DATA_DIR.
+    #[arg(long)]
+    no_data_download: bool,
 
     /// Allowed CORS origin (use '*' for permissive, or a specific URL)
     #[arg(long, env = "PHASE_CORS_ORIGIN")]
@@ -499,6 +538,41 @@ struct Cli {
     /// `NGROK_AUTHTOKEN` is set, the live tunnel URL is used when this is unset.
     #[arg(long, env = "PUBLIC_URL")]
     public_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CardDataSource {
+    Export(PathBuf),
+    DevFixture(PathBuf),
+}
+
+fn dev_fixture_enabled() -> bool {
+    matches!(std::env::var("PHASE_DEV_FIXTURE"), Ok(value) if value == "1")
+}
+
+fn select_card_data_source(data_dir: &Path, dev_fixture: bool) -> Result<CardDataSource, String> {
+    let export_path = data_dir.join("card-data.json");
+    if export_path.is_file() {
+        return Ok(CardDataSource::Export(export_path));
+    }
+    if dev_fixture {
+        return Ok(CardDataSource::DevFixture(
+            data_dir.join("mtgjson/test_fixture.json"),
+        ));
+    }
+    Err(format!(
+        "card-data.json is missing from {}; startup data bootstrap did not provide it",
+        data_dir.display()
+    ))
+}
+
+fn bootstrap_required(data_dir: &Path, dev_fixture: bool) -> bool {
+    !dev_fixture || data_dir.join("card-data.json").is_file()
+}
+
+fn fatal_startup(message: impl std::fmt::Display) -> ! {
+    eprintln!("phase-server startup failed: {message}");
+    std::process::exit(1);
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
@@ -635,6 +709,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Action { .. }
+        | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
         | ClientMessage::SeatMutate { .. }
         | ClientMessage::Concede
@@ -777,13 +852,40 @@ async fn main() {
         ServerMode::Full
     };
     info!(?mode, "server mode selected");
-    let data_path = Path::new(&cli.data_dir);
-    let export_path = data_path.join("card-data.json");
-    let card_db = if export_path.exists() {
-        CardDatabase::from_export(&export_path).expect("Failed to load card-data.json")
+    let data_path = cli.data_dir.as_path();
+    let dev_fixture = dev_fixture_enabled();
+    if bootstrap_required(data_path, dev_fixture) {
+        let identity = data_bootstrap::ChannelIdentity::embedded()
+            .unwrap_or_else(|error| fatal_startup(error));
+        let options = data_bootstrap::BootstrapOptions {
+            manifest_url_override: cli.data_manifest_url.clone(),
+            no_data_download: cli.no_data_download,
+        };
+        if let Err(error) =
+            data_bootstrap::bootstrap_missing_data(data_path, &options, identity.as_ref()).await
+        {
+            fatal_startup(error);
+        }
     } else {
-        CardDatabase::from_mtgjson(&data_path.join("mtgjson/test_fixture.json"))
-            .expect("Failed to load card database")
+        warn!(
+            path = %data_path.display(),
+            "using PHASE_DEV_FIXTURE=1 test fixture; startup data bootstrap is disabled"
+        );
+    }
+    let card_data_source = select_card_data_source(data_path, dev_fixture)
+        .unwrap_or_else(|message| fatal_startup(message));
+    let card_db = match card_data_source {
+        CardDataSource::Export(path) => CardDatabase::from_export(&path).unwrap_or_else(|error| {
+            fatal_startup(format!("failed to load {}: {error}", path.display()))
+        }),
+        CardDataSource::DevFixture(path) => {
+            CardDatabase::from_mtgjson(&path).unwrap_or_else(|error| {
+                fatal_startup(format!(
+                    "PHASE_DEV_FIXTURE=1 was set but failed to load {}: {error}",
+                    path.display()
+                ))
+            })
+        }
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
@@ -1175,14 +1277,15 @@ async fn main() {
         game_spectators,
         mode,
         public_url: advertised_public_url,
+        allowed_origin: cli.allowed_origin.clone(),
     });
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
+    let listener = tokio::net::TcpListener::bind((cli.bind, cli.port))
         .await
         .expect("failed to bind");
-    info!(port = %cli.port, "phase-server listening");
+    info!(bind = %cli.bind, port = %cli.port, "phase-server listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(cli.exit_on_stdin_close))
         .await
         .expect("server error");
 
@@ -1237,8 +1340,45 @@ async fn main() {
     }
 }
 
-async fn shutdown_signal() {
+fn stdin_close_watchdog(enabled: bool) -> Option<oneshot::Receiver<()>> {
+    enabled.then(|| {
+        let (sender, receiver) = oneshot::channel();
+        let _stdin_watchdog = tokio::spawn(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match stdin.read(&mut buffer).await {
+                    Ok(0) => {
+                        info!("stdin closed; shutting down");
+                        let _ = sender.send(());
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(error = %error, "stdin watchdog stopped without EOF");
+                        return;
+                    }
+                }
+            }
+        });
+        receiver
+    })
+}
+
+async fn wait_for_stdin_close(mut watchdog: Option<oneshot::Receiver<()>>) {
+    match watchdog.as_mut() {
+        Some(receiver) => {
+            if receiver.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn shutdown_signal(exit_on_stdin_close: bool) {
     let ctrl_c = tokio::signal::ctrl_c();
+    let stdin_close = wait_for_stdin_close(stdin_close_watchdog(exit_on_stdin_close));
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1246,17 +1386,76 @@ async fn shutdown_signal() {
         tokio::select! {
             _ = ctrl_c => info!("received Ctrl+C, shutting down"),
             _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
+            _ = stdin_close => info!("stdin-close watchdog requested shutdown"),
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await.expect("failed to listen for Ctrl+C");
-        info!("received Ctrl+C, shutting down");
+        tokio::select! {
+            result = ctrl_c => {
+                result.expect("failed to listen for Ctrl+C");
+                info!("received Ctrl+C, shutting down");
+            }
+            _ = stdin_close => info!("stdin-close watchdog requested shutdown"),
+        }
     }
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
+    use clap::Parser;
+
+    use super::{
+        bootstrap_required, origin_is_allowed, select_card_data_source, CardDataSource, Cli,
+    };
+
+    #[test]
+    fn bind_flag_defaults_to_lan_and_accepts_loopback() {
+        let default = Cli::try_parse_from(["phase-server"]).expect("default CLI parses");
+        assert_eq!(default.bind.to_string(), "0.0.0.0");
+
+        let loopback = Cli::try_parse_from(["phase-server", "--bind", "127.0.0.1"])
+            .expect("loopback bind parses");
+        assert_eq!(loopback.bind.to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn allowed_origin_accepts_matching_and_originless_clients() {
+        let mut matching = HeaderMap::new();
+        matching.insert(ORIGIN, HeaderValue::from_static("https://phase-rs.dev"));
+        assert!(origin_is_allowed(&matching, Some("https://phase-rs.dev")));
+
+        let mut mismatched = HeaderMap::new();
+        mismatched.insert(ORIGIN, HeaderValue::from_static("https://attacker.example"));
+        assert!(!origin_is_allowed(
+            &mismatched,
+            Some("https://phase-rs.dev")
+        ));
+
+        assert!(origin_is_allowed(
+            &HeaderMap::new(),
+            Some("https://phase-rs.dev")
+        ));
+        assert!(origin_is_allowed(&mismatched, None));
+    }
+
+    #[test]
+    fn fixture_fallback_requires_the_explicit_dev_opt_in() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        assert!(bootstrap_required(temp.path(), false));
+        assert!(select_card_data_source(temp.path(), false).is_err());
+        assert!(!bootstrap_required(temp.path(), true));
+        assert_eq!(
+            select_card_data_source(temp.path(), true).expect("explicit fixture source"),
+            CardDataSource::DevFixture(temp.path().join("mtgjson/test_fixture.json"))
+        );
+    }
 }
 
 /// Constant-time byte comparison so admin-token validation does not leak the
@@ -1404,9 +1603,34 @@ struct AppState {
     /// embedded ngrok tunnel), or `None` when the server has no reachable
     /// address to share. Cloned per connection at greet time only.
     public_url: Option<String>,
+    /// Origin allowed to upgrade WebSocket handshakes. `None` preserves the
+    /// self-hosted permissive behavior; origin-less non-browser clients are
+    /// always allowed.
+    allowed_origin: Option<String>,
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> impl IntoResponse {
+fn origin_is_allowed(headers: &HeaderMap, allowed_origin: Option<&str>) -> bool {
+    let Some(allowed_origin) = allowed_origin else {
+        return true;
+    };
+    match headers.get(http::header::ORIGIN) {
+        None => true,
+        Some(origin) => origin.to_str().is_ok_and(|origin| origin == allowed_origin),
+    }
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !origin_is_allowed(&headers, app_state.allowed_origin.as_deref()) {
+        warn!(
+            origin = ?headers.get(http::header::ORIGIN),
+            "rejecting WebSocket handshake from disallowed Origin"
+        );
+        return (http::StatusCode::FORBIDDEN, "WebSocket Origin not allowed").into_response();
+    }
     let current = app_state.player_count.load(Ordering::Relaxed);
     if current >= MAX_CONNECTIONS {
         warn!(
@@ -2659,6 +2883,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
             main_deck: deck.main_deck,
             sideboard: deck.sideboard,
             commander: deck.commander,
+            companion: deck.companion,
             planar_deck: deck.planar_deck,
             scheme_deck: deck.scheme_deck,
             attraction_deck: deck.attraction_deck,
@@ -2793,7 +3018,7 @@ async fn broadcast_takeback_approved(
     snapshot: server_core::BroadcastSnapshot,
     resolved_by: Option<PlayerId>,
 ) {
-    let (raw_state, legal_actions, auto_pass, spell_costs, by_object) = snapshot;
+    let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) = snapshot;
     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
         .map(|i| {
             let pid = PlayerId(i);
@@ -2803,16 +3028,15 @@ async fn broadcast_takeback_approved(
 
     let conns = connections.lock().await;
     if let Some(players) = conns.get(game_code) {
-        let actors = raw_state.waiting_for.acting_players();
         for (pid, pstate) in &filtered_states {
             if let Some(s) = players.get(pid) {
-                let is_actor = actors.contains(pid);
+                let is_actor = server_core::is_acting(&raw_state, *pid);
                 let player_legals = if is_actor {
                     legal_actions.clone()
                 } else {
                     vec![]
                 };
-                let p_auto_pass = if is_actor { auto_pass } else { false };
+                let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
                 let p_spell_costs = if is_actor {
                     spell_costs.clone()
                 } else {
@@ -2832,7 +3056,7 @@ async fn broadcast_takeback_approved(
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
                     legal_actions_by_object: p_by_object,
-                    derived: derive_views(pstate, Some(*pid)),
+                    derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
                 });
             }
         }
@@ -3122,6 +3346,35 @@ async fn handle_client_message(
             }
         }
 
+        ClientMessage::PreviewManaPayment { request_id, action } => {
+            let response = match (identity.game_code.clone(), identity.player_token.clone()) {
+                (Some(game_code), Some(player_token)) => {
+                    if let Err(reason) = guard_game_action_payload(&action) {
+                        ServerMessage::ManaPaymentPreviewRejected { request_id, reason }
+                    } else {
+                        let mgr = state.lock().await;
+                        match mgr.preview_mana_payment(&game_code, &player_token, &action) {
+                            Ok(source_ids) => ServerMessage::ManaPaymentPreview {
+                                request_id,
+                                source_ids,
+                            },
+                            Err(reason) => {
+                                ServerMessage::ManaPaymentPreviewRejected { request_id, reason }
+                            }
+                        }
+                    }
+                }
+                _ => ServerMessage::ManaPaymentPreviewRejected {
+                    request_id,
+                    reason: "Not in a game".to_string(),
+                },
+            };
+
+            if let Ok(json) = serde_json::to_string(&response) {
+                let _ = socket.send(Message::text(json)).await;
+            }
+        }
+
         ClientMessage::Action { action } => {
             let game_code = match &identity.game_code {
                 Some(c) => c.clone(),
@@ -3234,7 +3487,7 @@ async fn handle_client_message(
                         events,
                         legal_actions,
                         log_entries,
-                        auto_pass_rec,
+                        _auto_pass_rec,
                         spell_costs,
                         legal_actions_by_object,
                     ),
@@ -3281,16 +3534,19 @@ async fn handle_client_message(
                         if let Some(players) = conns.get(&game_code) {
                             for (pid, pstate) in &filtered_states {
                                 if let Some(s) = players.get(pid) {
-                                    let actors = raw_state.waiting_for.acting_players();
-                                    let is_actor = actors.contains(pid);
+                                    let is_actor = server_core::is_acting(&raw_state, *pid);
                                     let player_legals = if ai_results.is_empty() && is_actor {
                                         legal_actions.clone()
                                     } else {
                                         // AI will act next — don't send legal actions yet
                                         vec![]
                                     };
-                                    let p_auto_pass = if ai_results.is_empty() && is_actor {
-                                        auto_pass_rec
+                                    let p_auto_pass = if ai_results.is_empty() {
+                                        engine_auto_pass_for_viewer(
+                                            &raw_state,
+                                            *pid,
+                                            &legal_actions,
+                                        )
                                     } else {
                                         false
                                     };
@@ -3315,7 +3571,11 @@ async fn handle_client_message(
                                         log_entries: log_entries.clone(),
                                         spell_costs: p_spell_costs,
                                         legal_actions_by_object: p_by_object,
-                                        derived: derive_views(pstate, Some(*pid)),
+                                        derived: derive_transport_views(
+                                            &raw_state,
+                                            pstate,
+                                            Some(*pid),
+                                        ),
                                     });
                                 }
                             }
@@ -3353,7 +3613,7 @@ async fn handle_client_message(
                             ai_events,
                             ai_legal,
                             ai_log_entries,
-                            ai_auto_pass,
+                            _ai_auto_pass,
                             ai_spell_costs,
                             ai_by_object,
                         ) = result;
@@ -3379,19 +3639,18 @@ async fn handle_client_message(
                             })
                             .collect();
 
-                        let ai_actors = ai_raw_state.waiting_for.acting_players();
                         let conns = connections.lock().await;
                         if let Some(players) = conns.get(&game_code) {
                             for (pid, pstate) in &ai_filtered {
                                 if let Some(s) = players.get(pid) {
-                                    let is_actor = ai_actors.contains(pid);
+                                    let is_actor = server_core::is_acting(ai_raw_state, *pid);
                                     let player_legals = if is_last && is_actor {
                                         ai_legal.clone()
                                     } else {
                                         vec![]
                                     };
-                                    let p_auto_pass = if is_last && is_actor {
-                                        *ai_auto_pass
+                                    let p_auto_pass = if is_last {
+                                        engine_auto_pass_for_viewer(ai_raw_state, *pid, ai_legal)
                                     } else {
                                         false
                                     };
@@ -3418,7 +3677,11 @@ async fn handle_client_message(
                                         log_entries: ai_log_entries.clone(),
                                         spell_costs: p_spell_costs,
                                         legal_actions_by_object: p_by_object,
-                                        derived: derive_views(pstate, Some(*pid)),
+                                        derived: derive_transport_views(
+                                            ai_raw_state,
+                                            pstate,
+                                            Some(*pid),
+                                        ),
                                     });
                                 }
                             }
@@ -3813,6 +4076,7 @@ async fn handle_client_message(
                     &deck.main_deck,
                     &deck.sideboard,
                     &deck.commander,
+                    &deck.companion,
                     &deck.planar_deck,
                     &deck.scheme_deck,
                     &deck.signature_spell,
@@ -3865,6 +4129,7 @@ async fn handle_client_message(
                         &ai_deck_data.main_deck,
                         &ai_deck_data.sideboard,
                         &ai_deck_data.commander,
+                        &ai_deck_data.companion,
                         &ai_deck_data.planar_deck,
                         &ai_deck_data.scheme_deck,
                         &ai_deck_data.signature_spell,
@@ -4557,6 +4822,7 @@ async fn handle_client_message(
                     joiner: PlayerId,
                     slot_info: Vec<server_core::PlayerSlotInfo>,
                     current_count: u32,
+                    raw_state: Box<engine::types::game_state::GameState>,
                     filtered_state: Box<engine::types::game_state::GameState>,
                 },
                 Started {
@@ -4624,6 +4890,7 @@ async fn handle_client_message(
                                 joiner,
                                 slot_info: session.player_slot_info(),
                                 current_count: session.current_player_count(),
+                                raw_state: Box::new(session.state.clone()),
                                 filtered_state: Box::new(filtered_state),
                             })
                         }
@@ -4638,8 +4905,10 @@ async fn handle_client_message(
                     joiner,
                     slot_info,
                     current_count,
+                    raw_state,
                     filtered_state,
                 }) => {
+                    let raw_state = *raw_state;
                     let filtered_state = *filtered_state;
                     identity.set_session(game_code.clone(), joiner, player_token);
 
@@ -4671,7 +4940,7 @@ async fn handle_client_message(
                         .await;
                     }
 
-                    let derived = derive_views(&filtered_state, Some(joiner));
+                    let derived = derive_transport_views(&raw_state, &filtered_state, Some(joiner));
                     let msg = ServerMessage::StateUpdate {
                         state: filtered_state,
                         events: vec![],
@@ -5892,6 +6161,122 @@ async fn handle_client_message(
 }
 
 #[cfg(test)]
+mod state_transport_derived_tests {
+    use super::*;
+    use engine::types::ability::SearchSelectionConstraint;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
+    };
+    use engine::types::identifiers::ObjectId;
+    use engine::types::phase::Phase;
+
+    fn low_use_window_priority_result(
+        semantic_player: PlayerId,
+        controller: Option<PlayerId>,
+    ) -> ActionResult {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = semantic_player;
+        state.priority_player = controller.unwrap_or(semantic_player);
+        state.waiting_for = WaitingFor::Priority {
+            player: semantic_player,
+        };
+        state.turn_decision_controller = controller;
+        state.phase = Phase::End;
+        state.priority_passing_modes.insert(
+            controller.unwrap_or(semantic_player),
+            PriorityPassingMode::SkipLowUseWindows,
+        );
+        let legal_actions = vec![
+            GameAction::PassPriority,
+            GameAction::TurnFaceUp {
+                object_id: ObjectId(999),
+                x: 0,
+            },
+        ];
+
+        (
+            state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            true,
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    fn state_update_action_fields(result: &ActionResult, viewer: PlayerId) -> (usize, bool) {
+        match build_state_update_message(result, viewer).expect("fixture state update") {
+            ServerMessage::StateUpdate {
+                legal_actions,
+                auto_pass_recommended,
+                ..
+            } => (legal_actions.len(), auto_pass_recommended),
+            other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_controller_receives_low_use_window_recommendation_instead_of_controlled_seat() {
+        let controlled = PlayerId(0);
+        let controller = PlayerId(1);
+        let result = low_use_window_priority_result(controlled, Some(controller));
+
+        assert_eq!(state_update_action_fields(&result, controller), (2, true));
+        assert_eq!(state_update_action_fields(&result, controlled), (0, false));
+    }
+
+    #[test]
+    fn ordinary_actor_receives_low_use_window_recommendation_and_nonactor_does_not() {
+        let actor = PlayerId(0);
+        let nonactor = PlayerId(1);
+        let result = low_use_window_priority_result(actor, None);
+
+        assert_eq!(state_update_action_fields(&result, actor), (2, true));
+        assert_eq!(state_update_action_fields(&result, nonactor), (0, false));
+    }
+
+    #[test]
+    fn human_ai_and_takeback_transports_derive_search_authority_from_raw_state() {
+        let mut raw = GameState::new_two_player(42);
+        raw.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: None,
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: SearchSelectionConstraint::None,
+            split: None,
+        };
+        raw.active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+
+        let mut filtered = server_core::filter_state_for_player(&raw, PlayerId(0));
+        filtered
+            .active_search_decision_controls
+            .remove(&PlayerId(0));
+
+        for transport in ["human action", "AI follow-up", "takeback"] {
+            assert_eq!(
+                derive_transport_views(&raw, &filtered, Some(PlayerId(0)))
+                    .unique_authorized_submitter,
+                Some(PlayerId(1)),
+                "{transport} transport must retain raw search authority",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod ranked_tests {
     use super::*;
     use tempfile::NamedTempFile;
@@ -6377,6 +6762,7 @@ mod issue_4548_full_create_tests {
                 game_spectators: Arc::new(Mutex::new(HashMap::new())),
                 mode: ServerMode::Full,
                 public_url: None,
+                allowed_origin: None,
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -6504,6 +6890,10 @@ mod mode_gate_tests {
             ClientMessage::Action {
                 action: GameAction::PassPriority,
             },
+            ClientMessage::PreviewManaPayment {
+                request_id: 1,
+                action: GameAction::PassPriority,
+            },
             ClientMessage::Reconnect {
                 game_code: "X".into(),
                 player_token: "t".into(),
@@ -6604,6 +6994,10 @@ mod mode_gate_tests {
         let msgs: Vec<ClientMessage> = vec![
             ClientMessage::CreateGame { deck: deck() },
             ClientMessage::Action {
+                action: GameAction::PassPriority,
+            },
+            ClientMessage::PreviewManaPayment {
+                request_id: 1,
                 action: GameAction::PassPriority,
             },
             ClientMessage::Concede,
@@ -7167,6 +7561,7 @@ mod admin_auth_tests {
             game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
             mode: ServerMode::Full,
             public_url: None,
+            allowed_origin: None,
         }
     }
 
@@ -7332,6 +7727,7 @@ mod p2p_backup_delete_tests {
             game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
             mode: ServerMode::Full,
             public_url: None,
+            allowed_origin: None,
         }
     }
 

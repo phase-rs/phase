@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Blocked",
+    "cantBeActivated": "This ability can't be activated",
+    "cantActivateDuring": "Can't be activated right now",
+    "prohibited": "Activating this ability is prohibited"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -21,6 +27,16 @@
       "ExtraTurns": "This loop takes infinite extra turns.",
       "Advantage": "This loop generates unbounded advantage."
     }
+  },
+  "precastShortcut": {
+    "offerTitle": "Copy Shortcut",
+    "offerSubtitle": "The engine verified a finite copy route. Propose it or continue normally.",
+    "propose": "Propose route",
+    "routeCount_one": "1 verified route is available.",
+    "routeCount_other": "{{count}} verified routes are available.",
+    "respondTitle": "Copy Shortcut Proposed",
+    "respondSubtitle": "Accept the verified route or stop at one of your issued boundaries.",
+    "shortenAtBreakpoint": "Stop at boundary {{breakpointId}}"
   },
   "resolutionProgress": {
     "label": "Resolving {{resolved}} / {{total}}",
@@ -236,10 +252,14 @@
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
     "hiddenAttachments": "+{{count}} more attached",
+    "hiddenAttachmentsAria_one": "Show {{count}} hidden attached card",
+    "hiddenAttachmentsAria_other": "Show {{count}} hidden attached cards",
     "fanPick": "Pick",
     "fanConfirm": "Confirm ({{count}})",
     "viewAttachments_one": "View attached card",
     "viewAttachments_other": "View {{count}} attached cards",
+    "viewAttachmentsFor_one": "View {{name}}'s attached card",
+    "viewAttachmentsFor_other": "View {{name}}'s {{count}} attached cards",
     "hiddenExileCards": "+{{count}} more exiled",
     "boardChoiceBadges": {
       "sacrifice": "Sac",
@@ -311,6 +331,11 @@
     "creatureFallback": "Creature #{{id}}",
     "planeswalkerFallback": "Planeswalker #{{id}}",
     "objectFallback": "Object #{{id}}",
+    "playerTarget": "{{name}} (Player — {{life}} life)",
+    "playerTargetProjected": "{{name}} (Player — {{life}} → {{projectedLife}})",
+    "playerTargetLethal": "{{name}} (Player — {{life}} → {{projectedLife}} · Lethal)",
+    "planeswalkerTarget": "{{name}} (Planeswalker)",
+    "battleTarget": "{{name}} (Battle)",
     "you": "You",
     "ally": "Ally",
     "restoreDialog": "Restore dialog",
@@ -334,7 +359,7 @@
     "assignRemaining_other": "Assign {{count}} more",
     "confirmDistribute_one": "Declare {{count}} Attacker",
     "confirmDistribute_other": "Declare {{count}} Attackers",
-    "mustAttackPlayer": "{{creature}} must attack {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Control",
@@ -380,7 +405,14 @@
     "scopeOwnTurn": "Stops only on your turns.",
     "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
-    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Current phase: {{phase}}. Open phase stop settings.",
+    "sheetTitle": "Turn phases",
+    "sheetSubtitle": "Tap a step to change when auto-pass stops there.",
+    "scopeShortOff": "Off",
+    "scopeShortAllTurns": "All turns",
+    "scopeShortOwnTurn": "My turns",
+    "scopeShortOpponentsTurns": "Opponents' turns"
   },
   "phaseTracker": {
     "turn": "Turn {{number}}"
@@ -420,6 +452,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}} counter\n{{description}}",
     "summary_other": "{{count}} {{label}} counters\n{{description}}",
+    "summaryUnbounded": "∞ {{label}} counters\n{{description}}",
     "descriptions": {
       "p1p1": "Each +1/+1 counter gives the permanent +1/+1.",
       "m1m1": "Each -1/-1 counter gives the permanent -1/-1.",
@@ -519,6 +552,11 @@
     "castCommander": "Cast {{name}} — double-click or drag to play",
     "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "ninjutsuCommander": "Commander ninjutsu: {{name}} — click to return an unblocked attacker to hand and put this commander onto the battlefield tapped and attacking",
+    "signatureSpell": "Signature Spell",
+    "signatureSpellTitle": "Signature spell: {{name}}",
+    "signatureSpellTitleTax": "Signature spell: {{name}} (Tax: +{{tax}})",
+    "castSignatureSpell": "Cast {{name}} — double-click or drag to play",
+    "castSignatureSpellTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "tax": "Tax: +{{tax}}",
     "companion": "Companion",
     "companionTitle": "Companion: {{name}}",
@@ -578,6 +616,15 @@
     "resourceMana": "mana",
     "resourceCounters": "counters",
     "resourceSpeed": "speed",
+    "loopCollapseTitleTokens": "Choose how many tokens to create",
+    "loopCollapseTitleCounters": "Choose how many times to add counters",
+    "loopCollapseTitleLife": "Choose how many times to gain life",
+    "loopCollapseTitleMixed": "Choose how many times to repeat the loop",
+    "loopCollapseAmountTokens_one": "Create {{count}} token",
+    "loopCollapseAmountTokens_other": "Create {{count}} tokens",
+    "loopCollapseAmountCounters": "Add counters {{value}}×",
+    "loopCollapseAmountLife": "Gain life {{value}}×",
+    "loopCollapseAmountMixed": "Repeat loop {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
     "spendHint": "Click your mana to spend it on this cost",
@@ -641,8 +688,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Assign {{amount}} Combat Damage",
@@ -665,6 +710,7 @@
     "activated": "Activated",
     "triggered": "Triggered",
     "triggeredFrom": "Triggered — From {{source}}",
+    "selectedModes": "Selected modes",
     "controllerYou": "You",
     "controllerOpp": "Opp",
     "controllerInitialYou": "Y",
@@ -734,7 +780,8 @@
     "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
     "skipSacrifice": "Skip Sacrifice",
     "keepCurrentTargets": "Keep Current Targets",
-    "skip": "Skip"
+    "skip": "Skip",
+    "opponentChoice": "(opponent's choice)"
   },
   "log": {
     "title": "Game Log",
@@ -1048,6 +1095,13 @@
     "activationCost": {
       "title": "Choose Activation Cost"
     },
+    "meld": {
+      "choosePair": "Choose Cards to Meld",
+      "into": "Meld into {{result}}",
+      "chooseAttackTarget": "Choose What It Attacks",
+      "player": "Player {{id}}",
+      "permanent": "Permanent {{id}}"
+    },
     "debug": {
       "modeBanner": "DEBUG MODE - Click any card",
       "modeButtonOff": "CLICK MODE OFF"
@@ -1269,6 +1323,7 @@
       "titleTopdeck": "Put on Library",
       "titleBattlefield": "Put onto Battlefield",
       "titleHand": "Return",
+      "titleExile": "Exile",
       "titleUntap": "Untap",
       "titleTap": "Tap",
       "titleAttach": "Attach",
@@ -1290,6 +1345,12 @@
       "subtitleBattlefieldUpTo_other": "Choose up to {{count}} cards to put onto the battlefield",
       "subtitleBattlefieldRange_one": "Choose {{min}}-{{count}} card to put onto the battlefield",
       "subtitleBattlefieldRange_other": "Choose {{min}}-{{count}} cards to put onto the battlefield",
+      "subtitleExileExact_one": "Choose {{count}} card to exile",
+      "subtitleExileExact_other": "Choose {{count}} cards to exile",
+      "subtitleExileUpTo_one": "Choose up to {{count}} card to exile",
+      "subtitleExileUpTo_other": "Choose up to {{count}} cards to exile",
+      "subtitleExileRange_one": "Choose {{min}}-{{count}} card to exile",
+      "subtitleExileRange_other": "Choose {{min}}-{{count}} cards to exile",
       "subtitleHandExact_one": "Choose {{count}} permanent to return to its owner's hand",
       "subtitleHandExact_other": "Choose {{count}} permanents to return to their owners' hands",
       "subtitleHandUpTo_one": "Choose up to {{count}} permanent to return to its owner's hand",
@@ -1321,6 +1382,7 @@
       "labelTop": "Top ({{selected}}/{{count}})",
       "labelPut": "Put ({{selected}}/{{count}})",
       "labelReturn": "Return ({{selected}}/{{count}})",
+      "labelExile": "Exile ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "orderTop": "Top"
     },
@@ -1532,7 +1594,11 @@
     "manaCombination": {
       "title": "Choose Mana Combination",
       "subtitleAny": "Select each mana color to produce",
-      "subtitle": "Select which combination of mana to produce"
+      "subtitle": "Select which combination of mana to produce",
+      "amount": "{{selected}} / {{count}} mana selected",
+      "decrease": "Remove {{color}} mana",
+      "increase": "Add {{color}} mana",
+      "quantity": "{{color}} mana: {{count}}"
     },
     "untapSubset": {
       "title": "Choose permanents to untap",
@@ -1665,6 +1731,13 @@
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
   },
+  "announcingOpponent": {
+    "title": "Choose Announcing Opponent ({{current}} of {{total}})",
+    "subtitle": "Choose which opponent announces {{target}} ({{current}} of {{total}}).",
+    "targetLand": "the land target",
+    "targetCreature": "the creature target",
+    "targetChoice": "this target choice"
+  },
   "clashOpponent": {
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
@@ -1746,6 +1819,13 @@
     "variantBestow": "Cast with Bestow",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
+    "variantMutate": "Cast with Mutate",
+    "variantAwaken": "Cast with Awaken",
+    "variantCleave": "Cast with Cleave",
+    "variantImpending": "Cast with Impending",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Cast with Prototype",
+    "variantFaceDown": "Cast Face Down",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {
@@ -2038,6 +2118,7 @@
     "fromSideboard": "From sideboard"
   },
   "phaseName": {
+    "Untap": "Untap",
     "Upkeep": "Upkeep",
     "Draw": "Draw",
     "PreCombatMain": "Main Phase 1",

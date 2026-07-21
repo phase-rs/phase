@@ -66,7 +66,7 @@ fn build_face_from_oracle(
     let subtype_strings: Vec<String> = obj.card_types.subtypes.clone();
 
     // Build keyword name hints if the caller didn't provide them.
-    // The parser's `extract_keyword_line` requires keyword name hints to identify
+    // The parser's `extract_granted_keyword_list` requires keyword name hints to identify
     // keyword-only lines (returns None when hints are empty). Pre-scan each line
     // through Keyword::from_str to detect bare keywords like "Flying", "Haste".
     //
@@ -187,11 +187,24 @@ impl GameScenario {
         }
     }
 
+    /// Create a scenario with an explicit `FormatConfig` (the format axis), a
+    /// player count, and a seed. This is the general constructor; `new_n_player`
+    /// is its standard-format specialization. Enables team formats — e.g.
+    /// `FormatConfig::two_headed_giant()` — in scenario-driven tests so team
+    /// combat (CR 805.10) can be exercised through the production apply pipeline.
+    pub fn new_with_format(
+        format_config: crate::types::format::FormatConfig,
+        player_count: u8,
+        seed: u64,
+    ) -> Self {
+        GameScenario {
+            state: GameState::new(format_config, player_count, seed),
+        }
+    }
+
     /// Create a scenario with N players using the default format config (20 life each).
     pub fn new_n_player(count: u8, seed: u64) -> Self {
-        GameScenario {
-            state: GameState::new(crate::types::format::FormatConfig::standard(), count, seed),
-        }
+        Self::new_with_format(crate::types::format::FormatConfig::standard(), count, seed)
     }
 
     /// Set the game phase. Also sets `waiting_for`, `priority_player`, `active_player`,
@@ -532,6 +545,38 @@ impl GameScenario {
             player,
             name.to_string(),
             Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.power = Some(power);
+        obj.toughness = Some(toughness);
+        obj.base_power = Some(power);
+        obj.base_toughness = Some(toughness);
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
+    /// Add a creature card to a player's exile. Returns a `CardBuilder` for
+    /// fluent chaining. Used to stage cards tracked by source-linked exile
+    /// effects.
+    pub fn add_creature_to_exile(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Exile,
         );
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
@@ -897,18 +942,18 @@ impl<'a> CardBuilder<'a> {
 
     /// Attach a trigger definition (mode only, no execute).
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
-        let trigger = TriggerDefinition::new(mode);
-        let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
-        Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
-        self
+        self.with_trigger_definition(TriggerDefinition::new(mode))
     }
 
     /// Attach a fully constructed trigger definition (with execute, zones, etc.).
+    ///
+    /// Appends to the printed base set and re-materializes so the live entry
+    /// carries a real `Printed` occurrence ref — never the `Unmaterialized`
+    /// fixture sentinel, which is unserializable by design.
     pub fn with_trigger_definition(&mut self, trigger: TriggerDefinition) -> &mut Self {
         let obj = self.obj();
-        obj.trigger_definitions.push(trigger.clone());
         Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger);
+        obj.materialize_base_trigger_definitions();
         self
     }
 
@@ -997,6 +1042,34 @@ impl<'a> CardBuilder<'a> {
             .retain(|t| *t != CoreType::Instant && *t != CoreType::Sorcery);
         if !obj.card_types.core_types.contains(&CoreType::Creature) {
             obj.card_types.core_types.push(CoreType::Creature);
+        }
+        self.sync_base_card_types();
+        self
+    }
+
+    /// CR 306: Make this card a planeswalker with a printed loyalty number.
+    /// If the object is already on the battlefield, mirror the printed loyalty
+    /// into counters to model a pre-existing planeswalker fixture.
+    pub fn as_planeswalker_with_loyalty(&mut self, subtype: &str, loyalty: u32) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types.core_types.retain(|t| {
+            !matches!(
+                t,
+                CoreType::Creature | CoreType::Instant | CoreType::Sorcery
+            )
+        });
+        if !obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+        }
+        obj.card_types.subtypes = vec![subtype.to_string()];
+        obj.power = None;
+        obj.toughness = None;
+        obj.base_power = None;
+        obj.base_toughness = None;
+        obj.loyalty = Some(loyalty);
+        obj.base_loyalty = Some(loyalty);
+        if obj.zone == Zone::Battlefield {
+            obj.counters.insert(CounterType::Loyalty, loyalty);
         }
         self.sync_base_card_types();
         self
@@ -1522,6 +1595,8 @@ impl GameRunner {
     pub fn waiting_for_kind(&self) -> &'static str {
         match &self.state.waiting_for {
             WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MeldPairChoice { .. } => "MeldPairChoice",
+            WaitingFor::MeldAttackTargetChoice { .. } => "MeldAttackTargetChoice",
             WaitingFor::MulliganDecision { .. } => "MulliganDecision",
             WaitingFor::OpeningHandBottomCards { .. } => "OpeningHandBottomCards",
             WaitingFor::ManaPayment { .. } => "ManaPayment",
@@ -1540,6 +1615,7 @@ impl GameRunner {
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
@@ -1635,6 +1711,8 @@ impl GameRunner {
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
             WaitingFor::LoopShortcut { .. } => "LoopShortcut",
             WaitingFor::RespondToShortcut { .. } => "RespondToShortcut",
+            WaitingFor::PrecastCopyShortcutOffer { .. } => "PrecastCopyShortcutOffer",
+            WaitingFor::RespondToPrecastCopyShortcut { .. } => "RespondToPrecastCopyShortcut",
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
@@ -1696,11 +1774,13 @@ impl GameRunner {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
             WaitingFor::KeepWithinTotalPowerChoice { .. } => "KeepWithinTotalPowerChoice",
+            WaitingFor::KeepExactPermanentsChoice { .. } => "KeepExactPermanentsChoice",
             WaitingFor::ChooseXValue { .. } => "ChooseXValue",
             WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
@@ -1784,6 +1864,7 @@ pub struct SpellCast<'a> {
     alternative_cast: Option<AlternativeCastDecision>,
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
+    free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
     target_players: Vec<PlayerId>,
@@ -1811,6 +1892,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast: None,
             adventure_creature: None,
             casting_variant: None,
+            free_cast: false,
             modes: None,
             x: None,
             target_players: Vec::new(),
@@ -1876,6 +1958,15 @@ impl<'a> SpellCast<'a> {
     /// surfaces a variant choice without an explicit test intent.
     pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
         self.casting_variant = Some(variant);
+        self
+    }
+
+    /// Elect the free `HandPermission` option at a `CastingVariantChoice` without
+    /// having to name the granting source's `ObjectId` (CR 118.9 / CR 118.9a). The
+    /// driver picks the first `CastingVariant::HandPermission` option the menu
+    /// offers — the Omniscience-class "cast without paying its mana cost" branch.
+    pub fn free_cast(mut self) -> Self {
+        self.free_cast = true;
         self
     }
 
@@ -2020,6 +2111,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast,
             adventure_creature,
             casting_variant,
+            free_cast,
             modes,
             x,
             target_players,
@@ -2120,21 +2212,38 @@ impl<'a> SpellCast<'a> {
                     )?;
                 }
                 WaitingFor::CastingVariantChoice { options, .. } => {
-                    let variant = casting_variant.unwrap_or_else(|| {
-                        panic!(
-                            "SpellCast reached WaitingFor::CastingVariantChoice but no \
-                             .casting_variant(..) was declared — declare the intended cast variant"
-                        )
-                    });
-                    let index = options
-                        .iter()
-                        .position(|option| option.variant == variant)
-                        .unwrap_or_else(|| {
+                    // CR 118.9 / CR 118.9a: `.free_cast()` elects the first
+                    // `HandPermission` option without naming the source id;
+                    // otherwise match the explicitly declared `.casting_variant(..)`.
+                    let index = if free_cast {
+                        options
+                            .iter()
+                            .position(|option| {
+                                matches!(option.variant, CastingVariant::HandPermission { .. })
+                            })
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "SpellCast .free_cast() found no HandPermission option in {:?}",
+                                    options
+                                )
+                            })
+                    } else {
+                        let variant = casting_variant.unwrap_or_else(|| {
                             panic!(
-                                "SpellCast could not find requested cast variant {:?} in options {:?}",
-                                variant, options
+                                "SpellCast reached WaitingFor::CastingVariantChoice but no \
+                                 .casting_variant(..) was declared — declare the intended cast variant"
                             )
                         });
+                        options
+                            .iter()
+                            .position(|option| option.variant == variant)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "SpellCast could not find requested cast variant {:?} in options {:?}",
+                                    variant, options
+                                )
+                            })
+                    };
                     selected_casting_variant = Some(options[index].clone());
                     act_collect(
                         runner,
@@ -2355,6 +2464,18 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Mutate the board WHILE the committed spell is still on the stack.
+    ///
+    /// The spell has been announced (CR 601.2a-i) but not resolved (CR 608.2), which
+    /// is the only window in which "did this value LOCK at announcement, or is it
+    /// re-read at resolution?" is answerable. A test that merely casts and resolves
+    /// against a static board cannot tell a locked snapshot from a live re-read —
+    /// both produce the same number. Changing the board here and then resolving is
+    /// what discriminates them.
+    pub fn state_mut(&mut self) -> &mut GameState {
+        &mut self.runner.state
+    }
+
     /// The cast variant option selected during `CastingVariantChoice`, if the
     /// cast surfaced that prompt.
     pub fn selected_casting_variant(&self) -> Option<&CastingVariantChoiceOption> {
@@ -2476,6 +2597,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::Priority { .. } => "Priority",
         WaitingFor::OrderTriggers { .. } => "OrderTriggers",
         WaitingFor::ScryChoice { .. } => "ScryChoice",
+        WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
         WaitingFor::SearchChoice { .. } => "SearchChoice",
         WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
         WaitingFor::CastOffer { .. } => "CastOffer",
@@ -2949,6 +3071,12 @@ fn drive_resolution(
             WaitingFor::ScryChoice { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
+            }
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                cards, keep_on_top, ..
+            } => {
+                let keep: Vec<_> = cards.iter().take(*keep_on_top).copied().collect();
+                act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             // CR 701.25a: default surveil policy keeps all looked-at cards on
             // top, mirroring the scry default.
@@ -4369,7 +4497,10 @@ mod tests {
         let obj = &runner.state().objects[&id];
 
         assert!(!obj.trigger_definitions.is_empty());
-        assert_eq!(obj.trigger_definitions[0].mode, TriggerMode::ChangesZone);
+        assert_eq!(
+            obj.trigger_definitions[0].definition.mode,
+            TriggerMode::ChangesZone
+        );
     }
 
     #[test]
@@ -4434,12 +4565,13 @@ mod tests {
             .trigger_definitions
             .iter_all()
             .find(|t| {
-                t.description
+                t.definition
+                    .description
                     .as_deref()
                     .is_some_and(|d| d.contains("poison counters"))
             })
             .expect("ixhel end-step trigger");
-        let execute = trigger.execute.as_ref().expect("execute");
+        let execute = trigger.definition.execute.as_ref().expect("execute");
         assert!(
             matches!(
                 &*execute.effect,

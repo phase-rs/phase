@@ -5,7 +5,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DrawSequenceOrigin, GameState};
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 use crate::types::statics::StaticMode;
 #[cfg(test)]
@@ -172,7 +172,14 @@ pub(crate) fn start_draw_sequence(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    start_draw_sequence_with_replacement_applied(state, player, count, HashSet::new(), events)
+    start_draw_sequence_with_origin(
+        state,
+        player,
+        count,
+        HashSet::new(),
+        DrawSequenceOrigin::Plain,
+        events,
+    )
 }
 
 /// CR 614.5 + CR 121.2: Begin a draw instruction with replacements that have
@@ -187,9 +194,28 @@ fn start_draw_sequence_with_replacement_applied(
     applied: HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    let frame_id = state
-        .draw_sequences
-        .push_with_replacement_applied(player, count, applied);
+    start_draw_sequence_with_origin(
+        state,
+        player,
+        count,
+        applied,
+        DrawSequenceOrigin::Plain,
+        events,
+    )
+}
+
+/// CR 121.2 + CR 121.6b: Begin a draw instruction with its completion origin.
+/// The origin is retained across any per-unit replacement choice so the frame's
+/// completion runs the correct post-draw tail after the final unit settles.
+pub(crate) fn start_draw_sequence_with_origin(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    count: u32,
+    applied: HashSet<AppliedReplacementKey>,
+    origin: DrawSequenceOrigin,
+    events: &mut Vec<GameEvent>,
+) -> replacement::ReplacementResult {
+    let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
     resume_draw_sequence(state, frame_id, events)
 }
 
@@ -226,7 +252,7 @@ pub(crate) fn resume_draw_sequence(
         // Take the next owed unit off the cursor BEFORE attempting it, so a park
         // mid-attempt leaves the frame recording the units AFTER this one. The
         // in-flight unit is settled by the replacement choice that parked it.
-        let Some(frame) = state.draw_sequences.active_if(frame_id) else {
+        let Some(frame) = state.active_draw_sequence_if(frame_id) else {
             debug_assert!(
                 false,
                 "resume_draw_sequence({frame_id:?}) is not the active draw frame — a nested \
@@ -254,11 +280,22 @@ pub(crate) fn resume_draw_sequence(
         );
         match result {
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                // The unit's delivery may itself have pushed and popped a nested
-                // instruction, so re-address this frame by ID rather than assuming
-                // it is still whatever `active_mut()` returns.
-                if let Some(frame) = state.draw_sequences.active_if(frame_id) {
+                // The unit's delivery may itself have pushed a nested instruction.
+                // Credit this exact frame by identity, but never resume it while
+                // the nested frame remains active.
+                if let Some(frame) = state.draw_sequence_frame_mut(frame_id) {
                     frame.accumulated += unit_drawn;
+                }
+                if state
+                    .active_draw_sequence()
+                    .is_none_or(|frame| frame.frame_id != frame_id)
+                {
+                    return ReplacementResult::NeedsChoice(
+                        state
+                            .waiting_for
+                            .acting_player()
+                            .unwrap_or(state.active_player),
+                    );
                 }
             }
             // The frame stays parked on the stack; the choice resumes it.
@@ -268,53 +305,52 @@ pub(crate) fn resume_draw_sequence(
         }
     }
 
-    let Some(frame) = state.draw_sequences.pop(frame_id) else {
+    let Some(frame) = state.pop_active_draw_sequence(frame_id) else {
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return ReplacementResult::Prevented;
     };
     state.last_effect_count = Some(frame.accumulated as i32);
+    match frame.origin {
+        DrawSequenceOrigin::Plain => {
+            // Intentionally no `EffectResolved { Draw }`: no trigger matcher consumes
+            // `EffectKind::Draw` today, so wiring that event is out of scope here.
+        }
+        DrawSequenceOrigin::ConniveTail { conniver, count } => {
+            super::connive::apply_connive_tail(state, *conniver, count, events);
+        }
+        DrawSequenceOrigin::ScryCompletion { source_id } => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Scry,
+                source_id,
+                subject: None,
+            });
+        }
+    }
+
+    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
+    // normal pending-continuation slot. Keep this paused drain resident until
+    // that chain runs: its `PostReplacementSourceController` read still needs
+    // the prevented-event context. A draw without a parked follow-up is the
+    // terminal action of this dispatch and can retire the exact top entry now.
+    // Nested replacement dispatches retain their own stack entries, so this
+    // never pops an outer paused event context.
+    if state.active_ability_continuation().is_none() {
+        let completed = state
+            .take_completed_multi_draw_frame()
+            .expect("completed multi-draw frame must remain top-owned");
+        // The promoted continuation is now the paused drain's direct child;
+        // it must read the resident event context before its own completion
+        // retires that drain.
+        if completed.is_some() && state.active_ability_continuation().is_none() {
+            state.finish_active_paused_post_replacement_dispatch();
+        }
+    }
+
     ReplacementResult::Execute(ProposedEvent::Draw {
         player_id: frame.player,
         count: 0,
         applied: HashSet::new(),
     })
-}
-
-/// CR 614.6 + CR 614.11 + CR 704.3: Single authority for the
-/// "propose Draw → replace → apply → drain post-replacement continuation"
-/// sequence. Every site that proposes a `ProposedEvent::Draw` MUST call this
-/// helper — otherwise a substituted mandatory-post-effect (Jace WinTheGame,
-/// Abundance reveal-until) leaks past the resolution step and drains against
-/// the wrong player on a later priority pass.
-///
-/// `apply_executed` is invoked on the `Execute` arm with the (possibly
-/// pre-zeroed by `apply_single_replacement`) replaced event, so callers can
-/// layer their own bookkeeping — miracle tracking (`effects/draw.rs`,
-/// `effects/connive.rs`, `effects/gift_delivery.rs`), draw-step
-/// `has_drawn_this_turn` flag (`turns.rs`), or the chain's discard step
-/// (connive). The continuation drain runs immediately after `apply_executed`
-/// returns, inside the same resolution step so SBAs (CR 704.5b
-/// draw-from-empty-library loss) and priority never fall between the
-/// (possibly pre-zeroed) draw and its substitute.
-///
-/// On `NeedsChoice`, sets `state.waiting_for` to the replacement-choice
-/// prompt before returning so callers only need to bail. On `Prevented`,
-/// `apply_executed` is not called.
-pub(crate) fn draw_through_replacement(
-    state: &mut GameState,
-    player_id: crate::types::player::PlayerId,
-    count: u32,
-    events: &mut Vec<GameEvent>,
-    apply_executed: impl FnOnce(&mut GameState, ProposedEvent, &mut Vec<GameEvent>),
-) -> replacement::ReplacementResult {
-    draw_through_replacement_with_applied(
-        state,
-        player_id,
-        count,
-        HashSet::new(),
-        events,
-        apply_executed,
-    )
 }
 
 /// CR 614.5: Propose a draw while preserving replacements already applied to
@@ -432,7 +468,7 @@ pub fn apply_draw_after_replacement(
         // SelfRef`-bound to a battlefield host; the only `valid_card: None` class
         // — Rest in Peace / Leyline "put into a graveyard → exile" — is
         // destination-gated to Graveyard), so a draw cannot surface a CR 616.1
-        // ordering choice and no `pending_batch_deliveries` resume is wired.
+        // ordering choice and no BatchDelivery resume is wired.
         //
         // The assert catches the MECHANICAL non-delivery bug: if the card is
         // still in the library, the move stranded — `move_object` returned a
@@ -463,6 +499,16 @@ pub fn apply_draw_after_replacement(
         // draw of the draw step" read this ordinal.
         let (nth_in_turn, nth_in_step) =
             if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
+                // CR 121.1: This driver is the single authority for every
+                // settled draw, so it is the single place that marks the
+                // player as having drawn a card this turn — broadened from
+                // the pre-migration "took the draw-step draw" reading (the
+                // only production setter, deleted by the turns.rs/gift
+                // migration onto this driver) to "drew at least one card
+                // this turn". No production reader distinguishes the two;
+                // `turns.rs` clears it at turn start and
+                // `analysis/resource.rs` ignores it entirely.
+                player.has_drawn_this_turn = true;
                 player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
                 player.cards_drawn_this_step = player.cards_drawn_this_step.saturating_add(1);
                 (player.cards_drawn_this_turn, player.cards_drawn_this_step)

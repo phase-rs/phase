@@ -23,7 +23,7 @@ use nom::Parser;
 use super::condition::{parse_inner_condition, parse_recipient_has_counters};
 use super::error::{oracle_err, OracleError, OracleResult};
 use super::primitives::scan_contains;
-use crate::types::ability::{Duration, ObjectScope, PlayerScope, StaticCondition};
+use crate::types::ability::{Duration, ObjectScope, PlayerScope, StaticCondition, TargetFilter};
 use crate::types::phase::Phase;
 
 /// Parse a duration phrase from Oracle text.
@@ -198,6 +198,11 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
         // creature", bare card names) bind to the source. See
         // `parse_remains_tapped`.
         parse_remains_tapped,
+        // CR 611.2b + CR 301.5: an Equipment's "for as long as ~ remains
+        // attached to it" duration follows the creature that received the
+        // effect. `AttachedTo` is evaluated source-relatively each layer pass,
+        // so the duration ends as soon as the Equipment leaves that creature.
+        parse_remains_attached_to_it,
         // CR 311.2 + CR 901.7 + CR 611.2b: "[this plane] remains face up" — the
         // plane-face-up-gated continuous-effect duration. Kept adjacent to
         // `parse_remains_tapped` (the sibling source-status "remains X" family).
@@ -237,6 +242,22 @@ pub fn parse_for_as_long_as_condition(input: &str) -> OracleResult<'_, Duration>
             },
         }),
     ))
+    .parse(input)
+}
+
+fn parse_remains_attached_to_it(input: &str) -> OracleResult<'_, Duration> {
+    value(
+        Duration::ForAsLongAs {
+            condition: StaticCondition::RecipientMatchesFilter {
+                filter: TargetFilter::AttachedTo,
+            },
+        },
+        (
+            parse_self_reference_subject,
+            tag(" remains attached to it"),
+            rest,
+        ),
+    )
     .parse(input)
 }
 
@@ -712,6 +733,24 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 "self-reference subject {subject:?} must bind the source",
+            );
+        }
+    }
+
+    #[test]
+    fn test_remains_attached_to_it_binds_recipient() {
+        for subject in ["~", "this equipment", "this artifact", "this permanent"] {
+            let text = format!("for as long as {subject} remains attached to it");
+            let (rest, duration) = parse_duration(&text).unwrap();
+            assert_eq!(rest, "", "failed for {subject:?}");
+            assert_eq!(
+                duration,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+                },
+                "attachment duration for {subject:?} must follow the recipient",
             );
         }
     }

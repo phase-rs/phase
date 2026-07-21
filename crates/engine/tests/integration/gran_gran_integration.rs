@@ -351,7 +351,7 @@ fn abandon_attachments_discard_then_draw_fires() {
         "cost_payment_failed_flag must not linger after successful IfYouDo path"
     );
     // Suppress unused warning in the auto-drain path.
-    let _ = PendingContinuation::new(Box::new(chain.clone()));
+    let _ = PendingContinuation::new(Box::new(chain.clone()), state);
 }
 
 #[test]

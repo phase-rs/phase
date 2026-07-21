@@ -376,6 +376,8 @@ pub fn convert_permanent_rule(
             who: engine::types::statics::ProhibitionScope::AllPlayers,
             source_filter: affected.clone(),
             exemption: engine::types::statics::ActivationExemption::None,
+            // CR 606.2: not kind-narrowed — blocks any activated ability.
+            kind: None,
         },
 
         _ => {

@@ -33,7 +33,7 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::game::triggers::trigger_matcher;
+use engine::game::triggers::{trigger_matcher, trigger_source_context_for_latch};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, Effect, FilterProp, TargetFilter, TargetRef, TypedFilter,
@@ -216,6 +216,14 @@ fn avatar_aang_batched_bend_trigger_fires_on_any_bend() {
     scenario.at_phase(Phase::PreCombatMain);
     let aang = scenario.add_creature(P0, "Avatar Aang", 4, 4).id();
     let runner = scenario.build();
+    let source_context = trigger_source_context_for_latch(
+        runner.state(),
+        runner
+            .state()
+            .objects
+            .get(&aang)
+            .expect("Avatar Aang source"),
+    );
 
     let matcher = trigger_matcher(trigger.mode.clone())
         .expect("ElementalBend has a registered runtime matcher");
@@ -225,7 +233,7 @@ fn avatar_aang_batched_bend_trigger_fires_on_any_bend() {
         controller: P0,
     };
     assert!(
-        matcher(&earthbend, trigger, aang, runner.state()),
+        matcher(&earthbend, trigger, &source_context, runner.state()),
         "ElementalBend must match an Earthbend event for the source's controller"
     );
     let firebend = GameEvent::Firebend {
@@ -233,7 +241,7 @@ fn avatar_aang_batched_bend_trigger_fires_on_any_bend() {
         controller: P0,
     };
     assert!(
-        matcher(&firebend, trigger, aang, runner.state()),
+        matcher(&firebend, trigger, &source_context, runner.state()),
         "ElementalBend must match a Firebend event for the source's controller"
     );
     // An opponent's bend must NOT fire the controller-scoped trigger.
@@ -242,7 +250,7 @@ fn avatar_aang_batched_bend_trigger_fires_on_any_bend() {
         controller: P1,
     };
     assert!(
-        !matcher(&opp_bend, trigger, aang, runner.state()),
+        !matcher(&opp_bend, trigger, &source_context, runner.state()),
         "ElementalBend is controller-scoped: an opponent's bend must not fire it"
     );
 }

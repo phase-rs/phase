@@ -391,6 +391,25 @@ describe("getBoardChoiceView", () => {
     expect(canConfirmBoardChoice(choice, [10], objects)).toBe(false);
   });
 
+  it("renders the engine-provided exact keeper requirement without client-side capping", () => {
+    const choice = getBoardChoiceView({
+      type: "KeepExactPermanentsChoice",
+      data: {
+        player: 0,
+        target_player: 0,
+        eligible: [10, 11],
+        required_count: 5,
+        source_id: 50,
+        remaining_players: [],
+        all_kept: [],
+        scoped_players: [0],
+      },
+    });
+
+    expect(choice).not.toBeNull();
+    expect(choice?.selection).toEqual({ type: "exactCount", count: 5 });
+  });
+
   it("maps simple StationTarget and Ring-bearer choices to immediate single actions", () => {
     const station = getBoardChoiceView({
       type: "StationTarget",
@@ -438,6 +457,41 @@ describe("getBoardChoiceView", () => {
         },
       }),
     ).toBeNull();
+  });
+
+  it("maps resolution TapCreatures PayCost to a non-cancellable board choice", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "TapCreatures" },
+        choices: [4, 5],
+        count: 2,
+        min_count: 2,
+        resume: { type: "Resolution" },
+      },
+    };
+
+    const choice = getBoardChoiceView(
+      waitingFor,
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "tap",
+      selection: { type: "exactCount", count: 2 },
+      response: { type: "SelectCards" },
+      cancelAction: undefined,
+    });
+    expect(choice && buildBoardChoiceAction(choice, [4, 5])).toEqual({
+      type: "SelectCards",
+      data: { cards: [4, 5] },
+    });
   });
 
   it("keeps PayCost choices modal-only unless every candidate is on the battlefield", () => {

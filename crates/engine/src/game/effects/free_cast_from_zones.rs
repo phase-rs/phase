@@ -117,6 +117,14 @@ pub(crate) fn eligible_candidates(
             if !matches_target_filter_in_owner_zone(state, id, filter, &ctx) {
                 continue;
             }
+            // CR 601.2c + CR 608.2g: A spell cast during resolution still
+            // needs every required target to be legal before it can be offered.
+            let Some(obj) = state.objects.get(&id) else {
+                continue;
+            };
+            if !crate::game::casting::spell_has_legal_targets(state, obj, controller) {
+                continue;
+            }
             // CR 202.3 + CR 107.3b + CR 601.2b: Respect the running MV budget.
             // Because this window casts without paying a mana cost, X can only
             // be announced as 0, so the card's printed mana_value() is the same

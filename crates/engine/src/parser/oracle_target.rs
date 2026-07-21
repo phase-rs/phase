@@ -3,7 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::space1;
-use nom::combinator::{eof, not, opt, peek, success, value};
+use nom::combinator::{eof, map, not, opt, peek, success, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -410,6 +410,24 @@ fn parse_disjunct_mana_value(
             value: mv,
         },
     ))
+}
+
+/// CR 102.1 + CR 103.1: seat-relative neighbor phrase → [`SeatDirection`].
+/// Matches "the player to {their|your} {left|right}" — the reflexive "their"
+/// form for "each player …" chooser scopes, the "your" form for
+/// controller-relative references. Single authority for seat-direction phrase
+/// parsing on already-lowercased text; the `TargetFilter::Neighbor` arms and the
+/// `EachPlayerCopyChosen` controller-clause dispatch both delegate here so the
+/// phrase lives in exactly one combinator.
+pub(crate) fn parse_neighbor_seat_direction(input: &str) -> OracleResult<'_, SeatDirection> {
+    preceded(
+        (tag("the player to "), alt((tag("their "), tag("your ")))),
+        alt((
+            value(SeatDirection::Left, tag("left")),
+            value(SeatDirection::Right, tag("right")),
+        )),
+    )
+    .parse(input)
 }
 
 /// Context-aware variant of `parse_target`. TargetFallback diagnostics are
@@ -1189,22 +1207,14 @@ pub fn parse_target_with_syntax<'a>(
                 TargetFilter::ParentTargetSlot { index: 0 },
                 tag("the second player"),
             ),
-            // CR 102.1 + CR 103.1: "the player to your right/left" —
+            // CR 102.1 + CR 103.1: "the player to {your|their} {right|left}" —
             // seating-relative neighbor. Right = previous seat (clockwise turn
             // order proceeds to the left). Placed before the bare "the player"
             // arm so the longer phrase wins under longest-match-first dispatch.
-            value(
-                TargetFilter::Neighbor {
-                    direction: SeatDirection::Right,
-                },
-                tag("the player to your right"),
-            ),
-            value(
-                TargetFilter::Neighbor {
-                    direction: SeatDirection::Left,
-                },
-                tag("the player to your left"),
-            ),
+            // Delegates to the single `parse_neighbor_seat_direction` authority.
+            map(parse_neighbor_seat_direction, |direction| {
+                TargetFilter::Neighbor { direction }
+            }),
             value(TargetFilter::ParentTarget, tag("the player")),
             value(TargetFilter::ParentTarget, tag("the creature")),
             value(TargetFilter::ParentTarget, tag("the spell")),
@@ -2120,6 +2130,21 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // GAP B (DEFERRED — strict-failure tag, DynQty subgroup D follow-up): the leading
+    // adjective handlers here run as a fixed positional cascade (combat-status →
+    // enchanted/equipped → modified → renowned → goaded → historic → … → nontoken at
+    // ~:2310). A phrase whose adjectives appear in a different order — notably "nontoken
+    // attacking creature" (Sophina, Spearsage Deserter) — is only partly stripped:
+    // "nontoken" leads, so THIS combat-status loop never sees "attacking"; by the time
+    // "nontoken " is consumed further down, the combat-status loop has already passed, so
+    // "attacking creature" fails the type parse and `parse_for_each_clause` returns None
+    // (NO false lift — Sophina's Investigate stays bare and coverage stays honestly RED).
+    // The fix is to collapse this cascade into a single order-free many0-style property
+    // loop, but that is the hottest shared parser path (high CI-regression blast radius)
+    // and is out of scope here. Tripwire: the Sophina branch of
+    // `object_for_each_investigate_is_lifted` asserts the bare-Investigate state and
+    // FLIPS to fail when this gap is closed.
+    //
     // CR 509.1h: Consume combat status prefixes (unblocked, attacking, blocking).
     // Handles "or" compound as a property disjunction: "attacking or blocking
     // creature" means attacking creature OR blocking creature, not both.
@@ -2189,6 +2214,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Renowned);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 701.15b/c: "goaded" is a permanent designation used as an adjective in
+    // filters like "goaded creature you control". Mirrors the "renowned" strip:
+    // only consume when a type word follows, so the "goad target creature" verb
+    // path is untouched.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("goaded ").parse(&lower[pos..]) {
+        if starts_with_type_phrase_lead(rest) {
+            properties.push(FilterProp::Goaded);
             pos += lower[pos..].len() - rest.len();
         }
     }
@@ -2954,6 +2990,21 @@ pub fn parse_type_phrase_with_ctx<'a>(
         pos += consumed;
     }
 
+    // CR 302.6 + CR 508.1a: trailing continuity exemption "..., except for
+    // creatures [the/that player] hasn't controlled continuously since the
+    // beginning of the turn" (Total War). The exempted set — creatures NOT
+    // controlled continuously — is removed from the population, so only
+    // creatures the player HAS controlled continuously are affected. Placed
+    // after the controller/"didn't attack" relative clauses because the
+    // exemption trails them; the early `except for <type-list>` block sees the
+    // text before those clauses are consumed and does not reach it. Reuses the
+    // same `ControlledContinuouslySinceTurnBegan` restriction Siren's Call
+    // attaches via the ActivePlayerPunisher continuity path.
+    if let Some((prop, consumed)) = parse_except_continuity_exemption_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
     if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
         properties.extend(zone_props);
@@ -3042,6 +3093,31 @@ pub fn parse_type_phrase_with_ctx<'a>(
         if controller.is_none() {
             controller = zone_ctrl;
         }
+    }
+
+    // CR 202.3 + CR 608.2c + CR 115.2: a mana-value clause may TRAIL a zone clause
+    // ("target creature card in your graveyard with mana value X/4 or less/less than
+    // or equal to the number of permanent cards in your graveyard" — Lazav the
+    // Multifarious, Likeness Looter, Squirming Emergence, Too Evil to Stay Dead's
+    // narrow branch). The pre-zone parse_mana_value_suffix pass above only catches
+    // the clause when it precedes the zone; this second pass catches the
+    // zone-then-mana-value ordering so the full source-filter phrase is consumed
+    // (a leftover would trip the clone-replacement guard) and FilterProp::Cmc reaches
+    // the target filter. Mirrors the zone->counter and zone->without second passes below.
+    //
+    // RESOLVED (finding #1, follow-up to the engine gap this fix originally
+    // unmasked): correctly narrowing Too Evil to Stay Dead's BASE branch to
+    // `Cmc{LE, Fixed 4}` had exposed that its teamwork "instead" broad
+    // override was not applied at cast-time target selection — only kicker
+    // propagated `additional_cost_paid` there. That cast-time propagation is
+    // now generalized from kicker to every `AdditionalCost`-"instead" with a
+    // non-empty effective queue (parameterize-don't-proliferate). See
+    // `game/ability_utils.rs`: `collect_target_slots_inner` +
+    // `additional_cost_instead_spell_has_legal_targets`; `game/casting.rs`'s
+    // pre-target deferral gates.
+    if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
+        properties.push(prop);
+        pos += consumed;
     }
 
     // CR 122.1 + CR 400.1: A counter-presence clause may TRAIL a zone clause
@@ -3228,6 +3304,35 @@ pub fn parse_type_phrase_with_ctx<'a>(
             }
             break;
         }
+    }
+
+    // CR 601.2c: the controller normally announces every target; this card text
+    // overrides the announcer for THIS slot — "of an opponent's choice" (Volcanic
+    // Offering). The announcing player is an opponent of the controller (CR 102.3);
+    // the slot is still a target of the controller's spell (CR 115.1). In 3+ player
+    // games the controller picks which opponent announces before target selection
+    // (see `ChooseAnnouncingOpponent`).
+    let remaining_opp_choice = lower[pos..].trim_start();
+    let opp_choice_offset = lower[pos..].len() - remaining_opp_choice.len();
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("of an opponent's choice").parse(remaining_opp_choice)
+    {
+        pos += opp_choice_offset + (remaining_opp_choice.len() - rest.len());
+        ctx.target_chooser = Some(TargetFilter::Opponent);
+    }
+
+    // CR 601.2c + CR 109.4: A target's announcing-player qualifier can precede
+    // its controller restriction ("target creature of an opponent's choice you
+    // don't control", Volcanic Offering). The primary controller-suffix pass
+    // runs before choice qualifiers, so re-run it here to consume that trailing
+    // restriction without letting it leak into a following effect clause.
+    if controller.is_none() {
+        pos += parse_ownership_or_controller_suffix(
+            &lower[pos..],
+            &mut properties,
+            &mut controller,
+            ctx,
+        );
     }
 
     // CR 201.2: "named [card name]" suffix — filter by exact card name.
@@ -3868,6 +3973,8 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
         FilterProp::Modified
             // CR 702.112b: "renowned [type]" adjective prefix.
             | FilterProp::Renowned
+            // CR 701.15b/c: "goaded [type]" adjective prefix.
+            | FilterProp::Goaded
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
             | FilterProp::NotHistoric
@@ -6460,6 +6567,9 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
+        // CR 120.1: active voice — the creature dealt damage (was the source),
+        // distinct from the passive "was dealt damage" above (Red Guardian).
+        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -6770,6 +6880,49 @@ fn parse_except_for_type_list_suffix(
     }
 
     Some((neg_types, props, consumed))
+}
+
+/// CR 302.6 + CR 508.1a: a trailing continuity exemption on a target filter —
+/// "..., except for creatures [the/that player] hasn't controlled continuously
+/// since the beginning of the turn" (Total War). The exempted set is the
+/// creatures NOT controlled continuously since the turn began, so excluding it
+/// restricts the population to creatures the player HAS controlled continuously:
+/// `FilterProp::ControlledContinuouslySinceTurnBegan`. This is the "except
+/// for <predicate>" sibling of the type-list exclusion above; it reaches the
+/// same restriction Siren's Call attaches via its `ignore this effect for each
+/// creature ... didn't control continuously ...` ActivePlayerPunisher path
+/// (`parser/oracle.rs::parse_continuity_exemption_clause`), for the destroy /
+/// affect-all shape that trails the population phrase instead.
+fn parse_except_continuity_exemption_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    // Optional list/clause comma the exemption trails ("didn't attack, except…").
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>(",")).parse(trimmed).ok()?;
+    let rest = rest.trim_start();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("except for creatures")
+        .parse(rest)
+        .ok()?;
+    // Optional subject anaphor: " the player" / " that player" / "".
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>(" the player"),
+        tag(" that player"),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>(" hasn't controlled"),
+        tag(" haven't controlled"),
+        tag(" didn't control"),
+        tag(" doesn't control"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" continuously since the beginning of the turn")
+        .parse(rest)
+        .ok()?;
+    Some((
+        FilterProp::ControlledContinuouslySinceTurnBegan,
+        text.len() - rest.len(),
+    ))
 }
 
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
@@ -8274,6 +8427,25 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    /// CR 601.2c + CR 109.4: The announcing-player qualifier and controller
+    /// restriction both bind to one target phrase, even when the qualifier comes
+    /// first (Volcanic Offering's printed template).
+    #[test]
+    fn opponent_choice_target_consumes_trailing_controller_restriction() {
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_target_with_ctx(
+            "target creature of an opponent's choice you don't control",
+            &mut ctx,
+        );
+
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "");
+        assert_eq!(ctx.target_chooser, Some(TargetFilter::Opponent));
     }
 
     #[test]
@@ -10013,6 +10185,22 @@ mod tests {
                         zone: Zone::Graveyard
                     }])
             )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    // Necromancy building block (#640): "target creature card from a graveyard"
+    // must parse to a creature+card `Typed` filter, zone Graveyard, with NO owner
+    // constraint ("a graveyard", not "your graveyard"). This is the target the
+    // reanimator-Aura GRANT-shape ETB chain feeds into its root ChangeZone.
+    #[test]
+    fn target_creature_card_from_a_graveyard() {
+        let (f, rest) = parse_target("target creature card from a graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }]))
         );
         assert_eq!(rest.trim(), "");
     }
@@ -11991,6 +12179,61 @@ mod tests {
     }
 
     #[test]
+    fn goaded_adjective_creates_filter_prop() {
+        // CR 701.15b/c: "goaded creature" is a designation adjective (Gap A, site 15).
+        // This is the exact path Serene Sleuth's "goaded creature you control" takes.
+        let (f, rest) = parse_type_phrase("goaded creature you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Goaded])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn goad_verb_is_not_a_goaded_filter_prop() {
+        // Negative sibling: the Goad verb ("goad target creature") must NOT be
+        // misread as the `FilterProp::Goaded` designation. The adjective strip is
+        // `tag("goaded ")` guarded on a trailing type word, so the bare verb "goad "
+        // never fires it.
+        let (f, _rest) = parse_type_phrase("goad target creature");
+        let has_goaded = match &f {
+            TargetFilter::Typed(t) => t.properties.contains(&FilterProp::Goaded),
+            _ => false,
+        };
+        assert!(
+            !has_goaded,
+            "the Goad verb must not produce a FilterProp::Goaded designation: {f:?}"
+        );
+    }
+
+    #[test]
+    fn goaded_is_registered_as_leg_local_adjective_prefix() {
+        // Site 13 (`is_adjective_prefix_prop`) — the silent-break registration and the
+        // review's headline miss. This predicate is the single leg-locality registry for
+        // both disjunctive grammars; an unregistered adjective prop is wrongly
+        // distributed across earlier `Or` legs (the #2892 class bug).
+        //
+        // This is a DIRECT unit guard rather than a behavioral multi-leg parse: I
+        // measured that the natural "goaded X or Y" disjunction does not route through
+        // `parse_type_phrase`'s Or distributor — `parse_type_phrase("goaded creature or
+        // an artifact")` leaves " or an artifact" unconsumed (no in-repo grammar emits a
+        // goaded disjunction), which the plan anticipated as the fallback case. The
+        // direct guard is nonetheless a genuine revert-probe: dropping the
+        // `| FilterProp::Goaded` arm from `is_adjective_prefix_prop` flips this to false
+        // and FAILS, so the silent class bug cannot ship undetected.
+        assert!(
+            is_adjective_prefix_prop(&FilterProp::Goaded),
+            "FilterProp::Goaded must register as a leg-local adjective prefix, or it \
+             distributes across earlier Or legs and silently breaks 'goaded X or Y' filters"
+        );
+    }
+
+    #[test]
     fn modified_adjective_in_comma_list_silkguard() {
         // CR 700.4 + CR 700.9: Silkguard — "Auras, Equipment, and modified
         // creatures you control gain hexproof". The subject is a three-way OR
@@ -13899,6 +14142,37 @@ mod tests {
         );
     }
 
+    // CR 120.1: active-voice "that dealt damage this turn" (creature is the damage
+    // source) must parse to `DealtDamageThisTurn`, NOT the passive
+    // `WasDealtDamageThisTurn` (creature is the damage recipient). Red Guardian,
+    // Super-Soldier: "destroy target creature an opponent controls that dealt
+    // damage this turn."
+    #[test]
+    fn that_dealt_damage_this_turn_is_active_voice() {
+        let (filter, rest) =
+            parse_target("target creature an opponent controls that dealt damage this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
+            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+            "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
+    }
+
     #[test]
     fn that_entered_this_turn() {
         let (filter, rest) = parse_type_phrase("token you control that entered this turn");
@@ -15292,6 +15566,26 @@ mod tests {
             }
         );
         assert_eq!(rest, "");
+    }
+
+    /// CR 102.1 + CR 103.1: the shared seat-direction combinator accepts both the
+    /// reflexive "their" (each-player chooser scopes) and the "your"
+    /// (controller-relative) possessives, in both directions.
+    #[test]
+    fn parse_neighbor_seat_direction_covers_their_your_left_right() {
+        for (phrase, expected) in [
+            ("the player to their left", SeatDirection::Left),
+            ("the player to their right", SeatDirection::Right),
+            ("the player to your left", SeatDirection::Left),
+            ("the player to your right", SeatDirection::Right),
+        ] {
+            let (rest, dir) =
+                parse_neighbor_seat_direction(phrase).expect("seat direction phrase parses");
+            assert_eq!(dir, expected, "{phrase}");
+            assert_eq!(rest, "", "{phrase} fully consumed");
+        }
+        // A non-neighbor phrase is declined (fail-closed).
+        assert!(parse_neighbor_seat_direction("the player who cast it").is_err());
     }
 
     #[test]

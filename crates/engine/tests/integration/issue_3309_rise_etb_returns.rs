@@ -6,6 +6,7 @@
 //! ETB triggers including an optional graveyard-return (Sun Titan class) and
 //! observer triggers (Soul Warden class).
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -17,18 +18,30 @@ use engine::types::zones::Zone;
 const RISE_ORACLE: &str =
     "Put all creature cards from all graveyards onto the battlefield under your control.";
 
+// Verbatim Sun Titan Oracle text (Scryfall, api.scryfall.com/cards/named?exact=Sun+Titan).
+// The trigger is the compound `Whenever this creature enters or attacks` — parsing the real
+// text yields `TriggerMode::EntersOrAttacks`, so both the ETB and the attack branch feed the
+// graveyard-scoped return. A fabricated ETB-only const would silently leave the attack half
+// unpinned (issue #5674).
 const SUN_TITAN_ORACLE: &str =
-    "Vigilance\nWhen Sun Titan enters, you may return target permanent card with mana value 3 or less from your graveyard to the battlefield.";
+    "Vigilance\nWhenever this creature enters or attacks, you may return target permanent card with mana value 3 or less from your graveyard to the battlefield.";
 
 const SOUL_WARDEN_ORACLE: &str = "Whenever another creature enters, you gain 1 life.";
 
 const KARMIC_GUIDE_ORACLE: &str =
     "Flying, echo {3}{W}{W}\nWhen Karmic Guide enters, return target creature card with mana value 3 or less from your graveyard to the battlefield.";
 
+/// Sun Titan's real trigger is the compound `Whenever this creature enters or attacks`
+/// (CR 603.6 — the parser unifies both events under `TriggerMode::EntersOrAttacks`), so the
+/// graveyard-return effect is shared by the ETB *and* the attack branch. Parsing the verbatim
+/// Scryfall text through `parse_oracle_text` (the entry point `database::synthesis` uses to
+/// build card-data.json) is what keeps this test unable to go green while the shipped card is
+/// broken: a fabricated ETB-only const would parse to `TriggerMode::ChangesZone` and pass.
 #[test]
-fn sun_titan_etb_parses_graveyard_return_not_exile() {
+fn sun_titan_parses_enters_or_attacks_graveyard_return() {
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::ability::Effect;
+    use engine::types::triggers::TriggerMode;
 
     let parsed = parse_oracle_text(
         SUN_TITAN_ORACLE,
@@ -40,21 +53,32 @@ fn sun_titan_etb_parses_graveyard_return_not_exile() {
     let trigger = parsed
         .triggers
         .iter()
-        .find(|t| t.mode == engine::types::triggers::TriggerMode::ChangesZone)
-        .expect("Sun Titan must have an ETB trigger");
+        .find(|t| t.mode == TriggerMode::EntersOrAttacks)
+        .expect("Sun Titan must parse as an EntersOrAttacks trigger, not a plain ETB");
     let execute = trigger
         .execute
         .as_ref()
-        .expect("ETB must have execute ability");
+        .expect("EntersOrAttacks trigger must have an execute ability");
     match execute.effect.as_ref() {
         Effect::ChangeZone {
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             ..
         } => {}
-        other => panic!("Sun Titan ETB must be graveyard→battlefield ChangeZone, got {other:?}"),
+        other => panic!("Sun Titan return must be graveyard→battlefield ChangeZone, got {other:?}"),
     }
-    assert!(execute.optional, "Sun Titan return must be optional");
+    assert!(
+        execute.optional,
+        "\"you may return\" makes the return optional"
+    );
+    // No stray plain-ETB trigger should exist — the compound must not have been split.
+    assert!(
+        !parsed
+            .triggers
+            .iter()
+            .any(|t| t.mode == TriggerMode::ChangesZone),
+        "compound enters-or-attacks trigger must not split into a separate ETB trigger"
+    );
 }
 
 #[test]
@@ -320,5 +344,76 @@ fn rise_of_dark_realms_optional_etb_return_with_observers_resolves() {
     assert!(
         runner.state().players[P0.0 as usize].life > life_before,
         "Soul Warden must grant life when co-reanimated creatures enter"
+    );
+}
+
+/// CR 508.1a + CR 603.6: the attack branch of Sun Titan's `EntersOrAttacks` trigger, feeding a
+/// graveyard-scoped target slot end-to-end. The ETB branch is exercised above via reanimation;
+/// this pins the *attack* half, which parsing the real Oracle text (issue #5674) first makes
+/// possible — an ETB-only const would never produce an attack trigger to fire here. Reverting
+/// the const to the fabricated ETB-only text makes this test fail: no attack trigger fires, so
+/// the graveyard creature is never returned.
+#[test]
+fn sun_titan_attack_branch_returns_graveyard_permanent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Sun Titan already on the battlefield (not summoning-sick) so it can attack this turn.
+    let sun_titan = scenario
+        .add_creature(P0, "Sun Titan", 6, 6)
+        .from_oracle_text(SUN_TITAN_ORACLE)
+        .id();
+
+    // Permanent card with mana value 3 or less in Sun Titan's controller's graveyard.
+    let returnee = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(sun_titan, AttackTarget::Player(P1))])
+        .expect("declare Sun Titan as attacker");
+
+    // Drive the attack trigger: it targets a graveyard permanent as it goes on the stack
+    // (TriggerTargetSelection) and offers the optional "you may" on resolution
+    // (OptionalEffectChoice), then returns the card graveyard→battlefield.
+    let mut guard = 0;
+    while guard < 64 {
+        guard += 1;
+        if runner.state().objects[&returnee].zone == Zone::Battlefield {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(returnee)),
+                    })
+                    .expect("choose graveyard return target");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept optional attack-triggered return");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. } => {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected prompt while resolving attack trigger: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        runner.state().objects[&returnee].zone,
+        Zone::Battlefield,
+        "Sun Titan's attack trigger must return the graveyard permanent to the battlefield"
     );
 }

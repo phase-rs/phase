@@ -19,6 +19,8 @@ export interface BlockRequirement {
   required: number;
   assigned: number;
   status: BlockRequirementStatus;
+  /** CR 702.111b / CR 509.1b: permanents imposing the min-blocker floor. */
+  sources: ObjectId[];
 }
 
 export interface BlockRequirements {
@@ -55,13 +57,20 @@ export function useBlockRequirements(): BlockRequirements {
 
     const byAttacker = new Map<ObjectId, BlockRequirement>();
     let hasIncomplete = false;
-    for (const [attackerKey, required] of Object.entries(blockRequirements)) {
+    for (const [attackerKey, requirement] of Object.entries(blockRequirements)) {
       const attackerId = Number(attackerKey);
+      const required = requirement.count;
       const assigned = assignedPerAttacker.get(attackerId) ?? 0;
       const status: BlockRequirementStatus =
         assigned === 0 ? "pending" : assigned < required ? "incomplete" : "satisfied";
       if (status === "incomplete") hasIncomplete = true;
-      byAttacker.set(attackerId, { attackerId, required, assigned, status });
+      byAttacker.set(attackerId, {
+        attackerId,
+        required,
+        assigned,
+        status,
+        sources: requirement.sources ?? [],
+      });
     }
 
     return { byAttacker, hasIncomplete };

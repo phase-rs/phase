@@ -462,7 +462,7 @@ fn push_death(runner: &mut engine::game::scenario::GameRunner, obj: ObjectId) {
         Some(Zone::Battlefield),
         Zone::Graveyard,
     );
-    runner.state_mut().zone_changes_this_turn.push(rec);
+    runner.state_mut().zone_changes_this_turn.push_back(rec);
 }
 
 /// Test 7(a) + 7(i) — Undead Sprinter runtime: with a non-Zombie creature dead

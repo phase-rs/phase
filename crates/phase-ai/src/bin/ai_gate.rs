@@ -142,9 +142,8 @@ fn parse_args() -> Result<Args, String> {
             }
             "--difficulty" => {
                 // Case-insensitive; unknown labels fall back to Medium via
-                // `AiDifficulty::from_label`. The determinization gate runs
-                // `--difficulty hard` on both branch and baseline so the pair
-                // isolates the K=2-vs-K=0 delta (§11).
+                // `AiDifficulty::from_label`. Run the same difficulty on branch
+                // and baseline so the pair isolates the code delta.
                 difficulty = AiDifficulty::from_label(&next_value(&mut iter, "--difficulty")?);
             }
             "--suite-filter" => {
