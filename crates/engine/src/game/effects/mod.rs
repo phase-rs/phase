@@ -907,22 +907,32 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // replacement-produced child work resolves; Priority does not
             // authorize a synthetic entry completion.
         }
-        ResolutionFrame::PostReplacement(_) => {
-            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                state, None, None, None, events,
-            );
-            if state
-                .active_post_replacement_drains()
-                .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
-                && matches!(
-                    state.resolution_stack.last(),
-                    Some(ResolutionFrame::PostReplacement(_))
-                )
-            {
-                let _ = state
-                    .resolution_stack
-                    .take_active_post_replacement()
-                    .expect("post-replacement dispatcher may remove only its active frame");
+        ResolutionFrame::PostReplacement(drains) => {
+            if matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(crate::types::game_state::DrainStatus::Paused)
+            ) {
+                // CR 614.6 + CR 615.5: the direct child has answered the
+                // continuation's prompt, so retire precisely the resident
+                // paused dispatch before considering later ready work.
+                state.finish_active_paused_post_replacement_dispatch();
+            } else {
+                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    state, None, None, None, events,
+                );
+                if state
+                    .active_post_replacement_drains()
+                    .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
+                    && matches!(
+                        state.resolution_stack.last(),
+                        Some(ResolutionFrame::PostReplacement(_))
+                    )
+                {
+                    let _ = state
+                        .resolution_stack
+                        .take_active_post_replacement()
+                        .expect("post-replacement dispatcher may remove only its active frame");
+                }
             }
         }
     }

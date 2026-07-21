@@ -1911,18 +1911,13 @@ impl ResolutionStack {
     }
 
     /// Returns the active general replacement drain. It may be the exact
-    /// immediate parent of an active MultiDraw or AbilityContinuation child;
-    /// there is intentionally no general frame search.
+    /// immediate parent of the active child raised while its continuation
+    /// dispatches; there is intentionally no general frame search.
     pub fn active_post_replacement_or_paired_parent(&self) -> Option<&PostReplacementDrainStack> {
-        match self.last() {
+        let index = self.active_post_replacement_parent_index()?;
+        match self.frames.get(index) {
             Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-            Some(ResolutionFrame::MultiDraw(_)) | Some(ResolutionFrame::AbilityContinuation(_)) => {
-                match self.active_predecessor() {
-                    Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-                    Some(_) | None => None,
-                }
-            }
-            Some(_) | None => None,
+            Some(_) | None => unreachable!("checked post-replacement parent must match"),
         }
     }
 
@@ -1930,21 +1925,45 @@ impl ResolutionStack {
     pub fn active_post_replacement_or_paired_parent_mut(
         &mut self,
     ) -> Option<&mut PostReplacementDrainStack> {
-        let paired_parent_index = self.frames.len().checked_sub(2);
-        match self.frames.last() {
-            Some(ResolutionFrame::PostReplacement(_)) => match self.frames.last_mut() {
-                Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-                Some(_) | None => unreachable!("checked post-replacement frame must match"),
-            },
-            Some(ResolutionFrame::MultiDraw(_)) | Some(ResolutionFrame::AbilityContinuation(_)) => {
-                let index = paired_parent_index?;
-                match self.frames.get_mut(index) {
-                    Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
-                    Some(_) | None => None,
-                }
-            }
-            Some(_) | None => None,
+        let index = self.active_post_replacement_parent_index()?;
+        match self.frames.get_mut(index) {
+            Some(ResolutionFrame::PostReplacement(drains)) => Some(drains),
+            Some(_) | None => unreachable!("checked post-replacement parent must match"),
         }
+    }
+
+    /// Removes only the active child immediately above a post-replacement
+    /// frame. This is the abandonment boundary for work raised by that
+    /// dispatch; it never reaches through a child or searches for a buried
+    /// parent.
+    pub fn take_active_post_replacement_child(&mut self) -> Option<ResolutionFrame> {
+        let parent_index = self.active_post_replacement_parent_index()?;
+        let child_index = self.frames.len().checked_sub(1)?;
+        if parent_index.checked_add(1) != Some(child_index) {
+            return None;
+        }
+        self.frames.pop()
+    }
+
+    /// Finds the active post-replacement authority or its one direct child.
+    /// The two legal shapes are `[... PostReplacement]` and
+    /// `[... PostReplacement, child]`; any deeper relationship is deliberately
+    /// invisible here so callers cannot turn this into a generic frame search.
+    fn active_post_replacement_parent_index(&self) -> Option<usize> {
+        let parent_index = self.frames.len().checked_sub(1)?;
+        if matches!(
+            self.frames.get(parent_index),
+            Some(ResolutionFrame::PostReplacement(_))
+        ) {
+            return Some(parent_index);
+        }
+
+        let parent_index = parent_index.checked_sub(1)?;
+        matches!(
+            self.frames.get(parent_index),
+            Some(ResolutionFrame::PostReplacement(_))
+        )
+        .then_some(parent_index)
     }
 
     /// Returns the active ChangeZone frame, or its exact immediate parent
@@ -3449,13 +3468,13 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        CastingVariant, CopyChosenStage, DrainStatus, GameState, PendingBatchDeliveries,
-        PendingChooseOneOf, PendingCopyTokenResolution, PendingCounterAdditionQueue,
-        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
-        PendingLifeTotalAssignment, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
-        PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-        PendingVoteBallotIteration, PostReplacementDrain, ResidentDrainPolicy,
-        ZoneDeliveryExileTracking,
+        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, GameState,
+        PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
+        PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
+        PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
+        PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
+        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
+        ResidentDrainPolicy, ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
@@ -4923,6 +4942,39 @@ mod tests {
         );
         assert!(per_category.active_per_category_zone_choice().is_none());
         assert_reserializes_v2_only(per_category);
+    }
+
+    #[test]
+    fn v2_reader_recovers_draw_allocator_from_an_active_multi_draw_frame() {
+        let mut state = GameState::new_two_player(139);
+        let captured = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+        let mut v2 = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("v2 active draw fixture serializes");
+        v2["resolution_frames"]
+            .as_object_mut()
+            .expect("resolution frames serialize as an object")
+            .remove("next_draw_sequence_frame_id");
+
+        let mut restored = serde_json::from_value::<ResolutionStateWire>(v2)
+            .expect("older v2 active-draw payload restores")
+            .into_game_state();
+        restored.abandon_active_replacement_tails();
+        let later = restored.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            DrawSequenceOrigin::Plain,
+        );
+
+        assert!(
+            later > captured,
+            "the recovered allocator must not reuse an ID captured by the abandoned draw frame"
+        );
     }
 
     #[test]

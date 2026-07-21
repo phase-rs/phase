@@ -14237,9 +14237,8 @@ impl GameState {
     }
 
     /// Returns the complete general post-replacement drain authority. A
-    /// non-top drain may be the exact immediate parent of an active MultiDraw
-    /// or AbilityContinuation child; this is positional pairing, not a generic
-    /// frame search.
+    /// non-top drain may be the exact immediate parent of a child raised while
+    /// it dispatches; this is positional pairing, not a generic frame search.
     pub fn active_post_replacement_drains(&self) -> Option<&PostReplacementDrainStack> {
         self.resolution_stack
             .active_post_replacement_or_paired_parent()
@@ -14280,22 +14279,34 @@ impl GameState {
             .is_some_and(PostReplacementDrainStack::has_ready)
     }
 
-    /// Clears the active general drain and, when it is paired with an active
-    /// MultiDraw child, clears the child first. Frame IDs remain monotonic
-    /// because `DrawSequenceStack::abandon_all` does not rewind its allocator.
+    /// Clears the active general drain and its exact active child, if any.
+    /// Frame IDs remain monotonic because `DrawSequenceStack::abandon_all` does
+    /// not rewind its allocator. This is the sole general post-replacement
+    /// abandonment path; it never searches through an unrelated child frame.
     pub fn abandon_active_replacement_tails(&mut self) {
-        if self.active_multi_draw_frame().is_some() {
-            let mut frame = self
-                .resolution_stack
-                .take_active_multi_draw()
-                .expect("an active multi-draw frame must be consumable")
-                .expect("the active multi-draw frame was checked");
-            self.resolution_stack
-                .observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
-            frame.draw_sequences.abandon_all();
-            frame.connive_reentry = None;
-        } else if self.active_connive_reentry().is_some() {
-            let _ = self.take_active_connive_reentry();
+        match self.resolution_stack.take_active_post_replacement_child() {
+            Some(super::resolution::ResolutionFrame::MultiDraw(mut frame)) => {
+                self.resolution_stack
+                    .observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
+                frame.draw_sequences.abandon_all();
+                frame.connive_reentry = None;
+            }
+            Some(_) => {}
+            None if self.active_multi_draw_frame().is_some() => {
+                let mut frame = self
+                    .resolution_stack
+                    .take_active_multi_draw()
+                    .expect("an active multi-draw frame must be consumable")
+                    .expect("the active multi-draw frame was checked");
+                self.resolution_stack
+                    .observe_draw_sequence_frame_id(frame.draw_sequences.next_frame_id());
+                frame.draw_sequences.abandon_all();
+                frame.connive_reentry = None;
+            }
+            None if self.active_connive_reentry().is_some() => {
+                let _ = self.take_active_connive_reentry();
+            }
+            None => {}
         }
         if matches!(
             self.resolution_stack.last(),
@@ -18078,6 +18089,44 @@ mod tests {
         assert!(
             later > abandoned,
             "a stale captured draw frame ID must never alias a later instruction"
+        );
+    }
+
+    /// CR 614.6 + CR 615.5: abandoning a paused general replacement dispatch
+    /// clears its one exact active child before clearing the resident parent.
+    #[test]
+    fn abandoning_post_replacement_with_life_assignment_removes_only_that_branch() {
+        let mut state = GameState::new_two_player(42);
+        let continuation = PostReplacementContinuation::Resolved(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(42),
+            PlayerId(0),
+        )));
+        let mut drains = PostReplacementDrainStack::default();
+        assert!(drains.install(
+            PostReplacementDrain::ready(continuation),
+            ResidentDrainPolicy::KeepResident,
+        ));
+        let (_, dispatch) = drains
+            .begin_dispatch()
+            .expect("the ready drain starts its exact dispatch");
+        assert!(drains.pause_dispatch(dispatch));
+        state.resolution_stack.push_post_replacement(drains);
+        state.push_life_total_assignment(PendingLifeTotalAssignment {
+            completion_player: PlayerId(0),
+            remaining: Vec::new(),
+            completion: None,
+        });
+
+        state.abandon_active_replacement_tails();
+
+        assert!(
+            state.resolution_stack.is_empty(),
+            "the direct life-assignment child and its paused post-replacement parent are abandoned together"
         );
     }
 
