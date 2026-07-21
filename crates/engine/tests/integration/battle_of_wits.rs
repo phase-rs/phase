@@ -6,13 +6,11 @@
 //! opposite threshold so a controller/scope regression is observable.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::zones::move_to_zone;
 use engine::types::ability::{AbilityDefinition, Effect};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 const BATTLE_OF_WITS_ORACLE: &str =
     "At the beginning of your upkeep, if you have 200 or more cards in your library, you win the game.";
@@ -33,7 +31,7 @@ fn assert_no_unimplemented(ability: &AbilityDefinition) {
     }
 }
 
-fn setup(controller_cards: usize, opponent_cards: usize) -> (GameRunner, ObjectId) {
+fn setup(controller_cards: usize, opponent_cards: usize) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::Untap);
     add_library_cards(&mut scenario, P0, controller_cards);
@@ -45,6 +43,9 @@ fn setup(controller_cards: usize, opponent_cards: usize) -> (GameRunner, ObjectI
         builder.as_enchantment();
         builder.id()
     };
+    let draw_spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Draw Spell", true, "Draw a card.")
+        .id();
 
     let runner = scenario.build();
     let source_object = runner
@@ -73,7 +74,7 @@ fn setup(controller_cards: usize, opponent_cards: usize) -> (GameRunner, ObjectI
             .expect("the parsed trigger must retain its win effect"),
     );
 
-    (runner, source)
+    (runner, source, draw_spell)
 }
 
 fn triggers_from_source(runner: &GameRunner, source: ObjectId) -> usize {
@@ -108,7 +109,7 @@ fn assert_no_winner(runner: &GameRunner) {
 /// does not trigger. The opponent's 200-card library is a hostile scope guard.
 #[test]
 fn battle_of_wits_does_not_trigger_with_199_cards() {
-    let (mut runner, source) = setup(199, 200);
+    let (mut runner, source, _) = setup(199, 200);
 
     runner.advance_to_upkeep();
 
@@ -129,7 +130,7 @@ fn battle_of_wits_does_not_trigger_with_199_cards() {
 /// Wits triggers and its ordinary win effect ends the game for that controller.
 #[test]
 fn battle_of_wits_wins_with_200_cards() {
-    let (mut runner, source) = setup(200, 199);
+    let (mut runner, source, _) = setup(200, 199);
 
     runner.advance_to_upkeep();
     assert_eq!(
@@ -167,7 +168,7 @@ fn battle_of_wits_wins_with_200_cards() {
 /// the already-enqueued trigger resolves without applying its win effect.
 #[test]
 fn battle_of_wits_rechecks_library_count_on_resolution() {
-    let (mut runner, source) = setup(200, 199);
+    let (mut runner, source, draw_spell) = setup(200, 199);
 
     runner.advance_to_upkeep();
     assert_eq!(
@@ -181,15 +182,7 @@ fn battle_of_wits_rechecks_library_count_on_resolution() {
         "precondition: the 200-card condition enqueued the trigger"
     );
 
-    let moved_card = runner
-        .state()
-        .players
-        .iter()
-        .find(|player| player.id == P0)
-        .expect("controller exists")
-        .library[0];
-    let mut events = Vec::new();
-    move_to_zone(runner.state_mut(), moved_card, Zone::Hand, &mut events);
+    runner.cast(draw_spell).resolve();
     assert_eq!(
         runner
             .state()

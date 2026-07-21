@@ -14841,6 +14841,10 @@ fn battle_of_wits_full_oracle_parses_library_threshold_win_trigger() {
         .as_deref()
         .expect("win trigger must have an effect");
     assert!(matches!(execute.effect.as_ref(), Effect::WinTheGame { .. }));
+    assert!(
+        execute.condition.is_none(),
+        "the leading intervening-if must exist only on the trigger"
+    );
 
     fn assert_no_unimplemented(ability: &AbilityDefinition) {
         assert!(
