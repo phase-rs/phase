@@ -1187,8 +1187,11 @@ pub struct ZoneChangeRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_definitions: Vec<TriggerEntry>,
     /// The complete source projection captured at the same authority as this
-    /// record. Legacy hand-built records intentionally leave this absent; only
-    /// a real zone-change snapshot may supply an LKI source context.
+    /// record. Real records own the exact pre-change source authority. Legacy
+    /// hand-built or deserialized records may leave this absent; only
+    /// `TriggerCondition::HadCounters` may then consult the lower-fidelity
+    /// ObjectId-keyed LKI cache for compatibility. A present context whose
+    /// identity disagrees with the record is malformed, not absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_source_context: Option<TriggerSourceContext>,
     /// CR 208.1: Power as of the zone change.
@@ -1299,7 +1302,10 @@ pub struct ZoneChangeRecord {
 impl ZoneChangeRecord {
     /// Returns the owned source context captured with this exact event record.
     /// Callers must not reconstruct a source from a current object or from an
-    /// ObjectId-keyed LKI cache when this is absent.
+    /// ObjectId-keyed LKI cache when this is absent. The sole compatibility
+    /// exception is `TriggerCondition::HadCounters`, which may use the cache
+    /// only for a legacy/defaulted record with no context; present incoherence
+    /// must fail closed.
     pub fn trigger_source_context(&self) -> Option<&TriggerSourceContext> {
         self.trigger_source_context.as_ref()
     }
