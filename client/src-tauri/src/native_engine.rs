@@ -512,13 +512,13 @@ fn ensure_native_engine_sync(
 
     emit_progress(app, NativeEngineProgressPhase::Spawning, None);
     let port = reserve_port()?;
-    let (child, stdin) = spawn_server(
+    let (mut child, stdin) = spawn_server(
         &binary_path,
         &files.data_directory(&key),
         port,
         key.origin(),
     )?;
-    if !wait_for_health(&client, port) {
+    if let Err(error) = wait_for_health(&client, port, &mut child) {
         let running = RunningEngine::Child {
             key,
             port,
@@ -526,9 +526,7 @@ fn ensure_native_engine_sync(
             stdin: Some(stdin),
         };
         stop_running_engine(running, &files);
-        return Err(NativeEngineError::Health {
-            detail: format!("native engine did not become healthy on port {port}"),
-        });
+        return Err(error);
     }
 
     let pid = child.id();
@@ -545,7 +543,9 @@ fn ensure_native_engine_sync(
         child,
         stdin: Some(stdin),
     });
-    gc_after_successful_spawn(&files, &key)?;
+    if let Err(error) = gc_after_successful_spawn(&files, &key) {
+        eprintln!("native engine GC after successful spawn failed: {error:?}");
+    }
     emit_progress(
         app,
         NativeEngineProgressPhase::Ready,
@@ -921,15 +921,26 @@ fn spawn_server(
     Ok((child, stdin))
 }
 
-fn wait_for_health(client: &Client, port: u16) -> bool {
+fn wait_for_health(client: &Client, port: u16, child: &mut Child) -> Result<(), NativeEngineError> {
     let deadline = Instant::now() + HEALTH_TIMEOUT;
     while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().map_err(|error| NativeEngineError::Spawn {
+            detail: format!("failed to poll native engine after spawn: {error}"),
+        })? {
+            return Err(NativeEngineError::Spawn {
+                detail: format!(
+                    "native engine exited before becoming healthy on port {port}: {status}"
+                ),
+            });
+        }
         if health_passes(client, port) {
-            return true;
+            return Ok(());
         }
         thread::sleep(Duration::from_millis(100));
     }
-    false
+    Err(NativeEngineError::Health {
+        detail: format!("native engine did not become healthy on port {port}"),
+    })
 }
 
 fn health_passes(client: &Client, port: u16) -> bool {
@@ -1309,6 +1320,29 @@ mod tests {
             serde_json::from_str::<NativeEngineKey>(&serde_json::to_string(&preview).unwrap())
                 .unwrap(),
             preview
+        );
+    }
+
+    #[test]
+    fn key_validation_rejects_invalid_semver_and_preview_fingerprint() {
+        assert!(matches!(
+            release_key("not-semver").validate(),
+            Err(NativeEngineError::InvalidKey { .. })
+        ));
+        assert!(matches!(
+            preview_key("0123456789abcdeg").validate(),
+            Err(NativeEngineError::InvalidKey { .. })
+        ));
+    }
+
+    #[test]
+    fn native_engine_error_serializes_to_kind_and_detail() {
+        let error = NativeEngineError::Health {
+            detail: "native engine did not become healthy".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            r#"{"kind":"health","detail":"native engine did not become healthy"}"#
         );
     }
 
