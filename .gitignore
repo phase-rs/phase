@@ -30,6 +30,7 @@ client/src/wasm/*.wasm.d.ts
 
 # Build output
 client/dist/
+client/bootstrap/dist/
 
 # Locally-generated SSL certs (./scripts/setup-ssl.sh) — per-machine, never committed.
 certs/
