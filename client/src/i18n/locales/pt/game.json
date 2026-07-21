@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Para apenas nos seus turnos.",
     "scopeOpponentsTurns": "Para apenas nos turnos dos oponentes.",
     "tooltipCurrentPhase": "Fase atual.",
-    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase atual: {{phase}}. Abrir configurações de paradas de fase.",
+    "sheetTitle": "Fases do turno",
+    "sheetSubtitle": "Toque em uma etapa para mudar quando o passe automático para ali.",
+    "scopeShortOff": "Desativado",
+    "scopeShortAllTurns": "Todos os turnos",
+    "scopeShortOwnTurn": "Seus turnos",
+    "scopeShortOpponentsTurns": "Turnos dos oponentes"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -2074,6 +2081,7 @@
     "fromSideboard": "Do sideboard"
   },
   "phaseName": {
+    "Untap": "Desvirar",
     "Upkeep": "Manutenção",
     "Draw": "Compra",
     "PreCombatMain": "Fase principal 1",

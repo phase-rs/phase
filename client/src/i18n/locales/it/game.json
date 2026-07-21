@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
     "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
-    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase attuale: {{phase}}. Apri le impostazioni degli stop di fase.",
+    "sheetTitle": "Fasi del turno",
+    "sheetSubtitle": "Tocca un passo per cambiare quando il passaggio automatico si ferma lì.",
+    "scopeShortOff": "Disattivato",
+    "scopeShortAllTurns": "Tutti i turni",
+    "scopeShortOwnTurn": "I tuoi turni",
+    "scopeShortOpponentsTurns": "Turni avversari"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -2074,6 +2081,7 @@
     "fromSideboard": "Dalla sideboard"
   },
   "phaseName": {
+    "Untap": "STAP",
     "Upkeep": "Mantenimento",
     "Draw": "Pesca",
     "PreCombatMain": "Fase principale 1",

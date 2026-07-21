@@ -405,7 +405,14 @@
     "scopeOwnTurn": "Stops only on your turns.",
     "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
-    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Current phase: {{phase}}. Open phase stop settings.",
+    "sheetTitle": "Turn phases",
+    "sheetSubtitle": "Tap a step to change when auto-pass stops there.",
+    "scopeShortOff": "Off",
+    "scopeShortAllTurns": "All turns",
+    "scopeShortOwnTurn": "My turns",
+    "scopeShortOpponentsTurns": "Opponents' turns"
   },
   "phaseTracker": {
     "turn": "Turn {{number}}"
@@ -2111,6 +2118,7 @@
     "fromSideboard": "From sideboard"
   },
   "phaseName": {
+    "Untap": "Untap",
     "Upkeep": "Upkeep",
     "Draw": "Draw",
     "PreCombatMain": "Main Phase 1",

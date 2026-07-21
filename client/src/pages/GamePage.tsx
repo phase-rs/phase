@@ -51,6 +51,7 @@ import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { MobilePhaseChip } from "../components/controls/MobilePhaseChip.tsx";
 import { MayTriggerAutoChoiceList } from "../components/board/MayTriggerAutoChoiceList.tsx";
 import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
@@ -1443,7 +1444,7 @@ function GamePageContent({
             className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
           >
             <div className="flex flex-col gap-1 max-lg:gap-1">
-              <CombatPhaseIndicator />
+              <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
             </div>
             <div className="flex items-center gap-1.5">
@@ -1471,6 +1472,9 @@ function GamePageContent({
                 <TurnStatusLine />
               </div>
               <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
+                {/* <lg only: desktop conveys phase via the PhaseDot strips in
+                    PlayerHud, which are hidden on mobile. */}
+                <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the

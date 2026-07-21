@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
     "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
-    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Aktuelle Phase: {{phase}}. Phasenstopp-Einstellungen öffnen.",
+    "sheetTitle": "Zugphasen",
+    "sheetSubtitle": "Tippe auf einen Schritt, um festzulegen, wann das automatische Passen dort stoppt.",
+    "scopeShortOff": "Aus",
+    "scopeShortAllTurns": "Alle Züge",
+    "scopeShortOwnTurn": "Deine Züge",
+    "scopeShortOpponentsTurns": "Gegnerzüge"
   },
   "phaseTracker": {
     "turn": "Zug {{number}}"
@@ -2074,6 +2081,7 @@
     "fromSideboard": "Aus dem Sideboard"
   },
   "phaseName": {
+    "Untap": "Enttappen",
     "Upkeep": "Versorgung",
     "Draw": "Ziehen",
     "PreCombatMain": "Hauptphase 1",

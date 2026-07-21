@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Zatrzymuje się tylko w twoich turach.",
     "scopeOpponentsTurns": "Zatrzymuje się tylko w turach przeciwników.",
     "tooltipCurrentPhase": "Bieżąca faza.",
-    "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Zatrzymanie fazy: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Bieżąca faza: {{phase}}. Otwórz ustawienia zatrzymań faz.",
+    "sheetTitle": "Fazy tury",
+    "sheetSubtitle": "Dotknij kroku, aby zmienić, kiedy automatyczne pasowanie się tam zatrzymuje.",
+    "scopeShortOff": "Wył.",
+    "scopeShortAllTurns": "Wszystkie tury",
+    "scopeShortOwnTurn": "Twoje tury",
+    "scopeShortOpponentsTurns": "Tury przeciwników"
   },
   "phaseTracker": {
     "turn": "Tura {{number}}"
@@ -2074,6 +2081,7 @@
     "fromSideboard": "Z zaplecza"
   },
   "phaseName": {
+    "Untap": "Odwracanie",
     "Upkeep": "Utrzymanie",
     "Draw": "Dobieranie",
     "PreCombatMain": "Główna faza 1",

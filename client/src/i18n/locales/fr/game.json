@@ -373,7 +373,14 @@
     "scopeOwnTurn": "S'arrête uniquement lors de vos tours.",
     "scopeOpponentsTurns": "S'arrête uniquement lors des tours des adversaires.",
     "tooltipCurrentPhase": "Phase actuelle.",
-    "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Arrêt de phase : {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Phase actuelle : {{phase}}. Ouvrir les réglages d'arrêts de phase.",
+    "sheetTitle": "Phases du tour",
+    "sheetSubtitle": "Touchez une étape pour changer quand la passe automatique s'y arrête.",
+    "scopeShortOff": "Désactivé",
+    "scopeShortAllTurns": "Tous les tours",
+    "scopeShortOwnTurn": "Vos tours",
+    "scopeShortOpponentsTurns": "Tours adverses"
   },
   "phaseTracker": {
     "turn": "Tour {{number}}"
@@ -2074,6 +2081,7 @@
     "fromSideboard": "Depuis la réserve"
   },
   "phaseName": {
+    "Untap": "Dégagement",
     "Upkeep": "Entretien",
     "Draw": "Pioche",
     "PreCombatMain": "Phase principale 1",
