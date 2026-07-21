@@ -695,7 +695,7 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
+      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
       }

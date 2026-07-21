@@ -196,7 +196,9 @@ export class WebSocketAdapter implements EngineAdapter {
   private initStartEvents: GameEvent[] = [];
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
-  private readonly maxReconnectAttempts = 8;
+  // A native bridge has no resumable server session: a dead loopback engine
+  // cannot recover through the multiplayer reconnect protocol.
+  private readonly maxReconnectAttempts: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
@@ -230,7 +232,9 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly reservationToken?: string,
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
-  ) {}
+  ) {
+    this.maxReconnectAttempts = options.nativeAi ? 0 : 8;
+  }
 
   get gameCode(): string | null {
     return this._gameCode;
@@ -396,6 +400,8 @@ export class WebSocketAdapter implements EngineAdapter {
         this.initReject(err);
         this.initResolve = null;
         this.initReject = null;
+      } else {
+        this.emit({ type: "error", message: err.message });
       }
     };
 
@@ -670,9 +676,9 @@ export class WebSocketAdapter implements EngineAdapter {
         player_count: options.playerCount,
         match_config: options.matchConfig ?? { match_type: "Bo1" },
         ai_seats: options.aiSeats.map((seat) => ({
-          seat_index: seat.seatIndex,
+          seatIndex: seat.seatIndex,
           difficulty: seat.difficulty,
-          deck_name: null,
+          deckName: null,
           deck: { type: "DeckList", data: seat.deck },
         })),
         format_config: options.formatConfig ?? null,

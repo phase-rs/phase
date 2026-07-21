@@ -140,7 +140,7 @@ describe("WebSocketAdapter", () => {
       },
     });
 
-    it("uses the bridge factory and skips direct-WebSocket URL validation", async () => {
+    it("uses the bridge factory with the full camelCase AI seat wire shape", async () => {
       MockWebSocket.last = null;
       const socketFactory = vi.fn(
         () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
@@ -171,9 +171,9 @@ describe("WebSocketAdapter", () => {
             player_count: 2,
             match_config: { match_type: "Bo1" },
             ai_seats: [{
-              seat_index: 1,
+              seatIndex: 1,
               difficulty: "Hard",
-              deck_name: null,
+              deckName: null,
               deck: {
                 type: "DeckList",
                 data: { main_deck: ["Lightning Bolt"], sideboard: [] },
@@ -186,6 +186,11 @@ describe("WebSocketAdapter", () => {
           },
         }),
       );
+      const sentFrame = nativeSocket.send.mock.calls.at(-1)?.[0];
+      expect(sentFrame).toContain('"seatIndex"');
+      expect(sentFrame).toContain('"deckName"');
+      expect(sentFrame).not.toContain('"seat_index"');
+      expect(sentFrame).not.toContain('"deck_name"');
       nativeSocket.dispatchSynthetic(
         "message",
         JSON.stringify({

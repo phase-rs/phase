@@ -1514,6 +1514,19 @@ export function GameProvider({
                 waitingFor: { type: "GameOver", data: { winner: event.winner } },
               });
             }
+            if (event.type === "reconnectFailed" || event.type === "error") {
+              const adapter = nativeAdapter;
+              nativeAdapter = null;
+              controller?.dispose();
+              controller = null;
+              adapter?.dispose();
+              if (useGameStore.getState().adapter === adapter) {
+                useGameStore.setState({ adapter: null });
+              }
+              // GamePage's existing reconnect-failed/error surface is terminal
+              // and provides the Return-to-Menu action for this native session.
+              onWsEventRef.current?.(event);
+            }
           });
 
           await initGame(

@@ -1,6 +1,10 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+type NativeAdapterEvent =
+  | { type: "reconnectFailed" }
+  | { type: "error"; message: string };
+
 const {
   NativeEngineVersionMismatchError,
   WebSocketAdapter,
@@ -12,6 +16,7 @@ const {
   nativeAdapterInitialize,
   nativeAdapters,
   multiplayerGetState,
+  preferences,
   saveActiveGame,
   useGameStore,
   wasmAdapters,
@@ -24,22 +29,47 @@ const {
   }
 
   const nativeAdapterInitialize = vi.fn<() => Promise<void>>();
-  const nativeAdapters: Array<{
-    dispose: ReturnType<typeof vi.fn>;
-    onEvent: ReturnType<typeof vi.fn>;
-  }> = [];
+  const preferences = {
+    aiArchetypeFilter: "Any",
+    aiCoverageFloor: 0,
+    aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
+    cedhMode: false,
+    nativeEngineEnabled: true,
+  };
   class WebSocketAdapter {
+    private listener: ((event: NativeAdapterEvent) => void) | null = null;
+    readonly nativeAiOptions: { aiSeats: Array<{ difficulty: string }> } | undefined;
     dispose = vi.fn();
-    onEvent = vi.fn(() => () => {});
+    onEvent = vi.fn((listener: (event: NativeAdapterEvent) => void) => {
+      this.listener = listener;
+      return () => {
+        this.listener = null;
+      };
+    });
 
-    constructor(..._args: unknown[]) {
+    constructor(
+      _serverUrl: string,
+      _mode: string,
+      _deck: unknown,
+      _joinGameCode?: string,
+      _joinPassword?: string,
+      _reservationToken?: string,
+      _displayName?: string,
+      options?: { nativeAi?: { aiSeats: Array<{ difficulty: string }> } },
+    ) {
+      this.nativeAiOptions = options?.nativeAi;
       nativeAdapters.push(this);
     }
 
     initialize(): Promise<void> {
       return nativeAdapterInitialize();
     }
+
+    emit(event: NativeAdapterEvent): void {
+      this.listener?.(event);
+    }
   }
+  const nativeAdapters: WebSocketAdapter[] = [];
 
   class WasmAdapter {
     cardDbLoaded = true;
@@ -89,6 +119,7 @@ const {
     nativeAdapterInitialize,
     nativeAdapters,
     multiplayerGetState,
+    preferences,
     saveActiveGame: vi.fn(),
     useGameStore,
     wasmAdapters,
@@ -162,13 +193,6 @@ vi.mock("../../data/formatRegistry", () => ({
 }));
 
 vi.mock("../../stores/preferencesStore", () => {
-  const preferences = {
-    aiArchetypeFilter: "Any",
-    aiCoverageFloor: 0,
-    aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
-    cedhMode: false,
-    nativeEngineEnabled: true,
-  };
   return {
     AI_DECK_RANDOM: "Random",
     usePreferencesStore: Object.assign(vi.fn(), { getState: () => preferences }),
@@ -240,6 +264,8 @@ describe("GameProvider native AI routing", () => {
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
     multiplayerGetState.mockReset();
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.cedhMode = false;
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
@@ -290,5 +316,65 @@ describe("GameProvider native AI routing", () => {
     view.unmount();
     expect(nativeAdapters).toHaveLength(1);
     expect(nativeAdapters[0].dispose).toHaveBeenCalledWith({ concede: true });
+  });
+
+  it("preserves every exact server AI difficulty label from buildLocalAiDeckList", async () => {
+    preferences.aiSeats = [
+      { difficulty: "VeryEasy", deckId: "Random" },
+      { difficulty: "Easy", deckId: "Random" },
+      { difficulty: "Medium", deckId: "Random" },
+      { difficulty: "Hard", deckId: "Random" },
+      { difficulty: "VeryHard", deckId: "Random" },
+      { difficulty: "CEDH", deckId: "Random" },
+    ];
+
+    render(
+      <GameProvider gameId="native-difficulties" mode="ai" playerCount={7}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats.map((seat) => seat.difficulty)).toEqual([
+      "VeryEasy",
+      "Easy",
+      "Medium",
+      "Hard",
+      "VeryHard",
+      "CEDH",
+    ]);
+  });
+
+  async function expectNativeTerminalEvent(event: NativeAdapterEvent) {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    nativeAdapter.emit(event);
+
+    expect(nativeAdapter.dispose).toHaveBeenCalledOnce();
+    expect(gameStoreState.adapter).toBeNull();
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+  }
+
+  it("disposes a native game and surfaces reconnect failure as terminal", async () => {
+    await expectNativeTerminalEvent({ type: "reconnectFailed" });
+  });
+
+  it("disposes a native game and surfaces bridge errors as terminal", async () => {
+    await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
   });
 });
