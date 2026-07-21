@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -235,9 +236,7 @@ const DrawerCard = memo(function DrawerCard({
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { src } = useCardImage(cardName, { size: "normal" });
-  const displayCost = effectiveCost ?? manaCost;
-  const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
-    && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
+  const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
 
   // Mouse hover (desktop) + long-press (touch) both open the card preview, and
   // the hook tags the element with `data-card-hover` so usePreviewDismiss's

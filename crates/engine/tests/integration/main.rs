@@ -536,6 +536,7 @@ mod issue_5820_susan_foreman;
 mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
 mod issue_5910_kitchen_finks_persist;
+mod issue_5946_pest_infestation_bogwater_softlock;
 mod issue_5972_tracked_set_token_cleanup;
 mod issue_5977_hunger_tide_chapter_iv;
 mod issue_5978_roar_chapter_ii_creature_mana;

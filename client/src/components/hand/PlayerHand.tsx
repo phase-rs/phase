@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
+import { spellCostDisplay } from "../../viewmodel/costLabel.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -815,13 +816,10 @@ const HandCard = memo(function HandCard({
         : 0,
   );
 
-  // Use effective spell cost from engine if available (reflects reductions),
-  // otherwise fall back to printed mana cost.
+  // Effective spell cost from the engine (reflects cost reductions and
+  // free-cast permissions such as Omniscience); falls back to the printed cost.
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
-  const displayCost = effectiveCost ?? manaCost;
-  // Detect cost reduction by comparing effective vs printed generic mana
-  const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
-    && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
+  const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
   const playedRef = useRef(false);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -993,9 +991,7 @@ const ZoneFanCard = memo(function ZoneFanCard({
   });
 
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
-  const displayCost = effectiveCost ?? manaCost;
-  const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
-    && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
+  const { displayCost, isReduced } = spellCostDisplay(effectiveCost, manaCost);
   // Suppress dragSnapToOrigin only when the flick actually cast the card, so a
   // short/sideways drag springs back into the wing instead of flying off.
   const playedRef = useRef(false);
