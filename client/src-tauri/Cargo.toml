@@ -21,3 +21,6 @@ minisign-verify = "0.2.5"
 sha2 = "0.10"
 semver = "1"
 tauri-plugin-single-instance = "2"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { version = "1", features = ["macros", "net", "sync", "io-util"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }

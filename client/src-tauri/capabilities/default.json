@@ -24,7 +24,10 @@
       "allow-confirm-legacy-import",
       "allow-mark-remote-load-ok",
       "allow-ensure-native-engine",
-      "allow-stop-native-engine"
+      "allow-stop-native-engine",
+      "allow-connect-native-engine",
+      "allow-native-engine-bridge-send",
+      "allow-native-engine-bridge-close"
     ]
   }
 ]

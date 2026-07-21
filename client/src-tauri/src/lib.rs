@@ -1,6 +1,7 @@
 use tauri::{Manager, WebviewWindowBuilder};
 
 mod migration;
+mod native_bridge;
 mod native_engine;
 
 pub fn run() {
@@ -31,7 +32,10 @@ pub fn run() {
             migration::confirm_legacy_import,
             migration::mark_remote_load_ok,
             native_engine::ensure_native_engine,
-            native_engine::stop_native_engine
+            native_engine::stop_native_engine,
+            native_bridge::connect_native_engine,
+            native_bridge::native_engine_bridge_send,
+            native_bridge::native_engine_bridge_close
         ])
         .setup(|app| {
             // `create: false` on the "main" window in tauri.conf.json defers
@@ -51,7 +55,11 @@ pub fn run() {
             // and force a one-time re-login, so we leave those platforms on their
             // defaults and just build the window straight from config.
             let main_config = &app.config().app.windows[0];
-            let builder = WebviewWindowBuilder::from_config(app, main_config)?;
+            let builder =
+                WebviewWindowBuilder::from_config(app, main_config)?.on_navigation(|_| {
+                    native_engine::abort_native_engine_bridges_on_navigation();
+                    true
+                });
             #[cfg(target_os = "windows")]
             let builder = {
                 let data_dir = app.path().app_local_data_dir()?.join("webview");
