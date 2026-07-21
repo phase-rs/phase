@@ -10640,10 +10640,9 @@ pub struct GameState {
     /// continuation, AND every repeat/repeat-until drain. It is seeded exactly
     /// once (`replacement.rs`, only when a `CreateToken` event is replaced by a
     /// token-choice continuation — Jinnie Fay-class), read by every token
-    /// proposal (`effects/token.rs`), and cleared ONLY at true full-drain
-    /// (`effects/mod.rs::drain_pending_continuation`: back at priority with no
-    /// ability-continuation frame, no repeat-for frame, AND no
-    /// repeat-until frame). The replacement pipeline and ChooseOneOf
+    /// proposal (`effects/token.rs`), and cleared ONLY at true full-drain by
+    /// `effects/mod.rs::clear_post_replacement_token_choice_seed_if_resolution_drained`
+    /// (back at priority with an empty `resolution_stack`). The replacement pipeline and ChooseOneOf
     /// completion NEVER clear it — a branch may stash a token-bearing
     /// sub-ability or pause inside a repeat-until loop that drains only later
     /// via `resolve_ability_chain`, so clearing earlier wipes the seed before

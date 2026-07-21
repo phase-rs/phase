@@ -2041,9 +2041,9 @@ pub(crate) fn apply_pending_post_replacement_effect(
     // #4886). Clearing here on "waiting_for is not ChooseOneOfBranch" wipes the
     // outer originating seed when the nested continuation drains, letting the
     // same token-choice replacement re-prompt on a later token sub-ability. The
-    // seed is owned and cleared by the originating ChooseOneOf's completion
-    // (effects/choose_one_of.rs), which is the only frame that can correctly
-    // detect "the token-choice continuation has fully drained."
+    // seed is cleared by
+    // `effects::clear_post_replacement_token_choice_seed_if_resolution_drained`
+    // only once priority returns with an empty resolution stack.
     // CR 614.12a + CR 707.9: When the post-effect pauses on `CopyTargetChoice`,
     // the entering object's battlefield-entry `ZoneChanged` event is already
     // in `events` (emitted by the prior `move_to_zone`). `BecomeCopy` and its
