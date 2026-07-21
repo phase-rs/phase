@@ -13217,6 +13217,24 @@ impl GameState {
             )
     }
 
+    /// Reads the continuation immediately outside an active paused
+    /// post-replacement/draw pair without disturbing the pair's adjacency.
+    pub fn outer_ability_continuation_of_active_post_replacement_draw(
+        &self,
+    ) -> Option<&AbilityContinuationFrame> {
+        self.resolution_stack
+            .outer_ability_continuation_of_active_post_replacement_draw_pair()
+    }
+
+    /// Mutably accesses the continuation immediately outside an active paused
+    /// post-replacement/draw pair without disturbing the pair's adjacency.
+    pub fn outer_ability_continuation_of_active_post_replacement_draw_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        self.resolution_stack
+            .outer_ability_continuation_of_active_post_replacement_draw_pair_mut()
+    }
+
     /// Re-park the active continuation after its production handler made
     /// progress but raised another prompt.
     pub fn replace_active_ability_continuation(

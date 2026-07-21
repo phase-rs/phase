@@ -2030,6 +2030,53 @@ impl ResolutionStack {
         )
     }
 
+    /// Returns the continuation immediately outside the active paused
+    /// post-replacement/draw pair. This fixed three-frame relationship exists
+    /// while a replacement-produced draw is paused for a choice: the
+    /// continuation stays outside the pair so `PostReplacement` remains the
+    /// draw's exact immediate parent. This is positional access, not a frame
+    /// search, and it never authorizes taking the outer continuation early.
+    pub fn outer_ability_continuation_of_active_post_replacement_draw_pair(
+        &self,
+    ) -> Option<&AbilityContinuationFrame> {
+        let post_replacement_index = self.frames.len().checked_sub(2)?;
+        let continuation_index = post_replacement_index.checked_sub(1)?;
+        match (
+            self.frames.get(continuation_index),
+            self.frames.get(post_replacement_index),
+            self.last(),
+        ) {
+            (
+                Some(ResolutionFrame::AbilityContinuation(continuation)),
+                Some(ResolutionFrame::PostReplacement(drains)),
+                Some(ResolutionFrame::MultiDraw(_)),
+            ) if matches!(
+                drains.resident().map(|drain| &drain.status),
+                Some(DrainStatus::Paused)
+            ) =>
+            {
+                Some(continuation)
+            }
+            _ => None,
+        }
+    }
+
+    /// Mutably accesses only the continuation immediately outside the active
+    /// paused post-replacement/draw pair. See the immutable companion for the
+    /// structural invariant this preserves.
+    pub fn outer_ability_continuation_of_active_post_replacement_draw_pair_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        let continuation_index = self.frames.len().checked_sub(3)?;
+        self.outer_ability_continuation_of_active_post_replacement_draw_pair()?;
+        match self.frames.get_mut(continuation_index) {
+            Some(ResolutionFrame::AbilityContinuation(continuation)) => Some(continuation),
+            Some(_) | None => {
+                unreachable!("checked paired continuation must retain its frame kind")
+            }
+        }
+    }
+
     /// Inserts a continuation outside the active general-drain/draw pair.
     ///
     /// The continuation is the draw's later instruction, so it must resume

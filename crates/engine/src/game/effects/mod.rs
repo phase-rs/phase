@@ -884,6 +884,16 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             if let Some(frame_id) = state.active_draw_sequence().map(|draw| draw.frame_id) {
                 let _ = draw::resume_draw_sequence(state, frame_id, events);
             }
+            // CR 614.11a + CR 615.5: the completed child draw promotes its
+            // already-parked continuation above the exact paused parent. Drain
+            // that child in the same priority boundary so it consumes first and
+            // then retires only its own resident post-replacement dispatch.
+            if paired_parent
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state.active_ability_continuation().is_some()
+            {
+                drain_pending_continuation(state, events);
+            }
         }
         ResolutionFrame::ConniveReentry(_) => {
             let _ = crate::game::engine_replacement::drain_pending_connive_reentry(state, events);

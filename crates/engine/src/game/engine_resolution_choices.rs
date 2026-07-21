@@ -901,6 +901,11 @@ fn finalize_standard_search_selection(
     // survivor set are intentionally excluded.
     let continuation_exiles_set = state
         .active_ability_continuation()
+        .or_else(|| {
+            state
+                .outer_ability_continuation_of_active_post_replacement_draw()
+                .map(|continuation| &continuation.pending)
+        })
         .is_some_and(|cont| continuation_exiles_found_set(&cont.chain));
     if continuation_exiles_set {
         let hand_exiles = chosen
@@ -938,6 +943,24 @@ fn finalize_standard_search_selection(
         frame.pending.chain.targets = targets.clone();
         propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
         state.push_ability_continuation(frame);
+    } else if let Some(continuation) =
+        state.outer_ability_continuation_of_active_post_replacement_draw()
+    {
+        has_delivery = matches!(continuation.pending.chain.effect, Effect::ChangeZone { .. });
+        let search_attach_host = effects::change_zone::resolve_search_continuation_attach_host(
+            state,
+            &continuation.pending.chain,
+        );
+        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
+        if player != continuation.pending.chain.controller {
+            targets.push(TargetRef::Player(player));
+        }
+        let continuation = state
+            .outer_ability_continuation_of_active_post_replacement_draw_mut()
+            .expect("checked paired continuation must remain resident while the draw is active");
+        continuation.pending.search_attach_host = search_attach_host;
+        continuation.pending.chain.targets = targets.clone();
+        propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
     }
     if has_delivery {
         state.pending_library_search_delivery = Some(
