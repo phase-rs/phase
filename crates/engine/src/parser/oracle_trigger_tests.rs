@@ -654,18 +654,14 @@ fn attacks_while_saddled_gates_trigger_on_saddled_filter() {
 }
 
 #[test]
-fn while_saddled_fold_refused_for_non_attacks_trigger_reparses_original() {
+fn while_saddled_fold_refused_for_non_attacks_trigger_is_strictly_unsupported() {
     // CR 508.1m: the subject-state fold applies ONLY to attack triggers (the
     // saddled state is a property of the declared attacker). A non-attacks
-    // while-gate must NOT fold into `valid_card`; the classifier discards the
-    // probe parse and re-parses the ORIGINAL unstripped clause.
-    //
-    // NOTE (GAP 2): this fall-through currently relies on `parse_dies_verb`'s
-    // tail-discard (parse_dies_verb matches `tag("die")` and drops the trailing
-    // " while saddled" without consuming it), which is why the dies trigger
-    // parses at all. A future card printing a REAL non-attacks while-state gate
-    // must be caught by the swallowed-clause check, not silently blessed by this
-    // test's tolerance of the discard.
+    // while-gate has no rules-correct home, and re-parsing the original clause
+    // would let event-verb leaves (the dies verb tag-matches "die" and drops
+    // the unconsumed tail) accept the text WITHOUT its saddled semantics. The
+    // classifier therefore returns the strict `Unknown` fallback on the whole
+    // clause — coverage stays red until a real card motivates a design.
     let mut ctx = ParseContext::default();
     let def = parse_trigger_line_with_index(
         "When this creature dies while saddled, draw a card.",
@@ -674,19 +670,23 @@ fn while_saddled_fold_refused_for_non_attacks_trigger_reparses_original() {
         &mut ctx,
     );
 
-    // REVERT-FAILING (fold-guard): reverting step 1c's mode/valid_card guard so
-    // the saddled state folds unconditionally would either mis-mode this trigger
-    // or attach IsSaddled to a dies trigger's `valid_card`. Proves the re-parse
-    // of the original clause happened: the mode is the dies ChangesZone mode.
-    assert_eq!(
-        def.mode,
-        TriggerMode::ChangesZone,
-        "dies-while-saddled must re-parse to the dies ChangesZone mode"
-    );
+    // COVERAGE-HONESTY (revert-failing): reverting the strict refusal back to
+    // an original-clause re-parse yields a clean ChangesZone dies trigger with
+    // the saddled rider silently discarded — this assertion fails there. The
+    // Unknown payload preserves the full clause, rider included, so the line
+    // is reported unsupported rather than blessed without its rules text.
+    match &def.mode {
+        TriggerMode::Unknown(clause) => assert!(
+            clause.contains("while saddled"),
+            "Unknown payload must preserve the saddled rider, got {clause:?}"
+        ),
+        other => {
+            panic!("non-attack while-saddled must be strictly unsupported (Unknown), got {other:?}")
+        }
+    }
 
     // No IsSaddled anywhere in the trigger's subject filter OR stored condition —
-    // the gate was neither folded nor stored (the tail was discarded by the dies
-    // verb).
+    // the refused gate must not leak into either axis.
     assert!(
         !def.valid_card
             .as_ref()

@@ -8238,10 +8238,22 @@ pub(crate) fn parse_trigger_condition(
                     });
                     return (mode, def);
                 }
-                // Fold refused: discard the probe's diagnostics and fall through
-                // to parsing the ORIGINAL unstripped clause (nothing silently
-                // dropped).
+                // Fold refused (non-attack event or no parsed subject): the
+                // gate has no rules-correct home — CR 508.1m binds the saddled
+                // participle to attacker declaration only. Do NOT re-parse the
+                // original clause: downstream event-verb leaves (e.g. the dies
+                // verb) tag-match the verb and silently swallow the trailing
+                // " while saddled", accepting the text without its semantics.
+                // Return the strict `Unknown` fallback on the ORIGINAL clause
+                // instead, so the line stays coverage-red until a real card
+                // motivates a design for non-attack saddled gates.
                 ctx.diagnostics.truncate(pre_probe_diagnostics);
+                ctx.pending_trigger_subject_clause = None;
+                let mut def = make_base();
+                let mode = TriggerMode::Unknown(condition.to_string());
+                def.mode = mode.clone();
+                def.description = Some(condition.to_string());
+                return (mode, def);
             }
         }
     }
