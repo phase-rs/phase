@@ -2,7 +2,7 @@ use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::space1;
-use nom::combinator::{map, opt, peek, value};
+use nom::combinator::{all_consuming, map, opt, peek, rest, value, verify};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -111,15 +111,46 @@ pub(super) fn parse_search_library_details(
         None
     };
 
+    // CR 608.2c: "for that many/much [FILTER] cards" without "up to" — an
+    // anaphoric back-reference to a count produced by an earlier instruction in
+    // the same resolution (Settle the Wreckage: "Exile all attacking creatures
+    // target player controls. That player may search their library for that many
+    // basic land cards …"). Distinct from the "up to that many" path above: this
+    // is an exact count (find that many if able), not an up-to ceiling. The
+    // returned offset points past "that many/much" so the trailing type phrase
+    // ("basic land cards") is still handed to the filter parser below — without
+    // this branch the whole clause fell through to the `Fixed { 1 }` default with
+    // a dropped filter, so the search silently became "find one card of any type".
+    let for_that_many_match =
+        if up_to_match.is_none() && any_number_tail.is_none() && for_match.is_none() {
+            scan_preceded(lower, "for ", |input| {
+                // Delegate to the single demonstrative-amount authority
+                // (`parse_that_much_or_many`, CR 608.2h) rather than re-composing
+                // the "that many"/"that much" tags here, so the count-prefix
+                // grammar stays defined in exactly one place.
+                map(nom_quantity::parse_that_much_or_many, |qty| {
+                    QuantityExpr::Ref { qty }
+                })
+                .parse(input)
+            })
+        } else {
+            None
+        };
+
     // CR 107.1c + CR 701.23d: up_to=true ⇒ searcher picks 0..=count (vs. exactly count).
     // "any number of" uses i32::MAX as an unbounded ceiling — the resolver floors it
     // against matching.len(), so the effective ceiling is always the legal-option set.
-    let (count, count_end_in_for, up_to) = match (any_number_tail, up_to_match, for_match) {
-        (Some(off), _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
-        (None, Some((expr, off)), _) => (expr, Some(off), true),
-        (None, None, Some((expr, _))) => (expr, None, false),
-        (None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
-    };
+    let (count, count_end_in_for, up_to) =
+        match (any_number_tail, up_to_match, for_match, for_that_many_match) {
+            (Some(off), _, _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
+            (None, Some((expr, off)), _, _) => (expr, Some(off), true),
+            (None, None, Some((expr, _)), _) => (expr, None, false),
+            // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
+            // phrase is parsed into the filter (unlike the numeric `for` path, whose
+            // pre-existing filter handling is intentionally left unchanged here).
+            (None, None, None, Some((expr, off))) => (expr, Some(off), false),
+            (None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
+        };
 
     // Extract the type filter from after "for a/an" or from the tail after "up to N"
     // or "any number of".
@@ -825,11 +856,39 @@ fn parse_search_named_filter(text: &str) -> Option<TargetFilter> {
         .find(|&(idx, _)| parse_name_terminator(&after[idx..]).is_ok())
         .map_or(after.len(), |(idx, _)| idx);
     let name = after[..name_end].trim_end_matches('.').trim();
-    (!name.is_empty()).then(|| {
-        TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
-            name: name.to_string(),
-        }]))
-    })
+    (!name.is_empty()).then(|| search_named_leaf(name))
+}
+
+fn search_named_leaf(name: &str) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Named {
+        name: name.to_string(),
+    }]))
+}
+
+fn parse_search_named_literal_member(input: &str) -> OracleResult<'_, &str> {
+    verify(
+        map(
+            alt((terminated(take_until(" or "), peek(tag(" or "))), rest)),
+            str::trim,
+        ),
+        |name: &&str| !name.is_empty(),
+    )
+    .parse(input)
+}
+
+/// CR 201.2 + CR 701.23a: A bare named-card disjunction is one stated-quality
+/// search whose alternatives are independent exact names. Keep this narrower
+/// than the general disjunction grammar so mixed named/type searches continue
+/// to use [`split_filter_disjunctions`].
+fn parse_search_named_filter_disjunction(text: &str) -> Option<Vec<TargetFilter>> {
+    let (_, names) = all_consuming(preceded(
+        tag("card named "),
+        separated_list1(tag(" or "), parse_search_named_literal_member),
+    ))
+    .parse(text)
+    .ok()?;
+
+    (names.len() >= 2).then(|| names.into_iter().map(search_named_leaf).collect())
 }
 
 /// CR 201.2 + CR 701.18a: Match a clause-joining terminator that ends a card
@@ -1016,16 +1075,20 @@ fn parse_search_leading_filter_property(
 fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option<TargetFilter> {
     let filter_region = search_filter_region(text);
     let segments = split_filter_disjunctions(filter_region);
-    if segments.len() < 2 {
-        return None;
-    }
+    let filters = if segments.len() >= 2 {
+        segments
+            .into_iter()
+            .flat_map(|s| match parse_search_filter(s, ctx) {
+                TargetFilter::Or { filters } => filters,
+                filter => vec![filter],
+            })
+            .collect()
+    } else {
+        parse_search_named_filter_disjunction(filter_region)?
+    };
 
-    let filters: Vec<TargetFilter> = segments
+    let filters: Vec<TargetFilter> = filters
         .into_iter()
-        .flat_map(|s| match parse_search_filter(s, ctx) {
-            TargetFilter::Or { filters } => filters,
-            filter => vec![filter],
-        })
         .filter(search_filter_has_meaningful_content)
         .collect();
     (filters.len() >= 2).then(|| {
@@ -2657,6 +2720,40 @@ mod tests {
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
 
+    fn assert_exact_named_union(filter: &TargetFilter, expected: &[&str]) {
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected named Or filter, got {filter:?}");
+        };
+        let names: Vec<&str> = filters
+            .iter()
+            .map(|branch| match branch {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: None,
+                    properties,
+                }) if type_filters.is_empty() => match properties.as_slice() {
+                    [FilterProp::Named { name }] => name.as_str(),
+                    _ => panic!("expected exactly one Named property, got {branch:?}"),
+                },
+                _ => panic!("expected a name-only Typed branch, got {branch:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names, expected,
+            "named alternatives must retain source order"
+        );
+    }
+
+    fn assert_exact_named_filter(filter: &TargetFilter, expected: &str) {
+        let TargetFilter::Typed(TypedFilter { properties, .. }) = filter else {
+            panic!("expected a Typed named filter, got {filter:?}");
+        };
+        let [FilterProp::Named { name }] = properties.as_slice() else {
+            panic!("expected exactly one Named property, got {filter:?}");
+        };
+        assert_eq!(name, expected);
+    }
+
     #[test]
     fn named_filter_anchors_on_card_named_and_stops_at_conjunction() {
         // CR 201.2: "card named X" → Named X, with internal commas preserved.
@@ -2713,6 +2810,110 @@ mod tests {
 
         // A plain type filter is not a named filter.
         assert_eq!(parse_search_named_filter("creature card"), None);
+    }
+
+    #[test]
+    fn named_bare_or_exact_corpus_members_parse_as_union() {
+        // CR 201.2 + CR 701.23a: each stated card name is an independent exact
+        // alternative in the one-card hidden-zone search.
+        for (oracle, expected) in [
+            (
+                "search your library for a card named dragonstorm globe or boulderborn dragon, reveal it, put it into your hand, then shuffle",
+                ["dragonstorm globe", "boulderborn dragon"],
+            ),
+            (
+                "search your library for a card named festering newt or bubbling cauldron, put it onto the battlefield tapped, then shuffle",
+                ["festering newt", "bubbling cauldron"],
+            ),
+            (
+                "search your library for a card named heart-piercer bow or vial of dragonfire, reveal it, put it into your hand, then shuffle",
+                ["heart-piercer bow", "vial of dragonfire"],
+            ),
+        ] {
+            let details =
+                parse_search_library_details(oracle, &mut ParseContext::default());
+            assert_exact_named_union(&details.filter, &expected);
+            assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+            assert!(details.extra_filters.is_empty());
+        }
+    }
+
+    #[test]
+    fn named_bare_or_preserves_literal_punctuation() {
+        let filter = parse_search_filter(
+            "card named god-pharaoh's gift or altanak, the thrice-called",
+            &mut ParseContext::default(),
+        );
+        assert_exact_named_union(
+            &filter,
+            &["god-pharaoh's gift", "altanak, the thrice-called"],
+        );
+    }
+
+    #[test]
+    fn named_bare_or_does_not_capture_single_or_mixed_forms() {
+        let mut ctx = ParseContext::default();
+        let valid = parse_search_filter("card named alpha or beta", &mut ctx);
+        assert_exact_named_union(&valid, &["alpha", "beta"]);
+
+        let single = parse_search_filter("card named altanak, the thrice-called", &mut ctx);
+        assert_exact_named_filter(&single, "altanak, the thrice-called");
+
+        let internal_and = parse_search_filter("card named sword of fire and ice", &mut ctx);
+        assert_exact_named_filter(&internal_and, "sword of fire and ice");
+
+        let mixed = parse_search_filter(
+            "card named halvar, god of battle or an equipment card",
+            &mut ctx,
+        );
+        let TargetFilter::Or { filters } = mixed else {
+            panic!("expected mixed named/type union");
+        };
+        assert_eq!(filters.len(), 2);
+        let named_branch = filters
+            .iter()
+            .find(|branch| {
+                matches!(
+                    branch,
+                    TargetFilter::Typed(TypedFilter { properties, .. })
+                        if matches!(properties.as_slice(), [FilterProp::Named { .. }])
+                )
+            })
+            .expect("mixed union must retain its named branch");
+        assert_exact_named_filter(named_branch, "halvar, god of battle");
+        let type_branch = filters.iter().find_map(|branch| match branch {
+            TargetFilter::Typed(typed) if typed.get_subtype().is_some() => typed.get_subtype(),
+            _ => None,
+        });
+        assert_eq!(type_branch, Some("Equipment"));
+    }
+
+    #[test]
+    fn named_bare_or_rejects_empty_members() {
+        let valid = parse_search_named_filter_disjunction("card named alpha or beta")
+            .expect("valid named list proves the dedicated production is reached");
+        assert_eq!(valid.len(), 2);
+
+        for malformed in ["card named alpha or ", "card named  or beta"] {
+            assert_eq!(
+                parse_search_named_filter_disjunction(malformed),
+                None,
+                "empty members must make the dedicated union parser decline: {malformed:?}"
+            );
+            let parsed = parse_search_filter(malformed, &mut ParseContext::default());
+            assert!(
+                !matches!(parsed, TargetFilter::Or { .. } | TargetFilter::Any),
+                "malformed named list must not broaden into Or/Any: {parsed:?}"
+            );
+            assert!(
+                !matches!(
+                    parsed,
+                    TargetFilter::Typed(TypedFilter { ref properties, .. })
+                        if properties.iter().any(|property| matches!(property, FilterProp::Named { name } if name.is_empty()))
+                ),
+                "malformed named list must not emit an empty Named branch: {parsed:?}"
+            );
+        }
     }
 
     #[test]

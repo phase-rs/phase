@@ -70,6 +70,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // tactical policy currently routes on. Map them to ActivateAbility as
         // the catch-all bucket so policies that explicitly opt in still run.
         WaitingFor::ReplacementChoice { .. }
+        | WaitingFor::MeldPairChoice { .. }
+        | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::OrderTriggers { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ExploreChoice { .. }
@@ -79,6 +81,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::StationTarget { .. }
         | WaitingFor::SaddleMount { .. }
         | WaitingFor::ScryChoice { .. }
+        | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         // CR 119.7 + CR 119.8: redistribute life totals is a forced mid-resolution
         // selection; route to the ability catch-all bucket.
         | WaitingFor::RedistributeLifeTotals { .. }
@@ -146,6 +149,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CipherEncodeChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -165,6 +169,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::CategoryChoice { .. }
         | WaitingFor::EachPlayerCopyChosenSelection { .. }
         | WaitingFor::KeepWithinTotalPowerChoice { .. }
+        | WaitingFor::KeepExactPermanentsChoice { .. }
         | WaitingFor::AssignCombatDamage { .. }
         // CR 510.1d + CR 702.22k: active player divides a banded blocker's
         // damage — a forced mid-combat choice, routed to the ability catch-all.
@@ -274,6 +279,7 @@ mod tests {
                     player: PlayerId(0),
                     valid_attacker_ids: vec![],
                     valid_attack_targets: vec![],
+                    valid_attack_targets_by_attacker: None,
                     attacker_constraints: Default::default(),
                 },
                 &dummy_action

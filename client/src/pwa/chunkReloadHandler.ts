@@ -1,5 +1,11 @@
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
-import { pushUpdateDebug, setUpdateStatus } from "./updateStatus";
+import {
+  claimUpdateStatus,
+  pushUpdateDebug,
+  releaseUpdateStatus,
+  setUpdateError,
+  setUpdateStatus,
+} from "./updateStatus";
 import { flushNow, trackEvent } from "../services/telemetry";
 
 /**
@@ -20,10 +26,103 @@ import { flushNow, trackEvent } from "../services/telemetry";
  * everyone else in it. The user lives with a degraded UI for the rest of
  * the game (one missing lazy route), but the game itself stays alive and
  * the reconnect-on-end story remains intact.
+ *
+ * Loop breaker: when the failure *persists* (bad cached edge variant,
+ * broken client cache), reloading forever turns one broken client into a
+ * telemetry storm — observed 2026-07-18 as ~6,500 events/hour from a
+ * handful of clients. Reloads are counted per failing chunk in
+ * `sessionStorage` (survives reload in the same tab; keys self-reset when
+ * chunk hashes change on the next deploy). Only *executed* reloads count —
+ * queuing a deferred multiplayer reload does not — so repeated failures
+ * during one game can never trip the breaker. After
+ * {@link RELOAD_GUARD_MAX} reloads inside {@link RELOAD_GUARD_WINDOW_MS},
+ * the handler stops reloading, surfaces the failure via `setUpdateError`,
+ * and reports what the failing URL actually returns (status +
+ * `cf-cache-status` + `cf-ray` + SW-controlled bit) so a stuck client
+ * diagnoses itself in telemetry.
  */
 let isInstalled = false;
 let deferredReload: (() => void) | null = null;
 let deferredReloadUnsub: (() => void) | null = null;
+
+/** Reloads allowed per failing chunk within {@link RELOAD_GUARD_WINDOW_MS}. */
+const RELOAD_GUARD_MAX = 2;
+const RELOAD_GUARD_WINDOW_MS = 10 * 60 * 1000;
+
+interface ReloadGuardState {
+  count: number;
+  firstAt: number;
+}
+
+/** Read the guard state for a chunk key; `null` when absent, expired, or
+ *  storage is unavailable (lockdown/embedded contexts — the breaker then
+ *  degrades to the pre-guard always-reload behavior). */
+function readReloadGuard(key: string): ReloadGuardState | null {
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ReloadGuardState;
+    if (typeof parsed.count !== "number" || typeof parsed.firstAt !== "number") return null;
+    if (Date.now() - parsed.firstAt > RELOAD_GUARD_WINDOW_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+/** Count an *executed* reload (called immediately before `location.reload()`,
+ *  so deferred reloads count when they fire, not when queued). */
+function recordReload(key: string): void {
+  try {
+    const prior = readReloadGuard(key);
+    const next: ReloadGuardState = prior
+      ? { count: prior.count + 1, firstAt: prior.firstAt }
+      : { count: 1, firstAt: Date.now() };
+    window.sessionStorage.setItem(key, JSON.stringify(next));
+  } catch {
+    // Storage unavailable — degrade to always-reload.
+  }
+}
+
+/** Chunks whose loop-abort has already been reported this pageload. Without
+ *  this latch, a component retrying a failing dynamic import would re-probe
+ *  and re-emit on every attempt (loop-abort events have no per-event session
+ *  cap). Module-level on purpose: after a breach there are no reloads, so
+ *  per-pageload scope is exactly once-per-stuck-page; a manual refresh
+ *  starting a fresh page reports once more, which is the desired signal. */
+const abortReported = new Set<string>();
+
+/** Best-effort diagnosis of a persistently failing chunk: refetch it and
+ *  report status + Cloudflare cache/colo headers (same-origin, all readable)
+ *  plus whether a service worker controls this page. Runs only on the
+ *  loop-abort path, where no reload is pending — never delays recovery.
+ *  Interpretation rule: when `probe_sw` is 1 the page is SW-controlled and
+ *  the probe routes through the SW fetch handler (`cache: "no-store"` only
+ *  bypasses the HTTP cache), so status/cache/ray may describe the SW's
+ *  cached copy rather than the Cloudflare edge. */
+async function probeFailedChunk(message: string): Promise<Record<string, unknown>> {
+  const probeSw =
+    typeof navigator !== "undefined" &&
+    "serviceWorker" in navigator &&
+    navigator.serviceWorker.controller !== null
+      ? 1
+      : 0;
+  const url = /https?:\/\/[^\s'"()]+/.exec(message)?.[0];
+  if (!url) return { probe_sw: probeSw };
+  try {
+    const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    return {
+      probe_status: res.status,
+      probe_cache: res.headers.get("cf-cache-status") ?? "",
+      probe_ray: res.headers.get("cf-ray") ?? "",
+      probe_sw: probeSw,
+    };
+  } catch {
+    // Fetch threw or timed out — status 0 mirrors the browser's own
+    // network-error convention.
+    return { probe_status: 0, probe_sw: probeSw };
+  }
+}
 
 export function installChunkReloadHandler(): void {
   if (isInstalled) return;
@@ -34,16 +133,48 @@ export function installChunkReloadHandler(): void {
     // the console — we're handling it by reloading (or deferring).
     event.preventDefault();
 
-    const deferred = isMultiplayerGameLive();
     // The failed chunk identifier lives in the event's `.payload` Error
     // (its message carries the failing URL). Best-effort; truncated at enqueue.
+    // Payload-less events share the "unknown" key deliberately: distinct
+    // identity-less failures cross-count toward one breach, which fails
+    // conservative (stops reloading) rather than risking a loop.
     const chunk = (event as { payload?: Error }).payload?.message;
+    const guardKey = `chunk-reload:${chunk ?? "unknown"}`;
+
+    if ((readReloadGuard(guardKey)?.count ?? 0) >= RELOAD_GUARD_MAX) {
+      // Loop breaker: two reloads inside the window didn't fix this chunk, so
+      // a third won't either. Stop reloading and don't queue a new deferred
+      // reload — an already-queued one from an earlier failure is left intact
+      // (it's a single reload and may succeed after the game ends).
+      if (abortReported.has(guardKey)) return;
+      abortReported.add(guardKey);
+      setUpdateError("App update failed to load. Please refresh the page.");
+      // Emit the abort marker synchronously — the user was just told to
+      // refresh, and a refresh (or tab close) during the async probe below
+      // must not lose the one event this breaker exists to capture. The
+      // probe result follows as its own event when (if) it resolves.
+      trackEvent("chunk_reload", { reason: "loop-abort", deferred: false, chunk });
+      flushNow();
+      void probeFailedChunk(chunk ?? "").then((probe) => {
+        trackEvent("chunk_reload", {
+          reason: "loop-abort-probe",
+          deferred: false,
+          chunk,
+          ...probe,
+        });
+        flushNow();
+      });
+      return;
+    }
+
+    const deferred = isMultiplayerGameLive();
     trackEvent("chunk_reload", { reason: "preload-error", deferred, chunk });
 
     const doReload = () => {
       pushUpdateDebug("Chunk preload failed; reloading to pick up new bundle.", "warn");
       // Drain the telemetry queue before navigating away.
       flushNow();
+      recordReload(guardKey);
       window.location.reload();
     };
 
@@ -52,7 +183,9 @@ export function installChunkReloadHandler(): void {
         "Chunk preload failed during multiplayer game; deferring reload until game ends.",
         "warn",
       );
-      setUpdateStatus("deferred");
+      if (claimUpdateStatus("chunk")) {
+        setUpdateStatus("deferred");
+      }
       // First-failure-wins: if a second chunk fails before the game ends,
       // we already have a reload queued — replacing it changes nothing.
       if (deferredReload) return;
@@ -75,6 +208,7 @@ export function installChunkReloadHandler(): void {
       deferredReloadUnsub?.();
       deferredReloadUnsub = null;
       deferredReload = null;
+      releaseUpdateStatus("chunk");
     },
     { once: true },
   );

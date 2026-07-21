@@ -542,7 +542,12 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         loyalty: obj.loyalty,
         loyalty_activations_this_turn: obj.loyalty_activations_this_turn,
         abilities: obj.abilities.clone(),
-        trigger_definitions: obj.trigger_definitions.clone(),
+        trigger_definitions: obj
+            .trigger_definitions
+            .iter_all()
+            .map(|entry| entry.definition.clone())
+            .collect::<Vec<_>>()
+            .into(),
         replacement_definitions: obj.replacement_definitions.clone(),
         static_definitions: obj.static_definitions.clone(),
         played_from_zone: obj.played_from_zone,
@@ -706,6 +711,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // SAFE — read only candidate fingerprint fields.
         FilterProp::Token
         | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
         | FilterProp::WasPlayed
         | FilterProp::Tapped
         | FilterProp::Untapped
@@ -727,6 +733,8 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::PowerExceedsBase
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: reads only the candidate's own `goaded_by` fingerprint field.
+        | FilterProp::Goaded
         | FilterProp::Modified
         | FilterProp::Historic
         | FilterProp::NotHistoric
@@ -767,6 +775,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::AttackingAlone
         | FilterProp::BlockingAlone
         | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         // CR 302.6: per-turn control-continuity marker — a turn/history-relative
         // predicate like the siblings here (POISON for memoization).
@@ -794,6 +803,9 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::HasSingleTarget
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
+        // CR 715.2: Adventure identity reads the stored alternate face, which
+        // is not part of the candidate fingerprint; memoizing it is unsound.
+        | FilterProp::HasAdventure
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }

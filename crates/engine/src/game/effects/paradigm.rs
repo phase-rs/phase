@@ -188,6 +188,7 @@ pub fn cast_paradigm_copy(
     copy_obj.id = copy_id;
     copy_obj.controller = controller;
     copy_obj.owner = controller;
+    // allow-raw-zone: paradigm spell-copy birth directly on stack has no from-zone event (CR 707.10).
     copy_obj.zone = Zone::Stack;
     copy_obj.is_token = true;
     copy_obj.tapped = false;

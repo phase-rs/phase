@@ -29,7 +29,9 @@ use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
-use super::oracle_nom::primitives::{parse_number as nom_parse_number, scan_contains};
+use super::oracle_nom::primitives::{
+    parse_number as nom_parse_number, scan_contains, scan_preceded,
+};
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
@@ -55,7 +57,7 @@ use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
-    parse_effect_chain_with_context, rewrite_condition_keyword,
+    parse_effect_chain_ir, parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
@@ -65,11 +67,12 @@ use super::oracle_ir::doc::{
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
 use super::oracle_ir::feature::ItemIdTracks;
-use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
+use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
+use super::oracle_ir::replacement::ReplacementIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
-    extract_granted_keyword_list, is_keyword_cost_line, parse_granted_keyword_fragment,
-    parse_kicker_additional_cost_line, parse_router_keyword_line,
+    is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
+    parse_router_keyword_fragment, parse_router_keyword_line, parse_router_keyword_list,
 };
 use super::oracle_level::parse_level_blocks;
 use super::oracle_modal::{
@@ -80,6 +83,7 @@ use super::oracle_modal::{
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
+    parse_replacement_line_ir,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -90,12 +94,11 @@ use super::oracle_special::{
 };
 use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
-    parse_cast_spells_alternative_cost_multi, parse_chosen_creature_type_static_prefix,
-    parse_collect_evidence_alt_cost, parse_compound_you_control_chosen_type_static_prefix,
-    parse_every_creature_type_static_prefix, parse_flashback_trailing_self_spell_cost_reduction,
-    parse_spells_alternative_cost, parse_static_line, parse_static_line_multi,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
-    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
+    parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
+    parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
+    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
+    GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
@@ -206,10 +209,10 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
-fn parse_replacement_sentence_sequence(
+fn parse_replacement_sentence_sequence_ir(
     line: &str,
     card_name: &str,
-) -> Option<Vec<ReplacementDefinition>> {
+) -> Option<Vec<ReplacementIr>> {
     // CR 614.1c: Effects that read "[This permanent] enters with ...",
     // "As [this permanent] enters ...", or "[This permanent] enters as ..."
     // are replacement effects.
@@ -224,7 +227,7 @@ fn parse_replacement_sentence_sequence(
         if !is_replacement_pattern(&sentence.to_lowercase()) {
             return None;
         }
-        replacements.push(parse_replacement_line(sentence, card_name)?);
+        replacements.push(parse_replacement_line_ir(sentence, card_name)?);
     }
     Some(replacements)
 }
@@ -623,13 +626,21 @@ fn parse_begin_game_counter_clause(
     ))
 }
 
+fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
+    match node {
+        OracleNodeIr::Spell(effect_ir) => Some(lower_effect_chain_ir(effect_ir)),
+        OracleNodeIr::PreLoweredSpell(definition) => Some(definition.clone()),
+        _ => None,
+    }
+}
+
 fn parsed_result_recently_granted_flashback(emitter: &DocEmitter<'_>) -> bool {
     // u4-c2: reads the emitter's last-emitted-per-category peeks instead of
     // `result.{abilities,triggers,statics}.last()` (the vectors moved into the
     // source-ordered builder). Same semantics: was flashback just granted?
     emitter
-        .last_ability()
-        .is_some_and(definition_grants_flashback)
+        .last_ability_definition()
+        .is_some_and(|definition| definition_grants_flashback(&definition))
         || emitter.last_trigger().is_some_and(|trigger| {
             trigger
                 .execute
@@ -905,15 +916,31 @@ fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<St
 /// (e.g., cross-mode conjunctions) emit all their constituent statics
 /// rather than silently dropping the extras.
 ///
-/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), cant-cast
-/// gate parentheticals stripped by `strip_reminder_text` are re-applied without
-/// passing raw reminder parentheticals through the general static parser.
+/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), rules-
+/// bearing parentheticals stripped by `strip_reminder_text` are recovered for
+/// their specific static forms without feeding reminder text through the
+/// general static parser.
 fn parse_static_line_with_graveyard_keyword_continuation(
     line: &str,
     raw_line_for_cant_cast_gates: Option<&str>,
     card_name_for_cant_cast_gates: Option<&str>,
 ) -> Vec<StaticDefinition> {
-    let mut defs = if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
+    // CR 205.1a + CR 611.3a: a parenthetical subtype-loss rider belongs to
+    // its own conditional type grant, even though reminder stripping removes it
+    // from the general dispatch line (Goddric's Celebration).
+    let raw_conditional_type_grant = raw_line_for_cant_cast_gates
+        .zip(card_name_for_cant_cast_gates)
+        .and_then(|(raw_line, card_name)| {
+            let normalized_raw = normalize_self_refs_for_static(raw_line, card_name);
+            let raw_lower = normalized_raw.to_lowercase();
+            crate::parser::oracle_static::parse_inverted_base_pt_type_grant(
+                &normalized_raw,
+                &raw_lower,
+            )
+        });
+    let mut defs = if let Some(def) = raw_conditional_type_grant {
+        vec![def]
+    } else if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
         vec![def]
     } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
         vec![def]
@@ -949,7 +976,7 @@ fn parse_static_replacement_compound(
     line: &str,
     lower: &str,
     card_name: &str,
-) -> Option<(Vec<StaticDefinition>, Vec<ReplacementDefinition>)> {
+) -> Option<(Vec<StaticDefinition>, Vec<ReplacementIr>)> {
     // Re-attach the shared subject to each conjunct so each clause parses
     // independently (Oracle text drops the subject on the second conjunct).
     let (subject, p1, p2) = split_dual_cant_clause(line, lower)?;
@@ -958,8 +985,8 @@ fn parse_static_replacement_compound(
 
     let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left, None, None);
     let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right, None, None);
-    let left_repl = parse_replacement_line(&left, card_name);
-    let right_repl = parse_replacement_line(&right, card_name);
+    let left_repl = parse_replacement_line_ir(&left, card_name);
+    let right_repl = parse_replacement_line_ir(&right, card_name);
 
     // Each conjunct must be claimed by at least one layer; otherwise this is not
     // a clean cross-layer compound and the line belongs to the single-layer
@@ -1030,6 +1057,79 @@ fn split_dual_cant_clause<'a>(line: &'a str, lower: &str) -> Option<(&'a str, &'
     Some((subject, p1, p2))
 }
 
+/// CR 701.26b + CR 614.6: Split `<continuous grant or restriction> and can't
+/// become untapped` / `and can't be untapped` across parser layers — the
+/// first conjunct stays whatever `parse_static_line_multi` recognizes it as
+/// (RemoveAllAbilities, a P/T pump, a keyword grant, …) and the trailing
+/// prohibition becomes an unconditional `ProposedEvent::Untap` prevention
+/// (CR 701.26b, the BROAD untap prohibition — not a `StaticMode::CantUntap`,
+/// which is the untap-step-only class per CR 502.3 and is handled by the
+/// same-layer sibling `try_split_and_doesnt_untap`).
+///
+/// Frozen in Ice ("Enchanted creature loses all abilities and can't become
+/// untapped.") is the seed card: without this split, `is_static_pattern`
+/// claims the whole line and the generic continuous-modification scanner has
+/// no `ContinuousModification` representation for "can't become untapped", so
+/// it silently vanishes — the enchanted creature loses its abilities but
+/// untaps normally next turn, defeating the lock. Mirrors
+/// `try_split_and_doesnt_untap` (`oracle_static/evasion.rs`, the CR 502.3
+/// narrow form) but crosses into the replacement layer for the broad form,
+/// reusing the grant's parsed `affected` filter as the replacement's subject
+/// instead of re-deriving it from text.
+fn try_split_and_cant_become_untapped(
+    text: &str,
+) -> Option<(Vec<StaticDefinition>, ReplacementDefinition)> {
+    type VE<'a> = OracleError<'a>;
+    let lower = text.to_lowercase();
+
+    let (before, _matched, rest) = scan_preceded(&lower, |i: &str| {
+        let (i, _) = (
+            tag::<_, _, VE>("and can"),
+            alt((tag("'t "), tag("\u{2019}t "))),
+            alt((tag("become "), tag("be "))),
+            tag("untapped"),
+        )
+            .parse(i)?;
+        Ok((i, ()))
+    })?;
+
+    // CR 701.26b: only a terminal (period-only) tail is the plain broad
+    // prohibition; any other trailing clause is a different shape and the
+    // split declines rather than mis-split it — parity with the sibling
+    // `try_split_and_doesnt_untap` terminal guard.
+    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
+        return None;
+    }
+
+    // `before` is a slice of the lowercased copy, so its byte length can
+    // diverge from the equivalent prefix of `text` (e.g. Turkish dotted
+    // İ lowercases to a two-codepoint "i̇"). Re-anchor via char count on
+    // `text` directly rather than reusing the lowercased byte offset, so
+    // this never slices `text` on a non-char boundary.
+    let cut_char_count = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .chars()
+        .count();
+    let cut_end = text
+        .char_indices()
+        .nth(cut_char_count)
+        .map_or(text.len(), |(idx, _)| idx);
+    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
+    let mut defs = parse_static_line_with_graveyard_keyword_continuation(&line_a, None, None);
+    if defs.is_empty() {
+        return None;
+    }
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let affected = defs[0].affected.clone()?;
+    let replacement = ReplacementDefinition::new(ReplacementEvent::Untap)
+        .valid_card(affected)
+        .description(text.to_string());
+    Some((defs, replacement))
+}
+
 // ===========================================================================
 // Cross-item document relations (CR 607.2d)
 //
@@ -1042,12 +1142,15 @@ fn split_dual_cant_clause<'a>(line: &'a str, lower: &str) -> Option<(&'a str, &'
 // vectors for a matching shape (a dual authority the parse/lower split removes).
 // ===========================================================================
 
-/// The lowered replacement definition an item carries, if it is a replacement.
-/// Only `PreLowered*` nodes are inspected: the dedicated IR variants
-/// (`Spell`/`Trigger`/`Static`/`Replacement`) are never constructed today, and
-/// gain relation participation when the dispatch-cutover unit builds them.
+/// The replacement definition an item carries, if it is a replacement.
+///
+/// `ReplacementIr` already owns the parsed definition relation discovery needs;
+/// lowering it is currently an identity conversion. Treat both representations
+/// uniformly so document relations are recovered before the lower seam folds
+/// the items into category vectors.
 fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     match &item.node {
+        OracleNodeIr::Replacement(replacement_ir) => Some(&replacement_ir.definition),
         OracleNodeIr::PreLoweredReplacement(def) => Some(def),
         _ => None,
     }
@@ -1818,31 +1921,6 @@ fn is_self_chosen_type_description(description: &str) -> bool {
     parsed.is_ok()
 }
 
-fn push_same_is_true_static_tail<F>(
-    emitter: &mut DocEmitter<'_>,
-    item_line: usize,
-    line: &str,
-    lower: &str,
-    parse_modeled_sentence: F,
-) -> bool
-where
-    F: for<'i> FnMut(&'i str) -> OracleResult<'i, ()>,
-{
-    if let Some((modeled_sentence, unmodeled_tail)) =
-        split_same_is_true_static_tail(line, lower, parse_modeled_sentence)
-    {
-        for __item in
-            parse_static_line_with_graveyard_keyword_continuation(modeled_sentence, None, None)
-        {
-            emitter.static_at(item_line, __item);
-        }
-        emitter.ability_at(item_line, make_unimplemented(unmodeled_tail));
-        return true;
-    }
-
-    false
-}
-
 /// CR 611.3a + CR 702: Distribute a "The same is true for <keyword list>"
 /// continuation across a graveyard-keyword-gated static grant (Cairn Wanderer).
 ///
@@ -2148,6 +2226,11 @@ fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
     parsed
 }
 
+/// A classifier MAY probe with the STRICT parser; it may NOT probe with a helper
+/// that discards the remainder. This one gates a routing decision (priority 0 and
+/// the spell-resolution guard), so a permissive probe would report "this whole line
+/// is keywords" about a line carrying an unparsed semantic clause — and the router
+/// would then consume it.
 fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bool {
     let mut saw_multiple_parts = false;
     let mut parts = line
@@ -2158,13 +2241,13 @@ fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bo
         return false;
     };
 
-    if extract_granted_keyword_list(first, mtgjson_keyword_names).is_none() {
+    if parse_router_keyword_list(first, mtgjson_keyword_names).is_none() {
         return false;
     }
 
     for part in parts {
         saw_multiple_parts = true;
-        if extract_granted_keyword_list(part, mtgjson_keyword_names).is_none() {
+        if parse_router_keyword_list(part, mtgjson_keyword_names).is_none() {
             return false;
         }
     }
@@ -2201,8 +2284,12 @@ fn is_spell_resolution_instruction_line(
         return false;
     }
 
+    // Strict probe: a line is only "not a spell resolution instruction, it's a
+    // keyword line" when it parses COMPLETELY as keywords. A permissive probe here
+    // reports true for "Cycling {2} if you control an artifact" and the conditional
+    // tail is never parsed by anything.
     if !is_ability_activate_cost_static(&lower)
-        && extract_granted_keyword_list(line, mtgjson_keyword_names).is_some()
+        && parse_router_keyword_list(line, mtgjson_keyword_names).is_some()
     {
         return false;
     }
@@ -2507,7 +2594,7 @@ fn ability_word_to_ability_condition(
 /// - Structural equality (`==`) is the dedup criterion.
 /// - Results never nest: `And` children are always leaves, never `And`.
 /// - Empty-conjunction not produced — at least one operand is always retained.
-fn merge_ability_condition(
+pub(crate) fn merge_ability_condition(
     existing: Option<crate::types::ability::AbilityCondition>,
     incoming: crate::types::ability::AbilityCondition,
 ) -> crate::types::ability::AbilityCondition {
@@ -2977,8 +3064,39 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
 
 // --- CR 607.1 + CR 610.3: ETB exile → LTB return two-trigger pair --------------
 
-/// Whether a trigger is the LTB "return the exiled card to the battlefield" side.
-fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+/// CR 610.3: The automatic `check_exile_returns` path this synthesis activates
+/// performs a plain zone move with no entry modifiers — it can't carry a
+/// printed rider like "return the exiled cards to the battlefield TAPPED"
+/// (Realm Razer). Only pair the linked-ability synthesis with an unmodified
+/// return; a modified return needs its own modifier-carrying mechanism and
+/// stays unsupported by this synthesis until one exists (caught in review
+/// of #6055 — Realm Razer would otherwise return its lands untapped,
+/// contradicting its printed text).
+fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
+    match effect {
+        Effect::ChangeZone {
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile: None,
+            enters_modified_if: None,
+            ..
+        } => enter_with_counters.is_empty() && conditional_enter_with_counters.is_empty(),
+        _ => false,
+    }
+}
+
+/// The LTB "return the exiled card(s) to the battlefield" trigger *shape*, with
+/// no entry-modifier gate: mode `LeavesBattlefield` whose execute is a
+/// `ChangeZone` of a `TrackedSet` back to the battlefield. This is the raw
+/// pairing signal; whether the automatic return path can actually carry the
+/// printed return is decided by `change_zone_return_has_no_entry_modifiers`
+/// (see `trigger_is_ltb_return` / `trigger_is_ltb_return_with_entry_modifier`).
+fn trigger_is_ltb_return_shape(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::LeavesBattlefield
         && def.execute.as_deref().is_some_and(|ex| {
             matches!(
@@ -2992,8 +3110,43 @@ fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
         })
 }
 
-/// Whether a trigger is the ETB "exile target X" side with no printed duration
-/// (the side that must gain `Duration::UntilHostLeavesPlay`).
+/// Whether a trigger is the LTB "return the exiled card to the battlefield" side
+/// that the automatic `ExileLink::UntilSourceLeaves` return path can carry — the
+/// shape matches and the return has no entry modifiers. Journey to Nowhere,
+/// Oblivion Ring, and Worldgorger Dragon all pass here.
+fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+    trigger_is_ltb_return_shape(def)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(|ex| change_zone_return_has_no_entry_modifiers(&ex.effect))
+}
+
+/// CR 610.3: Whether a trigger is the LTB return side whose shape matches but
+/// whose return carries an entry modifier the automatic return path can't apply
+/// (Realm Razer's "return the exiled cards to the battlefield tapped"). This is
+/// exactly the class that shape-matched yet the modifier check rejected — the
+/// surviving signal that distinguishes "shape matched, modifier rejected it"
+/// from "no LTB-return shape at all", so coverage can flag the unsupported
+/// return instead of the card silently showing as fully supported.
+fn trigger_is_ltb_return_with_entry_modifier(def: &TriggerDefinition) -> bool {
+    trigger_is_ltb_return_shape(def)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(|ex| !change_zone_return_has_no_entry_modifiers(&ex.effect))
+}
+
+/// CR 610.3: Whether a trigger is the ETB "exile ..." side with no printed
+/// duration (the side that must gain `Duration::UntilHostLeavesPlay`). Covers
+/// both the single-target exile (`Effect::ChangeZone`, Journey to Nowhere /
+/// Oblivion Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all
+/// other permanents you control" — Worldgorger Dragon). The two effect
+/// variants share the CR 610.3 "until"-duration vehicle, so the duration
+/// stamp applies identically to either — gated, in `trigger_is_ltb_return`,
+/// on the paired LTB return having no entry modifiers (a card like Realm
+/// Razer, "return the exiled cards to the battlefield TAPPED," is excluded
+/// from this synthesis rather than silently dropping its tapped rider).
 fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::ChangesZone
         && def.destination == Some(Zone::Battlefield)
@@ -3004,51 +3157,120 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
                     Effect::ChangeZone {
                         destination: Zone::Exile,
                         ..
+                    } | Effect::ChangeZoneAll {
+                        destination: Zone::Exile,
+                        ..
                     }
                 )
         })
 }
 
-/// CR 607.1 + CR 610.3: Pair each ETB "exile target X" trigger with the LTB
-/// "return the exiled card" trigger (Journey to Nowhere, Oblivion Ring, and the
-/// broader two-trigger class). Emitted only when the LTB-return side exists.
+/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Pair each ETB "exile ..."
+/// trigger with the LTB "return the exiled card(s)" trigger. Covers both the
+/// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
+/// class ("exile all other permanents you control" — Worldgorger Dragon).
+/// CR 610.3: When an unmodified LTB-return side exists, emit `DurationStamped`
+/// relations so the ETB exiles gain `Duration::UntilHostLeavesPlay`. Otherwise,
+/// if a shape-matching LTB return exists whose entry modifier the automatic
+/// return path can't carry (Realm Razer), emit `ModifierUnsupported` relations
+/// so the unsupported return is marked visible to coverage. When neither side
+/// exists, no relation is emitted and ordinary cards are untouched. The
+/// diagnostic fragment is captured here, while `items` is in scope, because the
+/// relation applier has no access to the item list afterward.
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
-    let Some(ltb) = items
+    let ltb_return = items
         .iter()
-        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return))
-    else {
-        return;
+        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return));
+
+    let (ltb, outcome) = match ltb_return {
+        Some(ltb) => (ltb, LinkedReturnOutcome::DurationStamped),
+        None => {
+            let Some(ltb) = items.iter().find(|item| {
+                item_trigger(item).is_some_and(trigger_is_ltb_return_with_entry_modifier)
+            }) else {
+                return;
+            };
+            // CR 610.3: A low-precision span tier may report no fragment; fall
+            // back to a static description of the unsupported return so the
+            // coverage diagnostic is never handed an empty clause.
+            let fragment = ltb.source.fragment().map(str::to_owned).unwrap_or_else(|| {
+                "return the exiled cards to the battlefield with an entry modifier".to_string()
+            });
+            (ltb, LinkedReturnOutcome::ModifierUnsupported { fragment })
+        }
     };
+
     for item in items {
         if item_trigger(item).is_some_and(trigger_is_etb_exile_pending_duration) {
             relations.push(DocumentRelationIr::EtbExileLtbReturn {
                 etb_exile: item.id,
                 ltb_return: ltb.id,
+                outcome: outcome.clone(),
             });
         }
     }
 }
 
-/// Stamp `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the
-/// existing `ExileLink::UntilSourceLeaves` mechanism returns the exiled card.
+/// CR 610.3: Apply an ETB-exile / LTB-return pair. `DurationStamped` stamps
+/// `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the existing
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card(s).
+/// `ModifierUnsupported` instead marks the LTB return trigger unsupported so the
+/// modifier-bearing return is visible to coverage rather than silently dropped.
 fn apply_etb_exile_ltb_return(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
     trigger_ids: &[OracleItemId],
 ) {
     for relation in relations {
-        let DocumentRelationIr::EtbExileLtbReturn { etb_exile, .. } = relation else {
+        let DocumentRelationIr::EtbExileLtbReturn {
+            etb_exile,
+            ltb_return,
+            outcome,
+        } = relation
+        else {
             continue;
         };
-        let Some(pos) = position_of(trigger_ids, *etb_exile) else {
-            continue;
-        };
-        if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
-            if execute.duration.is_none() {
-                execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        match outcome {
+            LinkedReturnOutcome::DurationStamped => {
+                let Some(pos) = position_of(trigger_ids, *etb_exile) else {
+                    continue;
+                };
+                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+                    if execute.duration.is_none() {
+                        execute.duration =
+                            Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+                    }
+                }
+            }
+            LinkedReturnOutcome::ModifierUnsupported { fragment } => {
+                let Some(pos) = position_of(trigger_ids, *ltb_return) else {
+                    continue;
+                };
+                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+                    attach_modifier_unsupported_marker(execute, fragment);
+                }
             }
         }
     }
+}
+
+/// CR 610.3: Append an `Effect::unimplemented` gap marker to the tail of a
+/// trigger execute's sub-ability chain, marking a modifier-bearing linked LTB
+/// return unsupported so coverage reports the gap. Appends to the chain tail
+/// rather than overwriting any existing sub-ability (defensive — for this card
+/// class the chain is currently always empty).
+fn attach_modifier_unsupported_marker(execute: &mut AbilityDefinition, fragment: &str) {
+    let mut cursor: &mut AbilityDefinition = execute;
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_deref_mut()
+            .expect("sub_ability checked present");
+    }
+    cursor.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modifier_bearing_linked_return", fragment),
+    )));
 }
 
 /// CR 207.2c + CR 601.2f: Extract the per-target cost-increase clause,
@@ -3135,9 +3357,9 @@ struct DocEmitter<'a> {
     /// `result.{triggers,statics}.last()` (`parsed_result_recently_granted_flashback`).
     /// INSERTION recency: overwritten on each emit of that category. Safe as a
     /// clone-on-emit slot because NO `triggers.pop()`/`statics.pop()` exists in the
-    /// parser (doc.rs verifies this) — nothing can revert them. The ABILITY peek is
-    /// deliberately NOT here: it must be pop-aware, so `last_ability()` reads the
-    /// builder's `spells_emitted` stack via `peek_last_spell` instead.
+    /// parser (doc.rs verifies this) — nothing can revert them. The ability peek is
+    /// deliberately NOT here: it must be pop-aware, so `last_ability_node()` reads
+    /// the builder's `spells_emitted` stack via `peek_last_spell_node` instead.
     ///
     /// If a trigger/static pop is ever introduced, make these
     /// `*_emitted: Vec<OracleItemId>` stacks (like `spells_emitted`) first.
@@ -3206,8 +3428,8 @@ impl<'a> DocEmitter<'a> {
     }
 
     fn ability_at(&mut self, line: usize, def: AbilityDefinition) {
-        // No `last_ability` clone: the ability peek is pop-aware, read from the
-        // builder's `spells_emitted` stack (see `last_ability`).
+        // No ability clone: the ability peek is pop-aware, read from the builder's
+        // `spells_emitted` stack (see `last_ability_node`).
         self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
     }
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
@@ -3219,13 +3441,16 @@ impl<'a> DocEmitter<'a> {
         self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
 
-    /// Last-emitted definition per category — the read-only peeks for
+    /// Last-emitted node per category — the read-only peeks for
     /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
-    /// `result.{abilities,triggers,statics}.last()`). All three are INSERTION
-    /// recency; `last_ability` is pop-aware (via `spells_emitted`), the other two
-    /// are clone-on-emit slots (no pop exists to revert them).
-    fn last_ability(&self) -> Option<&AbilityDefinition> {
-        self.builder.peek_last_spell()
+    /// `result.{abilities,triggers,statics}.last()`). All three are insertion
+    /// recency; `last_ability_node` is pop-aware (via `spells_emitted`), the other
+    /// two are clone-on-emit slots (no pop exists to revert them).
+    fn last_ability_node(&self) -> Option<&OracleNodeIr> {
+        self.builder.peek_last_spell_node()
+    }
+    fn last_ability_definition(&self) -> Option<AbilityDefinition> {
+        self.last_ability_node().and_then(lower_spell_node)
     }
     fn last_trigger(&self) -> Option<&TriggerDefinition> {
         self.last_trigger.as_ref()
@@ -3705,19 +3930,18 @@ pub(crate) fn parse_oracle_ir(
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
+            // Consume-on-success: EVERY part must parse completely as keywords. The
+            // permissive form accepted a part carrying a semantic clause ("cycling
+            // {2} if you control an artifact"), consumed the whole line, and dropped
+            // that clause with no keyword and no diagnostic.
             if parts.len() > 1 {
-                let all_keywords = parts.iter().all(|part| {
-                    extract_granted_keyword_list(part, mtgjson_keyword_names).is_some()
-                });
-                if all_keywords {
-                    for part in &parts {
-                        if let Some(extracted) =
-                            extract_granted_keyword_list(part, mtgjson_keyword_names)
-                        {
-                            for __item in extracted {
-                                emitter.keyword_at(item_line, __item);
-                            }
-                        }
+                let routed: Option<Vec<Vec<Keyword>>> = parts
+                    .iter()
+                    .map(|part| parse_router_keyword_list(part, mtgjson_keyword_names))
+                    .collect();
+                if let Some(routed) = routed {
+                    for keyword in routed.into_iter().flatten() {
+                        emitter.keyword_at(item_line, keyword);
                     }
                     i += 1;
                     continue;
@@ -3761,8 +3985,10 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.122 + CR 602.5b: Crew with a trailing "Activate only once each
         // turn." cadence sentence. Must run before the generic keyword-only
-        // extraction below — that path parses "Crew N" via `parse_granted_keyword_fragment`
-        // and would consume the line, dropping the cadence sentence.
+        // extraction below: that path would emit a bare `Crew N` and leave the cadence
+        // sentence to be re-parsed as its own unit. This intercept models both in one
+        // keyword. (Both surfaces are strict about the tail — `parse_crew_keyword` ends
+        // in `all_consuming`, and priority 1b now routes through the strict list.)
         if lower_starts_with(&lower, "crew ") {
             if let Some(crew_kw) = parse_crew_keyword(&lower) {
                 emitter.keyword_at(item_line, crew_kw);
@@ -3774,9 +4000,17 @@ pub(crate) fn parse_oracle_ir(
         // Priority 1b: keyword-only line — extract any keywords for the union set
         // Guard: "{Keyword} abilities you activate cost {N} less" is a static ability,
         // not a keyword line. Don't let keyword extraction consume it.
+        // Consume-on-success. This slot runs LONG before the strict routers at
+        // priority 9 / 13, so whenever MTGJSON names the keyword — the common case —
+        // it is THIS slot, not those, that decides the line. On the permissive
+        // surface it consumed "Cycling {2} if you control an artifact" as a bare
+        // Cycling and dropped the condition, which made the strict wiring downstream
+        // unreachable for exactly the cards MTGJSON knows about. Only a completely
+        // parsed keyword list may consume the line now; anything else falls through
+        // and becomes an honest, exact-unit `Effect::Unimplemented`.
         let is_ability_cost_static = is_ability_activate_cost_static(&lower);
         if !is_ability_cost_static {
-            if let Some(extracted) = extract_granted_keyword_list(&line, mtgjson_keyword_names) {
+            if let Some(extracted) = parse_router_keyword_list(&line, mtgjson_keyword_names) {
                 if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                     merge_kicker_additional_cost(&mut result.additional_cost, cost);
                     additional_cost_line.get_or_insert(item_line);
@@ -3802,41 +4036,6 @@ pub(crate) fn parse_oracle_ir(
             item_line,
             &static_line,
             &static_line_lower,
-        ) {
-            i += 1;
-            continue;
-        }
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_chosen_creature_type_static_prefix,
-        ) {
-            i += 1;
-            continue;
-        }
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_every_creature_type_static_prefix,
-        ) {
-            i += 1;
-            continue;
-        }
-        // CR 611.3 + CR 607.2d: compound-subject chosen-type static with a
-        // "The same is true for ..." tail (Rukarumel, Biologist). Models the
-        // "X you control and Y you control are the chosen type ..." sentence and
-        // leaves the non-battlefield-zone tail as an `Unimplemented` residual,
-        // mirroring Arcane Adaptation / Maskwood Nexus.
-        if push_same_is_true_static_tail(
-            &mut emitter,
-            item_line,
-            &static_line,
-            &static_line_lower,
-            parse_compound_you_control_chosen_type_static_prefix,
         ) {
             i += 1;
             continue;
@@ -4277,8 +4476,8 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "enters with")
             && !scan_contains(&lower, "enters this way,")
         {
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
                 continue;
             }
@@ -4566,8 +4765,8 @@ pub(crate) fn parse_oracle_ir(
         // Corpus: Traxos, Scourge of Kroog; Grimgrin, Corpse-Born; Leviathan.
         if is_enters_tapped_cant_untap_compound(&lower) {
             let mut consumed = false;
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 consumed = true;
             }
             let defs = parse_static_line_with_graveyard_keyword_continuation(
@@ -4609,9 +4808,28 @@ pub(crate) fn parse_oracle_ir(
             for __item in statics {
                 emitter.static_at(item_line, __item);
             }
-            for __item in replacements {
-                emitter.replacement_at(item_line, __item);
+            for replacement_ir in replacements {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
             }
+            i += 1;
+            continue;
+        }
+
+        // Priority 6f: Compound `<continuous grant or restriction> and can't
+        // become untapped` prohibition (Frozen in Ice class). CR 701.26b +
+        // CR 614.6: the leading grant/restriction clause ("loses all
+        // abilities", a P/T pump, a keyword grant, …) stays a static
+        // modification, and the trailing "can't become untapped"/"can't be
+        // untapped" clause becomes a broad Untap-prevention replacement. The
+        // leading clause makes Priority 7's `is_static_pattern` fire and
+        // consume the whole line via the generic continuous-modification
+        // scanner, which has no representation for the untap prohibition and
+        // silently drops it. Split so both layers see their conjunct.
+        if let Some((statics, replacement)) = try_split_and_cant_become_untapped(&static_line) {
+            for __item in statics {
+                emitter.static_at(item_line, __item);
+            }
+            emitter.replacement_at(item_line, replacement);
             i += 1;
             continue;
         }
@@ -4660,7 +4878,7 @@ pub(crate) fn parse_oracle_ir(
         if lower_starts_with(&lower, "flashback") {
             if line.contains('\u{2014}') {
                 let lower_clean = lower.trim_end_matches('.').trim();
-                if let Some(kw) = parse_granted_keyword_fragment(lower_clean) {
+                if let Some(kw) = parse_router_keyword_fragment(lower_clean) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;
                     continue;
@@ -4668,17 +4886,21 @@ pub(crate) fn parse_oracle_ir(
             } else if let Some((flashback_part, reduction_part)) =
                 split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
             {
+                // ATOMIC + consume-on-success. The split PROMISES two semantic halves.
+                // The previous form advanced `i` unconditionally, so a line whose
+                // keyword half parsed but whose cost-reduction half did not (or vice
+                // versa) was consumed with the other half silently dropped. Both must
+                // parse, or the line falls through and stays honestly red.
                 let flashback_lower = flashback_part.to_lowercase();
-                if let Some(kw) = parse_granted_keyword_fragment(&flashback_lower) {
+                if let (Some(kw), Some(def)) = (
+                    parse_router_keyword_fragment(&flashback_lower),
+                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
+                ) {
                     emitter.keyword_at(item_line, kw);
-                }
-                if let Some(def) =
-                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
-                {
                     emitter.static_at(item_line, def);
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
             }
         }
 
@@ -4723,21 +4945,23 @@ pub(crate) fn parse_oracle_ir(
             // replacement parsers; the legacy `as long as` precondition still
             // routes the duration-gated replacement fallback.
             if find_copy_verb_present(&lower) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                    for __item in rep_defs {
-                        emitter.replacement_at(item_line, __item);
+                if let Some(replacement_irs) =
+                    parse_replacement_sentence_sequence_ir(&line, card_name)
+                {
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     }
                     i += 1;
                     continue;
                 }
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
             } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -4750,8 +4974,8 @@ pub(crate) fn parse_oracle_ir(
                 // replacement parser first; a line that is not actually an
                 // enters-with-counter replacement returns `None` and falls
                 // through to the static parser below.
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -4773,8 +4997,8 @@ pub(crate) fn parse_oracle_ir(
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
                     let mut defs = parse_static_line_with_graveyard_keyword_continuation(
                         &effect_static,
-                        None,
-                        None,
+                        Some(raw_line),
+                        Some(card_name),
                     );
                     if !defs.is_empty() {
                         if let Some(cond) = ability_word_to_condition(&aw_name) {
@@ -4918,9 +5142,9 @@ pub(crate) fn parse_oracle_ir(
         {
             ctx.subject = None;
             ctx.actor = None;
-            let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
-            if !has_unimplemented(&def) {
-                emitter.ability_at(item_line, def);
+            let effect_ir = parse_effect_chain_ir(&line, AbilityKind::Spell, &mut ctx);
+            if !has_unimplemented(&lower_effect_chain_ir(&effect_ir)) {
+                emitter.emit_at(item_line, OracleNodeIr::Spell(effect_ir));
                 i += 1;
                 continue;
             }
@@ -4968,15 +5192,16 @@ pub(crate) fn parse_oracle_ir(
             // A single Oracle paragraph can contain multiple independent ETB
             // replacement sentences. Parse each replacement sentence instead of
             // letting the first successful parser drop sibling modifiers.
-            if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                for __item in rep_defs {
-                    emitter.replacement_at(item_line, __item);
+            if let Some(replacement_irs) = parse_replacement_sentence_sequence_ir(&line, card_name)
+            {
+                for replacement_ir in replacement_irs {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 }
                 i += 1;
                 continue;
             }
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
                 continue;
             }
@@ -4989,16 +5214,17 @@ pub(crate) fn parse_oracle_ir(
             // exactly as the unprefixed Blind Obedience / Authority of the
             // Consuls lines do.
             if let Some(effect_text) = strip_ability_word(&line) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&effect_text, card_name)
+                if let Some(replacement_irs) =
+                    parse_replacement_sentence_sequence_ir(&effect_text, card_name)
                 {
-                    for __item in rep_defs {
-                        emitter.replacement_at(item_line, __item);
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     }
                     i += 1;
                     continue;
                 }
-                if let Some(rep_def) = parse_replacement_line(&effect_text, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&effect_text, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -5079,7 +5305,7 @@ pub(crate) fn parse_oracle_ir(
         // Spells (instants/sorceries) with Suspend would otherwise be caught by
         // the is_spell branch and produce an Unimplemented effect.
         if lower_starts_with(&lower, "suspend ") {
-            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5089,7 +5315,7 @@ pub(crate) fn parse_oracle_ir(
         // Digital-only Specialize: "specialize {cost}" — MTGJSON may omit the keyword
         // when it appears as a standalone rules line; intercept before dispatch fallback.
         if lower_starts_with(&lower, "specialize ") {
-            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5101,7 +5327,7 @@ pub(crate) fn parse_oracle_ir(
         // is intercepted as a keyword, not parsed as an effect.
         // MTGJSON keywords array only says "Harmonize" (no cost), so we extract cost here.
         // Format: "Harmonize {cost} (reminder text)" — space-separated.
-        // Note: When MTGJSON provides "Harmonize" in keywords, extract_granted_keyword_list at
+        // Note: When MTGJSON provides "Harmonize" in keywords, the strict keyword list at
         // priority 1b already handles this. This is a fallback for test/edge cases.
         if lower_starts_with(&lower, "harmonize ") {
             if let Some(harmonize_kw) = parse_harmonize_keyword(&line) {
@@ -5123,41 +5349,53 @@ pub(crate) fn parse_oracle_ir(
             }
         }
 
-        // Priority 8f: Kicker / Multikicker / Replicate cost lines — must run BEFORE Priority 9
-        // (spell catch-all) so these keyword declarations on spell cards don't become Unimplemented.
+        // Priority 8f: CR 702.33 Kicker / CR 702.33c Multikicker / CR 702.56 Replicate /
+        // CR 702.187 Mayhem cost lines — must run BEFORE Priority 9 (spell catch-all) so
+        // these keyword declarations on spell cards don't become Unimplemented.
         // We cannot use is_keyword_cost_line here because it would also catch "flashback"
         // etc. whose specific em-dash parsers run between Priority 9 and Priority 13.
         // Note: "mayhem" IS in is_keyword_cost_line and is handled at Priority 1b via MTGJSON
         // keywords when present; this guard catches it when keywords[] is empty.
-        if alt((
-            tag::<_, _, OracleError<'_>>("kicker"),
-            tag("multikicker"),
-            tag("replicate"),
-            tag("mayhem"),
-        ))
-        .parse(lower.as_str())
-        .is_ok()
-        {
+        //
+        // Two defects fixed here (task #123), both of which made this the worst site:
+        //  (a) CLASS-A SILENT SWALLOW. `i += 1; continue;` used to sit OUTSIDE both
+        //      `if let Some` blocks, so a candidate line that NEITHER parser could
+        //      parse was consumed with no keyword, no additional cost, and no
+        //      diagnostic — it vanished and the card rendered as fully supported.
+        //      The line is now consumed only if something was actually recorded.
+        //  (b) NO WORD BOUNDARY. The dispatch was a bare `alt((tag("kicker"), …))`,
+        //      so it matched any line merely STARTING with those letters —
+        //      "Kickerfoo {2}" was accepted and then vanished via (a).
+        //      `is_kicker_family_line` shares `is_keyword_cost_line`'s boundary rule.
+        if is_kicker_family_line(&lower) {
+            let mut recorded = false;
             if let Some(cost) = parse_kicker_additional_cost_line(&line, &lower) {
                 merge_kicker_additional_cost(&mut result.additional_cost, cost);
+                additional_cost_line.get_or_insert(item_line);
+                recorded = true;
             }
-            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
+                recorded = true;
             }
-            i += 1;
-            continue;
+            if recorded {
+                i += 1;
+                continue;
+            }
+            // Nothing parsed: fall through to the spell catch-all / priority 15 so the
+            // line becomes an honest, exact-unit `Effect::Unimplemented`.
         }
 
         // CR 702.27a: Buyback em-dash form — "Buyback—Sacrifice a land." (Constant
         // Mists) etc. MTGJSON omits the Buyback keyword when the cost is non-mana,
-        // so `extract_granted_keyword_list` bails and the line would otherwise fall through
+        // so the priority-1b keyword list bails and the line would otherwise fall through
         // to the spell-effect catch-all and produce `Unimplemented`. Intercept here
         // before the spell catch-all, mirroring the Flashback em-dash intercept above.
         // structural: not dispatch — em-dash char presence gates the cost sub-parser,
         // which uses nom combinators in `parse_buyback_cost` / `parse_oracle_cost`.
         if lower_starts_with(&lower, "buyback") && line.contains('\u{2014}') {
             let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_granted_keyword_fragment(lower_clean) {
+            if let Some(kw) = parse_router_keyword_fragment(lower_clean) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5173,7 +5411,7 @@ pub(crate) fn parse_oracle_ir(
             .is_ok()
         {
             let lower_clean = lower.trim_end_matches('.').trim();
-            if let Some(kw) = parse_granted_keyword_fragment(lower_clean) {
+            if let Some(kw) = parse_router_keyword_fragment(lower_clean) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5330,7 +5568,8 @@ pub(crate) fn parse_oracle_ir(
             // the ability-word merge and the cross-line binder below exactly like any
             // other override — the binder wraps it in `ConditionInstead` and parks the
             // printed Dig as the `else_ability` fallback.
-            let dig_alt = emitter.builder.peek_last_spell().and_then(|previous| {
+            let previous_spell = emitter.last_ability_definition();
+            let dig_alt = previous_spell.as_ref().and_then(|previous| {
                 crate::parser::oracle_effect::conditions::try_parse_dig_instead_alternative(
                     &effect_line,
                     Some(previous),
@@ -5431,7 +5670,7 @@ pub(crate) fn parse_oracle_ir(
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
-                } else if emitter.builder.peek_last_spell().is_some() {
+                } else if emitter.last_ability_node().is_some() {
                     // CR 614.6: "If an event is replaced, it never happens."
                     //
                     // The line IS a self-replacement override of the preceding
@@ -5455,8 +5694,7 @@ pub(crate) fn parse_oracle_ir(
                     def.sub_ability = None;
                     def.else_ability = None;
                 }
-            } else if is_unbindable_self_replacement && emitter.builder.peek_last_spell().is_some()
-            {
+            } else if is_unbindable_self_replacement && emitter.last_ability_node().is_some() {
                 // CR 614.6 + CR 614.15: the residual self-replacement printings — a
                 // PARTIAL override whose antecedent is not a Dig ("search your library
                 // for up to three basic Forest cards instead of two"), or one that
@@ -5508,7 +5746,7 @@ pub(crate) fn parse_oracle_ir(
 
         // CR 702.49d: Commander ninjutsu is not in MTGJSON keywords — extract explicitly.
         if lower_starts_with(&lower, "commander ninjutsu ") {
-            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+            if let Some(kw) = parse_router_keyword_fragment(&lower) {
                 emitter.keyword_at(item_line, kw);
                 i += 1;
                 continue;
@@ -5518,7 +5756,7 @@ pub(crate) fn parse_oracle_ir(
         // CR 702.138a: Escape is extracted by the generic keyword-cost guards —
         // the `is_spell` guard above (Priority 9) for instants/sorceries and the
         // `is_keyword_cost_line` guard below (Priority 13) for permanents — via the
-        // `escape—` branch registered in `parse_granted_keyword_fragment`, alongside its
+        // `escape—` branch registered in `parse_keyword_line_core`, alongside its
         // evoke/embalm/eternalize/escalate em-dash siblings. No dedicated intercept
         // is needed here.
 
@@ -5540,17 +5778,18 @@ pub(crate) fn parse_oracle_ir(
             if let Some((flashback_part, reduction_part)) =
                 split_flashback_trailing_self_spell_cost_reduction(&line, &lower)
             {
+                // ATOMIC + consume-on-success — see the identical split above (priority 7
+                // guard). Both halves must parse or the line is not consumed.
                 let flashback_lower = flashback_part.to_lowercase();
-                if let Some(kw) = parse_granted_keyword_fragment(&flashback_lower) {
+                if let (Some(kw), Some(def)) = (
+                    parse_router_keyword_fragment(&flashback_lower),
+                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
+                ) {
                     emitter.keyword_at(item_line, kw);
-                }
-                if let Some(def) =
-                    parse_flashback_trailing_self_spell_cost_reduction(reduction_part)
-                {
                     emitter.static_at(item_line, def);
+                    i += 1;
+                    continue;
                 }
-                i += 1;
-                continue;
             }
         }
         // Consume-on-success. The previous form advanced `i` OUTSIDE the
@@ -5632,8 +5871,11 @@ pub(crate) fn parse_oracle_ir(
             }
             // Try as keyword — the ability-word prefix ("Void Shields —") was
             // stripped, so the remainder may be a keyword line that Priority 1b
-            // missed because it ran on the unprefixed original line.
-            if let Some(kw) = parse_granted_keyword_fragment(&effect_lower) {
+            // missed because it ran on the unprefixed original line. Strict: the
+            // stripped remainder must be a COMPLETE keyword declaration, or the line
+            // continues to the static/effect paths and ultimately an honest
+            // `Effect::Unimplemented`.
+            if let Some(kw) = parse_router_keyword_fragment(&effect_lower) {
                 if !matches!(kw, Keyword::Unknown(_)) {
                     emitter.keyword_at(item_line, kw);
                     i += 1;
@@ -6558,16 +6800,34 @@ fn parse_activation_during_role_gate(i: &str) -> OracleResult<'_, ActivationRest
     .parse(i)
 }
 
-/// CR 508.1 + CR 509.1: the combat-window half of a compound activation-timing
-/// gate — "before combat" / "before attackers are declared" both map to the
-/// EXISTING `BeforeAttackersDeclared` variant (enforced via
-/// `is_before_attackers_declared` = `PreCombatMain | BeginCombat`), so no new
-/// variant is introduced.
+/// CR 508.1 + CR 509.1 + CR 510: the combat-window half of an activation-timing
+/// gate. Each phrasing maps to an EXISTING enforced variant, so no new variant is
+/// introduced:
+/// - "before the combat damage step" / "before combat damage [has been dealt]"
+///   → `BeforeCombatDamage` (CR 510; enforced = `BeginCombat | DeclareAttackers
+///   | DeclareBlockers`) — Angus Mackenzie, Save Point.
+/// - "before attackers are declared" / "before combat" → `BeforeAttackersDeclared`
+///   (CR 508.1; enforced = `PreCombatMain | BeginCombat`) — Arcum's Whistle.
+///
+/// The combat-damage arm is tried BEFORE the `before combat` arm, which is a
+/// prefix of "before combat damage" and would otherwise shadow it; within that
+/// arm the longest phrasing is first so it consumes fully rather than leaving a
+/// "has been dealt" / "step" residual for the caller's whole-consumption check.
 fn parse_activation_before_window_gate(i: &str) -> OracleResult<'_, ActivationRestriction> {
-    value(
-        ActivationRestriction::BeforeAttackersDeclared,
-        alt((tag("before combat"), tag("before attackers are declared"))),
-    )
+    alt((
+        value(
+            ActivationRestriction::BeforeCombatDamage,
+            alt((
+                tag("before combat damage has been dealt"),
+                tag("before the combat damage step"),
+                tag("before combat damage"),
+            )),
+        ),
+        value(
+            ActivationRestriction::BeforeAttackersDeclared,
+            alt((tag("before attackers are declared"), tag("before combat"))),
+        ),
+    ))
     .parse(i)
 }
 
@@ -6597,6 +6857,32 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
         if let Ok((tail, (_sep, window))) = compound {
             if tail.trim().is_empty() {
                 return Some(vec![restr, window]);
+            }
+        }
+    }
+    // CR 508.1: a STANDALONE combat-window gate with no "during <role>" first
+    // half — "Activate only before attackers are declared" / "before combat"
+    // (Arcum's Whistle, Arcum's Sleigh). Reuses the same enforced
+    // `BeforeAttackersDeclared` variant as the compound form above; it only fires
+    // when the whole phrase is a bare before-window that would otherwise fall
+    // through to `Effect::Unimplemented`.
+    if let Ok((tail, window)) = parse_activation_before_window_gate(lower.as_str()) {
+        if tail.trim().is_empty() {
+            return Some(vec![window]);
+        }
+    }
+    // CR 509.1 + CR 510: "during combat, before <window>" — the leading half is the
+    // combat phase itself (not a turn-role), so it pairs `DuringCombat` with the
+    // before-window gate. Save Point: "during combat before combat damage has been
+    // dealt" → [DuringCombat, BeforeCombatDamage]. Replaces the former verbatim
+    // strip_suffix special case; bare "during combat" (no trailing window) is left
+    // to its own single-restriction branch because `tag` requires the space.
+    if let Ok((rest, ())) =
+        value((), tag::<_, _, OracleError<'_>>("during combat ")).parse(lower.as_str())
+    {
+        if let Ok((tail, window)) = parse_activation_before_window_gate(rest) {
+            if tail.trim().is_empty() {
+                return Some(vec![ActivationRestriction::DuringCombat, window]);
             }
         }
     }
@@ -6888,32 +7174,14 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        // CR 602.5b + CR 102.1 + CR 509.1: The former verbatim-string hack for
-        // "activate only during your turn, before attackers are declared" is
-        // subsumed by the compound `parse_activation_timing_restriction` grammar,
-        // which the `activate only ` routing arm above reaches BEFORE this point
-        // (it emits `[DuringYourTurn, BeforeAttackersDeclared]` via the
-        // during-role + before-window sub-combinators). Pinned by Test 10c.
-
-        if let Some(prefix) =
-            lower.strip_suffix("activate only during combat before combat damage has been dealt")
-        {
-            let end = remaining.len()
-                - "activate only during combat before combat damage has been dealt".len();
-            remaining = remaining[..end]
-                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                .to_string();
-            constraints
-                .restrictions
-                .push(ActivationRestriction::DuringCombat);
-            constraints
-                .restrictions
-                .push(ActivationRestriction::BeforeCombatDamage);
-            if prefix.trim().is_empty() {
-                break;
-            }
-            continue;
-        }
+        // CR 602.5b + CR 102.1 + CR 509.1 + CR 510: The former verbatim-string
+        // hacks for "activate only during your turn, before attackers are declared"
+        // and "activate only during combat before combat damage has been dealt" are
+        // both subsumed by the `parse_activation_timing_restriction` grammar, which
+        // the `activate only ` routing arm above reaches BEFORE this point (it emits
+        // `[DuringYourTurn, BeforeAttackersDeclared]` / `[DuringCombat,
+        // BeforeCombatDamage]` via the during-role + before-window sub-combinators).
+        // Pinned by Test 10c and the combat-damage building-block tests.
 
         if let Some(prefix) = lower.strip_suffix("activate only once each turn") {
             let end = remaining.len() - "activate only once each turn".len();

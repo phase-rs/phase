@@ -81,7 +81,11 @@ pub fn resolve_gain(
                 player.life += gain_amount as i32;
                 // CR 119.9: Track life gained this turn for triggered ability matching.
                 player.life_gained_this_turn += gain_amount;
-                crate::game::layers::mark_layers_full(state);
+                // CR 611.3a + CR 119: escalate layers only if a live continuous
+                // static reads the life family (life total / life-above-starting
+                // / per-turn life counters); otherwise this life change cannot
+                // flip any derived board.
+                crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -211,7 +215,8 @@ pub fn apply_life_gain_after_replacement(
         player.life += gain_amount as i32;
         player.life_gained_this_turn += gain_amount;
     }
-    crate::game::layers::mark_layers_full(state);
+    // CR 611.3a + CR 119: gate escalation on a live life-reading static.
+    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
@@ -287,7 +292,9 @@ pub fn apply_life_loss_after_replacement(
         player.life -= loss_amount as i32;
         player.life_lost_this_turn += loss_amount;
     }
-    crate::game::layers::mark_layers_full(state);
+    // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
+    // static. Also the sink for non-infect player damage (deal_damage.rs).
+    crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: -(loss_amount as i32),
@@ -355,7 +362,7 @@ pub fn apply_life_totals_assignment(
             // CR 616.1: a competing replacement required a player choice; the
             // helper installed the WaitingFor and the resume path completes the
             // remaining assignments.
-            state.pending_life_total_assignment = Some(PendingLifeTotalAssignment {
+            state.push_life_total_assignment(PendingLifeTotalAssignment {
                 completion_player,
                 remaining: deltas[index + 1..].to_vec(),
                 completion: completion.clone(),
@@ -370,7 +377,7 @@ pub(crate) fn drain_pending_life_total_assignment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    while let Some(mut pending) = state.pending_life_total_assignment.take() {
+    while let Some(mut pending) = state.take_active_life_total_assignment() {
         state.waiting_for = WaitingFor::Priority {
             player: pending.completion_player,
         };
@@ -384,7 +391,7 @@ pub(crate) fn drain_pending_life_total_assignment(
         };
 
         pending.remaining.remove(0);
-        state.pending_life_total_assignment = Some(pending);
+        state.push_life_total_assignment(pending);
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
@@ -487,7 +494,8 @@ pub fn resolve_lose(
                     .ok_or(EffectError::PlayerNotFound)?;
                 player.life -= loss_amount as i32;
                 player.life_lost_this_turn += loss_amount;
-                crate::game::layers::mark_layers_full(state);
+                // CR 611.3a + CR 119: gate escalation on a live life-reading static.
+                crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
 
                 events.push(GameEvent::LifeChanged {
                     player_id,
@@ -1101,6 +1109,15 @@ mod tests {
         let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
             panic!("expected replacement choice");
         };
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("life-total assignment prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("life-total assignment prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
         state.active_player = player;
         state.priority_player = player;
 
@@ -1109,7 +1126,7 @@ mod tests {
 
         assert_eq!(state.players[0].life, 5);
         assert_eq!(state.players[1].life, 20);
-        assert!(state.pending_life_total_assignment.is_none());
+        assert!(state.active_life_total_assignment().is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(result.events.iter().any(|event| matches!(
             event,

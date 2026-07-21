@@ -84,11 +84,12 @@ fn issue_2862_teferi_cast_minus_three_pays_loyalty_cost() {
     );
 
     let mut events = Vec::new();
-    engine::game::casting::pay_ability_cost(
+    engine::game::casting::pay_ability_cost_for_activation(
         runner.state_mut(),
         P0,
         teferi,
         &AbilityCost::Loyalty { amount: -3 },
+        None,
         &mut events,
     )
     .expect("pay [-3] loyalty cost through activation payment seam");

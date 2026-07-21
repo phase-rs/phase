@@ -7,10 +7,11 @@ import type {
   GameState,
   LegalActionsResult,
   ManaCost,
+  ObjectId,
   PlayerId,
   SubmitResult,
 } from "./types";
-import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
+import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
@@ -107,6 +108,11 @@ export class ServerDraftAdapter implements EngineAdapter {
   private ws: WebSocket | null = null;
   private pendingResolve: ((result: SubmitResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
+  private nextManaPaymentPreviewRequestId = 1;
+  private pendingManaPaymentPreviews = new Map<
+    number,
+    { resolve: (sourceIds: ObjectId[]) => void; reject: (error: Error) => void }
+  >();
   private draftResolve: ((view: DraftPlayerView) => void) | null = null;
   private draftReject: ((error: Error) => void) | null = null;
   private initResolve: (() => void) | null = null;
@@ -188,6 +194,24 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.pendingReject = null;
         this.emit({ type: "actionPendingChanged", pending: false });
         reject(new AdapterError("WS_CLOSED", "Failed to send action", true));
+      }
+    });
+  }
+
+  async previewManaPayment(action: GameAction, _actor: PlayerId): Promise<ObjectId[]> {
+    if (this.phase !== "match") {
+      throw new AdapterError("PHASE_ERROR", "Not in a match phase", false);
+    }
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new AdapterError("WS_ERROR", "WebSocket not connected", false);
+    }
+
+    const requestId = this.nextManaPaymentPreviewRequestId++;
+    return new Promise<ObjectId[]>((resolve, reject) => {
+      this.pendingManaPaymentPreviews.set(requestId, { resolve, reject });
+      if (!this.send({ type: "PreviewManaPayment", data: { request_id: requestId, action } })) {
+        this.pendingManaPaymentPreviews.delete(requestId);
+        reject(new AdapterError("WS_CLOSED", "Failed to send mana-payment preview", true));
       }
     });
   }
@@ -430,6 +454,9 @@ export class ServerDraftAdapter implements EngineAdapter {
         this.pendingResolve = null;
         this.pendingReject = null;
       }
+      this.rejectPendingManaPaymentPreviews(
+        new AdapterError("WS_CLOSED", "Connection closed during mana-payment preview", true),
+      );
       if (this.draftReject) {
         this.draftReject(
           new AdapterError("WS_CLOSED", "Connection closed during draft operation", true),
@@ -640,11 +667,47 @@ export class ServerDraftAdapter implements EngineAdapter {
         const data = msg.data as { reason: string };
         this.emit({ type: "actionPendingChanged", pending: false });
         if (this.pendingReject) {
-          this.pendingReject(
-            new AdapterError("ACTION_REJECTED", data.reason, true),
-          );
+          // Game-phase action rejection. `ServerDraftAdapter` is a full
+          // `EngineAdapter` once the pod's game starts, so it must classify the
+          // engine's stale verdicts exactly as the WebSocket and P2P transports
+          // do — otherwise a stale `ReorderHand` in a server-hosted draft game
+          // still surfaces as the red recoverable error this PR removes
+          // everywhere else.
+          //
+          // The mana-payment preview handler below routes through the same
+          // classifier. Deliberately NOT applied to `DraftActionRejected`: that
+          // carries a pick/pass rejection, which is not a `GameAction` at all,
+          // so no stale-action verdict is possible — it is a separate draft
+          // protocol concern and stays a plain recoverable rejection.
+          this.pendingReject(actionRejectionError(data.reason));
           this.pendingResolve = null;
           this.pendingReject = null;
+        }
+        break;
+      }
+
+      case "ManaPaymentPreview": {
+        const data = msg.data as { request_id: number; source_ids: ObjectId[] };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          pending.resolve(data.source_ids);
+        }
+        break;
+      }
+
+      case "ManaPaymentPreviewRejected": {
+        const data = msg.data as { request_id: number; reason: string };
+        const pending = this.pendingManaPaymentPreviews.get(data.request_id);
+        if (pending) {
+          this.pendingManaPaymentPreviews.delete(data.request_id);
+          // Same shared classifier as the action path above. A preview is
+          // answered against the same engine state an action would be, so it
+          // can carry the same stale verdict when the state moves underneath
+          // the request — and a stale preview is likewise void rather than
+          // retryable. Non-stale reasons still classify as recoverable
+          // ACTION_REJECTED, so existing surface/retry behavior is unchanged.
+          pending.reject(actionRejectionError(data.reason));
         }
         break;
       }
@@ -770,6 +833,13 @@ export class ServerDraftAdapter implements EngineAdapter {
     }
   }
 
+  private rejectPendingManaPaymentPreviews(error: Error): void {
+    for (const { reject } of this.pendingManaPaymentPreviews.values()) {
+      reject(error);
+    }
+    this.pendingManaPaymentPreviews.clear();
+  }
+
   dispose(): void {
     this.disposed = true;
     if (this.pingInterval) {
@@ -790,6 +860,9 @@ export class ServerDraftAdapter implements EngineAdapter {
     this.activeMatchId = null;
     this.pendingResolve = null;
     this.pendingReject = null;
+    this.rejectPendingManaPaymentPreviews(
+      new AdapterError("WS_CLOSED", "Adapter disposed during mana-payment preview", true),
+    );
     this.draftResolve = null;
     this.draftReject = null;
     this.initResolve = null;

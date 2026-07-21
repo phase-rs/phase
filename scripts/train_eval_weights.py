@@ -58,6 +58,27 @@ HAND_TUNED = {
 # Target maximum absolute weight value after scaling.
 MAX_WEIGHT_SCALE = 2.5
 
+# Self-play harvest features. Names are exactly the EvalWeights struct fields, so
+# each fitted coefficient maps DIRECTLY onto its weight (no proxy map). All 9 are
+# fitted; `energy_offset` is a fixed-coefficient control fed to the regression and
+# then discarded (matching the engine's post-weighting energy offset).
+SELFPLAY_FEATURE_NAMES = [
+    "life",
+    "board_presence",
+    "board_power",
+    "board_toughness",
+    "hand_size",
+    "aggression",
+    "card_advantage",
+    "zone_quality",
+    "synergy",
+]
+SELFPLAY_CONTROL = "energy_offset"
+
+# Smoke thresholds under --allow-tiny-corpus (vs the production 1000 / 100).
+TINY_GLOBAL_MIN = 10
+TINY_PHASE_MIN = 2
+
 # Turn boundaries for game phases.
 EARLY_MAX = 3   # turns 1-3
 MID_MAX = 7     # turns 4-7
@@ -430,6 +451,246 @@ def extract_and_scale_weights(
     return raw_coefs, weights
 
 
+def load_selfplay_corpus(
+    glob_pattern: str,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict, list[str], set]:
+    """Read JSONL harvest shards, skip meta lines, bucket rows by turn phase.
+
+    Returns (phase_features, phase_labels, meta, files, seeds) where
+    phase_features values are (N, 10) arrays (9 fitted features + the
+    `energy_offset` control) and phase_labels values are (N,) arrays of 0/1.
+    """
+    files = sorted(glob.glob(glob_pattern))
+    if not files:
+        print(
+            f"ERROR: No self-play JSONL shards matched {glob_pattern}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    phase_feat: dict[str, list[list[float]]] = {"early": [], "mid": [], "late": []}
+    phase_lab: dict[str, list[int]] = {"early": [], "mid": [], "late": []}
+    meta: dict = {}
+    seeds: set = set()
+    total = 0
+    columns = SELFPLAY_FEATURE_NAMES + [SELFPLAY_CONTROL]
+
+    for path in files:
+        with open(path) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if "meta" in obj:
+                    # First meta line wins for provenance; shards share a run.
+                    if not meta:
+                        meta = obj["meta"]
+                    continue
+                feats = obj["features"]
+                phase = turn_phase(int(obj["turn"]))
+                phase_feat[phase].append([float(feats[name]) for name in columns])
+                phase_lab[phase].append(1 if obj["won"] else 0)
+                seeds.add(int(obj["seed"]))
+                total += 1
+
+    phase_features = {}
+    phase_labels = {}
+    for phase in ["early", "mid", "late"]:
+        if phase_feat[phase]:
+            phase_features[phase] = np.asarray(phase_feat[phase], dtype=np.float64)
+            phase_labels[phase] = np.asarray(phase_lab[phase], dtype=np.int64)
+        else:
+            phase_features[phase] = np.empty((0, len(columns)))
+            phase_labels[phase] = np.empty(0)
+        print(
+            f"  {phase}: {len(phase_features[phase])} samples",
+            file=sys.stderr,
+        )
+
+    print(f"\nTotal self-play samples: {total}", file=sys.stderr)
+    return phase_features, phase_labels, meta, files, seeds
+
+
+def train_selfplay_model(
+    X: np.ndarray, y: np.ndarray, phase_name: str
+):
+    """Train logistic regression for one self-play phase.
+
+    Skips single-class phases with a warning instead of crashing inside
+    `train_test_split(stratify=y)` (which requires ≥2 classes). Returns
+    `(model, train_acc, test_acc)` or `None` when skipped.
+    """
+    finite_mask = np.isfinite(X).all(axis=1)
+    if not finite_mask.all():
+        n_bad = int((~finite_mask).sum())
+        print(f"  {phase_name}: dropping {n_bad} rows with inf/NaN values", file=sys.stderr)
+        X = X[finite_mask]
+        y = y[finite_mask]
+
+    # train_test_split(stratify=y) requires at least two classes AND at least
+    # two members per class; a single-class phase (all wins or all losses) or a
+    # class with one member (reachable under --allow-tiny-corpus, whose
+    # per-phase floor is 2) is unsplittable — skip it rather than crash.
+    classes, class_counts = np.unique(y, return_counts=True)
+    if len(classes) < 2 or class_counts.min() < 2:
+        print(
+            f"  WARNING: {phase_name} lacks two outcome classes with >=2 "
+            "members each — skipping (cannot stratify).",
+            file=sys.stderr,
+        )
+        return None
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    model = LogisticRegression(penalty="l2", C=1.0, max_iter=1000, random_state=42)
+    model.fit(X_train, y_train)
+    train_accuracy = model.score(X_train, y_train)
+    test_accuracy = model.score(X_test, y_test)
+    print(
+        f"\n  {phase_name} accuracy: train={train_accuracy:.4f} test={test_accuracy:.4f}",
+        file=sys.stderr,
+    )
+    return model, train_accuracy, test_accuracy
+
+
+def extract_selfplay_weights(model: LogisticRegression, phase_name: str) -> tuple[dict, dict]:
+    """Map self-play coefficients DIRECTLY onto weight names (no proxy map).
+
+    The `energy_offset` control coefficient is recorded but discarded — it is a
+    fixed serve-time offset, not a fitted weight. Remaining coefficients are
+    `abs()`-ed and scaled so the max maps to MAX_WEIGHT_SCALE. HAND_TUNED is NOT
+    applied: self-play measures every weight.
+    """
+    columns = SELFPLAY_FEATURE_NAMES + [SELFPLAY_CONTROL]
+    raw_coefs = {name: round(float(coef), 6) for name, coef in zip(columns, model.coef_[0])}
+
+    print(f"  {phase_name} raw coefficients:", file=sys.stderr)
+    for name, coef in raw_coefs.items():
+        sign = "+" if coef >= 0 else ""
+        tag = " (control, discarded)" if name == SELFPLAY_CONTROL else ""
+        print(f"    {name}: {sign}{coef}{tag}", file=sys.stderr)
+
+    fitted = {name: raw_coefs[name] for name in SELFPLAY_FEATURE_NAMES}
+    max_abs = max(abs(v) for v in fitted.values()) if fitted else 1.0
+    scale_factor = MAX_WEIGHT_SCALE / max_abs if max_abs > 0 else 1.0
+    weights = {name: round(abs(coef) * scale_factor, 4) for name, coef in fitted.items()}
+
+    print(f"  {phase_name} scaled weights (all self-play fitted):", file=sys.stderr)
+    for name, val in weights.items():
+        print(f"    {name}: {val}", file=sys.stderr)
+
+    return raw_coefs, weights
+
+
+def run_selfplay(args) -> None:
+    """Fit all 9 EvalWeights per phase from a self-play harvest corpus."""
+    print("=== Self-Play Phase-Aware EvalWeights Training ===\n", file=sys.stderr)
+
+    phase_features, phase_labels, meta, files, seeds = load_selfplay_corpus(args.selfplay_glob)
+
+    total_samples = sum(len(v) for v in phase_features.values())
+    global_min = TINY_GLOBAL_MIN if args.allow_tiny_corpus else 1000
+    if total_samples < global_min:
+        print(
+            f"ERROR: Only {total_samples} self-play samples "
+            f"(need >= {global_min}; pass --allow-tiny-corpus for smoke runs).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    phase_min = TINY_PHASE_MIN if args.allow_tiny_corpus else 100
+    print("\n--- Training phase-specific self-play models ---", file=sys.stderr)
+    phase_results = {}
+    for phase in ["early", "mid", "late"]:
+        X = phase_features[phase].astype(np.float64)
+        y = phase_labels[phase].astype(np.int64)
+        if len(X) < phase_min:
+            print(
+                f"  WARNING: {phase} has only {len(X)} samples "
+                f"(< {phase_min}), skipping",
+                file=sys.stderr,
+            )
+            continue
+        trained = train_selfplay_model(X, y, phase)
+        if trained is None:
+            continue
+        model, train_acc, test_acc = trained
+        raw_coefs, weights = extract_selfplay_weights(model, phase)
+        phase_results[phase] = {
+            "sample_count": int(len(X)),
+            "train_accuracy": round(train_acc, 4),
+            "test_accuracy": round(test_acc, 4),
+            "raw_coefficients": raw_coefs,
+            "weights": weights,
+        }
+
+    if not phase_results:
+        # Every phase was empty, sub-threshold, or single-class — no fittable
+        # signal. A fully single-class corpus lands here.
+        print(
+            "ERROR: no phase produced fittable weights (all phases were empty, "
+            "below threshold, or single-class). Nothing to write.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Identity/provenance: the artifact is the identity-bearing object.
+    output = {
+        "kind": "selfplay_phase_weights",
+        "source": "phase_ai_selfplay_harvest",
+        "git_sha": meta.get("git_sha"),
+        "card_data_hash": meta.get("card_data_hash"),
+        "difficulty": meta.get("difficulty"),
+        "corpus_files": [os.path.basename(f) for f in files],
+        "base_seeds": sorted(seeds),
+        "total_sample_count": total_samples,
+        "feature_names": SELFPLAY_FEATURE_NAMES,
+        "control_feature": SELFPLAY_CONTROL,
+        "turn_boundaries": {
+            "early": f"turns 1-{EARLY_MAX}",
+            "mid": f"turns {EARLY_MAX + 1}-{MID_MAX}",
+            "late": f"turns {MID_MAX + 1}+",
+        },
+        "phases": phase_results,
+    }
+
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    with open(args.output, "w") as f:
+        json.dump(output, f, indent=2)
+        f.write("\n")
+
+    print(f"\nSelf-play weights written to {args.output}", file=sys.stderr)
+
+    # Comparison table: self-play fit vs the shipped 17Lands baseline (read from
+    # data/learned-weights.json when present). LR is convex, so 17Lands weights are
+    # the comparison baseline / shipped fallback, not a numerical initialization.
+    baseline = {}
+    baseline_path = os.path.join("data", "learned-weights.json")
+    if os.path.exists(baseline_path):
+        try:
+            with open(baseline_path) as bf:
+                baseline = json.load(bf).get("phases", {})
+        except (OSError, json.JSONDecodeError):
+            baseline = {}
+
+    print("\n=== Self-play vs 17Lands weight comparison ===", file=sys.stderr)
+    for phase in ["early", "mid", "late"]:
+        sp = phase_results.get(phase, {}).get("weights")
+        if not sp:
+            continue
+        bl = baseline.get(phase, {}).get("weights", {})
+        print(f"\n[{phase}]  {'weight':<16}{'selfplay':>10}{'17lands':>10}", file=sys.stderr)
+        for name in SELFPLAY_FEATURE_NAMES:
+            sp_val = sp.get(name)
+            bl_val = bl.get(name, "-")
+            bl_str = f"{bl_val:>10.4f}" if isinstance(bl_val, (int, float)) else f"{bl_val:>10}"
+            print(f"  {'':<2}{name:<16}{sp_val:>10.4f}{bl_str}", file=sys.stderr)
+
+    print("\nDone.", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train turn-phase-aware AI evaluation weights from 17Lands replay data."
@@ -456,7 +717,28 @@ def main():
         default=50,
         help="Minimum user_n_games_bucket filter (default: 50)",
     )
+    parser.add_argument(
+        "--source",
+        choices=["17lands", "selfplay"],
+        default="17lands",
+        help="Training data source (default: 17lands; the existing path is untouched)",
+    )
+    parser.add_argument(
+        "--selfplay-glob",
+        default="data/selfplay/*.jsonl",
+        help="Glob for self-play harvest JSONL shards (--source selfplay)",
+    )
+    parser.add_argument(
+        "--allow-tiny-corpus",
+        action="store_true",
+        help="Lower sample-count guards to smoke thresholds "
+        f"({TINY_GLOBAL_MIN} global / {TINY_PHASE_MIN} per phase) for pipeline validation",
+    )
     args = parser.parse_args()
+
+    if args.source == "selfplay":
+        run_selfplay(args)
+        return
 
     print("=== 17Lands Phase-Aware EvalWeights Training ===\n", file=sys.stderr)
 

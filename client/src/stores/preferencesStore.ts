@@ -1,7 +1,12 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { GameFormat, MatchType, PhaseStop } from "../adapter/types";
+import type {
+  GameFormat,
+  MatchType,
+  PhaseStop,
+  PriorityPassingMode,
+} from "../adapter/types";
 import type { CommanderBracket } from "../types/bracket";
 import type { SortKey } from "../components/modal/cardChoice/gridSelection";
 import {
@@ -272,6 +277,7 @@ function buildDefaultPreferences(): PreferencesState {
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
+    priorityPassingMode: "Standard",
     masterVolume: 100,
     sfxVolume: 70,
     musicVolume: 40,
@@ -311,6 +317,7 @@ function buildDefaultPreferences(): PreferencesState {
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
     telemetryEnabled: true,
+    nativeEngineEnabled: true,
   };
 }
 
@@ -335,6 +342,7 @@ interface PreferencesState {
    *  and the matching multiplier scales its base duration. */
   pacingMultipliers: Record<PacingCategory, number>;
   phaseStops: PhaseStop[];
+  priorityPassingMode: PriorityPassingMode;
   masterVolume: number;
   sfxVolume: number;
   musicVolume: number;
@@ -408,6 +416,8 @@ interface PreferencesState {
    *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
    *  regardless. See `services/telemetry.ts`. */
   telemetryEnabled: boolean;
+  /** Prefer the shell-managed native engine for eligible desktop AI games. */
+  nativeEngineEnabled: boolean;
 }
 
 interface PreferencesActions {
@@ -431,6 +441,7 @@ interface PreferencesActions {
    *  reconnect state, which is owned by `multiplayerStore`. */
   resetAllPreferences: () => void;
   setPhaseStops: (stops: PhaseStop[]) => void;
+  setPriorityPassingMode: (mode: PriorityPassingMode) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
   setMusicVolume: (vol: number) => void;
@@ -506,6 +517,7 @@ interface PreferencesActions {
   resetFlexLayout: () => void;
   /** Toggle anonymous crash & usage telemetry. */
   setTelemetryEnabled: (enabled: boolean) => void;
+  setNativeEngineEnabled: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -574,6 +586,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
         }),
       resetAllPreferences: () => set(buildDefaultPreferences()),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
+      setPriorityPassingMode: (mode) => set({ priorityPassingMode: mode }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
       setMusicVolume: (vol) => set({ musicVolume: vol }),
@@ -761,10 +774,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
       resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
       setTelemetryEnabled: (enabled) => set({ telemetryEnabled: enabled }),
+      setNativeEngineEnabled: (enabled) => set({ nativeEngineEnabled: enabled }),
     }),
     {
       name: "phase-preferences",
-      version: 24,
+      version: 27,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -815,6 +829,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v23 → v24: Add dismissedReportCardNudge; legacy stores default to `false`
       //          (nudge not yet dismissed) via the shallow merge — no explicit
       //          migration block needed (see telemetryEnabled precedent).
+      // v24 → v25: Add priorityPassingMode. Standard preserves the prior
+      //          recommendation behavior; invalid persisted values normalize
+      //          to Standard rather than enabling the experimental mode.
+      // v25 → v26: Rename the experimental Smart value to the behavior it
+      //          actually enables: SkipLowUseWindows.
+      // v26 → v27: Add nativeEngineEnabled; the default-state shallow merge
+      //             preserves the intended enabled-by-default behavior.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -965,6 +986,19 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
             phaseStops: Array.isArray(legacy)
               ? legacy.map((p) => (typeof p === "string" ? { phase: p, scope: "AllTurns" } : p))
               : [],
+          };
+        }
+
+        // v25 → v26: rename the experimental mode and normalize unknown values.
+        // This single block also handles older stores that never had the field.
+        if (version < 26) {
+          const legacy = (migrated as { priorityPassingMode?: unknown }).priorityPassingMode;
+          migrated = {
+            ...migrated,
+            priorityPassingMode:
+              legacy === "Smart" || legacy === "SkipLowUseWindows"
+                ? "SkipLowUseWindows"
+                : "Standard",
           };
         }
 

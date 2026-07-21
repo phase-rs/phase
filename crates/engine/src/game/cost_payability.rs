@@ -60,6 +60,7 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -89,8 +90,10 @@ pub(crate) fn target_filter_has_pitch_bound_x(filter: &TargetFilter) -> bool {
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
@@ -138,6 +141,7 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::SelfRef
         | TargetFilter::SourceOrPaired
         | TargetFilter::StackAbility { .. }
@@ -167,8 +171,10 @@ pub(crate) fn relax_pitch_bound_x_filter(filter: &TargetFilter) -> TargetFilter 
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }

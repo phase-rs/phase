@@ -316,7 +316,8 @@ export type BoardChoiceResponse =
   | { type: "SaddleMount"; mountId: ObjectId }
   | { type: "ChooseRingBearer" }
   | { type: "HarmonizeTap" }
-  | { type: "ChooseKeptCreatures" };
+  | { type: "ChooseKeptCreatures" }
+  | { type: "ChooseKeptPermanents" };
 
 export interface BoardChoiceView {
   player: PlayerId;
@@ -352,6 +353,9 @@ function zipContributions(
 function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"]): ObjectId | undefined {
   if (data.resume.type === "ManaAbility") {
     return (data.resume.ManaAbility as { source_id?: ObjectId } | undefined)?.source_id;
+  }
+  if (data.resume.type === "Resolution") {
+    return undefined;
   }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
@@ -412,6 +416,18 @@ export function getBoardChoiceView(
         intent: "keep",
         selection: { type: "totalPowerAtMost", power: waitingFor.data.cap },
         response: { type: "ChooseKeptCreatures" },
+        sourceId: waitingFor.data.source_id,
+      };
+    // CR 101.4 + CR 701.21a: exact keeper-cardinality selection. The engine
+    // supplies the legal pool and authoritative count; the board is display
+    // only and submits the typed choice action below.
+    case "KeepExactPermanentsChoice":
+      return {
+        player: waitingFor.data.player,
+        objectIds: waitingFor.data.eligible,
+        intent: "keep",
+        selection: { type: "exactCount", count: waitingFor.data.required_count },
+        response: { type: "ChooseKeptPermanents" },
         sourceId: waitingFor.data.source_id,
       };
     case "PayCost": {
@@ -603,6 +619,8 @@ export function buildBoardChoiceAction(
       return { type: "HarmonizeTap", data: { creature_id: selectedIds[0] } };
     case "ChooseKeptCreatures":
       return { type: "ChooseKeptCreatures", data: { kept: selectedIds } };
+    case "ChooseKeptPermanents":
+      return { type: "ChooseKeptPermanents", data: { kept: selectedIds } };
   }
 }
 
@@ -790,12 +808,20 @@ export function buildPlayerBattlefieldView(
       (id): id is ObjectId => id != null,
     ),
   );
-  return buildPlayerBattlefieldViewFromObjects(playerObjects, ringBearerIds);
+  // CR 732.2a: engine-authored ∞-pile membership (accepted object-growth loop).
+  // Read exactly like ring_bearer — the adapter attaches `derived` onto gameState.
+  const unboundedPileIds = new Set(gameState.derived?.unbounded_pile ?? []);
+  return buildPlayerBattlefieldViewFromObjects(
+    playerObjects,
+    ringBearerIds,
+    unboundedPileIds,
+  );
 }
 
 export function buildPlayerBattlefieldViewFromObjects(
   playerObjects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = new Set(),
+  unboundedPileIds: ReadonlySet<ObjectId> = new Set(),
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -805,11 +831,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds),
-    lands: groupByName(resolveObjects(partition.lands), ringBearerIds),
-    support: groupByName(resolveObjects(partition.support), ringBearerIds),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds),
-    other: groupByName(resolveObjects(partition.other), ringBearerIds),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds),
   };
 }
 

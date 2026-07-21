@@ -10,9 +10,8 @@ import { useGameStore } from "../../stores/gameStore.ts";
 import { DRAFT_BOT_AI_SEAT, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
+import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets, getValidAttackTargetsByAttacker } from "../../utils/combat.ts";
 import { useBlockRequirements } from "../combat/useBlockRequirements.ts";
-import { useAttackRequirements } from "../combat/useAttackRequirements.ts";
 import { useBlockerConstraints } from "../combat/useBlockerConstraints.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
@@ -82,8 +81,10 @@ export function ActionButton() {
     () => Array.from(blockRequirements.values()).filter((r) => r.status === "incomplete").length,
     [blockRequirements],
   );
-  // CR 508.1c/d + CR 509.1c: engine-provided must-attack / must-block gating.
-  const { unsatisfiedMustAttackCount } = useAttackRequirements();
+  // CR 509.1c: engine-provided must-block gating. Attacker must-attack
+  // requirements are NOT gated client-side — the engine strictly validates the
+  // declaration (CR 508.1d) and rejects an illegal submission; the must-attack
+  // badges (see AttackRequirementBadges / useAttackRequirements) are display only.
   const { unsatisfiedMustBlockCount } = useBlockerConstraints();
 
   const canCompanionToHand = useGameStore((s) =>
@@ -105,6 +106,7 @@ export function ActionButton() {
   const [showTargetPicker, setShowTargetPicker] = useState(false);
   const isMultiTarget = hasMultipleAttackTargets(gameState);
   const validAttackTargets = getValidAttackTargets(gameState);
+  const validAttackTargetsByAttacker = getValidAttackTargetsByAttacker(gameState);
 
   // Reset skip-confirm when mode changes
   useEffect(() => {
@@ -227,7 +229,7 @@ export function ActionButton() {
     }
     dispatchAction({
       type: "DeclareAttackers",
-      data: { attacks: buildAttacks(selectedAttackers, gameState, playerId) },
+      data: { attacks: buildAttacks(selectedAttackers, validAttackTargetsByAttacker, validAttackTargets) },
     });
   }
 
@@ -293,27 +295,22 @@ export function ActionButton() {
             </button>
             {selectedAttackers.length > 0 ? (
               <button
-                disabled={actionBlocked || unsatisfiedMustAttackCount > 0}
+                disabled={actionBlocked}
                 onClick={handleConfirmAttackers}
-                className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked || unsatisfiedMustAttackCount > 0, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "emerald", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
               >
                 {t("actionButton.confirmAttackers", { count: selectedAttackers.length })}
               </button>
             ) : (
               <button
-                disabled={actionBlocked || unsatisfiedMustAttackCount > 0}
+                disabled={actionBlocked}
                 onClick={() => handleSkipConfirm("attackers")}
-                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked || unsatisfiedMustAttackCount > 0, className: primaryButtonClass })}
+                className={gameButtonClass({ tone: "slate", size: "md", disabled: actionBlocked, className: primaryButtonClass })}
               >
                 {skipArmed === "attackers"
                   ? t("actionButton.attackWithNoneConfirm")
                   : t("actionButton.attackWithNone")}
               </button>
-            )}
-            {unsatisfiedMustAttackCount > 0 && (
-              <div className="absolute bottom-full right-0 mb-3 whitespace-nowrap rounded-[8px] border border-rose-300/30 bg-rose-950/95 px-4 py-2 text-sm font-medium text-rose-100 shadow-lg">
-                {t("combat.unsatisfiedMustAttack", { count: unsatisfiedMustAttackCount })}
-              </div>
             )}
           </>
         )}
@@ -505,10 +502,8 @@ export function ActionButton() {
       {showTargetPicker && (
         <AttackTargetPicker
           validTargets={validAttackTargets}
+          validTargetsByAttacker={validAttackTargetsByAttacker}
           selectedAttackers={selectedAttackers}
-          attackerConstraints={
-            waitingFor?.type === "DeclareAttackers" ? waitingFor.data.attacker_constraints : undefined
-          }
           onConfirm={handleTargetPickerConfirm}
           onCancel={() => setShowTargetPicker(false)}
         />

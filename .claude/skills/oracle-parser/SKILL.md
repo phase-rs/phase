@@ -416,7 +416,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `0` | Semicolon-separated keyword line ("Defender; reach"); colon guard excludes activated abilities | per-part keyword extraction | `oracle.rs` |
 | `1` | Modal block: "Choose one —" header + mode lines, or Spree + `+` lines (consumes multiple lines) | `parse_oracle_block()` + `lower_oracle_block()` | `oracle_modal.rs` |
 | — | "Equip {cost}" / "Equip — {cost}" (not "Equipped …"); "Crew N" with trailing cadence sentence | `try_parse_equip()`, `parse_crew_keyword()` | `oracle.rs` |
-| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `extract_granted_keyword_list()` (permissive — see §3a) | `oracle_keyword.rs` |
+| `1b` | Keyword-only line (guard: "{kw} abilities you activate cost {N} less" is a static, not a keyword line) | `parse_router_keyword_list()` (strict — see §3a) | `oracle_keyword.rs` |
 | `2` | "Enchant {filter}" | skip (handled externally) | — |
 | — | Commander-permission / deck-construction copy-limit sentences (skip); named equip "<Name> — Equip {cost}" | `try_parse_equip()` | `oracle.rs` |
 | `11` | Planeswalker loyalty `+N:` / `−N:` / `0:` / `[+N]:` (runs here despite the label) | `try_parse_loyalty_line()` | `oracle.rs` |
@@ -439,6 +439,7 @@ Unlabeled handlers interleaved between labeled slots are shown as `—` rows.
 | `6c-altcost-e` | "You may [cost] rather than pay [keyword] cost[s]" (New Perspectives / Heart of Kiran class) | `parse_alternative_keyword_cost()` | `oracle_static/cost_mod.rs` |
 | `6d` | Compound "enters tapped and doesn't untap during your untap step" — decomposed into ETB-tapped replacement (CR 614.1c) + CantUntap static (CR 502.3) | both parsers run | `oracle.rs` |
 | `6e` | Cross-layer compound "`<subject>` can't `<P1>` and can't `<P2>`" — each conjunct routed to both layer parsers (Blossombind: Untap-prevention replacement CR 701.26b + AddCounter-prevention replacement CR 614.6) so a conjunct isn't dropped by `is_static_pattern` claiming the whole line | `parse_static_replacement_compound()` | `oracle.rs` |
+| `6f` | Compound "`<continuous grant or restriction>` and can't become/be untapped" (Frozen in Ice class) — leading grant/restriction clause stays a static modification, trailing clause becomes a broad Untap-prevention replacement (CR 701.26b + CR 614.6) so `is_static_pattern` at `7` doesn't silently absorb and drop the untap prohibition | `try_split_and_cant_become_untapped()` | `oracle.rs` |
 | `7` | Static/continuous patterns — `is_static_pattern()`; spell lines with explicit durations and damage verbs are deferred to `9`; copy-replacement lines route to the replacement parser first | `parse_static_line_multi()` family | `oracle_classifier.rs` → `oracle_static/` |
 | `8` | Replacement patterns — `is_replacement_pattern()`; one paragraph can yield multiple ETB replacements | `parse_replacement_line()` | `oracle_classifier.rs` → `oracle_replacement.rs` |
 | `8c` | Leyline clause "If this card is in your opening hand, you may begin the game with it on the battlefield" (CR 103.6) | `parse_begin_game_clause()` | `oracle.rs` |
@@ -466,6 +467,8 @@ the wrong one at a router boundary is the silent-swallow bug class.
 |---|---|---|
 | `parse_keyword_line_core()` | Remainder-**preserving** core: `Option<(Keyword, &str /* unconsumed */)>`. The single authority both wrappers are built on. | Internal — call a wrapper, not this. |
 | `parse_router_keyword_line()` | **STRICT / all-consuming.** Candidate recognizer → reminder strip → core → `all_consuming` permitted tail (P/R/M modifiers). Returns a typed `RoutedKeywordLine` only when the line parses *completely*. | The **only** surface that may license a router to CONSUME a whole line. |
+| `parse_router_keyword_fragment()` | **STRICT.** One keyword phrase: core + all-consuming permitted tail + modifiers. The primitive the other strict surfaces are built on. | Any router intercept parsing a single keyword phrase (flashback, suspend, specialize, buyback, escalate, commander ninjutsu, …). |
+| `parse_router_keyword_list()` | **STRICT.** The keyword-LIST sibling: comma parts, MTGJSON validation, protection expansion — with every part all-consuming. | Router slots and routing classifiers facing a keyword *list* (priorities 0 and 1b, `is_semicolon_keyword_line`, `is_spell_resolution_instruction_line`). `parse_router_keyword_line` cannot serve here: it parses ONE keyword and takes no MTGJSON names, so it cannot see a bare-keyword line ("Flying, vigilance"). |
 | `parse_granted_keyword_fragment()` / `extract_granted_keyword_list()` | **PERMISSIVE.** Takes the leading keyword and **discards the remainder** — by design. | **Embedded grant contexts only**: static/token/vote/class-level/effect-payload payloads ("…gains vanishing 3 if …"), where a trailing clause belongs to the *enclosing* sentence. |
 
 **Consume-on-success (the rule).** A candidate recognizer (`is_keyword_cost_line`)
@@ -485,16 +488,15 @@ strict parser fails the build. `KNOWN_NOUN_PARAM_LEAKS` is a **ratchet** listing
 families whose noun/filter parameter still absorbs a trailing clause — entries are
 deleted as each is fixed, never added to.
 
-**Migration status (accurate as of Plan 02 step 5).** The strict router is wired at
-priority `9` (spell) and priority `13` (permanent). The remaining keyword-cost router
-entries — priority `0`, `1b`, `8f`, the flashback/suspend/buyback/escalate/commander-ninjutsu
-intercepts, and the two line classifiers — **still call the permissive surface** and are
-therefore still capable of swallowing a semantic tail. That surviving set is enumerated
-and frozen by **Gate G** in `scripts/check-parser-combinators.sh`: it counts the permissive
-calls inside `parse_oracle_ir`, `is_semicolon_keyword_line`, and
-`is_spell_resolution_instruction_line` and fails if the count rises (a new permissive
-router call) *or* falls without lowering the gate's expected floor. Gate G is a ratchet,
-not a blessing — when every count reaches 0, the boundary is fully enforced.
+**The boundary is fully enforced.** Every router slot and routing classifier now parses
+through a strict surface; the permissive symbols are not even imported into `oracle.rs`.
+**Gate G** in `scripts/check-parser-combinators.sh` is the plain whole-file invariant: a
+permissive keyword-parser symbol appearing anywhere inside `parse_oracle_ir`,
+`is_semicolon_keyword_line`, or `is_spell_resolution_instruction_line` fails the build, at
+any count. Note the ordering consequence this closed: priority `1b` runs long before the
+strict routers at `9`/`13`, so while it was permissive it claimed keyword lines first
+whenever MTGJSON named the keyword — which silently shadowed the strict wiring downstream
+for exactly the cards MTGJSON knows about.
 
 ### `is_static_pattern()` — `oracle_classifier.rs`
 Gates Priority `7`. Returns false for `target`-leading lines, then matches

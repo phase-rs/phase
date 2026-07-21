@@ -533,7 +533,7 @@ pub fn resolve_all(
     //
     // CR 616.1: two simultaneous destination-redirects on one bounced permanent
     // surface an ordering choice. `move_objects_simultaneously` parks it and the
-    // undelivered tail in `state.pending_batch_deliveries`; the
+    // undelivered tail in the active `BatchDelivery` frame; the
     // replacement-choice resume path drains it. A single applicable redirect
     // never prompts (the realistic path), so the common mass bounce never
     // pauses. `state.last_effect_count` is set up front from the matched pool so

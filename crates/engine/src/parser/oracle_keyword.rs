@@ -15,13 +15,13 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount, Effect,
-    EffectScope, FilterProp, QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
+    CostReduction, Effect, EffectScope, FilterProp, QuantityExpr, SacrificeRequirement,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
-    EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
+    EmbalmCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -295,13 +295,90 @@ pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Optio
     })
 }
 
+/// `parse_oracle_cost` NEVER fails — it hands back `AbilityCost::Unimplemented`
+/// for text it cannot type. So "the cost parser returned" is not evidence the cost
+/// parsed. Without the `ability_cost_is_fully_typed` guard, a kicker line with a
+/// semantic tail ("Kicker {2} if you control an artifact") yields a `Some(_)` cost
+/// built from the untyped remainder, and the priority-8f router then consumes the
+/// line AND fabricates a cost — strictly worse than declining, because the card
+/// renders as supported. Declining lets the line fall through to an honest,
+/// exact-unit `Effect::Unimplemented`.
 fn parse_kicker_cost_payload(input: &str) -> Option<AbilityCost> {
     let stripped = strip_reminder_text(input);
     let cost_text = stripped.trim().trim_end_matches('.').trim();
     if cost_text.is_empty() {
         return None;
     }
-    Some(parse_oracle_cost(cost_text))
+    let cost = parse_oracle_cost(cost_text);
+    ability_cost_is_fully_typed(&cost).then_some(cost)
+}
+
+/// Which keyword-parse contract a keyword-LIST consumer needs for each part.
+///
+/// This is the list-level counterpart of the `parse_granted_keyword_fragment` /
+/// `parse_router_keyword_line` split, expressed as a typed axis rather than two
+/// near-duplicate list walks. The list semantics (comma parts, MTGJSON validation,
+/// protection expansion, `instances_function_separately`) are identical in both
+/// modes; only the per-part remainder contract differs, so THAT is the parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeywordRemainderPolicy {
+    /// EMBEDDED GRANT. The trailing clause belongs to the ENCLOSING sentence
+    /// ("… gains vanishing 3 if that creature doesn't have vanishing"), so the
+    /// part parser must take the leading keyword and leave the rest alone.
+    /// Discarding the remainder is CORRECT here.
+    DiscardRemainder,
+    /// ROUTER. The line IS the unit. Any unconsumed semantic prose means the
+    /// router may not consume the line — it must fall through to ordinary
+    /// parsing and become an honest, exact-unit `Effect::Unimplemented` rather
+    /// than vanishing with no keyword and no diagnostic.
+    RequireAllConsuming,
+}
+
+impl KeywordRemainderPolicy {
+    /// The single place the policy turns into an actual per-part parse.
+    fn parse_part(self, lower: &str) -> Option<Keyword> {
+        match self {
+            Self::DiscardRemainder => parse_granted_keyword_fragment(lower),
+            Self::RequireAllConsuming => parse_router_keyword_fragment(lower),
+        }
+    }
+}
+
+/// PERMISSIVE keyword-list extraction — see [`KeywordRemainderPolicy::DiscardRemainder`].
+///
+/// Valid ONLY in embedded grant contexts (static/token/vote/class-level payloads).
+/// A router that consumes a line on this result silently swallows whatever the
+/// keyword did not explain. Routers must call [`parse_router_keyword_list`].
+pub(crate) fn extract_granted_keyword_list(
+    line: &str,
+    mtgjson_keyword_names: &[String],
+) -> Option<Vec<Keyword>> {
+    parse_keyword_list_with_policy(
+        line,
+        mtgjson_keyword_names,
+        KeywordRemainderPolicy::DiscardRemainder,
+    )
+}
+
+/// STRICT keyword-list extraction — see [`KeywordRemainderPolicy::RequireAllConsuming`].
+///
+/// The list-level sibling of [`parse_router_keyword_line`], and the ONLY keyword-list
+/// surface a router or a routing classifier may use. Every comma part must parse to a
+/// typed keyword with an all-consuming permitted (`P`/`R`/`M`) tail; one part carrying
+/// a semantic clause declines the WHOLE line.
+///
+/// `parse_router_keyword_line` cannot serve this role: it parses a single keyword and
+/// takes no MTGJSON names, so it cannot see a bare-keyword line ("Flying, vigilance")
+/// or the MTGJSON-authoritative parts that carry no Oracle parameter.
+pub(crate) fn parse_router_keyword_list(
+    line: &str,
+    mtgjson_keyword_names: &[String],
+) -> Option<Vec<Keyword>> {
+    parse_keyword_list_with_policy(
+        line,
+        mtgjson_keyword_names,
+        KeywordRemainderPolicy::RequireAllConsuming,
+    )
 }
 
 /// Try to extract keywords from a keyword-only line (comma-separated).
@@ -312,15 +389,19 @@ fn parse_kicker_cost_payload(input: &str) -> Option<AbilityCost> {
 /// Returns only keywords not already covered by MTGJSON names — these are typically
 /// parameterized keywords where MTGJSON lists the name (e.g. "Protection") but
 /// Oracle text has the full form (e.g. "Protection from multicolored").
-pub(crate) fn extract_granted_keyword_list(
+///
+/// `policy` decides the per-part remainder contract — the ONE axis on which the
+/// grant and router surfaces differ.
+fn parse_keyword_list_with_policy(
     line: &str,
     mtgjson_keyword_names: &[String],
+    policy: KeywordRemainderPolicy,
 ) -> Option<Vec<Keyword>> {
     let line_without_reminder = strip_reminder_text(line);
     let line = strip_keyword_activation_cost_prefix(line_without_reminder.trim());
 
     if mtgjson_keyword_names.is_empty() {
-        return parse_mtgjson_missing_standalone_keyword_line(line);
+        return parse_mtgjson_missing_standalone_keyword_line(line, policy);
     }
 
     if mtgjson_keyword_names.iter().any(|n| n == "mobilize") {
@@ -340,6 +421,12 @@ pub(crate) fn extract_granted_keyword_list(
             if kw == Keyword::Bloodthirst(BloodthirstValue::Fixed(1)) {
                 return Some(Vec::new());
             }
+            return Some(vec![kw]);
+        }
+    }
+
+    if mtgjson_keyword_names.iter().any(|n| n == "disguise") {
+        if let Some(kw) = parse_disguise_keyword_line(line) {
             return Some(vec![kw]);
         }
     }
@@ -393,7 +480,7 @@ pub(crate) fn extract_granted_keyword_list(
                 // place printed multiplicity survives — emit one Keyword per occurrence
                 // so the runtime's per-instance trigger loop fires correctly. Synthesis
                 // reconciles the deduped MTGJSON copy against these.
-                if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+                if let Some(kw) = policy.parse_part(&lower) {
                     if kw.instances_function_separately() {
                         new_keywords.push(kw);
                     }
@@ -403,14 +490,14 @@ pub(crate) fn extract_granted_keyword_list(
 
             // Prefix match: Oracle text has more detail (e.g. "protection from red").
             // Extract the full parameterized keyword.
-            if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+            if let Some(kw) = policy.parse_part(&lower) {
                 new_keywords.push(kw);
                 continue;
             }
         }
 
         // Not an MTGJSON match — try parsing as any keyword (for keyword-only line validation)
-        if let Some(kw) = parse_granted_keyword_fragment(&lower) {
+        if let Some(kw) = policy.parse_part(&lower) {
             if !matches!(kw, Keyword::Unknown(_)) {
                 // Keywords not in MTGJSON (e.g., firebending) must be extracted here.
                 // They also validate the line as a keyword line.
@@ -476,9 +563,12 @@ fn strip_activation_cost_dash(rest: &str) -> Option<&str> {
     .map(|(keyword_text, _)| keyword_text.trim_start())
 }
 
-fn parse_mtgjson_missing_standalone_keyword_line(line: &str) -> Option<Vec<Keyword>> {
+fn parse_mtgjson_missing_standalone_keyword_line(
+    line: &str,
+    policy: KeywordRemainderPolicy,
+) -> Option<Vec<Keyword>> {
     let lower = line.to_lowercase();
-    let keyword = parse_granted_keyword_fragment(&lower)?;
+    let keyword = policy.parse_part(&lower)?;
     match keyword {
         Keyword::ForMirrodin => Some(vec![keyword]),
         // CR 702.89a: Umbra armor (printed as "umbra armor"/"totem armor") is a
@@ -612,6 +702,19 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
+    // current power on resolution, or its last known information if it left its
+    // expected public zone.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("pay life equal to "),
+        alt((tag("this creature's power"), tag("~'s power"))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(WardCost::PayLifeEqualToPower);
+    }
+
     // "pay N life"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("pay ").parse(lower) {
         if let Some(life_str) = rest.strip_suffix(" life") {
@@ -1126,6 +1229,44 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
     (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
 }
 
+/// CR 702.168d + CR 118.7a: Parse a disguise line with a trailing generic
+/// reduction. The reduction belongs to the turn-face-up special action, not
+/// to casting the creature or its face-down spell.
+fn parse_disguise_keyword_line(text: &str) -> Option<Keyword> {
+    let stripped = strip_reminder_text(text);
+    let upper = stripped.trim().to_ascii_uppercase();
+    let (after_for_each, (_, cost, _, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("DISGUISE "),
+        nom_primitives::parse_mana_cost,
+        tag(". THIS COST IS REDUCED BY "),
+        nom_primitives::parse_mana_cost,
+        tag(" FOR EACH "),
+    )
+        .parse(upper.as_str())
+        .ok()?;
+    let ManaCost::Cost {
+        generic: amount_per,
+        shards,
+    } = amount
+    else {
+        return None;
+    };
+    if !shards.is_empty() {
+        return None;
+    }
+    let count_text = after_for_each.to_ascii_lowercase();
+    let (_, qty) =
+        super::oracle_nom::quantity::parse_for_each_clause_ref_complete(&count_text).ok()?;
+    Some(Keyword::Disguise(DisguiseCost::Reduced {
+        cost,
+        reduction: Box::new(CostReduction {
+            amount_per,
+            count: QuantityExpr::Ref { qty },
+            condition: None,
+        }),
+    }))
+}
+
 /// Remainder-preserving keyword core — the SINGLE authority for keyword-line
 /// parsing. Returns the typed keyword plus the input it did **not** consume.
 ///
@@ -1146,6 +1287,10 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
 /// handling the "from" preposition used by protection keywords.
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
+
+    if let Some(kw) = parse_disguise_keyword_line(text) {
+        return Some((kw, ""));
+    }
 
     // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
     // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword "Partner".
@@ -2006,6 +2151,62 @@ pub(crate) fn parse_router_keyword_line(line: &str) -> Option<RoutedKeywordLine>
     })
 }
 
+/// The remainder-CHECKING sibling of [`parse_granted_keyword_fragment`], which is
+/// literally `parse_keyword_line_core(t).map(|(kw, _discarded_remainder)| kw)`.
+///
+/// Same core, same typed keyword — but any unconsumed SEMANTIC prose rejects the
+/// fragment instead of being thrown away. Only a permitted (`P`/`M`) tail may
+/// remain. This is the primitive every router-context keyword parse is built on:
+/// the whole-line router ([`parse_router_keyword_line`]) adds candidate recognition
+/// and reminder-text handling on top; the list router
+/// ([`parse_router_keyword_list`]) applies it per comma part.
+///
+/// Takes ALREADY-LOWERCASED text, matching `parse_granted_keyword_fragment`'s
+/// contract, so it is a drop-in at every site that used the permissive surface.
+pub(crate) fn parse_router_keyword_fragment(lower: &str) -> Option<Keyword> {
+    let (keyword, unconsumed) = parse_keyword_line_core(lower)?;
+    let (modifiers, _had_terminal_punctuation) = parse_permitted_keyword_tail(unconsumed)?;
+    apply_keyword_line_modifiers(keyword, &modifiers)
+}
+
+/// A candidate prefix matches only at a WORD BOUNDARY: the prefix must be followed
+/// by end-of-line, whitespace, or an em-dash.
+///
+/// Extracted from [`is_keyword_cost_line`]'s guard so that every candidate
+/// recognizer shares one boundary rule. Without it, a bare `tag("kicker")` accepts
+/// "Kickerfoo {2}" — the router claims a line it cannot parse and (before this
+/// unit) consumed it with no keyword and no diagnostic.
+fn matches_keyword_prefix_at_word_boundary(lower: &str, prefix: &str) -> bool {
+    tag::<_, _, OracleError<'_>>(prefix)
+        .parse(lower)
+        .is_ok_and(|(rest, _)| {
+            rest.is_empty()
+                || rest.as_bytes().first() == Some(&b' ')
+                || rest.as_bytes().first() == Some(&b'\t')
+                || tag::<_, _, OracleError<'_>>("\u{2014}").parse(rest).is_ok()
+        })
+}
+
+/// CR 702.33 Kicker / CR 702.33c Multikicker (a kicker variant, not a sibling rule)
+/// / CR 702.56 Replicate / CR 702.187 Mayhem — the four keyword ADDITIONAL COSTS
+/// that declare themselves on their own Oracle line.
+///
+/// The priority-8f candidate set. Deliberately NOT merged into
+/// [`KEYWORD_COST_PREFIXES`]: these are keyword ADDITIONAL COSTS whose lines also
+/// feed `parse_kicker_additional_cost_line`, and `is_keyword_cost_line` additionally
+/// gates `is_spell_resolution_instruction_line` — widening it there would change
+/// which lines count as spell-resolution text.
+pub(crate) const KICKER_FAMILY_PREFIXES: [&str; 4] =
+    ["kicker", "multikicker", "replicate", "mayhem"];
+
+/// Whether a line is a priority-8f kicker-family candidate, guarded at a word
+/// boundary. Candidate recognition ONLY — never evidence that the line parses.
+pub(crate) fn is_kicker_family_line(lower: &str) -> bool {
+    KICKER_FAMILY_PREFIXES
+        .iter()
+        .any(|prefix| matches_keyword_prefix_at_word_boundary(lower, prefix))
+}
+
 /// Bare-integer-count keywords whose `FromStr` arm does `p.parse().unwrap_or(N)`
 /// (or wraps the integer in `QuantityExpr::Fixed`) over the parameter string —
 /// see the arms in `types/keywords.rs`. For these the generic normalizer must
@@ -2588,18 +2789,9 @@ pub(crate) const KEYWORD_COST_PREFIXES: [&str; 95] = [
 /// precisely the bug this unit removes. Only `parse_router_keyword_line` returning
 /// `Some` licenses a router to consume the line.
 pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
-    KEYWORD_COST_PREFIXES.iter().any(|kw| {
-        tag::<_, _, OracleError<'_>>(*kw)
-            .parse(lower)
-            .is_ok_and(|(rest, _)| {
-                rest.is_empty()
-                    || rest.as_bytes().first() == Some(&b' ')
-                    || rest.as_bytes().first() == Some(&b'\t')
-                    || tag::<_, _, OracleError<'_>>("\u{2014}")
-                        .parse(rest)
-                        .is_ok()
-            })
-    })
+    KEYWORD_COST_PREFIXES
+        .iter()
+        .any(|kw| matches_keyword_prefix_at_word_boundary(lower, kw))
         // CR 702.29e: Typecycling — first word ends in "cycling" but isn't "cycling" itself
         || lower
             .split_whitespace()
@@ -3075,6 +3267,18 @@ mod tests {
         let Keyword::Cycling(CyclingCost::Mana(_)) = kw else {
             panic!("expected Cycling Mana variant, got {kw:?}");
         };
+    }
+
+    #[test]
+    fn parse_granted_keyword_fragment_ward_pay_life_equal_to_power() {
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to this creature's power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to ~'s power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
     }
 
     #[test]
@@ -3728,6 +3932,69 @@ mod tests {
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
         assert!(matches!(keywords[0], Keyword::Transmute(_)));
+    }
+
+    /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's red pip and dynamic
+    /// turn-face-up discount both survive keyword extraction.
+    #[test]
+    fn extract_router_keyword_line_disguise_with_graveyard_reduction() {
+        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+
+        let keyword = parse_router_keyword_line(
+            "Disguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)",
+        )
+        .and_then(|routed| routed.keyword)
+        .expect("compound disguise keyword should extract");
+        let Keyword::Disguise(DisguiseCost::Reduced { cost, reduction }) = &keyword else {
+            panic!("expected reduced disguise cost, got {keyword:?}");
+        };
+        assert!(matches!(
+            cost,
+            ManaCost::Cost { generic: 5, shards }
+                if shards.as_slice() == [ManaCostShard::Red]
+        ));
+        assert_eq!(reduction.amount_per, 1);
+        assert!(matches!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    ref card_types,
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            } if card_types == &[TypeFilter::Instant, TypeFilter::Sorcery]
+        ));
+
+        let serialized = serde_json::to_value(&keyword).expect("serialize reduced disguise");
+        let round_trip: Keyword =
+            serde_json::from_value(serialized).expect("deserialize reduced disguise");
+        assert_eq!(round_trip, keyword);
+        let legacy: Keyword = serde_json::from_value(serde_json::json!({
+            "Disguise": {"type": "Cost", "generic": 5, "shards": ["Red"]}
+        }))
+        .expect("legacy disguise mana cost remains readable");
+        assert!(matches!(legacy, Keyword::Disguise(DisguiseCost::Mana(_))));
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Prowess, haste\nDisguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)\nWhen this creature is turned face up, discard your hand, then draw three cards.",
+            "Fugitive Codebreaker",
+            &["prowess".to_string(), "haste".to_string(), "disguise".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Detective".to_string()],
+        );
+        assert!(
+            parsed
+                .extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Disguise(DisguiseCost::Reduced { .. }))),
+            "full Oracle parse should retain the reduced disguise cost: {parsed:#?}"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "fully represented Fugitive line should not report a swallowed dynamic quantity: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]

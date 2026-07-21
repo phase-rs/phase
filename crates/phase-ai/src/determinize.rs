@@ -46,6 +46,15 @@
 //! | `perpetual_mods` / `intensity` | Persist across hidden zones by explicit engine design (`game_object.rs`); zeroing them would fight that invariant. Rare (digital-only Alchemy), not read by hidden-zone candidate gen/eval in v1. |
 //! | `counters` / `stickers` | Not carried by hidden-zone cards in normal play; candidate gen/eval read them only for battlefield permanents. |
 //! | `casting_permissions` | Governs whether a specific object may be cast; no AI candidate references a resampled unknown card by identity (pin-invariant), so a stale permission cannot enable an illegal cheat candidate. |
+//!
+//! # Shipping status (2026-07-18)
+//!
+//! All difficulty tier presets ship `determinization_samples = 0`
+//! (perfect-information search) as a deliberate strength decision while players
+//! win ~80% of games vs the AI. This module remains the config-reachable
+//! sampling primitive for experiments and measurement runs — reached by setting
+//! `SearchConfig::determinization_samples > 0` directly — and is exercised by the
+//! `search.rs` ensemble tests, which set K manually.
 
 use std::collections::HashSet;
 

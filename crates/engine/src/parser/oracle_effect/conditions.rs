@@ -53,9 +53,10 @@ fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
 
 /// CR 702.171b: The runtime filter matching the saddled designation. Shared by
 /// the affirmative and negated `SourceIsSaddled` bridges in
-/// `static_condition_to_ability_condition` so both compose the same
-/// `SourceMatchesFilter { Typed([IsSaddled]) }` shape.
-fn source_saddled_filter() -> TargetFilter {
+/// `static_condition_to_ability_condition`, and by the `SourceIsSaddled` arm of
+/// `static_condition_to_trigger_condition` (oracle_trigger.rs), so all three
+/// compose the same `SourceMatchesFilter { Typed([IsSaddled]) }` shape.
+pub(crate) fn source_saddled_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter {
         properties: vec![FilterProp::IsSaddled],
         ..Default::default()
@@ -238,6 +239,24 @@ pub(crate) fn strip_leading_general_conditional(
     text: &str,
     ctx: &mut ParseContext,
 ) -> (Option<AbilityCondition>, String) {
+    // CR 508.4 + CR 608.2c + CR 701.42: this condition contains an internal
+    // comma before its second conjunct ("are attacking, and you both own and
+    // control them"). Peel it through the shared condition production before
+    // the generic first-comma splitter, then leave the imperative body to the
+    // normal effect-chain parser.
+    if let Some((condition, _, _, partner, body)) = super::meld::strip_live_pair_conditional(text) {
+        ctx.pending_meld_partner = Some(partner);
+        return (Some(condition), body);
+    }
+    // CR 603.4: an inline `If` in an activated ability has its normal English
+    // meaning. Parse the shared own/control pair grammar as an AbilityCondition;
+    // this covers Hanweir Battlements and Urza, Lord Protector without a
+    // card-name dispatch.
+    if let Some((condition, _, _, partner, body)) = super::meld::strip_owned_pair_conditional(text)
+    {
+        ctx.pending_meld_partner = Some(partner);
+        return (Some(condition), body);
+    }
     if let Some((condition_fragment, body)) = split_leading_conditional(text) {
         let condition_lower = condition_fragment.to_lowercase();
         let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
@@ -257,7 +276,21 @@ pub(crate) fn strip_leading_general_conditional(
         .unwrap_or(&condition_fragment)
         .trim();
 
-        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text, ctx)
+        let body_lower = body.to_lowercase();
+        let player_damage_scry = tag::<_, _, OracleError<'_>>("scry ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_previous_effect_player_damage_condition(cond_text))
+            .flatten();
+        let effect_discard_drain = tag::<_, _, OracleError<'_>>("each opponent loses ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_effect_discard_instant_or_sorcery_condition(cond_text))
+            .flatten();
+
+        if let Some(condition) = player_damage_scry
+            .or(effect_discard_drain)
+            .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
             .or_else(|| parse_condition_text(cond_text))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
             .or_else(|| parse_and_conjunction_condition(cond_text, ctx))
@@ -1138,7 +1171,7 @@ fn type_filter_to_core_type(tf: &TypeFilter) -> Option<CoreType> {
 /// Inverse of [`type_filter_to_core_type`]: map a `CoreType` to the `TypeFilter`
 /// the engine uses to gate a present-target filter. Total over the card-type
 /// `CoreType` set; mirrors the explicit arms of `type_filter_to_core_type`.
-fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
+pub(super) fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
     match core {
         CoreType::Creature => TypeFilter::Creature,
         CoreType::Land => TypeFilter::Land,
@@ -4764,6 +4797,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::SourceIsTapped
         | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::ControllerControlsMatching { .. }
         | AbilityCondition::And { .. }
@@ -5120,6 +5154,14 @@ pub(super) fn try_nom_condition_as_ability_condition(
     use crate::parser::oracle_nom::condition::parse_inner_condition;
 
     let lower = text.to_lowercase();
+
+    // CR 508.4 + CR 608.2c + CR 701.42: attacking meld-pair conditions are
+    // resolution-time leading conditions. Keep them in the shared condition
+    // dispatcher so trigger, activated-ability, and ordinary effect chains all
+    // obtain the same typed source/partner predicates.
+    if let Some((condition, ..)) = super::meld::parse_live_pair_ability_condition(text) {
+        return Some(condition);
+    }
 
     // CR 608.2c: "<condition A> or if <condition B>" disjunction (Reptilian
     // Recruiter: "If that creature's power is 2 or less or if you control another
@@ -6294,6 +6336,53 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
         comparator: Comparator::GT,
         rhs: QuantityExpr::Fixed { value: 0 },
         channel: DamageChannel::Excess,
+    })
+}
+
+/// CR 120.3 + CR 608.2c: "a player is dealt damage this way" gates a rider
+/// on both the recipient and the damage event emitted by the preceding
+/// instruction. Deal-damage targets are either players or permanents, so a
+/// player target is represented by the negated permanent match; the total
+/// channel prevents the rider from firing when all damage was prevented.
+fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "a player is dealt damage this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Total,
+            },
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                    use_lki: true,
+                    subject_slot: None,
+                }),
+            },
+        ],
+    })
+}
+
+/// CR 701.8a + CR 608.2c: Vohar's drain checks the card discarded by the
+/// preceding effect, not an object paid as an additional cost. The discard
+/// publishes its hand-to-graveyard move in the resolution-local zone-change
+/// ledger, which preserves the discarded card's types for this rider.
+fn parse_effect_discard_instant_or_sorcery_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "you discarded an instant or sorcery card this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery,
+        ]))),
     })
 }
 

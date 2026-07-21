@@ -1,8 +1,8 @@
 use crate::game::targeting::resolve_event_context_target;
 use crate::types::ability::{
-    DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError, EffectKind,
-    ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry, TargetFilter,
-    TargetRef,
+    AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
+    EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+    TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -43,7 +43,47 @@ fn replacement_with_ability_expiry(
     }
     stamp_for_as_long_as_controlled_gate(&mut replacement, ability);
     freeze_damage_modification_x(&mut replacement, ability);
+    freeze_parent_copy_target(&mut replacement, ability);
     replacement
+}
+
+// CR 614.12a + CR 707.2: If the resolving spell chose the object to copy, bind
+// that object into the delayed enter-as-copy replacement when the shield is
+// created so the later entry event does not ask for a new copy source.
+fn freeze_parent_copy_target(replacement: &mut ReplacementDefinition, ability: &ResolvedAbility) {
+    let Some(copy_source) = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    }) else {
+        return;
+    };
+    if let Some(execute) = replacement.execute.as_mut() {
+        concretize_parent_copy_target(execute, copy_source);
+    }
+}
+
+fn concretize_parent_copy_target(
+    def: &mut AbilityDefinition,
+    copy_source: crate::types::identifiers::ObjectId,
+) {
+    // CR 614.12a + CR 707.2: a Mystic Reflection-style replacement chooses the
+    // copied object when the spell resolves, before the later battlefield-entry
+    // replacement applies. Freeze that parent target into the installed shield
+    // so the later enter event does not prompt for a new copy source.
+    if let Effect::BecomeCopy { target, .. } = def.effect.as_mut() {
+        if matches!(target, TargetFilter::ParentTarget) {
+            *target = TargetFilter::SpecificObject { id: copy_source };
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        concretize_parent_copy_target(sub, copy_source);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        concretize_parent_copy_target(else_ability, copy_source);
+    }
+    for mode in def.mode_abilities.iter_mut() {
+        concretize_parent_copy_target(mode, copy_source);
+    }
 }
 
 /// CR 611.2b: Translate a "for as long as you control ~" duration on the
@@ -217,9 +257,11 @@ pub fn resolve(
                     // CR 611.2b lapse, so base never accumulates a stale runtime
                     // rider. printed_cards.rs is the only intrinsic base-write
                     // precedent; there is no additive-runtime base-push
-                    // precedent, so this exception is documented here. This
-                    // gate-scoping keeps transient riders (die-exile, Crafty
-                    // Cutpurse, end-of-turn) live-only and untouched.
+                    // precedent, so this exception is documented here.
+                    // A turn-bound die-exile rider must also survive a layer
+                    // reset: a damaged creature can gain/lose characteristics
+                    // or enter combat before it dies. Cleanup prunes this
+                    // narrowly scoped base copy at end of turn.
                     //
                     // Acknowledged out-of-scope edges (NOT fixed here): (1) Cleave
                     // re-baselining only touches spells on the stack (casting.rs)
@@ -229,10 +271,15 @@ pub fn resolve(
                     // base+live replacement defs, CR 708.2a) would end the lock
                     // early — an under-prune, strictly safer than a revival; rare
                     // corner, out of scope.
-                    let install_to_base = matches!(
-                        replacement.condition,
-                        Some(ReplacementCondition::ControllerControlsSource { .. })
-                    );
+                    let durable_die_exile =
+                        crate::game::printed_cards::is_runtime_target_die_exile_replacement(
+                            &replacement,
+                        );
+                    let install_to_base = durable_die_exile
+                        || matches!(
+                            replacement.condition,
+                            Some(ReplacementCondition::ControllerControlsSource { .. })
+                        );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if install_to_base {
                             std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
@@ -252,6 +299,7 @@ pub fn resolve(
                         replacement.damage_target_filter =
                             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
                                 player: DamageTargetPlayerScope::Specific(player),
+                                permanent_type: None,
                             });
                     }
                     state.pending_damage_replacements.push(replacement);
@@ -279,7 +327,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, DamageModification, DamageTargetPlayerScope, Duration,
-        ReplacementDefinition, RestrictionExpiry, TargetFilter,
+        ReplacementDefinition, RestrictionExpiry, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -427,6 +475,73 @@ mod tests {
     }
 
     #[test]
+    fn global_enter_as_copy_replacement_freezes_parent_target_copy_source() {
+        let mut state = GameState::new_two_player(42);
+        let copy_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chosen Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&copy_source)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker)),
+                ],
+            })
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    recipient: TargetFilter::SelfRef,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            ));
+        replacement.consume_on_apply = true;
+        replacement.expiry = Some(RestrictionExpiry::EndOfTurn);
+
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            vec![TargetRef::Object(copy_source)],
+            ObjectId(0),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let installed = state
+            .pending_damage_replacements
+            .last()
+            .expect("global replacement shield must be installed");
+        let execute = installed.execute.as_ref().expect("copy execute");
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!("expected BecomeCopy execute, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::SpecificObject { id: copy_source },
+            "the chosen creature must be captured before the later entry event"
+        );
+    }
+
+    #[test]
     fn pushes_damage_replacement_for_triggering_player() {
         let mut state = GameState::new_two_player(42);
         state.current_trigger_event = Some(GameEvent::DamageDealt {
@@ -460,7 +575,8 @@ mod tests {
         assert_eq!(
             pending.damage_target_filter,
             Some(DamageTargetFilter::PlayerOrPermanentsControlledBy {
-                player: DamageTargetPlayerScope::Specific(PlayerId(1))
+                player: DamageTargetPlayerScope::Specific(PlayerId(1)),
+                permanent_type: None,
             })
         );
         assert_eq!(

@@ -565,6 +565,17 @@ fn random_modal_trigger_resolves_without_prompting() {
         state.pending_trigger_entry.is_none(),
         "random modal trigger entry must be resolver-eligible (cursor cleared)",
     );
+    let labels = &state
+        .stack
+        .back()
+        .unwrap()
+        .ability()
+        .unwrap()
+        .selected_mode_labels;
+    assert!(
+        matches!(labels.as_slice(), [label] if label == "A" || label == "B"),
+        "the random modal trigger must retain the label of the engine-selected mode, got {labels:?}",
+    );
 }
 
 /// SHAPE-level regression (manual surgery): drives the real dispatch pipeline to

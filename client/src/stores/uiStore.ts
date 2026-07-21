@@ -368,10 +368,15 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       if (pendingClearTimer != null) return; // already scheduled
       pendingClearTimer = setTimeout(() => {
         pendingClearTimer = null;
-        // Suppress clear only if cursor is over the preview panel itself, so Alt-mode
-        // reading of the parsed abilities panel isn't dismissed when mousing onto it.
-        // We intentionally do NOT suppress when cursor is over another card-hover: the
-        // next card's onMouseEnter already cancels this timer via the id != null branch.
+        // Alt PINS the preview (frozen in place — see CardPreview's cursor-follow
+        // effect). While pinned, a mouseleave must not dismiss it, so the user can
+        // traverse the gap from the card to the panel and click "Report a Problem"
+        // or scroll rulings. Toggling Alt off (or a click outside) still dismisses.
+        if (get().altHeld) return;
+        // Otherwise suppress the clear only while the cursor is over the preview
+        // panel itself, so mousing onto a non-pinned panel isn't dismissed. We do
+        // NOT suppress over another card-hover: that card's onMouseEnter already
+        // cancels this timer via the id != null branch.
         const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
         if (el?.closest("[data-card-preview]")) return;
         set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });

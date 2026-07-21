@@ -1,13 +1,15 @@
-import { useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { motion } from "framer-motion";
 import type { PanInfo } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, PlayerId } from "../../adapter/types.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { getPlayerId } from "../../hooks/usePlayerId.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -16,7 +18,7 @@ import {
   resolveSingleActionDispatch,
 } from "../../viewmodel/cardActionChoice.ts";
 import { CASTABLE_AFFORDANCE_ACTIVE } from "../../viewmodel/castableAffordance.ts";
-import { commandersInZone } from "../../viewmodel/commanderColumn.ts";
+import { commandZoneLeaders } from "../../viewmodel/commanderColumn.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -37,14 +39,19 @@ export function CommanderCardZone({ playerId, splitOverview = false }: Commander
   const gameState = useGameStore((s) => s.gameState);
 
   const commanders = useMemo(
-    () => (gameState ? commandersInZone(gameState, playerId) : []),
+    () => (gameState ? commandZoneLeaders(gameState, playerId) : []),
     [gameState, playerId],
   );
 
   if (commanders.length === 0) return null;
 
+  // Lay the leaders out horizontally (commander(s) + any Oathbreaker signature
+  // spell, and partner/background pairs) rather than stacking them. A vertical
+  // stack doubles the command dock's height, and the middle row is
+  // `items-stretch`, so that height propagates to the whole battlefield row and
+  // breaks the layout globally. A row keeps the dock one card tall.
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-row items-end gap-1">
       {commanders.map((cmd) => (
         <CommanderCard key={cmd.id} commander={cmd} splitOverview={splitOverview} />
       ))}
@@ -60,6 +67,7 @@ function CommanderCard({
   splitOverview: boolean;
 }) {
   const { t } = useTranslation("game");
+  const isSignatureSpell = commander.signature_spell != null;
   const isCompactHeight = useIsCompactHeight();
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const effectiveCost = useGameStore(
@@ -109,6 +117,34 @@ function CommanderCard({
   // priority + mana + timing all permit the cast. Reuse it as the drag gate
   // rather than threading a separate hasPriority check through.
   const dragCast = useDragToCast({ castAction, hasPriority: canCast, useDistanceThreshold: true });
+  const manaPaymentPreviewRequestId = useRef(0);
+  const startManaPaymentPreview = useCallback(() => {
+    const requestId = ++manaPaymentPreviewRequestId.current;
+    if (!castAction) {
+      useGameStore.getState().clearManaPaymentPreview();
+      return;
+    }
+
+    void previewAutomaticManaPayment(castAction, getPlayerId())
+      .then((sourceIds) => {
+        const store = useGameStore.getState();
+        if (manaPaymentPreviewRequestId.current !== requestId) return;
+        if (sourceIds === null) {
+          store.clearManaPaymentPreview();
+        } else {
+          store.setManaPaymentPreviewSourceIds(sourceIds);
+        }
+      })
+      .catch(() => {
+        if (manaPaymentPreviewRequestId.current === requestId) {
+          useGameStore.getState().clearManaPaymentPreview();
+        }
+      });
+  }, [castAction]);
+  const stopManaPaymentPreview = useCallback(() => {
+    manaPaymentPreviewRequestId.current += 1;
+    useGameStore.getState().clearManaPaymentPreview();
+  }, []);
   // Framer Motion does not suppress the synthetic click that follows a
   // drag gesture on a <motion.button>. Without this guard, a successful
   // drag-cast would immediately trigger the click handler and open the
@@ -116,6 +152,7 @@ function CommanderCard({
   // fires and read-reset it on the next click.
   const dragCastedRef = useRef(false);
   const onDragEnd = (event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
+    stopManaPaymentPreview();
     const fired = dragCast(event, info);
     if (fired) dragCastedRef.current = true;
   };
@@ -145,6 +182,7 @@ function CommanderCard({
       onDoubleClick={canCast ? () => dispatchAction(castAction) : undefined}
       drag={canCast || false}
       dragSnapToOrigin
+      onDragStart={startManaPaymentPreview}
       onDragEnd={onDragEnd}
       whileDrag={{ cursor: "grabbing", scale: 1.04 }}
       className={`group relative ${
@@ -152,14 +190,22 @@ function CommanderCard({
       }`}
       title={
         canCast
-          ? tax > 0
-            ? t("zone.castCommanderTax", { name: commander.name, tax })
-            : t("zone.castCommander", { name: commander.name })
+          ? isSignatureSpell
+            ? tax > 0
+              ? t("zone.castSignatureSpellTax", { name: commander.name, tax })
+              : t("zone.castSignatureSpell", { name: commander.name })
+            : tax > 0
+              ? t("zone.castCommanderTax", { name: commander.name, tax })
+              : t("zone.castCommander", { name: commander.name })
           : canNinjutsu
             ? t("zone.ninjutsuCommander", { name: commander.name })
-            : tax > 0
-              ? t("zone.commanderTitleTax", { name: commander.name, tax })
-              : t("zone.commanderTitle", { name: commander.name })
+            : isSignatureSpell
+              ? tax > 0
+                ? t("zone.signatureSpellTitleTax", { name: commander.name, tax })
+                : t("zone.signatureSpellTitle", { name: commander.name })
+              : tax > 0
+                ? t("zone.commanderTitleTax", { name: commander.name, tax })
+                : t("zone.commanderTitle", { name: commander.name })
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
     >
@@ -193,7 +239,7 @@ function CommanderCard({
           card and hide the cost pips. */}
       {!splitOverview && (
         <div className="absolute -top-1 left-1/2 z-10 -translate-x-1/2 whitespace-nowrap rounded-sm bg-amber-700 px-1.5 py-px text-[8px] font-bold text-amber-100 shadow">
-          {t("zone.commander")}
+          {isSignatureSpell ? t("zone.signatureSpell") : t("zone.commander")}
         </div>
       )}
 

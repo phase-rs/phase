@@ -17,7 +17,20 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use engine::database::card_db::CardDatabase;
+use engine::game::triggers::trigger_source_context_for_latch;
+use engine::types::game_state::{GameState, NamedChoiceSource, NamedChoiceSourceBinding};
+use engine::types::identifiers::ObjectId;
 use serde_json::{Map, Value};
+
+/// Builds the exact object-and-resolution authority used by persisted named
+/// choice fixtures. Test prompts must not retain a raw object id as authority.
+pub fn exact_named_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
+    let context = trigger_source_context_for_latch(state, state.objects.get(&object_id).unwrap());
+    NamedChoiceSource::from_trigger_source(
+        context,
+        NamedChoiceSourceBinding::ExactObjectAndResolution,
+    )
+}
 
 /// Path to the full parsed card-data export, relative to the engine crate root.
 fn export_path() -> PathBuf {

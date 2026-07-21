@@ -24,7 +24,10 @@
 //! later cipher spell can re-encode onto the same creature (CR 702.99); each
 //! encode is an independent link.
 
-use super::triggers::{PendingTrigger, PendingTriggerContext, PendingTriggerDispatchOrigin};
+use super::triggers::{
+    trigger_source_context_for_latch, PendingTrigger, PendingTriggerContext,
+    PendingTriggerDispatchOrigin,
+};
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{Effect, ResolvedAbility, TargetFilter, TargetRef};
 use crate::types::card_type::CoreType;
@@ -218,11 +221,19 @@ pub fn collect_combat_damage_recast_triggers(
             }
             // CR 702.99c: "its controller" — the creature's current controller,
             // which may differ from the player who cast the cipher spell.
-            let Some(controller) = state.objects.get(creature_id).map(|o| o.controller) else {
+            let Some(source) = state.objects.get(creature_id) else {
                 continue;
             };
+            let controller = source.controller;
+            let source_context = trigger_source_context_for_latch(state, source);
             for card_id in encoded_cards_on_creature(state, *creature_id) {
-                pending.push(recast_trigger(*creature_id, controller, card_id, event));
+                pending.push(recast_trigger(
+                    *creature_id,
+                    controller,
+                    card_id,
+                    event,
+                    source_context.clone(),
+                ));
             }
         }
     }
@@ -238,6 +249,7 @@ fn recast_trigger(
     controller: PlayerId,
     card_id: ObjectId,
     event: &GameEvent,
+    source_context: crate::types::game_state::TriggerSourceContext,
 ) -> PendingTriggerContext {
     let mut ability = ResolvedAbility::new(
         // CR 702.99c: the encoded card is a *copy source*, not a spell target —
@@ -257,6 +269,7 @@ fn recast_trigger(
     );
     // CR 702.99c: "you may cast" — the controller chooses whether to recast.
     ability.optional = true;
+    ability.set_trigger_source_recursive(source_context);
 
     PendingTriggerContext {
         pending: PendingTrigger {

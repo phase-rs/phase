@@ -101,6 +101,7 @@ fn probe_squirrel_board() {
         player: active,
         valid_attacker_ids,
         valid_attack_targets,
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
     measure("declare-attackers", &da);

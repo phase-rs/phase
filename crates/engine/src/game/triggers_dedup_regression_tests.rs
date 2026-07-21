@@ -20,6 +20,18 @@ fn setup() -> GameState {
     GameState::new_two_player(42)
 }
 
+fn live_trigger_origin(
+    state: &GameState,
+    source_id: ObjectId,
+    live_index: usize,
+) -> MayTriggerOrigin {
+    let source = state.objects.get(&source_id).unwrap();
+    let entry = source.trigger_definitions.get(live_index).unwrap();
+    MayTriggerOrigin::Definition {
+        definition_ref: source.trigger_definition_ref(entry),
+    }
+}
+
 fn make_creature(
     state: &mut GameState,
     player: PlayerId,
@@ -90,6 +102,7 @@ fn etb_observer_fires_once_per_event() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
 
     let new_etb = create_object(
@@ -864,6 +877,7 @@ fn landfall_fires_once_per_land_etb() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     // Narrow the valid_card to lands to mimic landfall's filter.
     state
@@ -871,6 +885,7 @@ fn landfall_fires_once_per_land_etb() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .valid_card = Some(TargetFilter::Typed(
         crate::types::ability::TypedFilter::land(),
     ));
@@ -928,6 +943,7 @@ fn panharmonicon_still_doubles_after_dedup() {
         .get_mut(&observer_id)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
 
     // Put a Panharmonicon on the battlefield with its static.
@@ -1041,6 +1057,7 @@ fn gandalf_doubles_legendary_etb_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _gandalf = install_gandalf_doubler(&mut state);
 
@@ -1091,6 +1108,7 @@ fn gandalf_doubles_artifact_etb_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _gandalf = install_gandalf_doubler(&mut state);
 
@@ -1142,6 +1160,7 @@ fn gandalf_does_not_double_ordinary_creature_etb_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _gandalf = install_gandalf_doubler(&mut state);
 
@@ -1237,6 +1256,7 @@ fn isshin_does_not_double_etb_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _isshin = install_doubler(&mut state, TriggerCause::CreatureAttacking);
 
@@ -1862,6 +1882,7 @@ fn drivnod_doubles_dies_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Graveyard);
     let _drivnod = install_doubler(&mut state, TriggerCause::CreatureDying);
 
@@ -1967,6 +1988,7 @@ fn wayta_does_not_double_unrelated_triggers() {
         .get_mut(&observer)
         .unwrap()
         .trigger_definitions[0]
+        .definition
         .destination = Some(Zone::Battlefield);
     let _wayta = install_doubler(&mut state, TriggerCause::ControlledCreatureDealtDamage);
 
@@ -2889,6 +2911,7 @@ fn make_phase_trigger_source(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.trigger_definitions.push(trig_def.clone());
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    obj.materialize_base_trigger_definitions();
     id
 }
 
@@ -2921,6 +2944,7 @@ fn make_optional_phase_trigger_with_no_legal_target(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.trigger_definitions.push(trig_def.clone());
     std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trig_def);
+    obj.materialize_base_trigger_definitions();
     id
 }
 
@@ -3122,7 +3146,7 @@ fn auto_accepted_optional_triggers_without_legal_targets_are_suppressed() {
             MayTriggerAutoChoiceKey {
                 player: PlayerId(0),
                 source_id,
-                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+                origin: live_trigger_origin(&state, source_id, 0),
             },
             AutoMayChoice::Accept,
         );
@@ -3192,7 +3216,7 @@ fn auto_accepted_optional_context_ref_effect_reaches_stack() {
             MayTriggerAutoChoiceKey {
                 player: PlayerId(0),
                 source_id: src,
-                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+                origin: live_trigger_origin(&state, src, 0),
             },
             AutoMayChoice::Accept,
         );

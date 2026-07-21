@@ -107,6 +107,20 @@ function castOfferState(): GameState {
   });
 }
 
+function gollumNamedChoiceSource(gollumId: number) {
+  return {
+    prompt: {
+      identity: {
+        reference: { object_id: gollumId, incarnation: 0 },
+        expected_zone: "Battlefield",
+      },
+      controller: 1,
+      display_name: "Gollum, Scheming Guide",
+    },
+    binding: "ResolutionContext" as const,
+  };
+}
+
 /** Flush pending microtasks (promise `.then` chains). */
 async function flushMicrotasks() {
   for (let i = 0; i < 10; i++) {
@@ -265,6 +279,46 @@ describe("aiController stuck-fallback (issue #484)", () => {
 
     controller.dispose();
   });
+
+  it("recovers via getLegalActions when getAiAction returns null without halting", async () => {
+    const legalPass = { type: "PassPriority" } as GameAction;
+    const getAiAction = vi.fn(async () => null);
+    const getLegalActions = vi.fn(
+      async (): Promise<LegalActionsResult> => ({
+        actions: [legalPass],
+        autoPassRecommended: false,
+      }),
+    );
+    const state = buildGameState({
+      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
+      stack: [],
+      has_pending_cast: false,
+      priority_player: 1,
+      active_player: 1,
+    });
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions },
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    const stopSpy = vi.spyOn(controller, "stop");
+    controller.start();
+
+    for (let i = 0; i < 4; i++) {
+      await vi.advanceTimersByTimeAsync(1000);
+      await flushMicrotasks();
+    }
+
+    expect(getLegalActions).toHaveBeenCalled();
+    expect(dispatchAction).toHaveBeenCalledWith(legalPass, 1);
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(stopSpy).not.toHaveBeenCalled();
+
+    controller.dispose();
+  });
 });
 
 /**
@@ -420,7 +474,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
         player: 1,
         choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
         options: ["Land", "Nonland"],
-        source_id: gollumId,
+        source: gollumNamedChoiceSource(gollumId),
       },
     };
     const state = buildGameState({
@@ -469,7 +523,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
         player: 1,
         choice_type: { CardPredicateGuess: { options: ["Land", "Nonland"] } },
         options: ["Land", "Nonland"],
-        source_id: gollumId,
+        source: gollumNamedChoiceSource(gollumId),
       },
     };
     const currentWaitingFor: WaitingFor = {
@@ -478,7 +532,7 @@ describe("aiController turn-control authorization (issue #2012)", () => {
         player: 1,
         choice_type: "Opponent",
         options: ["1"],
-        source_id: gollumId,
+        source: gollumNamedChoiceSource(gollumId),
       },
     };
     const scheduledState = buildGameState({

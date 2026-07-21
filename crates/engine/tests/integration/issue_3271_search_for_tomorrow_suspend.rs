@@ -48,8 +48,13 @@ fn last_counter_cast_uses_during_resolution(
     state.objects[&card]
         .trigger_definitions
         .iter_unchecked()
-        .find(|t| matches!(t.mode, engine::types::triggers::TriggerMode::CounterRemoved))
-        .and_then(|t| t.execute.as_ref())
+        .find(|t| {
+            matches!(
+                t.definition.mode,
+                engine::types::triggers::TriggerMode::CounterRemoved
+            )
+        })
+        .and_then(|t| t.definition.execute.as_ref())
         .is_some_and(|execute| {
             matches!(
                 execute.effect.as_ref(),

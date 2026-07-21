@@ -10,7 +10,11 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
+import {
+  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -487,7 +491,8 @@ export function isLobbyEntryCompatible(
 /** True when the client's wire-protocol can speak to the server's advertised mode. */
 export function isServerCompatible(info: ServerInfo | null): boolean {
   if (!info) return false;
-  const minProtocol = info.mode === "LobbyOnly" ? PROTOCOL_VERSION - 1 : PROTOCOL_VERSION;
+  const minProtocol =
+    info.mode === "LobbyOnly" ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL : PROTOCOL_VERSION;
   return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
 }
 
