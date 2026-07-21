@@ -39,6 +39,7 @@ export interface DeckData {
  * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
+ * 20 — Actor-scoped priority-passing settings and filtered per-player state.
  * 19 — Connive exact subject snapshots and resident paused post-replacement
  *      drains changed the serialized full-game state. Phase 4 later pinned
  *      the existing v2 resolution wire shape without another protocol change.
@@ -50,7 +51,7 @@ export interface DeckData {
  *      into a MulliganDecisionPhase::BottomCards sub-phase on
  *      WaitingFor::MulliganDecision.
  */
-export const PROTOCOL_VERSION = 19;
+export const PROTOCOL_VERSION = 20;
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
