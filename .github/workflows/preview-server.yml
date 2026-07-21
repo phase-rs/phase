@@ -323,28 +323,28 @@ jobs:
                        commit: $commit,
                        binaries: {
                          "x86_64-unknown-linux-musl": {
-                           url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl",
-                           sig_url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl.minisig"
+                           url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl"),
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-unknown-linux-musl.minisig")
                          },
                          "aarch64-apple-darwin": {
-                           url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin",
-                           sig_url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin.minisig"
+                           url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin"),
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-aarch64-apple-darwin.minisig")
                          },
                          "x86_64-pc-windows-msvc": {
-                           url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe",
-                           sig_url: "https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe.minisig"
+                           url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe"),
+                           sig_url: ("https://data.phase-rs.dev/desktop/preview-server/" + $fingerprint + "/phase-server-x86_64-pc-windows-msvc.exe.minisig")
                          }
                        },
                        data: [
                          {
                            name: "card-data.json",
                            sha256: $card_data_sha256,
-                           url: "https://data.phase-rs.dev/staging/card-data-" + $card_data_hash16 + ".json"
+                           url: ("https://data.phase-rs.dev/staging/card-data-" + $card_data_hash16 + ".json")
                          },
                          {
                            name: "draft-pools.json",
                            sha256: $draft_pools_sha256,
-                           url: "https://data.phase-rs.dev/staging/draft-pools-" + $draft_pools_hash16 + ".json"
+                           url: ("https://data.phase-rs.dev/staging/draft-pools-" + $draft_pools_hash16 + ".json")
                          }
                        ]
                      }
