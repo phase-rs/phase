@@ -2,7 +2,7 @@
 //! triggered ability must fire while Edgar is in the command zone.
 //!
 //! Oracle (verified from `client/public/card-data.json`):
-//!   Eminence — Whenever you cast another Vampire spell, if Edgar Markov is in
+//!   Eminence — Whenever you cast another Vampire spell, if Edgar is in
 //!   the command zone or on the battlefield, create a 1/1 black Vampire
 //!   creature token.
 //!
@@ -25,14 +25,14 @@
 //! reported broken. That path currently has no runtime coverage.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::player::PlayerId;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 
 /// Edgar Markov's Eminence line. `add_creature_to_hand_from_oracle` runs this
 /// through the production parser, so the trigger's `trigger_zones` are whatever
 /// the parser derives — the exact surface #817 is about.
 const EDGAR_EMINENCE: &str = "Eminence — Whenever you cast another Vampire spell, \
-     if Edgar Markov is in the command zone or on the battlefield, create a 1/1 \
+     if Edgar is in the command zone or on the battlefield, create a 1/1 \
      black Vampire creature token.";
 
 /// Count 1/1 Vampire creature *tokens* controlled by `controller` on the
