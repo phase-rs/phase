@@ -90,14 +90,20 @@ local_resource('caddy',
     labels = ['serve'],
 )
 
-TAURI_SRC = ['client/src-tauri/src/']
-SIDECAR_DEST = 'client/src-tauri/binaries/phase-server-' + str(local('rustc -vV | sed -n "s/host: //p" | tr -d "\\n"', quiet = True))
-
+# Thin-shell dev loop. `tauri dev` starts vite itself (beforeDevCommand) and
+# points the window at devUrl http://localhost:5173, so the shell hosts the
+# LOCAL frontend instead of the production bootstrap->remote-origin flow —
+# that is why `frontend` sets auto_init = 'tauri' not in enabled (both would
+# bind :5173). The shell crate is workspace-excluded and self-contained, and
+# `tauri dev` watches client/src-tauri/src/ and rebuilds on its own; Tilt only
+# restarts the loop when the Tauri config or crate manifest changes. The old
+# phase-server sidecar build is gone with the thin shell: production shells
+# download their native engine via signed manifests, and local multiplayer
+# testing talks to the `server` resource on :9374.
 local_resource('tauri',
-    cmd = 'cargo build -p phase-server && mkdir -p client/src-tauri/binaries && cp target/debug/phase-server ' + SIDECAR_DEST,
     serve_cmd = 'pnpm tauri:dev',
     serve_dir = 'client',
-    deps = ENGINE_SRC + AI_SRC + WASM_SRC + TAURI_SRC + ['crates/server-core/src/', 'crates/phase-server/src/'],
+    deps = ['client/src-tauri/tauri.conf.json', 'client/src-tauri/Cargo.toml'],
     ignore = TMP_IGNORE,
     auto_init = 'tauri' in enabled,
     labels = ['serve'],
