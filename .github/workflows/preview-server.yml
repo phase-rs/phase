@@ -138,7 +138,10 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
 
       - name: Build phase-server
-        run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+        # -p scopes feature unification to phase-server's own dependency set;
+        # an unscoped workspace build unifies feed-scraper's default-features
+        # reqwest (native-tls -> openssl-sys) into the musl target and fails.
+        run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Prepare preview server binary (Unix)
         if: matrix.os != 'windows'
