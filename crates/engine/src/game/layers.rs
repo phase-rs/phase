@@ -4583,33 +4583,54 @@ fn expand_granted_triggered_abilities(
 }
 
 /// Collect active transient effects, filtering out expired host-bound effects.
+/// CR 611.2 + CR 613.1: whether a stored transient continuous effect is still
+/// APPLYING, as opposed to merely still being stored.
+///
+/// A lapsed effect stays in `transient_continuous_effects` until it is swept, so
+/// presence in that list means nothing on its own: the host may have left the
+/// battlefield, a `ForAsLongAs` duration may have ended (Zygon Infiltrator's copy
+/// lapses the moment its target untaps), or the source condition may have gone
+/// false. This is the single authority for that question — `derive_views`
+/// consults it too, so a display projection can never claim an effect is live
+/// after the layer engine has stopped applying it.
+pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    // UntilHostLeavesPlay: skip if source is no longer on the battlefield
+    if tce.duration == Duration::UntilHostLeavesPlay
+        && !state
+            .objects
+            .get(&tce.source_id)
+            .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
+    {
+        return false;
+    }
+
+    if !transient_duration_holds(state, tce) {
+        return false;
+    }
+
+    if let Some(condition) = &tce.condition {
+        if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub(crate) fn gather_transient_continuous_effects(
     state: &GameState,
     effects: &mut Vec<ActiveContinuousEffect>,
 ) {
     for tce in &state.transient_continuous_effects {
-        // UntilHostLeavesPlay: skip if source is no longer on the battlefield
-        if tce.duration == Duration::UntilHostLeavesPlay
-            && !state
-                .objects
-                .get(&tce.source_id)
-                .is_some_and(|obj| obj.zone == crate::types::zones::Zone::Battlefield)
-        {
+        if !transient_effect_is_live(state, tce) {
             continue;
         }
 
-        if !transient_duration_holds(state, tce) {
-            continue;
-        }
-
-        let retained_condition = if let Some(condition) = &tce.condition {
-            if !source_condition_gate_passes(state, condition, tce.controller, tce.source_id) {
-                continue;
-            }
-            condition_uses_recipient_context(condition).then(|| condition.clone())
-        } else {
-            None
-        };
+        let retained_condition = tce
+            .condition
+            .as_ref()
+            .filter(|condition| condition_uses_recipient_context(condition))
+            .cloned();
 
         for (mod_index, modification) in tce.modifications.iter().enumerate() {
             if is_combat_assignment_rule_modification(modification) {

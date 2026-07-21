@@ -478,10 +478,17 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
 /// correct for any filter shape a future copy effect might use.
 fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
     state.transient_continuous_effects.iter().any(|effect| {
-        effect
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::CopyValues { .. }))
+        // A lapsed effect stays stored until it is swept, so "is it in the list"
+        // is not the same question as "is it applying". Zygon Infiltrator's copy
+        // ends the instant its target untaps while the effect remains stored —
+        // badging that permanent would claim a copy the layer engine has already
+        // stopped applying. Gated on the layer engine's own predicate so the two
+        // cannot drift apart.
+        crate::game::layers::transient_effect_is_live(state, effect)
+            && effect
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::CopyValues { .. }))
             && matches_target_filter(
                 state,
                 object_id,
@@ -544,6 +551,11 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 .push(obj_id);
         }
     }
+    // Collected in `state.battlefield` order above, which reorders as permanents
+    // enter and leave; sort so the serialized payload depends only on WHICH
+    // permanents are copies, not on battlefield churn that never changed the
+    // answer.
+    views.copied_permanents.sort_unstable();
 
     // CR 702.188a + 604.1: viewer-scoped web-slinging costs (own hand only → leak-proof).
     if let Some(viewer) = viewer {
@@ -1263,7 +1275,8 @@ mod tests {
     use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, TargetFilter, TargetRef,
+        Duration, Effect, ModalChoice, ResolvedAbility, RestrictionExpiry, StaticCondition,
+        TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -1362,6 +1375,81 @@ mod tests {
             vec![clone],
             "only the permanent the copy effect applies to is a copy; the \
              original it copied is not"
+        );
+    }
+
+    #[test]
+    fn derive_views_drops_the_copy_flag_once_a_temporary_copy_effect_lapses() {
+        // CR 611.2b: a `ForAsLongAs` copy ends the moment its condition goes
+        // false, but the effect stays STORED until it is swept. Zygon
+        // Infiltrator copies "for as long as that creature remains tapped", so
+        // untapping the target ends the copy while the TCE is still in the list.
+        // Reading membership alone would keep badging a permanent that is no
+        // longer a copy, so the projection asks the layer engine's own
+        // liveness predicate instead.
+        use crate::types::ability::ObjectScope;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tapped Bear".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&target).unwrap().tapped = true;
+        let source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Zygon".into(),
+            Zone::Battlefield,
+        );
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&target).unwrap(),
+        );
+        let tce_id = state.add_transient_continuous_effect(
+            source,
+            PlayerId(0),
+            Duration::ForAsLongAs {
+                condition: StaticCondition::IsTapped {
+                    scope: ObjectScope::Target,
+                },
+            },
+            TargetFilter::SpecificObject { id: source },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        // CR 611.2b: the duration tracks the copy TARGET's tap state, not the
+        // source's — the same binding the layer engine uses.
+        state.set_transient_duration_subject(tce_id, target);
+
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![source],
+            "while the target is tapped the copy applies, so the badge shows"
+        );
+
+        // Untap the target: the duration ends and the copy lapses, but the
+        // effect is still stored.
+        state.objects.get_mut(&target).unwrap().tapped = false;
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|t| t.id == tce_id),
+            "precondition: the lapsed effect is still stored, so this test is \
+             exercising liveness rather than removal"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a lapsed copy must not keep the badge (CR 611.2b)"
         );
     }
 

@@ -565,10 +565,12 @@ export const PermanentCard = memo(function PermanentCard({
   //   - a real card under a live copy effect (`copied_permanents`) — Clone,
   //     Phantasmal Image, Vesuvan Doppelganger. These were previously missed
   //     entirely, so two Reveillarks were indistinguishable on the board.
-  // Both stay subject to the same face-down guard below.
+  // CR 708.2: the face-down guard leads, so it covers BOTH sources — a
+  // face-down permanent has only the characteristics its face-down rules grant,
+  // and surfacing "Copy" on one would leak what it really is.
   const isCopy =
-    (obj.is_token === true && obj.display_source !== "Token" && !obj.face_down)
-    || (isCopiedPermanent && !obj.face_down);
+    !obj.face_down
+    && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
