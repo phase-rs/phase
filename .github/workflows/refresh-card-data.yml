@@ -70,8 +70,37 @@ jobs:
         env:
           PHASE_REFRESH_MTGJSON: "1"
         run: |
+          set -euo pipefail
           mkdir -p data
-          ./scripts/gen-card-data.sh
+          ./scripts/gen-card-data.sh 2>&1 | tee /tmp/gen-card-data.log
+
+      - name: Verify token-set fetch was complete
+        # A catalog is only trustworthy if EVERY token-bearing set downloaded.
+        # fetch-token-sets.sh tolerates a per-set download failure — it drops a
+        # `.missing` marker and continues, exiting 0 — so a flaky MTGJSON pull
+        # would otherwise ship a silently partial known-tokens.toml (fewer
+        # source_card_refs from the sets that failed). That is the exact failure
+        # the engine's token_coverage floor was left to catch after the fact.
+        # Enforce completeness at the source instead: refuse to open a PR unless
+        # the fetch reported zero failures. PHASE_REFRESH_MTGJSON=1 forces a clean
+        # pull (FORCE=1), so `skipped` must be 0 too — any skip means a leftover
+        # `.missing` marker from a set that never came down.
+        run: |
+          set -euo pipefail
+          tally="$(grep -E '^Token sets: downloaded [0-9]+, skipped [0-9]+, failed [0-9]+' /tmp/gen-card-data.log | tail -1 || true)"
+          if [ -z "$tally" ]; then
+            echo "::error::No 'Token sets:' fetch tally in the generator log; cannot confirm a complete fetch." >&2
+            exit 1
+          fi
+          echo "Fetch tally: $tally"
+          [[ "$tally" =~ skipped\ ([0-9]+),\ failed\ ([0-9]+) ]]
+          skipped="${BASH_REMATCH[1]}"
+          failed="${BASH_REMATCH[2]}"
+          if [ "$failed" -ne 0 ] || [ "$skipped" -ne 0 ]; then
+            echo "::error::Token-set fetch incomplete (skipped=$skipped, failed=$failed). Refusing to open a catalog PR from a partial regen; re-run once MTGJSON is reachable." >&2
+            exit 1
+          fi
+          echo "Token-set fetch complete: every token-bearing set downloaded."
 
       - name: Detect tracked-catalog changes
         id: diff
