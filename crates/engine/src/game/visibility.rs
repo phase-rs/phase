@@ -316,6 +316,21 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     } else {
         HashSet::new()
     };
+    let effect_zone_library_visible: HashSet<ObjectId> = if let WaitingFor::EffectZoneChoice {
+        player,
+        zone: Zone::Library,
+        ref cards,
+        ..
+    } = filtered.waiting_for
+    {
+        if can_view_private_for_player(player) {
+            cards.iter().copied().collect()
+        } else {
+            HashSet::new()
+        }
+    } else {
+        HashSet::new()
+    };
     let drawn_choice_hand_cards: HashSet<ObjectId> =
         if let WaitingFor::DrawnThisTurnTopdeckChoice { ref cards, .. } = filtered.waiting_for {
             cards.iter().copied().collect()
@@ -389,6 +404,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
             || dig_visible.contains(&obj_id)
             || private_look_visible.contains(&obj_id)
             || search_visible.contains(&obj_id)
+            || effect_zone_library_visible.contains(&obj_id)
             // Heist (and any ChooseFromZoneChoice over a hidden zone) — see
             // `choose_from_zone_hidden_visible` above.
             || choose_from_zone_hidden_visible.contains(&obj_id)
@@ -1204,7 +1220,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         enters_modified_if: _,
     } = state.waiting_for
     {
-        if !can_view_private_for_player(player) && zone == Zone::Hand {
+        // `open_private_zone_cast_selection` is the sole Library producer and
+        // always writes `library_position: None`, so this pattern redacts every
+        // private library cast-choice payload for non-prompt viewers.
+        if !can_view_private_for_player(player) && matches!(zone, Zone::Hand | Zone::Library) {
             filtered.waiting_for = WaitingFor::EffectZoneChoice {
                 player,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),

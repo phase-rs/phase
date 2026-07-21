@@ -600,6 +600,7 @@ mod kaya_spirits_justice_per_opponent_exile;
 mod kaysa_green_anthem;
 mod kibo_uktabi_prince_defending_player_sacrifice;
 mod kilo_live_offer_from_real_dump;
+mod kiora_self_library_peek_cast;
 mod knighthood_first_strike_grant;
 mod knollspine_dragon_target_damage_draw;
 mod kodama_anti_recursion_intervening_if;

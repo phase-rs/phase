@@ -96,21 +96,22 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
-    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
-    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction,
-    GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint, LibraryPosition,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty,
-    ObjectScope, OriginConstraint, PlayPermissionInvalidation, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SkipScope, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    BounceSelection, CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, CastingPermission,
+    ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
+    ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
+    CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
+    DelayedTriggerLifetime, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
+    KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PlayPermissionInvalidation,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -20908,6 +20909,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 });
             }
         }
+        // CR 608.2g: a self-library peek ("look at the top N of your library,
+        // you may cast one from among them without paying its mana cost") is a
+        // genuine during-resolution cast of ONE, not an exile-and-grant. Route
+        // it to the one-shot DuringResolution driver; every other bare "from
+        // among them" anaphor keeps the LingeringPermission exile path.
+        let driver = if mode == CardPlayMode::Cast
+            && without_paying
+            && ctx.chain_prior_self_library_peek
+            && !ctx.chain_has_prior_exile_producer
+        {
+            CastFromZoneDriver::DuringResolution
+        } else {
+            CastFromZoneDriver::LingeringPermission
+        };
         return Some(Effect::CastFromZone {
             target: TargetFilter::ExiledBySource,
             without_paying_mana_cost: without_paying,
@@ -20916,7 +20931,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            driver,
             mana_spend_permission: None,
         });
     }
@@ -21242,7 +21257,35 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     // "with mana value <comparator> <quantity>" pre-value prefix used by Cosmic
     // Cube. They cannot share a comparator combinator (suffix vs. prefix), so
     // dispatch over two sub-combinators.
-    parse_beseech_mv_constraint(lower).or_else(|| parse_with_mana_value_constraint(lower))
+    parse_beseech_mv_constraint(lower)
+        .or_else(|| parse_with_mana_value_constraint(lower))
+        .or_else(|| parse_dig_peek_suffix_mv_constraint(lower))
+}
+
+/// Dig-peek-family constraint: `... from among them ... with mana value N or less`.
+/// CR 202.3: mana value is the comparison subject. CR 601.2e: the suffix gates
+/// cast legality. The `from among them` guard excludes unrelated mana-value
+/// suffixes, including total-mana-value caps.
+fn parse_dig_peek_suffix_mv_constraint(lower: &str) -> Option<CastPermissionConstraint> {
+    type E<'a> = OracleError<'a>;
+    if !nom_primitives::scan_contains(lower, "from among them") {
+        return None;
+    }
+    let (after_anchor, _) = many_till(anychar, tag::<_, _, E>("with mana value "))
+        .parse(lower)
+        .ok()?;
+    let (after_value, quantity) = nom_quantity::parse_quantity_expr_number(after_anchor).ok()?;
+    let after_value = after_value.trim_start();
+    let (_, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, E>("or less")),
+        value(Comparator::GE, tag("or greater")),
+    ))
+    .parse(after_value)
+    .ok()?;
+    Some(CastPermissionConstraint::ManaValue {
+        comparator,
+        value: quantity,
+    })
 }
 
 /// Beseech-family constraint: `... if that spell's mana value is N or less`.
@@ -23030,6 +23073,41 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
         || continuation_is_exile_producer(clause.disposition.followup())
         || continuation_is_exile_producer(clause.disposition.intrinsic())
+}
+
+/// CR 701.20e + CR 608.2c: the RAW "look at the top N cards" shape a private
+/// peek carries BEFORE the assembly pure-peek lowering stamps `keep_count =
+/// Some(0)`. Single authority shared by the assembly lowering match and the
+/// `ClauseIr` seed predicate so the two sites cannot drift on which `Dig` shape
+/// counts as a bare peek.
+pub(super) fn effect_is_bare_private_peek(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Dig {
+            reveal: false,
+            keep_count: None,
+            keep_count_expr: None,
+            filter: TargetFilter::Any,
+            destination: None,
+            rest_destination: None,
+            ..
+        }
+    )
+}
+
+/// A "look at the top N cards of your library" peek: a RAW `Dig` that reveals
+/// nothing, keeps nothing, moves nothing, and reads the controller's own
+/// library. CR 701.20e — looking leaves the cards in the library.
+fn clause_ir_is_self_library_peek(clause: &ClauseIr) -> bool {
+    effect_is_bare_private_peek(&clause.parsed.effect)
+        && matches!(
+            &clause.parsed.effect,
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                source,
+                ..
+            } if source.is_library()
+        )
 }
 
 /// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
@@ -28275,6 +28353,10 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_exile_producer),
+            chain_prior_self_library_peek: builder
+                .clauses()
+                .iter()
+                .any(clause_ir_is_self_library_peek),
             // CR 400.1/400.2 + CR 608.2c: most-recent earlier same-chain
             // `RevealHand` target, so a later "cast a spell from among those
             // cards" anaphor (Silent-Blade Oni) binds to that player's hand

@@ -4456,6 +4456,26 @@ pub(super) fn handle_resolution_choice(
                     // No decline fallback: the taken continuation is discarded —
                     // the subless decline consumes it without granting a
                     // permission (below).
+                    if zone == Zone::Library {
+                        // CR 401.4: declining the one-shot self-library peek
+                        // cast bottoms every looked-at card in a random order.
+                        // `library_position: None` is guaranteed by the sole
+                        // `open_private_zone_cast_selection` producer.
+                        let looked_at = effects::cast_from_zone::looked_at_controller_library_cards(
+                            state,
+                            ability.controller,
+                        );
+                        if matches!(
+                            effects::cascade::shuffle_to_bottom(
+                                state, &looked_at, source_id, None, events,
+                            ),
+                            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+                        ) {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                    }
                 }
                 // CR 609.1 / CR 601.2a: Declining an optional Electrodominance-
                 // style hand cast consumes the stashed CastFromZone continuation
