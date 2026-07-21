@@ -788,13 +788,10 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     // (lines 721 / 744) and can emit further token proposals. Clearing before
     // that drain (the previous bug) wiped the seed before a repeated token
     // proposal, reopening the self-replacement loop. Clear ONLY at true
-    // full-drain: back at priority with no ability-continuation frame, no
-    // repeat-for frame, AND no repeat-until frame. By this point no
-    // ability is still resolving, so no token proposal can still need the seed.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.active_ability_continuation().is_none()
-        && state.active_repeat_for().is_none()
-        && state.active_repeat_until().is_none()
+    // full-drain: back at priority with no resident resolution frame. By this
+    // point no ability is still resolving, so no token proposal can still need
+    // the seed.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.resolution_stack.is_empty()
     {
         state.post_replacement_token_choice_applied = None;
         // CR 614.1a: the Moonlit-scoped "that many" copy count rides the same
@@ -11675,6 +11672,25 @@ mod tests {
         assert!(
             !is_repeated_optional_payment(&scaled),
             "scaled mana is not the synchronous repeated-optional class"
+        );
+    }
+
+    #[test]
+    fn token_choice_seed_waits_for_the_resolution_stack_to_drain() {
+        let mut state = GameState::new_two_player(42);
+        state.post_replacement_token_substitution_count = Some(2);
+        state.push_proliferate_frame(crate::types::resolution::PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(9_503),
+            remaining: 1,
+        });
+
+        drain_pending_continuation(&mut state, &mut Vec::new());
+
+        assert_eq!(
+            state.post_replacement_token_substitution_count,
+            Some(2),
+            "a nonempty resolution stack retains the replacement-scoped token count"
         );
     }
 

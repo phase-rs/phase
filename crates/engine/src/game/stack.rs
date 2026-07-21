@@ -2058,22 +2058,7 @@ fn self_counter_batch_state_is_settled(state: &GameState) -> bool {
         && state.current_trigger_events.is_empty()
         && state.current_trigger_match_count.is_none()
         && state.die_result_this_resolution.is_none()
-        && state.active_ability_continuation().is_none()
-        && state.active_repeat_for().is_none()
-        && state
-            .active_repeated_optional_payment_frame()
-            .is_none_or(|frame| frame.pending.is_none())
-        && state.active_repeat_until().is_none()
-        && state.active_change_zone_frame().is_none()
-        && state.active_copy_token().is_none()
-        && state.active_vote_ballot().is_none()
-        && state.active_per_player_zone_choice().is_none()
-        && state.active_per_category_zone_choice().is_none()
-        && state.active_batch_delivery().is_none()
-        && state.active_proliferate_frame().is_none()
-        && state.active_counter_additions().is_none()
-        && state.active_counter_moves().is_none()
-        && state.active_optional_effect_frame().is_none()
+        && state.resolution_stack.is_empty()
         && state.pending_miracle_offers.is_empty()
         && state.pending_paradigm_remaining_offers.is_none()
         && state.pending_damage_replacements.is_empty()
@@ -5743,7 +5728,8 @@ mod tests {
         // Driver internals under test (the stack module).
         use super::super::{
             batch_run_len, effects, observers_are_batch_safe, resolve_next,
-            resolve_next_with_limit, resolve_top, self_counter_run_len,
+            resolve_next_with_limit, resolve_top, self_counter_batch_state_is_settled,
+            self_counter_run_len,
         };
         // Test fixtures from the parent `tests` module.
         use super::setup;
@@ -5762,6 +5748,7 @@ mod tests {
         use crate::types::mana::ManaColor;
         use crate::types::player::PlayerId;
         use crate::types::proposed_event::TokenSpec;
+        use crate::types::resolution::PendingProliferateActions;
         use crate::types::triggers::TriggerMode;
         use crate::types::zones::Zone;
         use std::sync::Arc;
@@ -6309,6 +6296,21 @@ mod tests {
             assert_eq!(
                 crate::game::perf_counters::snapshot().stack_batched_entries,
                 2
+            );
+        }
+
+        #[test]
+        fn self_counter_batch_requires_an_empty_resolution_stack() {
+            let mut state = setup();
+            state.push_proliferate_frame(PendingProliferateActions {
+                actor: PlayerId(0),
+                source_id: ObjectId(9_501),
+                remaining: 1,
+            });
+
+            assert!(
+                !self_counter_batch_state_is_settled(&state),
+                "an active resolution frame makes a skipped priority checkpoint observable"
             );
         }
 

@@ -6402,24 +6402,10 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if is_pending_trigger_construction_active(state) {
         return false;
     }
-    if state.active_ability_continuation().is_some() {
+    if !state.resolution_stack.is_empty() {
         return false;
     }
-    if state.active_repeat_for().is_some() {
-        return false;
-    }
-    if state.has_post_replacement_drain() {
-        return false;
-    }
-    if state.active_change_zone_frame().is_some() {
-        return false;
-    }
-    if state.pending_replacement.is_some()
-        || state.active_batch_delivery().is_some()
-        || state.active_counter_additions().is_some()
-        || state.active_counter_moves().is_some()
-        || state.active_counter_removals().is_some()
-    {
+    if state.pending_replacement.is_some() {
         return false;
     }
     true
@@ -25861,6 +25847,21 @@ pub mod tests {
             "drain must be a no-op while pending_continuation is set"
         );
         assert_eq!(state.deferred_triggers.len(), 2);
+    }
+
+    #[test]
+    fn resolution_completion_requires_an_empty_resolution_stack() {
+        let mut state = setup();
+        state.push_proliferate_frame(crate::types::resolution::PendingProliferateActions {
+            actor: PlayerId(0),
+            source_id: ObjectId(9_502),
+            remaining: 1,
+        });
+
+        assert!(
+            !resolution_completion_can_settle(&state),
+            "deferred triggers cannot settle while any resolution frame remains active"
+        );
     }
 
     /// Issue #1793: at a true resolution boundary, 2+ same-controller deferred
