@@ -2515,9 +2515,30 @@ fn token_creator_is_attachable(effect: &Effect) -> bool {
     )
 }
 
-/// Rebind a `GenericEffect` grant's `SelfRef` recipient(s) to `LastCreated`.
-/// No-op for any other effect, and for grants that already name a concrete
-/// recipient — only the source-defaulted `SelfRef` is the misbound "it".
+/// True for the misbound recipient of a post-token-creation grant: the bare
+/// pronoun "it" (`SelfRef`, the imperative default) or the plural "those
+/// tokens" (`TrackedSet` sentinel `id 0`, which the plural-anaphor path emits
+/// assuming a published set). Neither is correct after a token creator, which
+/// publishes `last_created_token_ids` (→ `LastCreated`), not a tracked set —
+/// so both must be rebound. A concretely-numbered `TrackedSet` (a real prior
+/// published set) is left untouched.
+fn is_post_token_misbound_grant_recipient(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::SelfRef
+            | TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            }
+    )
+}
+
+/// Rebind a `GenericEffect` grant's misbound recipient(s) to `LastCreated`.
+/// Handles both the singular bare-"it" (`SelfRef`) grant ("create a token …
+/// It gains haste") and the plural "those tokens gain haste" grant whose
+/// recipient the plural-anaphor path defaulted to the `TrackedSet(0)` sentinel
+/// (Mirror March #5966). No-op for any other effect, and for grants that
+/// already name a concrete recipient — only the source-defaulted references are
+/// the misbound anaphor.
 fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
     let Effect::GenericEffect {
         static_abilities,
@@ -2530,12 +2551,21 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
     };
     let mut rebound = false;
     for static_def in static_abilities.iter_mut() {
-        if matches!(static_def.affected, Some(TargetFilter::SelfRef)) {
+        if static_def
+            .affected
+            .as_ref()
+            .is_some_and(is_post_token_misbound_grant_recipient)
+        {
             static_def.affected = Some(TargetFilter::LastCreated);
             rebound = true;
         }
     }
-    if rebound && matches!(target, None | Some(TargetFilter::SelfRef)) {
+    if rebound
+        && (target.is_none()
+            || target
+                .as_ref()
+                .is_some_and(is_post_token_misbound_grant_recipient))
+    {
         *target = Some(TargetFilter::LastCreated);
     }
     if rebound && duration.is_none() {
@@ -3158,6 +3188,39 @@ pub(super) fn nest_whenever_this_turn_token_cleanup_delayed_trigger(def: &mut Ab
     def.sub_ability = remaining_sibling_chain;
 }
 
+/// True when a def is a rider clause bound to the just-created tokens
+/// (`TargetFilter::LastCreated`) — e.g. the "Those tokens gain haste" grant and
+/// the "Exile them at the beginning of the next end step" delayed cleanup that
+/// follow a token-creating `FlipCoinUntilLose` win clause (Mirror March #5966).
+/// Used as the absorb predicate that folds these into the per-win `win_effect`.
+fn def_is_last_created_rider(def: &AbilityDefinition) -> bool {
+    effect_targets_last_created(&def.effect)
+}
+
+/// True when `effect` (directly or through a `CreateDelayedTrigger` wrapper)
+/// targets `TargetFilter::LastCreated`. The `GenericEffect` arm inspects both
+/// the effect-level `target` and each static grant's `affected` recipient, since
+/// a "those tokens gain haste" grant carries `LastCreated` on the static, not
+/// the effect target.
+fn effect_targets_last_created(effect: &Effect) -> bool {
+    match effect {
+        Effect::GenericEffect {
+            static_abilities,
+            target,
+            ..
+        } => {
+            target.as_ref() == Some(&TargetFilter::LastCreated)
+                || static_abilities
+                    .iter()
+                    .any(|s| s.affected.as_ref() == Some(&TargetFilter::LastCreated))
+        }
+        Effect::CreateDelayedTrigger { effect: inner, .. } => {
+            effect_targets_last_created(&inner.effect)
+        }
+        other => other.target_filter() == Some(&TargetFilter::LastCreated),
+    }
+}
+
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
 /// branches into their parent `FlipCoin` effect.
 ///
@@ -3212,12 +3275,28 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             }
         }
 
-        // CR 705: Consolidate FlipCoinUntilLose with its following effect clause.
-        // The next def becomes the win_effect that is executed per win.
+        // CR 705.2 + CR 603.7c: Consolidate FlipCoinUntilLose with its per-win
+        // clause chain. Absorb the win head (e.g. the token-creating copy clause)
+        // PLUS any trailing rider clauses that reference the just-created tokens
+        // (`LastCreated`) — "Those tokens gain haste", "Exile them …", already
+        // rebound to `LastCreated` by the earlier `resolve_populated_token_anaphors`
+        // pass — into ONE win_effect chain. They must live INSIDE win_effect
+        // because `finish_until_lose` runs win_effect once per win and each
+        // `CopyTokenOf` overwrites `state.last_created_token_ids`; left as post-loop
+        // siblings they would grant haste to / exile only the final win's token
+        // (Mirror March #5966). Riders that do NOT reference `LastCreated` stay
+        // top-level siblings — the predicate is the reach guard against
+        // over-absorbing an unrelated following clause.
         if matches!(&*defs[i].effect, Effect::FlipCoinUntilLose { .. }) && i + 1 < defs.len() {
-            let next = defs.remove(i + 1);
+            let mut head = defs.remove(i + 1);
+            while i + 1 < defs.len() && def_is_last_created_rider(&defs[i + 1]) {
+                let mut rider = defs.remove(i + 1);
+                rider.kind = AbilityKind::Spell;
+                rider.sub_link = SubAbilityLink::SequentialSibling;
+                super::append_to_deepest_sub_ability(&mut head, Some(Box::new(rider)));
+            }
             *defs[i].effect = Effect::FlipCoinUntilLose {
-                win_effect: Box::new(next),
+                win_effect: Box::new(head),
             };
         }
 
@@ -3359,6 +3438,26 @@ pub(crate) fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String
         }
     }
     (None, text.to_string())
+}
+
+/// CR 705.2: Strip the redundant `"for each flip you won, "` (Mirror March)
+/// quantifier from a coin-flip win clause. Unlike `strip_for_each_prefix`, this
+/// carries NO iteration count: `FlipCoinUntilLose`/`FlipCoins` already run their
+/// `win_effect` once per win (`finish_until_lose`), so lifting the count into a
+/// `repeat_for` loop would double-apply it. Dropping the quantifier lets the
+/// bare imperative ("create a token that's a copy of that creature") reach the
+/// `CopyTokenOf` combinator. The `"flip(s) you won"` noun is not a countable
+/// `parse_for_each_clause` clause, so `strip_for_each_prefix` cannot handle it.
+/// Anchored nom strip — never a substring dispatch.
+pub(crate) fn strip_redundant_flip_win_quantifier(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let ((), rest) = nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("for each ").parse(i)?;
+        let (i, _) = alt((tag("flips you won"), tag("flip you won"))).parse(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        Ok((i, ()))
+    })?;
+    Some(rest.to_string())
 }
 
 /// CR 107.1: Parse an anchored `for each <clause>` multiplier for an effect's

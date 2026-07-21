@@ -394,7 +394,6 @@ fn finish_until_lose(
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let prior_waiting_for = state.waiting_for.clone();
     for _ in 0..win_count {
         run_flip_branch(
             state,
@@ -404,14 +403,21 @@ fn finish_until_lose(
             targets,
             events,
         )?;
-        // CR 608.2c: a win effect may suspend for an optional choice.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only if the win effect suspended for an INTERACTIVE
+        // player choice (an optional "you may", scry, etc.). A win effect that
+        // merely creates permanents hands priority back to the active player
+        // (Priority{opponent} -> Priority{controller}), which is NOT a
+        // suspension — gating on `waits_for_resolution_choice` rather than any
+        // `waiting_for` change lets a multi-win token creator (Mirror March,
+        // #5966) run the win effect for every win instead of stopping after one.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if the win effect suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only if the win effect actually
+    // suspended for a player choice; otherwise the effect has fully resolved.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoinUntilLose,
             source_id,
