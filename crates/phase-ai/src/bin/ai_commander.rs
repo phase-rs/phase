@@ -10,9 +10,23 @@
 //!   cargo run --release --bin ai-commander -- client/public --seed 7 --difficulty Easy
 //!   cargo run --release --bin ai-commander -- client/public --difficulty Easy \
 //!       --difficulty-p2 VeryHard --action-cap 50000
+//!
+//! Batch mode (pod-lab simulation-acceleration plan, Tier 1 item 1): play many
+//! games in one process instead of one process per game, amortizing the card
+//! database load (~1.8s/game measured) across the whole batch. `--games-file`
+//! points at a file of `seed,difficulty` lines (one game per line); when it is
+//! given, `--seed`/`--difficulty` are ignored and every line is played in turn
+//! against the SAME loaded database and feed. Each game's play-through is
+//! panic-isolated (`run_batch_isolated`) and its result is flushed to stdout
+//! immediately, so a batch survives an individual game panicking or the whole
+//! process being killed mid-batch (pod-lab enforces an external wall-clock
+//! timeout on the process).
+//!   cargo run --release --bin ai-commander -- client/public --games-file games.txt
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
+use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -32,6 +46,17 @@ use rand::SeedableRng;
 
 const DEFAULT_ACTION_CAP: usize = 200_000;
 
+/// Stack size for the thread that actually drives games. Deep AI search
+/// recursion (even at Easy difficulty — directly reproduced this session:
+/// every seed tried overflowed the plain main thread's default stack
+/// immediately after game start, under this crate's normal release profile)
+/// exceeds the platform default. Mirrors the identical fix already
+/// established in `duel_suite::run` for the same reason. Batching (this
+/// file's `--games-file` mode) makes this *more* important, not less: more
+/// cumulative execution per process is more chances to hit a deep-recursion
+/// case, even though no single game's peak depth changes.
+const GAME_THREAD_STACK_SIZE: usize = 32 << 20;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -49,6 +74,7 @@ fn main() {
     let mut seat_difficulty: [Option<AiDifficulty>; 4] = [None; 4];
     let mut action_cap: usize = DEFAULT_ACTION_CAP;
     let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
+    let mut games_file: Option<String> = None;
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -74,6 +100,13 @@ fn main() {
                     feed = v.clone();
                 }
             }
+            "--games-file" => match args_iter.next() {
+                Some(v) => games_file = Some(v.clone()),
+                None => {
+                    eprintln!("error: --games-file requires a path");
+                    std::process::exit(1);
+                }
+            },
             other => {
                 // `--difficulty-p0` .. `--difficulty-p3`: single-seat override,
                 // parameterized on seat index rather than four bespoke flags.
@@ -94,6 +127,100 @@ fn main() {
             }
         }
     }
+
+    // `--games-file` batch entries are validated up front — same hard-fail-at-
+    // startup discipline as `parse_difficulty`/`parse_action_cap`/
+    // `parse_seat_override` above: a garbled batch file should fail before the
+    // ~1.8s database load, not silently skip or misinterpret one line mid-batch.
+    let batch_games: Option<Vec<(u64, AiDifficulty)>> =
+        games_file
+            .as_deref()
+            .map(|path| match parse_games_file(path) {
+                Ok(games) if games.is_empty() => {
+                    eprintln!("error: --games-file {path:?} contains no games");
+                    std::process::exit(1);
+                }
+                Ok(games) => games,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+            });
+
+    // Argument parsing and validation above needs no special stack; the actual
+    // game-driving work (both the single-game path and `--games-file` batch
+    // mode) does — see `GAME_THREAD_STACK_SIZE`. Spawning unconditionally
+    // (rather than only under `--games-file`) fixes the pre-existing
+    // single-game overflow too, not just the batch case.
+    let cli = CliArgs {
+        cards_path,
+        feed,
+        seed,
+        difficulty,
+        seat_difficulty,
+        action_cap,
+        games_file,
+        batch_games,
+    };
+    let handle = std::thread::Builder::new()
+        .name("ai-commander-driver".to_string())
+        .stack_size(GAME_THREAD_STACK_SIZE)
+        .spawn(move || run(cli))
+        .expect("failed to spawn game-driving thread");
+
+    // A non-batch (`games_file.is_none()`) game that panics is NOT caught (see
+    // `run`'s doc) — it unwinds only the spawned thread, which by itself would
+    // leave the process silently exiting 0. Detect that here and exit 101, the
+    // same code an uncaught panic on the plain main thread would have produced
+    // before this thread split existed, so a caller keying off exit status sees
+    // an unmistakable failure either way.
+    let exit_code = handle.join().unwrap_or(101);
+    std::process::exit(exit_code);
+}
+
+/// Bundles the parsed CLI arguments `run` needs. A plain struct (not more
+/// positional params on `run`) so the seam between "parse args" (plain main
+/// thread) and "drive games" (large-stack spawned thread) stays one value to
+/// move across the `thread::spawn` boundary, not eight.
+struct CliArgs {
+    cards_path: String,
+    feed: String,
+    seed: u64,
+    difficulty: AiDifficulty,
+    seat_difficulty: [Option<AiDifficulty>; 4],
+    action_cap: usize,
+    games_file: Option<String>,
+    batch_games: Option<Vec<(u64, AiDifficulty)>>,
+}
+
+/// Shared immutable inputs for one or more AI-commander game runs.
+#[derive(Clone, Copy)]
+struct GameRunContext<'a> {
+    db: &'a CardDatabase,
+    payload: &'a DeckPayload,
+    seat_difficulty: &'a [Option<AiDifficulty>; 4],
+    action_cap: usize,
+    dump_log_path: Option<&'a str>,
+    dump_actions_path: Option<&'a str>,
+}
+
+/// Everything that isn't argument parsing: loads the card database and feed
+/// once, resolves the shared deck payload once, then either plays one game
+/// (`batch_games.is_none()`, the pre-existing single-game path — its stdout is
+/// byte-identical to before this function existed) or drives `--games-file`
+/// batch mode. Runs entirely on the large-stack thread `main` spawns. Returns
+/// the process exit code `main` should propagate.
+fn run(cli: CliArgs) -> i32 {
+    let CliArgs {
+        cards_path,
+        feed,
+        seed,
+        difficulty,
+        seat_difficulty,
+        action_cap,
+        games_file,
+        batch_games,
+    } = cli;
 
     let export_path = PathBuf::from(&cards_path).join("card-data.json");
     let db = match CardDatabase::from_export(&export_path) {
@@ -119,7 +246,18 @@ fn main() {
 
     println!("=== 4-player Commander AI test ===");
     println!("Feed: {feed}");
-    println!("Seed: {seed}   Difficulty: {difficulty:?}");
+    match &batch_games {
+        // `--games-file` ignores --seed/--difficulty (per-game values come
+        // from the file instead), so echoing the unused top-level seed/
+        // difficulty here would be misleading. Single-game mode's line below
+        // is unchanged from before batch mode existed.
+        Some(games) => println!(
+            "Batch mode: {} games from {}",
+            games.len(),
+            games_file.as_deref().unwrap_or("<unknown>")
+        ),
+        None => println!("Seed: {seed}   Difficulty: {difficulty:?}"),
+    }
     println!();
 
     let mut deck_lists: Vec<PlayerDeckList> = Vec::new();
@@ -203,7 +341,75 @@ fn main() {
     }
     println!();
 
-    let mut state = build_game_state(&db, &payload, seed);
+    // Read once — shared for the whole process (including every game in a
+    // batch). NOTE: in `--games-file` mode, if these are set, each game's dump
+    // overwrites the previous game's file at the same path (last game wins);
+    // pod-lab's harness does not set these env vars for batch runs, and fixing
+    // per-game dump paths is out of scope for the batching change itself.
+    let dump_log_path = read_dump_env("PHASE_DUMP_LOG");
+    let dump_actions_path = read_dump_env("PHASE_DUMP_ACTIONS");
+    let game_context = GameRunContext {
+        db: &db,
+        payload: &payload,
+        seat_difficulty: &seat_difficulty,
+        action_cap,
+        dump_log_path: dump_log_path.as_deref(),
+        dump_actions_path: dump_actions_path.as_deref(),
+    };
+
+    match batch_games {
+        None => {
+            let outcome = play_one_game(&game_context, seed, difficulty);
+            match outcome {
+                RunOutcome::Completed => 0,
+                RunOutcome::Aborted => 2,
+                RunOutcome::Stalled => 3,
+            }
+        }
+        Some(games) => {
+            run_batch_isolated(
+                &games,
+                |(seed, _)| seed.to_string(),
+                |&(seed, seat_diff)| {
+                    println!("--- GAME seed={seed} difficulty={seat_diff:?} ---");
+                    play_one_game(&game_context, seed, seat_diff);
+                    // Immediate per-game flush (Tier 1 item 3): if the process
+                    // is killed mid-batch (e.g. pod-lab's external wall-clock
+                    // timeout on a hung game), every already-completed game's
+                    // result must already be on stdout, not buffered.
+                    let _ = std::io::stdout().flush();
+                },
+            );
+            // The whole point of batch mode is that one bad game must not take
+            // the process down; individual game outcomes are already on stdout
+            // (RESULT/ABORT/STALL/PANICKED lines) for the harness to parse per
+            // line, so the process exit code just reports "the batch loop
+            // itself ran to completion", not any one game's outcome.
+            0
+        }
+    }
+}
+
+/// Drives one complete game: builds a fresh `GameState` from `payload` at
+/// `seed`, resolves per-seat difficulty, runs the AI driver loop to
+/// completion/cap/stall, and prints the exact `=== RESULT ===` epilogue the
+/// single-game path always printed (before batch mode existed, this was the
+/// tail of `main` — the code here is unchanged from that except for returning
+/// `RunOutcome` instead of calling `std::process::exit` directly, so a batch
+/// caller can keep looping instead of exiting on this game's outcome). Called
+/// once for the single-game path and once per line for `--games-file` batch
+/// mode — the SAME function drives both, so batching can never change what one
+/// game's play-through does or prints.
+fn play_one_game(context: &GameRunContext<'_>, seed: u64, difficulty: AiDifficulty) -> RunOutcome {
+    let GameRunContext {
+        db,
+        payload,
+        seat_difficulty,
+        action_cap,
+        dump_log_path,
+        dump_actions_path,
+    } = *context;
+    let mut state = build_game_state(db, payload, seed);
 
     engine::game::engine::start_game(&mut state);
     println!();
@@ -228,9 +434,7 @@ fn main() {
     println!();
 
     let start = Instant::now();
-    let dump_log_path = read_dump_env("PHASE_DUMP_LOG");
     let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
-    let dump_actions_path = read_dump_env("PHASE_DUMP_ACTIONS");
     let mut actions_log: Vec<String> = Vec::new();
     let mut last_turn_reported: u32 = 0;
     let mut ai_rng = StdRng::seed_from_u64(seed);
@@ -419,23 +623,89 @@ fn main() {
         );
     }
 
-    if let Some(path) = &dump_actions_path {
+    if let Some(path) = dump_actions_path {
         std::fs::write(path, actions_log.join("\n")).expect("write actions dump");
         println!("Dumped {} actions to {path}", actions_log.len());
     }
-    if let Some(path) = &dump_log_path {
+    if let Some(path) = dump_log_path {
         let json = serde_json::to_string(&game_log).expect("serialize game log");
         std::fs::write(path, json).expect("write game log dump");
         println!("Dumped {} game-log entries to {path}", game_log.len());
     }
 
-    // Distinct exit codes so a caller keying off exit status alone (phase#6080)
-    // can never mistake a clean finish (0), an action-cap abort (2), and a
-    // driver stall (3) for one another.
-    match outcome {
-        RunOutcome::Completed => {}
-        RunOutcome::Aborted => std::process::exit(2),
-        RunOutcome::Stalled => std::process::exit(3),
+    outcome
+}
+
+/// Runs `play` once per entry in `games`, isolating panics per game (Tier 1
+/// item 2) so one bad game (this binary has real `unwrap()`/`expect()` calls,
+/// including deep in the AI search path) can't take down the rest of the
+/// batch. `play` is responsible for printing and flushing that game's own
+/// output; this function supplies panic isolation and, on panic, prints (and
+/// flushes) the `GAME <label> PANICKED: <message>` line pod-lab's harness can
+/// key off. `label` extracts a short, printable identifier from `T` for that
+/// line without requiring `T: Display`. A quiet panic hook is installed for
+/// the duration of the batch so an in-batch panic doesn't dump a (potentially
+/// large, Debug-formatted game state) default panic report to stderr — it's
+/// restored afterward, so single-game mode (which never calls this) and
+/// anything the process does after the batch are unaffected.
+fn run_batch_isolated<T>(games: &[T], label: impl Fn(&T) -> String, mut play: impl FnMut(&T)) {
+    let _panic_hook_guard = PanicHookGuard::install(Box::new(|info| {
+        eprintln!("panic (isolated to one batch game): {info}");
+    }));
+
+    for game in games {
+        // The whole per-game step — including reporting the panic itself — is
+        // inside this outer boundary. `println!`/`flush` panic on a genuine
+        // I/O failure (e.g. a broken stdout pipe, plausible under an external
+        // process harness), and without this wrapper that would break out of
+        // the loop before the next game or the hook restore below ran,
+        // silently defeating the isolation this function exists to provide.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| play(game)));
+            if let Err(payload) = result {
+                println!(
+                    "GAME {} PANICKED: {}",
+                    label(game),
+                    panic_message(&*payload)
+                );
+                let _ = std::io::stdout().flush();
+            }
+        }));
+    }
+}
+
+type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+/// Restores the process-wide panic hook even if batch-loop plumbing unwinds.
+struct PanicHookGuard(Option<PanicHook>);
+
+impl PanicHookGuard {
+    fn install(temporary_hook: PanicHook) -> Self {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(temporary_hook);
+        Self(Some(previous_hook))
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(previous_hook) = self.0.take() {
+            std::panic::set_hook(previous_hook);
+        }
+    }
+}
+
+/// Best-effort extraction of a human-readable message from a `catch_unwind`
+/// payload. `panic!`/`unwrap`/`expect` payloads are `&str` or `String` in
+/// every case this codebase produces; anything else (a custom `panic_any`
+/// payload) falls back to a fixed placeholder rather than failing to report.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
     }
 }
 
@@ -520,6 +790,46 @@ fn parse_seat_override<'a>(
     Ok((idx, label))
 }
 
+/// Parses one non-blank `--games-file` line: `<seed>,<difficulty>`. Pure and
+/// unit-tested; the caller decides how to report a failure. Difficulty labels
+/// are validated against the same `ACCEPTED_DIFFICULTY_LABELS` table
+/// `--difficulty` uses (via `AiDifficulty::from_label`), so a games-file typo
+/// hard-fails exactly like a CLI typo — never silently downgrades to Medium.
+fn parse_games_file_line(line: &str) -> Result<(u64, AiDifficulty), String> {
+    let (seed_str, label_str) = line.split_once(',').ok_or_else(|| {
+        format!("malformed games-file line (expected `seed,difficulty`): {line:?}")
+    })?;
+    let seed = seed_str.trim().parse::<u64>().map_err(|_| {
+        format!("games-file line {line:?}: seed {seed_str:?} is not a valid non-negative integer")
+    })?;
+    let label = label_str.trim();
+    if !ACCEPTED_DIFFICULTY_LABELS
+        .iter()
+        .any(|l| l.eq_ignore_ascii_case(label))
+    {
+        return Err(format!(
+            "games-file line {line:?}: unrecognized difficulty {label:?}; accepted values: {}",
+            ACCEPTED_DIFFICULTY_LABELS.join(", ")
+        ));
+    }
+    Ok((seed, AiDifficulty::from_label(label)))
+}
+
+/// Reads and parses a whole `--games-file`: one `seed,difficulty` pair per
+/// non-blank line. Any malformed line fails the whole file (see
+/// `parse_games_file_line`'s doc) rather than skipping it, so a typo can't
+/// silently shrink or corrupt a batch.
+fn parse_games_file(path: &str) -> Result<Vec<(u64, AiDifficulty)>, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read games-file {path:?}: {e}"))?;
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(parse_games_file_line)
+        .collect()
+}
+
 /// End-of-run disposition, derived purely from whether the action cap was hit
 /// and where `waiting_for` parked. Drives both the epilogue text and the exit
 /// code. Abort takes precedence: `(aborted, GameOver)` is narrowly reachable —
@@ -569,6 +879,23 @@ mod tests {
     use super::*;
     use engine::ai_support::candidate_actions;
     use engine::types::ability::ChoiceType;
+    use std::sync::{Arc, Mutex};
+
+    struct TempFileGuard(PathBuf);
+
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn temp_games_file_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ai_commander_{name}_{}_{:?}.txt",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
 
     /// Minimal two-card fixture (one legendary creature, one basic land) so the
     /// setup-path regression test below doesn't depend on the full card-data.json
@@ -732,5 +1059,108 @@ mod tests {
             player: PlayerId(0),
         };
         assert_eq!(classify_run_outcome(false, &parked), RunOutcome::Stalled);
+    }
+
+    #[test]
+    fn games_file_line_parses_seed_and_difficulty() {
+        assert_eq!(
+            parse_games_file_line("1009,Easy"),
+            Ok((1009, AiDifficulty::Easy))
+        );
+        // Whitespace around either field is tolerated.
+        assert_eq!(
+            parse_games_file_line(" 42 , VeryHard "),
+            Ok((42, AiDifficulty::VeryHard))
+        );
+    }
+
+    #[test]
+    fn games_file_line_rejects_missing_comma() {
+        assert!(parse_games_file_line("1009 Easy").is_err());
+    }
+
+    #[test]
+    fn games_file_line_rejects_non_numeric_seed() {
+        assert!(parse_games_file_line("abc,Easy").is_err());
+    }
+
+    #[test]
+    fn games_file_line_rejects_unrecognized_difficulty() {
+        assert!(parse_games_file_line("1009,Impossible").is_err());
+    }
+
+    #[test]
+    fn parse_games_file_reads_multiple_lines_and_skips_blanks() {
+        let path = temp_games_file_path("games_file_test");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(&path, "1009,Easy\n\n1010,VeryHard\n  \n1011,Medium\n").unwrap();
+        let games = parse_games_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            games,
+            vec![
+                (1009, AiDifficulty::Easy),
+                (1010, AiDifficulty::VeryHard),
+                (1011, AiDifficulty::Medium),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_games_file_rejects_a_batch_with_any_malformed_line() {
+        let path = temp_games_file_path("games_file_bad_test");
+        let _guard = TempFileGuard(path.clone());
+        std::fs::write(&path, "1009,Easy\nnotaseed,Easy\n").unwrap();
+        let result = parse_games_file(path.to_str().unwrap());
+        assert!(result.is_err());
+    }
+
+    /// Building-block test for panic isolation (Tier 1 item 2), decoupled from
+    /// `GameState`/the engine entirely — a `#[cfg(test)]`-only fake `play`
+    /// closure stands in for a real game so this proves the loop mechanics
+    /// (order, panic containment, continuation) without the cost of driving
+    /// real games. Records every `(seed, difficulty)` `run_batch_isolated`
+    /// handed to `play`, in order, and forces the middle game to panic.
+    #[test]
+    fn run_batch_isolated_continues_past_a_panicking_game() {
+        let games = vec![
+            (1u64, AiDifficulty::Easy),
+            (2u64, AiDifficulty::Medium),
+            (3u64, AiDifficulty::Hard),
+        ];
+        let seen: Arc<Mutex<Vec<(u64, AiDifficulty)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_in_closure = Arc::clone(&seen);
+
+        run_batch_isolated(
+            &games,
+            |(seed, _)| seed.to_string(),
+            move |&(seed, difficulty)| {
+                seen_in_closure.lock().unwrap().push((seed, difficulty));
+                if seed == 2 {
+                    panic!("forced panic for seed 2 (test isolation seam)");
+                }
+            },
+        );
+
+        // All three games were invoked, in order — the panic on game 2 did not
+        // stop game 3 (or anything) from running. This is the direct proof
+        // that one bad game can't take down the rest of the batch.
+        assert_eq!(*seen.lock().unwrap(), games);
+    }
+
+    #[test]
+    fn run_batch_isolated_visits_every_game_exactly_once_when_none_panic() {
+        let games = vec![(10u64, AiDifficulty::Easy), (20u64, AiDifficulty::VeryHard)];
+        let seen: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_in_closure = Arc::clone(&seen);
+
+        run_batch_isolated(
+            &games,
+            |(seed, _)| seed.to_string(),
+            move |&(seed, _)| {
+                seen_in_closure.lock().unwrap().push(seed);
+            },
+        );
+
+        assert_eq!(*seen.lock().unwrap(), vec![10, 20]);
     }
 }
