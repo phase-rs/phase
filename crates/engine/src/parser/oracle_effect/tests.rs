@@ -47834,3 +47834,57 @@ fn they_binds_producer_population_across_mass_effect_family() {
         );
     }
 }
+
+/// CR 111.3 + CR 118.12: A token created "with" a quoted activated ability whose
+/// effect is a soft counter ("Counter … unless its controller pays {mana}") must
+/// carry that whole ability, unless-pay included, on the TOKEN. Mage's Attendant's
+/// Wizard token: `{1}, Sacrifice this token: Counter target noncreature spell
+/// unless its controller pays {1}`.
+///
+/// RED before the fix: the clause-level `extract_resolution_unless_pay_modifier`
+/// scanned the whole chunk — reaching INSIDE the quoted grant — hoisted the
+/// "unless its controller pays {1}" onto the *create-token* spell, and in
+/// stripping it broke the quoted span, so the token dropped its entire granted
+/// ability (0 statics, silently — no `Unimplemented`).
+#[test]
+fn token_grant_soft_counter_keeps_unless_pay_on_the_token() {
+    let def = parse_effect_chain(
+        "create a 1/1 blue Wizard creature token with \"{1}, Sacrifice this token: \
+         Counter target noncreature spell unless its controller pays {1}.\"",
+        AbilityKind::Spell,
+    );
+
+    // The "unless pays" belongs to the token's ability, NOT the create-token spell.
+    assert!(
+        def.unless_pay.is_none(),
+        "the pay clause must not be hoisted onto the create-token spell"
+    );
+
+    let Effect::Token {
+        static_abilities, ..
+    } = &*def.effect
+    else {
+        panic!("expected a Token, got {:?}", def.effect);
+    };
+
+    let granted = static_abilities
+        .iter()
+        .flat_map(|sd| sd.modifications.iter())
+        .find_map(|m| match m {
+            crate::types::ability::ContinuousModification::GrantAbility { definition } => {
+                Some(definition)
+            }
+            _ => None,
+        })
+        .expect("the Wizard token must carry its granted activated ability");
+
+    assert!(
+        matches!(&*granted.effect, Effect::Counter { .. }),
+        "granted effect is a counter, got {:?}",
+        granted.effect
+    );
+    assert!(
+        granted.unless_pay.is_some(),
+        "the soft-counter's unless-pay must live on the granted ability"
+    );
+}

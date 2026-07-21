@@ -30602,6 +30602,25 @@ fn extract_resolution_unless_pay_modifier(
         return (text.to_string(), None);
     }
 
+    // CR 111.3 + CR 113.3: An "unless … pays" that lives INSIDE a quoted granted
+    // ability — a created token's `with "…"`, an aura's granted spell ability —
+    // belongs to that ability, not to this clause's own effect;
+    // `classify_quoted_inner` already captures it on the grant. If every "unless"
+    // in the chunk is inside a quoted span, masking the quoted content leaves no
+    // "unless" to extract here. Return the text untouched so the quoted span
+    // stays balanced for downstream token/aura extraction (Mage's Attendant:
+    // `create a 1/1 blue Wizard creature token with "{1}, Sacrifice this token:
+    // Counter target noncreature spell unless its controller pays {1}."` — the
+    // pay belongs to the Wizard's activated ability, not to "create a token").
+    if text.contains('"')
+        && !nom_primitives::scan_contains(
+            &nom_primitives::strip_double_quoted_spans(&lower),
+            "unless ",
+        )
+    {
+        return (text.to_string(), None);
+    }
+
     // CR 118.12a: "[Effect] unless a player has [~] deal N to them" (Barbarian
     // Bully). Checked before the generic "unless " scan so the player-have-deal
     // shape is not misclassified as a mana-payment unless.
