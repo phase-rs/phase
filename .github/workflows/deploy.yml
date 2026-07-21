@@ -323,6 +323,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # An env RUSTFLAGS (this action's default is "-D warnings") overrides
+          # ALL .cargo/config.toml rustflags, silently dropping the
+          # [target.wasm32-unknown-unknown] 16 MiB shadow-stack link-arg that
+          # build-wasm.sh's assert_wasm_stack guard requires. Keep config.toml
+          # authoritative.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         with:
@@ -505,7 +511,11 @@ jobs:
         # No chmod here: upload-artifact strips the executable bit anyway;
         # push-server-image re-applies it (and the Dockerfile chmods in-image).
         run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          # -p scopes feature unification to phase-server's own graph: an
+          # unscoped workspace build unifies feed-scraper's native-tls reqwest
+          # features into phase-server, dragging openssl-sys into the musl
+          # cross-compile (which has no OpenSSL and fails).
+          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact

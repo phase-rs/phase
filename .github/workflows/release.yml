@@ -87,6 +87,11 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # Keep .cargo/config.toml's [target.wasm32-unknown-unknown] 16 MiB
+          # shadow-stack rustflags authoritative: an env RUSTFLAGS (this
+          # action's default "-D warnings") would override them and trip
+          # build-wasm.sh's assert_wasm_stack guard.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         with:
@@ -413,7 +418,10 @@ jobs:
         # No chmod here: upload-artifact strips the executable bit anyway; both
         # consumers (image build, slim-asset packaging) re-apply it.
         run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          # -p scopes feature unification to phase-server's own graph — an
+          # unscoped workspace build unifies feed-scraper's native-tls reqwest
+          # features in, dragging openssl-sys into the musl cross-compile.
+          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
@@ -534,6 +542,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # Same as the wasm job: broker-wasm needs the config.toml
+          # [target.wasm32-unknown-unknown] shadow-stack rustflags, which an
+          # env RUSTFLAGS would override.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         if: steps.lobby-worker.outputs.exists == 'true'
@@ -614,7 +626,8 @@ jobs:
         # Linux musl is compiled once in build-server-binary and reused below;
         # only the non-musl targets compile here.
         if: matrix.triple != 'x86_64-unknown-linux-musl'
-        run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+        # -p scopes feature unification (see the Linux leg's note).
+        run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Download prebuilt linux binary
         # Reuse the single musl build from build-server-binary, placed at the

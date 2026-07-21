@@ -109,7 +109,7 @@ SERVER_SRC = ENGINE_SRC + AI_SRC + [
 ]
 
 local_resource('server',
-    cmd = 'cargo build --bin phase-server',
+    cmd = 'cargo build -p phase-server --bin phase-server',
     serve_cmd = './target/debug/phase-server',
     serve_env = {'PHASE_DATA_DIR': 'data'},
     deps = SERVER_SRC,
