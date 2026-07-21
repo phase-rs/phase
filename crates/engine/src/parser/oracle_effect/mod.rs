@@ -4697,8 +4697,14 @@ fn split_create_token_sequence<'a>(after_create: TextPair<'a>) -> Option<Vec<(&'
     // Disjunctive rejector — require a conjunctive "and <noun>" coordinator.
     nom_primitives::scan_preceded(after_create.lower, parse_token_sequence_conjunction)?;
 
+    // Opaque quoted spans: a double-quoted granted ability, and — for the
+    // depth-2 cascading-token case where the outer double quotes are already
+    // stripped — a single-quoted one, anchored on `" '"` so a possessive
+    // apostrophe (`owner's`, no preceding space) is never mistaken for an
+    // ability opener. Mirrors `split_choice_list_items`.
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
+        recognize((tag(" '"), take_until("'"), tag("'"))),
         recognize(preceded(not(parse_token_sequence_separator), anychar)),
     ));
     let item = recognize(many1(unit));
@@ -4844,12 +4850,17 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
 /// one opaque unit so the splitter never severs a list item inside quoted ability
 /// text; otherwise the inner `, create …` is misread as additional choice branches
 /// (a single cascading token wrongly becomes a `ChooseOneOf` of distinct tokens).
-/// Single quotes are only ever nested inside double quotes here, so handling the
-/// double-quoted span alone also covers them and leaves bare apostrophes
-/// (possessives such as "owner's") untouched.
+/// A double-quoted span is consumed as one opaque unit. When the outer double
+/// quotes have already been stripped — the depth-2 case of a cascading token
+/// (Reef Worm's Fish trigger creates a Whale token whose own ability is written
+/// in single quotes) — the nested span is single-quoted, so a single-quoted
+/// span is consumed opaquely too. It is anchored on `" '"` (space then quote):
+/// an ability-opening quote is always preceded by a space (`with '…'`), whereas
+/// a possessive apostrophe (`owner's`) never is, so possessives stay untouched.
 fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
+        recognize((tag(" '"), take_until("'"), tag("'"))),
         recognize(preceded(not(parse_choice_list_separator), anychar)),
     ));
     let item = recognize(many1(unit));

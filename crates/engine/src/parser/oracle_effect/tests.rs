@@ -44789,19 +44789,62 @@ fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_sourc
 /// carries a quoted death-triggered ability; it is NOT a modal token choice.
 /// Before the quote-aware splitter, the inner ", create …" severed the clause
 /// into a bogus `ChooseOneOf` of Fish/Whale/Kraken. (issue #4230)
+///
+/// #4230's fix made the *outer* double-quoted span opaque, so the outer token
+/// stopped being a `ChooseOneOf`. But the nested grant is written in SINGLE
+/// quotes, and the splitters' opaque unit only covered double quotes — so one
+/// level down, the Whale clause's `', create a 9/9 … Kraken'` was still severed,
+/// producing Whale and Kraken as siblings instead of the Whale carrying its own
+/// dies-trigger. This asserts the full cascade: Fish ⊃ Whale ⊃ Kraken, each as
+/// a `GrantTrigger` whose dies-trigger creates the next.
 #[test]
-fn reef_worm_nested_token_is_not_modal_choice() {
+fn reef_worm_nested_token_cascade() {
+    // The single-created-token effect at the top of a "When this dies, create …"
+    // trigger, given a token that grants a dies-trigger.
+    fn granted_dies_token<'a>(effect: &'a Effect, who: &str) -> &'a Effect {
+        let Effect::Token {
+            name,
+            static_abilities,
+            ..
+        } = effect
+        else {
+            panic!("{who}: expected a Token, got {effect:?}");
+        };
+        assert_eq!(name, who, "token name");
+        let trigger = static_abilities
+            .iter()
+            .flat_map(|sd| sd.modifications.iter())
+            .find_map(|m| match m {
+                crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                    Some(trigger)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{who}: must carry a granted dies-trigger"));
+        assert_eq!(
+            trigger.mode,
+            crate::types::triggers::TriggerMode::ChangesZone,
+            "{who}: dies-trigger is a zone change"
+        );
+        &trigger
+            .execute
+            .as_ref()
+            .unwrap_or_else(|| panic!("{who}: dies-trigger has no effect"))
+            .effect
+    }
+
     let def = parse_effect_chain(
             "create a 3/3 blue Fish creature token with \"When this token dies, create a 6/6 blue Whale creature token with 'When this token dies, create a 9/9 blue Kraken creature token.'\"",
             AbilityKind::Spell,
         );
-    let Effect::Token { name, .. } = &*def.effect else {
-        panic!(
-            "Reef Worm must create one Token (not a choice), got {:?}",
-            def.effect
-        );
+
+    let whale = granted_dies_token(&def.effect, "Fish");
+    let kraken = granted_dies_token(whale, "Whale");
+    // The Kraken is a leaf: a plain token, no further grant.
+    let Effect::Token { name, .. } = kraken else {
+        panic!("Kraken must be a plain Token, got {kraken:?}");
     };
-    assert_eq!(name, "Fish", "outer token is the 3/3 Fish");
+    assert_eq!(name, "Kraken", "innermost token is the 9/9 Kraken");
 }
 
 /// CR 702.62a + CR 118.9: The Face of Boe's verbless "pay its suspend cost
