@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 177,
+      "date": "2026-07-20",
+      "title": "Choose how to cast under Omniscience",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Birgi, God of Storytelling // Harnfel, Horn of Bounty join the pool, including boasting twice a turn, Birgi's story mana trigger, and casting cards from exile off Harnfel\n• Under Omniscience and other \"cast without paying\" effects, you now choose how to cast: a prompt lists every legal method with its real cost (free, printed mana, Evoke/Warp) instead of forcing the free version\n\n🛠️ Cards That Now Work Right\n• Mirror March makes a copy of the entering creature for each won flip, gives those copies haste, and exiles the copies (not the original) at end of turn\n• Thrumming Stone keeps its ripple triggers through resolution, so ripple chains fire\n• Ardbert, Warrior of Darkness grants vigilance and menace to the legendary creatures it just put counters on, instead of doing nothing\n• Anya, Merciless Angel grows only for opponents below half their starting life, rather than buffing every turn\n• Frodo Baggins and Enkira, Hostile Scavenger enforce \"must be blocked if able\" only while their condition holds, such as while Frodo is your Ring-bearer\n• Geyser Drake and Naiad of Hidden Coves discount your spells only on your opponents' turns\n• \"Gain control of up to N target creatures\" now lets you take the full number (The Super Hero Civil War, Jace, Ingenious Mind-Mage)\n• Settle the Wreckage searches for as many basic lands as the creatures it exiled, keeping the land filter\n• Perrie, the Pulverizer counts the different kinds of counters among your permanents correctly\n• Wedding Announcement still transforms after creating a Human, and Sunfall's Incubator arrives with one counter per creature it exiled\n• Summer Bloom grants its extra land plays; Roar's chapter II tap-for-mana grant, Hunger Tide's multi-zone search, delayed \"exile those tokens\" effects, and \"the Nth spell you cast each turn costs less\" all parse correctly\n• Planetarium of Wan Shi Tong resolves its cast-from-exile offers and declines the ones that aren't legal\n• Tokens created with a built-in triggered ability no longer crash the game as they enter\n\n⚔️ Combat & Gameplay\n• Accepted mandatory infinite loops are detected and resolved to their end state at the end of the turn instead of stalling the game\n• Historic Brawl is correctly a 100-card format\n• A new opt-in setting skips low-value priority windows to reduce clicking through empty stops\n\n🖥️ Interface\n• Cards show why an activated ability is unavailable, and combat badges name the permanent imposing each \"must attack\" or \"must block\" requirement\n• The unimplemented-mechanics \"!\" badge now also appears on spells on the stack, where it matters most just before they resolve\n• Hand and stack mana pips scale with card size, and tokens with no official art render a readable name-and-text tile\n• Oathbreaker's command zone gains a horizontal dock with fluid zone summary tiles\n• The view-attachments badge scales with card size instead of covering small cards\n• Reordering your hand quietly drops a stale move instead of surfacing an engine error\n\n🤖 AI\n• AI decisions are fully deterministic now that hidden run-to-run ordering differences are removed from its decision paths\n• AI recovery is hardened when a controller gets stuck, including the Very Hard fallthrough",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1528998028571185172"
+    },
+    {
       "id": 176,
       "date": "2026-07-18",
       "title": "Attack requirements are now enforced",
