@@ -44,8 +44,9 @@ pub use format::{DeckCopyLimit, FormatConfig, GameFormat};
 pub use game_state::{
     ActionResult, BattlefieldEntryRecord, CommanderDamageEntry, CostResume, GameState, LKISnapshot,
     LandPlayRecord, NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
-    PendingSpellCostReduction, PlayerDeckPool, ScheduledTurnControl, SpellCastRecord, StackEntry,
-    StackEntryKind, TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
+    PendingSpellCostReduction, PlayerDeckPool, PriorityPassingMode, ScheduledTurnControl,
+    SpellCastRecord, StackEntry, StackEntryKind, TransientContinuousEffect, WaitingFor,
+    ZoneChangeRecord,
 };
 pub use identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,

@@ -18,9 +18,9 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
 use phase_ai::choose_action;
-use phase_ai::config::{create_config, AiDifficulty, Platform};
+use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -256,6 +256,128 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
         results.len() <= 200,
         "AI loop should stay within its hard safety cap"
     );
+}
+
+/// Builds a two-player game with BOTH seats AI, parked at the initial priority,
+/// and each library seeded deep so nobody decks out (draw-from-empty loss) for
+/// many turns. With an effectively empty board the AI's action stream is a long
+/// run of pass-priority / land plays that cycles phases and turns far beyond any
+/// small budget — so any early stop is the budget, not a natural game end. A
+/// bare `GameScenario::new()` has empty libraries and stalls after ~4 actions,
+/// which is why the seeding is load-bearing for the exact-equality assertions.
+fn two_ai_long_stream_runner() -> (GameRunner, HashSet<PlayerId>, HashMap<PlayerId, AiConfig>) {
+    let mut scenario = GameScenario::new();
+    let deck: Vec<&str> = vec!["Forest"; 60];
+    scenario.with_library_top(P0, &deck);
+    scenario.with_library_top(P1, &deck);
+    let runner = scenario.build();
+
+    let ai_players = HashSet::from([P0, P1]);
+    let ai_configs = HashMap::from([
+        (P0, create_config(AiDifficulty::VeryHard, Platform::Native)),
+        (P1, create_config(AiDifficulty::VeryHard, Platform::Native)),
+    ]);
+    (runner, ai_players, ai_configs)
+}
+
+#[test]
+fn run_ai_actions_bounded_stops_exactly_at_budget() {
+    // The stream is effectively unbounded (see helper), so a `results.len() == 3`
+    // outcome with no break reason can only be the budget cutting the stream.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let results = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        3,
+    );
+
+    assert_eq!(
+        results.len(),
+        3,
+        "bounded run must take exactly its budget of actions"
+    );
+    assert!(
+        results.break_reason.is_none(),
+        "budget cut the stream — the loop did not end for a break-door reason"
+    );
+}
+
+#[test]
+fn commander_driver_small_action_cap_is_never_exceeded() {
+    // Regression for the PR #6195 round-2 finding: the action-cap regressions
+    // must exercise the PRODUCTION driver boundary (`run_driver_loop`, the same
+    // helper `ai_commander`'s main calls), not a hand-mirror loop. Reverting
+    // main's/the helper's internals to unbounded batches (a full batch runs up
+    // to MAX_AI_ACTIONS_PER_SEQUENCE past a small cap) fails here.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let outcome = run_driver_loop(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        5,
+        &mut |_results, _state, total_before| {
+            assert!(
+                total_before < 5,
+                "observer must see a pre-batch total below the cap, got {total_before}"
+            );
+        },
+    );
+
+    assert_eq!(
+        outcome.total_actions, 5,
+        "the pass-priority stream is effectively unbounded, so the cap is \
+         exactly what stopped the driver"
+    );
+    assert!(matches!(outcome.exit, DriverExit::CapReached));
+}
+
+#[test]
+fn commander_driver_cap_beyond_one_batch_exercises_remaining_arithmetic() {
+    // A cap of 250 exceeds the 200 per-batch safety clamp, forcing TWO loop
+    // iterations: batch 1 is clamped to 200, batch 2 gets remaining = 50. The
+    // across-batch accounting (remaining shrinking, total accumulating) is
+    // exactly where the original overshoot bug lived; a cap <= 200 runs the loop
+    // once and cannot discriminate it.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let mut batch_sizes: Vec<usize> = Vec::new();
+    let outcome = run_driver_loop(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        250,
+        &mut |results, _state, total_before| {
+            assert!(
+                total_before < 250,
+                "observer must see a pre-batch total below the cap, got {total_before}"
+            );
+            batch_sizes.push(results.len());
+        },
+    );
+
+    assert_eq!(
+        batch_sizes,
+        vec![200, 50],
+        "200 is MAX_AI_ACTIONS_PER_SEQUENCE (phase-ai/src/auto_play.rs); if that \
+         constant changes this assertion fails loudly and should be updated in step"
+    );
+    assert_eq!(outcome.total_actions, 250);
+    assert!(matches!(outcome.exit, DriverExit::CapReached));
 }
 
 const GOLLUM_SCHEMING_GUIDE_ORACLE: &str = "Whenever Gollum attacks, look at the top two cards of your library, put them back in any order, then choose land or nonland. An opponent guesses whether the top card of your library is the chosen kind. Reveal that card. If they guessed right, remove Gollum from combat. Otherwise, you draw a card and Gollum can't be blocked this turn.";

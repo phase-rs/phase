@@ -529,6 +529,8 @@ pub enum ProtectionTarget {
 pub enum WardCost {
     Mana(ManaCost),
     PayLife(i32),
+    /// CR 702.21a: Ward whose life payment is the warded creature's power at resolution.
+    PayLifeEqualToPower,
     DiscardCard,
     /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
     Sacrifice {

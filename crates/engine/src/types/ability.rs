@@ -18941,8 +18941,18 @@ impl TriggerEntry {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl From<TriggerDefinition> for TriggerEntry {
     fn from(definition: TriggerDefinition) -> Self {
+        Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
+    }
+}
+
+impl TriggerEntry {
+    /// Legacy wire bridge: a payload-only entry with no occurrence provenance.
+    /// Only the deserializer may mint one; a later normalization pass migrates
+    /// it to a provable printed slot or rejects the state.
+    pub(crate) fn unmaterialized_legacy(definition: TriggerDefinition) -> Self {
         Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
     }
 }
@@ -18971,7 +18981,9 @@ impl<'de> Deserialize<'de> for TriggerEntry {
             // provable printed/base slot. Keeping the marker here preserves the
             // distinction instead of guessing copied/granted provenance from
             // definition bytes at the serde boundary.
-            TriggerEntryWire::LegacyPayload(definition) => Ok(definition.into()),
+            TriggerEntryWire::LegacyPayload(definition) => {
+                Ok(Self::unmaterialized_legacy(definition))
+            }
         }
     }
 }
@@ -20382,6 +20394,12 @@ pub enum ContinuousModification {
     /// Mind Swap). Applied in Layer 1 so the override is part of the copy's
     /// copiable values (per CR 707.9b).
     SetName {
+        name: String,
+    },
+    /// CR 612.8 + CR 613.1c: A continuous effect that gives an object a
+    /// literal name is a text-changing effect, not a copiable-value override
+    /// (Witness Protection). Applied in Layer 3.
+    SetTextName {
         name: String,
     },
     AddPower {

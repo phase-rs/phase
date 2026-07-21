@@ -216,6 +216,16 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
         }
     }
 
+    // CR 705.2: Redundant "for each flip you won, " coin-flip quantifier — the
+    // flip loop (`finish_until_lose` / the `FlipCoins` win branch) already runs
+    // the win effect once per win, so drop the prefix (no `repeat_for`) and keep
+    // peeling the bare imperative. Must precede the generic for-each peel, which
+    // cannot strip "flip(s) you won" (not a countable clause) and would leave
+    // the text to fall through to an `Unimplemented` "for" dispatch (#5966).
+    if let Some(rest) = super::oracle_effect::lower::strip_redundant_flip_win_quantifier(&text) {
+        return peel_inner(rest, ctx);
+    }
+
     // Repeat-for: "for each [qty], " leading prefix (CR 608.2c: the instruction is
     // followed as written, once per counted iteration).
     if ctx.repeat_for.is_none() {

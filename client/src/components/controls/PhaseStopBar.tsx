@@ -151,7 +151,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
   const tooltip = getPhaseTooltip(t, phase, stop?.scope, isActive);
 
   // Cycle the stop for this phase: off → AllTurns → OwnTurn → OpponentsTurns → off.
-  // Update in place so array order is preserved — `usePhaseStopsSync` dedupes by
+  // Update in place so array order is preserved — `useGameplayPreferencesSync` dedupes by
   // positional comparison, so appending would reorder and force a redundant
   // engine dispatch even when the set of stops is unchanged.
   const cyclePhase = () => {

@@ -1094,13 +1094,17 @@ impl SessionManager {
             ));
         }
 
-        // SetPhaseStops: per-player preference keyed to the authenticated player,
+        // SetPhaseStops / SetPriorityPassingMode: per-player preferences keyed
+        // to the authenticated player,
         // not the priority holder. Bypasses the turn/legal-action prechecks (any
         // player may adjust their own stops at any time) and delegates the
         // mutation to the engine (single authority — the write handler keys by
         // `actor`, i.e. the authenticated player). Not an undo point → no
         // takeback snapshot. CR 102.1 (scope resolves against the active player).
-        if matches!(action, GameAction::SetPhaseStops { .. }) {
+        if matches!(
+            action,
+            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. }
+        ) {
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -1947,6 +1951,99 @@ mod tests {
             !state.phase_stops.contains_key(&priority_player),
             "the priority holder's entry must remain untouched"
         );
+    }
+
+    #[test]
+    fn priority_passing_mode_route_updates_recommendation_without_history_or_advance() {
+        use std::sync::Arc;
+
+        use engine::game::zones::create_object;
+        use engine::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        };
+        use engine::types::game_state::PriorityPassingMode;
+        use engine::types::identifiers::CardId;
+
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.state.active_player = PlayerId(0);
+        session.state.priority_player = PlayerId(0);
+        session.state.phase = Phase::End;
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = create_object(
+            &mut session.state,
+            CardId(900),
+            PlayerId(0),
+            "Priority Test Source".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut session.state.objects.get_mut(&source).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        );
+        let waiting_before = session.state.waiting_for.clone();
+        let stack_before = session.state.stack.clone();
+        let pass_before = session.state.priority_passes.clone();
+        let history_before = session.takeback_history.len();
+
+        let (_, events, _, logs, standard, _, _) = mgr
+            .handle_action(
+                &code,
+                &token0,
+                GameAction::SetPriorityPassingMode {
+                    mode: PriorityPassingMode::Standard,
+                },
+            )
+            .expect("Standard preference route");
+        assert!(!standard, "meaningful End-step action holds in Standard");
+        assert!(events.is_empty() && logs.is_empty());
+
+        let (_, events, _, logs, skips_low_use_window, _, _) = mgr
+            .handle_action(
+                &code,
+                &token0,
+                GameAction::SetPriorityPassingMode {
+                    mode: PriorityPassingMode::SkipLowUseWindows,
+                },
+            )
+            .expect("low-use-window preference route");
+        assert!(
+            skips_low_use_window,
+            "the opt-in mode passes the player's own empty End window"
+        );
+        assert!(events.is_empty() && logs.is_empty());
+        assert_eq!(
+            mgr.sessions
+                .get(&code)
+                .unwrap()
+                .state
+                .priority_passing_modes,
+            HashMap::from([(PlayerId(0), PriorityPassingMode::SkipLowUseWindows)])
+        );
+
+        let (_, _, _, _, standard_again, _, _) = mgr
+            .handle_action(
+                &code,
+                &token0,
+                GameAction::SetPriorityPassingMode {
+                    mode: PriorityPassingMode::Standard,
+                },
+            )
+            .expect("return to sparse Standard");
+        assert!(!standard_again);
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(session.state.priority_passing_modes.is_empty());
+        assert_eq!(session.state.waiting_for, waiting_before);
+        assert_eq!(session.state.stack, stack_before);
+        assert_eq!(session.state.priority_passes, pass_before);
+        assert_eq!(session.takeback_history.len(), history_before);
     }
 
     /// `ReorderHand` succeeds even when the sender is not the priority holder.

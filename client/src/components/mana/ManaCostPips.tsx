@@ -2,7 +2,7 @@ import type { ManaCost } from "../../adapter/types.ts";
 import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
-type PipSize = "2xs" | "xs" | "sm" | "md" | "lg";
+type PipSize = "2xs" | "xs" | "sm" | "md" | "lg" | "fluid";
 
 const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: string }> = {
   "2xs": { container: "w-[10px] h-[10px] p-[0px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[1px] top-[2px] -bottom-[3px]" },
@@ -10,6 +10,14 @@ const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: str
   sm: { container: "w-[18px] h-[18px] p-[0px]", gap: "gap-[1px]", backdrop: "-inset-x-[2px] top-[4px] -bottom-[8px]" },
   md: { container: "w-[22px] h-[22px] p-[2px]", gap: "gap-[1px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
   lg: { container: "w-[28px] h-[28px] py-[2px] px-[2.5px]", gap: "gap-[0.5px]", backdrop: "-inset-x-[3px] -top-[2px] -bottom-[4px]" },
+  // Card-relative sizing in container-query inline units (1cqi = 1% of the
+  // nearest `@container` ancestor's width). Consumers that pass `size="fluid"`
+  // MUST wrap the pips in an element with `container-type: inline-size` sized to
+  // the card (e.g. an `absolute inset-0 @container` overlay). 15cqi matches the
+  // fixed `md` (22px) pip on a ~145px desktop hand card, then scales down with
+  // the card so pips never look oversized on smaller layouts. Secondary
+  // dimensions use the same md ratios (p 9.1%, gap 4.5%, backdrop 13.6/9.1/18.2%).
+  fluid: { container: "w-[15cqi] h-[15cqi] p-[1.4cqi]", gap: "gap-[0.7cqi]", backdrop: "-inset-x-[2cqi] -top-[1.4cqi] -bottom-[2.7cqi]" },
 };
 
 interface ManaCostPipsProps {

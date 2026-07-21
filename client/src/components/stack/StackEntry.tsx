@@ -1,9 +1,11 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
@@ -90,6 +92,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -220,10 +224,20 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         style={{ width: cardSize.width, height: cardSize.height }}
         className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
-        {isLoading || !src ? (
+        {isLoading ? (
           <div
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
+          />
+        ) : !src || artError ? (
+          // Issue #6156 on the stack: this path is explicitly token-aware
+          // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
+          // token's triggered or activated ability landed here and pulsed
+          // forever — worse than a blank square, since it implies the art is
+          // still coming. Name the source instead.
+          <CardArtFallback
+            name={sourceName}
+            className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
@@ -231,12 +245,26 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             alt={sourceName}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => setArtError(true)}
           />
         )}
-        {isSpell && displayManaCost && (
-          <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
-        )}
       </div>
+      {/* @container overlay sized to the card (sibling of the overflow-hidden
+          image wrapper, so the pip backdrop isn't clipped at the card edge).
+          absolute inset-0 takes its width from the relative outer wrapper, so
+          container-type can't collapse it; pips scale in cqi with the stack
+          card's width instead of a fixed px size. */}
+      {isSpell && displayManaCost && (
+        <div className="pointer-events-none absolute inset-0 @container">
+          <ManaCostPips cost={displayManaCost} size="fluid" className="absolute right-[5%] top-[2.5%]" />
+        </div>
+      )}
+
+      {/* Badge: unimplemented-mechanics warning (issue #4711). Hand and
+          battlefield cards already surface this through CardImage; a spell is
+          most consequential while it is on the stack about to resolve, so the
+          same badge is shown here from the same engine-provided projection. */}
+      <UnimplementedMechanicsBadge mechanics={sourceObj?.unimplemented_mechanics} variant="corner" />
 
       {/* Badge: ×N coalesce count for engine-grouped mass triggers. */}
       {groupCount > 1 && (

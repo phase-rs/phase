@@ -209,6 +209,7 @@ pub(super) fn note_meaningful_action(state: &mut GameState, actor: PlayerId, act
                 | GameAction::SetAutoPass { .. }
                 | GameAction::CancelAutoPass
                 | GameAction::SetPhaseStops { .. }
+                | GameAction::SetPriorityPassingMode { .. }
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }

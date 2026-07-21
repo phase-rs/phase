@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
     OutsideGameChoiceSource, PayableResource, PendingContinuation,
-    PendingPlayerScopeSacrificeCompletion, WaitingFor,
+    PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -2181,6 +2181,216 @@ pub(super) fn handle_resolution_choice(
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
+                PayableResource::LoopCollapse { .. } => {
+                    // CR 732.2a: an accepted unbounded loop shortcut deferred its finite
+                    // count to this phase/step boundary; the controller has now named N.
+                    // Apply each stashed persistent-axis materialization, cash out the
+                    // collapsed ∞ axes, and re-enter the boundary drain so Priority is
+                    // restored in this same action.
+                    //
+                    // This arm deducts NO resource and MUST early-return: the shared
+                    // pay-then-continue tail below is for chained real-resource payments,
+                    // not a boundary collapse. Mirrors the `pending_mana_ability`
+                    // early-return above. `take_` removes the whole stash even on the
+                    // error path so the boundary fixpoint terminates rather than
+                    // re-prompting forever.
+                    let Some(mut items) = state.take_pending_materialization(player) else {
+                        return Err(EngineError::InvalidAction(format!(
+                            "LoopCollapse pay-amount for {player:?} has no pending materialization stash"
+                        )));
+                    };
+                    // CR 732.2a pause-safety: process the ONLY pause-prone axis (`Tokens` — its
+                    // per-cycle fodder mint can raise an ETB replacement `NeedsChoice`, unlike
+                    // the deterministic Counters/Life/DriveSequence axes) LAST. A mixed loop
+                    // stashes multiple axes at once (Guide of Souls + Sprout Swarm =
+                    // tokens+life; Witherbloom + Sprout Swarm = tokens+counters). Committing the
+                    // deterministic axes first means a `Tokens` pause leaves the finite
+                    // non-token effects applied exactly once and only the paused `Tokens` axis
+                    // ∞ — order-independent of how the stash was registered. Stable: relative
+                    // order of the non-Tokens axes is preserved.
+                    items.sort_by_key(|i| matches!(i, PersistentAxisMaterialization::Tokens(_)));
+                    // FINDING #4 (accept→boundary observer-drift): the observed-growth
+                    // firewall ran at ACCEPT, but the controller held priority between
+                    // accept and this boundary and could have cast an observer (Heliod /
+                    // Corpsejack) of the growing class. The batched δ single-application is
+                    // sound only while the class stays UNOBSERVED — `apply_life_gain` fires
+                    // a life observer ONCE not N×, and `apply_counter_addition` bypasses the
+                    // doubler pipeline. Re-check NOW (the firewall scans the board/stack, not
+                    // the stash, so it needs no sequence): if an observer appeared, DECLINE
+                    // the batched `Counters`/`Life` apply and leave those ∞ axes marked for
+                    // manual play (CR 732.2a / CR 732.2b never force a shortcut) —
+                    // unambiguously sound (never a wrong count). `Tokens` (N real ETB events)
+                    // and `DriveSequence` (N-cycle real replay) honor observers regardless
+                    // and always proceed. Only the ACTUALLY-applied items are cleared, so a
+                    // declined axis stays ∞.
+                    // AXIS-SPECIFIC re-check: an observer of the counter class must not veto a
+                    // batched LIFE gain and vice-versa. Each axis re-runs its own firewall.
+                    let counter_observed_now =
+                        crate::analysis::resource::counter_growth_is_observed(state);
+                    let life_observed_now =
+                        crate::analysis::resource::life_growth_is_observed(state);
+                    let mut collapsed: Vec<PersistentAxisMaterialization> = Vec::new();
+                    for item in &items {
+                        match item {
+                            PersistentAxisMaterialization::Tokens(profile) => {
+                                // CR 707.2 (+ CR 111.10): mint N tapped copy-tokens of the
+                                // fodder profile — a source-less mint, so route through
+                                // `drive_copy_token_batches` (`ObjectId(0)` sentinel source).
+                                //
+                                // CR 732.2a k≡1 INVARIANT: this mints `count: amount` == k·amount
+                                // with the per-cycle fodder count k STRUCTURALLY ≡ 1. A `Tokens`
+                                // stash is only registered under `if let Some(profile)` in
+                                // `materialize_object_growth_shortcut` (engine.rs), whose
+                                // `current_period_fodder` derives the profile from
+                                // `derived_fodder_class` (engine.rs:1991-2005), which returns `None`
+                                // unless EXACTLY one new battlefield object appeared per period
+                                // (`let id = new_ids.next()?; if new_ids.next().is_some() { None }`).
+                                // A k>1 period (two+ new objects/cycle) fails that gate ⇒ no `Tokens`
+                                // stash ⇒ this arm is never reached for k≠1. So `count: amount` is
+                                // EXACT, not a k·N undercount. (Counters/Life instead carry a measured
+                                // `per_cycle_delta`, so those axes handle k>1 by construction.)
+                                let batch = crate::types::game_state::PendingCopyTokenBatch {
+                                    owner: player,
+                                    count: amount,
+                                    copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+                                        values: profile.clone(),
+                                        display_source:
+                                            crate::game::game_object::DisplaySource::Token,
+                                        printed_ref: None,
+                                        token_image_ref: None,
+                                        extra_keywords: vec![],
+                                        additional_modifications: vec![],
+                                        tapped: true,
+                                        enters_attacking: false,
+                                        sacrifice_at: None,
+                                        source_id: ObjectId(0),
+                                        controller: player,
+                                    }),
+                                };
+                                crate::game::effects::token_copy::drive_copy_token_batches(
+                                    state,
+                                    std::collections::VecDeque::from([batch]),
+                                    EffectKind::CopyTokenOf,
+                                    ObjectId(0),
+                                    events,
+                                );
+                                // CR 732.2a defense-in-depth: the offer firewall (the exhaustive
+                                // fail-closed `_ => Err(RecastAbort)` in `drive_loop_action_iteration`,
+                                // engine.rs:1871-1873, has no replacement-/target-choice arm)
+                                // guarantees a certified shortcut's per-cycle fodder mint cannot
+                                // pause, so this mint is unreachable-paused today. The boundary copies
+                                // the SAME fodder class (CR 707.2), so a mint that would pause implies
+                                // a certification that would have aborted. If that invariant ever
+                                // weakens, DO NOT advance the phase / mark the axis collapsed /
+                                // overwrite the replacement `waiting_for`: preserve the paused
+                                // copy-resolution and hand the replacement choice back (CR 732.2b
+                                // leaves the ∞ axes for manual play; game totals stay correct because
+                                // the ∞ marks are not cleared). No `debug_assert!` — the defensive
+                                // test deliberately drives this pause, which a debug_assert would panic.
+                                if state.active_copy_token().is_some() {
+                                    // CR 732.2a pause-safe transaction: cash out the axes already
+                                    // applied THIS pass (a mixed stash, Edit 1 puts Tokens last) so
+                                    // no finite-applied Counters/Life axis is left with a stale ∞
+                                    // mark. The still-paused Tokens axis is NOT in `collapsed`, so
+                                    // its ∞ axis/pile is preserved for manual play (CR 732.2b never
+                                    // forces a shortcut). Do NOT drain the phase — the mint is
+                                    // mid-flight.
+                                    state.clear_collapsed_materializations(player, &collapsed);
+                                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                        state.waiting_for.clone(),
+                                    ));
+                                }
+                                collapsed.push(item.clone());
+                            }
+                            PersistentAxisMaterialization::Counters(growths) => {
+                                if counter_observed_now {
+                                    continue; // decline (finding #4): leave the ∞ axis for manual play
+                                }
+                                for g in growths {
+                                    // CR 400.7: a permanent that left the battlefield
+                                    // accept→boundary is skipped (its object id is stale).
+                                    if !state.battlefield.contains(&g.object) {
+                                        continue;
+                                    }
+                                    // CR 122.1 single counter authority; the direct `+=` (no
+                                    // doubler re-run) is EXACT N×δ because the firewall
+                                    // rejected any counter-placement replacement at accept.
+                                    crate::game::effects::counters::apply_counter_addition(
+                                        state,
+                                        player,
+                                        g.object,
+                                        g.counter.clone(),
+                                        g.per_cycle_delta.saturating_mul(amount),
+                                        events,
+                                    );
+                                }
+                                collapsed.push(item.clone());
+                            }
+                            PersistentAxisMaterialization::Life {
+                                player: p,
+                                per_cycle_delta,
+                            } => {
+                                if life_observed_now {
+                                    continue; // decline (finding #4): leave the ∞ axis for manual play
+                                }
+                                // CR 119.3 single life authority; SOUND only because the
+                                // firewall rejected any life-gain replacement/observer
+                                // (`apply_life_gain` re-runs the replacement pipeline, so a
+                                // lump gain would fire an observer ONCE not N×).
+                                let _ = crate::game::effects::life::apply_life_gain(
+                                    state,
+                                    *p,
+                                    per_cycle_delta.saturating_mul(amount),
+                                    events,
+                                );
+                                collapsed.push(item.clone());
+                            }
+                            PersistentAxisMaterialization::DriveSequence {
+                                sequence,
+                                collapsed_axes: _,
+                            } => {
+                                // CR 732.2a: replay N real cycles; observers fire each cycle;
+                                // no re-offer (the drive holds the simulation guard).
+                                crate::game::engine::drive_persistent_axis_collapse(
+                                    state, sequence, amount,
+                                );
+                                collapsed.push(item.clone());
+                            }
+                        }
+                    }
+                    // CR 732.2a: cash out ONLY the axes actually collapsed (axis-scoped) —
+                    // end their ∞ status + stash + pile, PRESERVING any coexisting axis (a
+                    // debug infinite-mana capability, or a finding-#4-declined axis). The ∞
+                    // display collapses to an ordinary ×N for the collapsed axes (§9).
+                    //
+                    // FINDING #4 DECLINED-AXIS ∞ LIFECYCLE (CR 732.2b): a declined `Counters`/`Life`
+                    // axis (`continue`d above without `collapsed.push`) is absent from `collapsed`,
+                    // so `clear_collapsed_materializations` — which iterates ONLY `collapsed`
+                    // (game_state.rs) — never removes its `unbounded_resources` /
+                    // `unbounded_counter_targets` entry. That ∞ mark is an INTENTIONAL capability
+                    // marker that PERSISTS (the loop machinery still exists, so the capability is
+                    // real), with game totals correct (the declined axis was not applied — no double
+                    // count). It is retired by exactly TWO LIVE paths:
+                    //   (a) a later GENUINE re-detection re-collapsing it — the empty-stack offer
+                    //       hook `try_offer_object_growth_shortcut` (engine.rs:472), which is NOT
+                    //       ∞-gated, so a fresh manual re-loop re-offers and re-registers a stash; and
+                    //   (b) debug toggle-off — `clear_unbounded_loop` via `engine_debug.rs:417`.
+                    // NOTE: the enabler-departure clear (`clear_unbounded_loop` from
+                    // `zones.rs:544-554`) is INERT for this object-growth ∞-mark class, because
+                    // `materialize_object_growth_shortcut` (engine.rs) never calls
+                    // `register_unbounded_loop_enablers` (only the Interactive Path-C arm at
+                    // engine.rs:682 does), so `zones.rs`'s `unbounded_loop_enablers.contains(id)`
+                    // gate never matches an object-growth mark. Registering enablers for the
+                    // object-growth path is a PRE-EXISTING, broader gap (deferred follow-up F2), not
+                    // introduced by this declined-axis handling.
+                    state.clear_collapsed_materializations(player, &collapsed);
+                    // Continue the boundary fixpoint (§7): re-draining either prompts the
+                    // next APNAP player with a stash or restores Priority now.
+                    crate::game::turns::drain_pending_phase_transition_progress(state, events);
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
@@ -4209,14 +4419,49 @@ pub(super) fn handle_resolution_choice(
             }
 
             if chosen.is_empty() && matches!(effect_kind, EffectKind::CastFromZone) {
-                // CR 609.1 / CR 601.2a: Declining an optional
-                // Electrodominance-style hand cast consumes the stashed
-                // CastFromZone continuation without granting a permission. Do
-                // not call the generic resume path here; the pending ability
-                // would re-open the same optional prompt.
-                let _ = state
-                    .clear_active_ability_continuation()
-                    .expect("declined cast cannot clear a buried continuation");
+                // CR 608.2c: An empty selection at a hand-pick cast's
+                // `EffectZoneChoice` means the player did not cast ("you may cast
+                // a permanent spell … from your hand"). A Kellan-class ability
+                // carries a `Not(OptionalEffectPerformed)` decline fallback ("If
+                // you don't, put a land onto the battlefield"): re-stash it with
+                // the performed flag reset and drain it via resume, rather than
+                // discarding the continuation (issue #5945).
+                // The typed accessor consumes only the active continuation frame;
+                // `stash_declined_cast_fallback` parks its fallback through the
+                // same typed continuation authority. A subless Electrodominance-
+                // style decline (helper returns false) falls through to the
+                // consume-and-no-op path below.
+                if let Some(frame) = state
+                    .take_active_ability_continuation()
+                    .expect("declined cast cannot consume a buried continuation")
+                {
+                    let ability = *frame.pending.chain;
+                    if effects::cast_from_zone::stash_declined_cast_fallback(state, &ability) {
+                        state.last_effect_count = Some(0);
+                        events.push(GameEvent::EffectResolved {
+                            kind: effect_kind,
+                            source_id,
+                            subject: None,
+                        });
+                        set_priority(state, player);
+                        // CR 608.2c: drain the re-stashed land-drop fallback.
+                        // `resume_with_error_propagation` only drains under
+                        // `WaitingFor::Priority` (set just above), so ordering
+                        // `set_priority` before resume is required and correct.
+                        resume_with_error_propagation(state, events)?;
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    // No decline fallback: the taken continuation is discarded —
+                    // the subless decline consumes it without granting a
+                    // permission (below).
+                }
+                // CR 609.1 / CR 601.2a: Declining an optional Electrodominance-
+                // style hand cast consumes the stashed CastFromZone continuation
+                // without granting a permission. Do not call the generic resume
+                // path here; the pending ability would re-open the same optional
+                // prompt.
                 state.last_effect_count = Some(0);
                 events.push(GameEvent::EffectResolved {
                     kind: effect_kind,

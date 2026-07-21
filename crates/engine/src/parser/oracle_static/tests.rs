@@ -19396,6 +19396,36 @@ fn enchanted_creature_is_blue_creature_no_subtype() {
     }));
 }
 
+#[test]
+fn witness_protection_replaces_colors_types_subtypes_name_and_abilities() {
+    let def = parse_static_line(
+        "Enchanted creature loses all abilities and is a green and white Citizen creature with base power and toughness 1/1 named Legitimate Businessperson.",
+    )
+    .unwrap();
+    let mods = &def.modifications;
+    assert!(mods.contains(&ContinuousModification::RemoveAllAbilities));
+    assert!(mods.contains(&ContinuousModification::SetCardTypes {
+        core_types: vec![crate::types::card_type::CoreType::Creature],
+    }));
+    assert!(mods.contains(&ContinuousModification::SetColor {
+        colors: vec![
+            crate::types::mana::ManaColor::Green,
+            crate::types::mana::ManaColor::White,
+        ],
+    }));
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: crate::types::card_type::SubtypeSet::Creature,
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Citizen".to_string(),
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 1 }));
+    assert!(mods.contains(&ContinuousModification::SetTextName {
+        name: "Legitimate Businessperson".to_string(),
+    }));
+}
+
 // --- CantBeCast (blanket casting prohibition) tests ---
 
 #[test]

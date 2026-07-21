@@ -517,10 +517,14 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             .chain(enter_with_counters.iter().cloned())
             .collect();
 
+    // Liminal choice is loop-invariant; compute once so the terminal drain below
+    // can mirror the former continue_liminal_copy_token_batch tail for this path.
+    let liminal_immediate =
+        copy_token_modifications_are_liminal_immediate(&additional_modifications)
+            && etb_counters.is_empty();
+
     for index in 0..final_count {
-        if copy_token_modifications_are_liminal_immediate(&additional_modifications)
-            && etb_counters.is_empty()
-        {
+        if liminal_immediate {
             let (token_id, mut token) =
                 super::token::reserve_liminal_token_object(state, token_owner, name.clone());
             let entry_timestamp = state.next_timestamp();
@@ -613,20 +617,16 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                             };
                         }
                     }
-                    if !super::token::commit_liminal_token_entry_and_continue_copy_batch(
-                        state, event, events,
-                    ) {
+                    if !super::token::commit_liminal_copy_token_entry(state, event, events) {
                         created_ids = state.last_created_token_ids.clone();
                         return CopyTokenApplyStatus {
                             created_ids,
                             completion: CopyTokenApplyCompletion::Paused,
                         };
                     }
+                    // CR 707.2: this copy committed; iterate to the next token in the
+                    // batch (O(1) stack). Terminal drain runs once after the loop.
                     created_ids = state.last_created_token_ids.clone();
-                    return CopyTokenApplyStatus {
-                        created_ids,
-                        completion: CopyTokenApplyCompletion::Completed,
-                    };
                 }
                 crate::game::replacement::ReplacementResult::Prevented => {
                     state.liminal_entries.remove(&token_id);
@@ -835,6 +835,45 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             source_id,
         });
         created_ids.push(token_id);
+    }
+
+    if liminal_immediate {
+        // CR 603.7 + CR 701.36a: terminal step of the iterative liminal batch —
+        // set the created-token id ledger and emit the batch's final
+        // EffectResolved through the pending drain, exactly as the former
+        // continue_liminal_copy_token_batch None / remaining==0 arm did.
+        state.waiting_for = crate::types::game_state::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        let created_ids_for_pending = state.last_created_token_ids.clone();
+        if let Some(pending) = state.active_copy_token_mut() {
+            pending.created_ids = created_ids_for_pending;
+        }
+        if state.active_copy_token().is_some() {
+            drain_pending_copy_token_resolution(state, events);
+        }
+        created_ids = state.last_created_token_ids.clone();
+
+        // C1: do NOT hardcode Completed. Reproduce the replaced
+        // continue_liminal_copy_token_batch tail (old ~1196-1197): the whole
+        // (possibly multi-batch) resolution is done only if nothing remains
+        // pending or we've settled back to Priority; otherwise a later batch is
+        // waiting on a CR 616.1 replacement choice, so report Paused and let the
+        // caller resume rather than double-drain it (token_copy::resolve builds a
+        // multi-batch VecDeque when copy_source_ids.len() > 1).
+        let completion = if state.active_copy_token().is_none()
+            || matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            ) {
+            CopyTokenApplyCompletion::Completed
+        } else {
+            CopyTokenApplyCompletion::Paused
+        };
+        return CopyTokenApplyStatus {
+            created_ids,
+            completion,
+        };
     }
 
     CopyTokenApplyStatus {
@@ -1274,8 +1313,7 @@ fn apply_token_modifications(
             // as their source.
             ContinuousModification::GrantTrigger { trigger } => {
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.trigger_definitions.push((**trigger).clone());
-                    Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                    token.push_printed_trigger((**trigger).clone());
                 }
             }
             // CR 707.9a: "except it has \"<activated/static ability>\"" — the
@@ -1453,8 +1491,7 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
                 token.loyalty = Some(*value);
             }
             ContinuousModification::GrantTrigger { trigger } => {
-                token.trigger_definitions.push((**trigger).clone());
-                Arc::make_mut(&mut token.base_trigger_definitions).push((**trigger).clone());
+                token.push_printed_trigger((**trigger).clone());
             }
             ContinuousModification::GrantAbility { definition } => {
                 Arc::make_mut(&mut token.abilities).push((**definition).clone());

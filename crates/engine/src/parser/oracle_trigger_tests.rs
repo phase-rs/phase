@@ -5816,6 +5816,181 @@ fn etb_token_copier_exile_anaphor_binds_created_token() {
         }
 }
 
+/// Walk an ability chain, descending through coin-flip `win_effect`s,
+/// `CreateDelayedTrigger.effect`, and `sub_ability`. Used to prove the folded
+/// per-win/per-head token-rider shape.
+fn collect_through_flip<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+    out.push(&def.effect);
+    match &*def.effect {
+        Effect::FlipCoinUntilLose { win_effect } => collect_through_flip(win_effect, out),
+        Effect::FlipCoins {
+            win_effect: Some(win_effect),
+            ..
+        } => collect_through_flip(win_effect, out),
+        _ => {}
+    }
+    if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+        collect_through_flip(inner, out);
+    }
+    if let Some(sub) = def.sub_ability.as_deref() {
+        collect_through_flip(sub, out);
+    }
+}
+
+/// The `affected` recipient of the first `GenericEffect` keyword-grant static in
+/// a collected effect list ("those tokens gain haste").
+fn grant_affected(effs: &[&Effect]) -> Option<TargetFilter> {
+    effs.iter().find_map(|e| match e {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.first().and_then(|s| s.affected.clone()),
+        _ => None,
+    })
+}
+
+/// Mirror March (#5966): "Whenever a nontoken creature you control enters, flip
+/// a coin until you lose a flip. For each flip you won, create a token that's a
+/// copy of that creature. Those tokens gain haste. Exile them at the beginning
+/// of the next end step."
+///
+/// CR 705.2 (flip loop runs the win effect once per win) + CR 707.1 (token
+/// copy) + CR 603.7c (delayed exile). The redundant "for each flip you won,"
+/// quantifier must be stripped so the win clause reaches `CopyTokenOf`, and the
+/// per-win rider clauses ("those tokens gain haste", "exile them") must fold
+/// INTO `win_effect` — bound to the created tokens (`LastCreated`) — because a
+/// post-loop sibling would only touch the final win's token (each `CopyTokenOf`
+/// overwrites `state.last_created_token_ids`).
+#[test]
+fn mirror_march_flip_win_effect_folds_copy_haste_exile_on_last_created() {
+    let text = "Whenever a nontoken creature you control enters, flip a coin until you lose a flip. \
+        For each flip you won, create a token that's a copy of that creature. Those tokens gain haste. \
+        Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Mirror March");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+
+    // Structural fold guard (revert-fails Step 2): the per-win riders live inside
+    // `win_effect`, NOT as post-loop siblings of the flip effect.
+    assert!(
+        matches!(&*exec.effect, Effect::FlipCoinUntilLose { .. }),
+        "top-level effect must be FlipCoinUntilLose"
+    );
+    assert!(
+        exec.sub_ability.is_none(),
+        "haste/exile must fold into win_effect, not hang as post-loop siblings"
+    );
+
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+
+    // Reach guard (pairs with the negatives below): the copy clause parsed
+    // (revert-fails Step 1) — exactly one CopyTokenOf, reached via win_effect.
+    let copy_sources: Vec<_> = effs
+        .iter()
+        .filter_map(|e| match e {
+            Effect::CopyTokenOf { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        copy_sources.len(),
+        1,
+        "exactly one CopyTokenOf inside win_effect, got {copy_sources:?}"
+    );
+    // `ParentTarget` resolves to the entering creature at runtime (verified by
+    // the `mirror_march_copy_token_exile` integration test); the trigger's
+    // top-level ParentTarget→TriggeringSource rewrite does not descend into
+    // `win_effect`, and does not need to.
+    assert_eq!(copy_sources[0], TargetFilter::ParentTarget);
+
+    // Both anaphors bind the created tokens.
+    assert_eq!(
+        grant_affected(&effs),
+        Some(TargetFilter::LastCreated),
+        "\"those tokens gain haste\" must bind the created tokens"
+    );
+    assert_eq!(
+        effs.iter().find_map(|e| match e {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => Some(target.clone()),
+            _ => None,
+        }),
+        Some(TargetFilter::LastCreated),
+        "delayed \"exile them\" must bind the created tokens, not the entering creature (#5966)"
+    );
+
+    // Revert-failing negative: no clause dropped to Unimplemented anywhere.
+    assert!(
+        !effs
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "no clause may lower to Unimplemented, got {effs:?}"
+    );
+}
+
+/// CR 705.2 + CR 603.7c: the fixed-count sibling has the same per-win rider
+/// boundary as Mirror March. The present-tense form is used by cards such as
+/// Yusri, Fortune's Flame; once lowered, the copied token's haste/exile riders
+/// must be part of `FlipCoins.win_effect`, not post-loop siblings.
+#[test]
+fn flip_coins_present_tense_win_effect_folds_last_created_riders() {
+    let text = "Whenever a nontoken creature you control enters, flip two coins. \
+        For each flip you win, create a token that's a copy of that creature. Those tokens gain haste. \
+        Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Fixed-count copy coins");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+
+    assert!(
+        matches!(&*exec.effect, Effect::FlipCoins { .. }),
+        "top-level effect must be FlipCoins"
+    );
+    assert!(
+        exec.sub_ability.is_none(),
+        "haste/exile must fold into FlipCoins.win_effect, not remain post-loop siblings"
+    );
+
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+    assert!(
+        effs.iter()
+            .any(|effect| matches!(effect, Effect::CopyTokenOf { .. })),
+        "the present-tense quantifier must reach CopyTokenOf"
+    );
+    assert_eq!(grant_affected(&effs), Some(TargetFilter::LastCreated));
+    assert_eq!(
+        effs.iter().find_map(|effect| match effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => Some(target.clone()),
+            _ => None,
+        }),
+        Some(TargetFilter::LastCreated)
+    );
+}
+
+/// Latent-bug guard (surfaced by #5966): the plural "Those tokens gain haste"
+/// grant after a token copier must bind `LastCreated`, not the `TrackedSet(0)`
+/// sentinel the plural-anaphor path defaults to. Independent of the coin flip —
+/// a plain ETB copier exercises the same rebind. CR 608.2c + CR 611.2c.
+#[test]
+fn plural_those_tokens_gain_haste_binds_last_created() {
+    let text = "Whenever a nontoken creature you control enters, create a token that's a copy of \
+        that creature. Those tokens gain haste. Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Plural ETB copier");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+    assert_eq!(
+        grant_affected(&effs),
+        Some(TargetFilter::LastCreated),
+        "plural \"those tokens gain haste\" must bind LastCreated, not TrackedSet(0)"
+    );
+}
+
 /// Molten Echoes (GitHub #4709/#4708): "Whenever a nontoken creature you
 /// control of the chosen type enters, create a token that's a copy of that
 /// creature. That token gains haste. Exile it at the beginning of the next

@@ -547,7 +547,7 @@ fn lki_attachment_ids_are_identity_only_and_survive_a_purged_aura() {
 
 /// RIDER — SAVE-COMPAT ROUND TRIP, BOTH DIRECTIONS.
 ///
-/// `GameState` is `Serialize`/`Deserialize` and owns `lki_cache: HashMap<ObjectId, LKISnapshot>`,
+/// `GameState` is `Serialize`/`Deserialize` and owns `lki_cache: im::HashMap<ObjectId, LKISnapshot>`,
 /// so `LKISnapshot` IS persisted into saves. The new field therefore needs `#[serde(default)]`
 /// (it has it) and a two-way round-trip proof:
 ///

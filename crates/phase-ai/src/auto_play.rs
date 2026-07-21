@@ -130,10 +130,48 @@ pub fn run_ai_actions(
     rng: &mut impl Rng,
     session: &Arc<AiSession>,
 ) -> AiActionsRun {
+    // Thin delegate: existing callers get the full safety-cap budget and
+    // exactly the prior semantics.
+    run_ai_actions_bounded(
+        state,
+        ai_players,
+        ai_configs,
+        rng,
+        session,
+        MAX_AI_ACTIONS_PER_SEQUENCE,
+    )
+}
+
+/// Run AI actions like [`run_ai_actions`], but with a caller-supplied upper
+/// bound on how many actions the batch may take.
+///
+/// The effective bound is `min(max_actions, MAX_AI_ACTIONS_PER_SEQUENCE)`: the
+/// module's safety cap remains the single authority — a caller can *shrink* a
+/// batch below it (to honor an action budget) but never *enlarge* one past it.
+/// This function never returns more than that many `AiActionResult`s.
+///
+/// `max_actions == 0` returns an empty run with `break_reason == None` — no
+/// actor is inspected. A caller that loops on this function must therefore
+/// guarantee a positive budget before each call (`run_driver_loop` does, via
+/// its `total >= action_cap` `DriverExit::CapReached` abort door firing before
+/// the next iteration).
+///
+/// The "hit safety cap" warning stays keyed to `MAX_AI_ACTIONS_PER_SEQUENCE`,
+/// not `max_actions`: a small operator budget reaching its bound is expected,
+/// not a pathological infinite loop, so the warning is naturally silent whenever
+/// the clamp is the lower of the two.
+pub fn run_ai_actions_bounded(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    max_actions: usize,
+) -> AiActionsRun {
     let mut results = Vec::new();
     let mut break_reason = None;
 
-    for _ in 0..MAX_AI_ACTIONS_PER_SEQUENCE {
+    for _ in 0..max_actions.min(MAX_AI_ACTIONS_PER_SEQUENCE) {
         // CR 723.5: Under turn control (Mindslaver, Emrakul), the authorized
         // submitter is the controller — not the active player. Only run AI when
         // that submitter is an AI seat; otherwise wait for the human controller
@@ -230,6 +268,99 @@ pub fn driver_step(results: AiActionsRun) -> DriverStep {
     DriverStep {
         actions_taken: results.results.len(),
         break_reason: results.break_reason,
+    }
+}
+
+/// Why [`run_driver_loop`] returned: it either hit the action cap exactly, or a
+/// batch carried a break reason ([`AiActionsBreakReason`]) at its boundary. One
+/// fact, one type — not an `aborted: bool` plus an `Option<AiActionsBreakReason>`
+/// pair whose two illegal combinations (aborted with a reason, not-aborted with
+/// none) a caller would have to defend against.
+#[derive(Debug)]
+pub enum DriverExit {
+    /// `total_actions` reached `action_cap` with no break door firing first.
+    CapReached,
+    /// A batch stopped early at its boundary; carries the reason to report.
+    BatchBreak(AiActionsBreakReason),
+}
+
+/// Outcome of a [`run_driver_loop`] run: the total actions taken and why it
+/// stopped.
+#[derive(Debug)]
+pub struct DriverOutcome {
+    pub total_actions: usize,
+    pub exit: DriverExit,
+}
+
+/// Drives repeated [`run_ai_actions_bounded`] batches until the action cap is
+/// reached or a batch breaks, threading the remaining-budget arithmetic that
+/// keeps a small `action_cap` from being overshot. This is the single authority
+/// for the batch / remaining-budget boundary: `ai_commander`'s `main` and the
+/// regression tests both drive it, so the exact-cap contract is exercised on the
+/// production path rather than re-derived in a test-only mirror loop.
+///
+/// # Exact-cap contract
+/// `DriverOutcome::total_actions` never exceeds `action_cap`. Each batch is
+/// bounded to the *remaining* budget (`action_cap - total`), so the loop stops
+/// exactly at the cap instead of overshooting by up to
+/// `MAX_AI_ACTIONS_PER_SEQUENCE` within a final batch. This deliberately differs
+/// from `duel_suite`'s `drive_game_observed`, whose documented contract checks
+/// the cap only at batch boundaries and may overshoot within a batch — that
+/// overshoot is baseline-witnessed and intentional there, so this helper must
+/// not be "helpfully" unified with it.
+///
+/// # Observer contract
+/// `on_batch(&mut results, &state, total)` fires exactly once per batch, with:
+/// the batch results *mutably* (so the observer can `mem::take` per-action log
+/// vectors while draining dumps — this is why the seam is `&mut`, unlike
+/// `drive_game_observed`'s immutable `&GameState`-only observer); the
+/// post-batch `state` immutably; and the *pre-batch* running `total` (turn and
+/// ELIMINATED numbering in `ai_commander` depend on the pre-batch total, so the
+/// observer must see the count as it stood before this batch's actions).
+///
+/// # Caller contract
+/// `action_cap >= 1`. `ai_commander`'s CLI parsing guarantees this; the
+/// `debug_assert!` enforces it in tests. `remaining` is a plain subtraction (not
+/// `saturating_sub`): the `CapReached` abort door below breaks at
+/// `total >= action_cap`, so `remaining >= 1` whenever the loop body runs. An
+/// underflow here would be a real invariant violation and must panic rather than
+/// be silently masked into a zero-budget no-op.
+pub fn run_driver_loop(
+    state: &mut GameState,
+    ai_players: &HashSet<PlayerId>,
+    ai_configs: &HashMap<PlayerId, AiConfig>,
+    rng: &mut impl Rng,
+    session: &Arc<AiSession>,
+    action_cap: usize,
+    on_batch: &mut dyn FnMut(&mut AiActionsRun, &GameState, usize),
+) -> DriverOutcome {
+    debug_assert!(action_cap > 0);
+    let mut total: usize = 0;
+    loop {
+        let remaining = action_cap - total;
+        let mut results =
+            run_ai_actions_bounded(state, ai_players, ai_configs, rng, session, remaining);
+        on_batch(&mut results, &*state, total);
+
+        // phase#6080 follow-up: a batch can complete actions and still carry a
+        // break_reason, so capture the reason from EVERY batch — not only empty
+        // ones — and stop at this batch boundary. The break-reason check stays
+        // BEFORE the cap check so a genuine break door is reported instead of a
+        // cap abort when both are true on the same batch.
+        let step = driver_step(results);
+        total += step.actions_taken;
+        if let Some(reason) = step.break_reason {
+            return DriverOutcome {
+                total_actions: total,
+                exit: DriverExit::BatchBreak(reason),
+            };
+        }
+        if total >= action_cap {
+            return DriverOutcome {
+                total_actions: total,
+                exit: DriverExit::CapReached,
+            };
+        }
     }
 }
 

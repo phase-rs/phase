@@ -34,7 +34,6 @@ test = false
 [[bin]]
 name = "ai-commander"
 path = "src/bin/ai_commander.rs"
-test = false
 
 [[bin]]
 name = "ai-bench-state"

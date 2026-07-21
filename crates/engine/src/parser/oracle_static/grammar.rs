@@ -1064,6 +1064,65 @@ pub(crate) fn scan_loss_enumeration(lower: &str) -> Vec<LossMember> {
     }
 }
 
+/// Opening anchors for a nested single-quoted granted ability inside a
+/// double-quoted grant body. Grant verbs are mid-sentence and lowercase in
+/// Oracle text; ` and '` covers chained grants (Old-Growth Troll: `'{T}: …' and
+/// '{1}, {T}, …'`).
+const NESTED_ABILITY_QUOTE_OPENERS: [&str; 5] =
+    [" have '", " has '", " gain '", " gains '", " and '"];
+
+/// Find the next nested single-quoted ability span as `(open_quote, close_quote)`
+/// indices (both point at the `'` delimiter). Each opener is tried from
+/// `search_from`; the earliest match wins. The closing quote is the next `'`
+/// after the opener — never `rfind`, so multiple chained grants promote
+/// independently.
+fn next_nested_ability_quote_span(body: &str, search_from: usize) -> Option<(usize, usize)> {
+    let mut next_open: Option<usize> = None;
+    for anchor in NESTED_ABILITY_QUOTE_OPENERS {
+        if let Some(rel) = body[search_from..].find(anchor) {
+            let abs_open = search_from + rel + anchor.len() - 1;
+            next_open = Some(next_open.map_or(abs_open, |cur| cur.min(abs_open)));
+        }
+    }
+    let open_quote = next_open?;
+    let content_start = open_quote + 1;
+    let rel_close = body[content_start..].find('\'')?;
+    let close_quote = content_start + rel_close;
+    Some((open_quote, close_quote))
+}
+
+/// A granted ability may nest one quote level deep inside a double-quoted grant
+/// body (Koth emblem: `Mountains you control have '{T}: …'`; Roar saga chapter
+/// II: `Creatures you control have '{T}: Add {R}, {G}, or {W}.'`; Old-Growth
+/// Troll / Harold and Bob: `Enchanted Forest has '{T}: …' and '{1}, {T}, …'`).
+/// Downstream grant parsers recognise only double-quoted ability bodies — single
+/// quotes are ambiguous with apostrophes — so promote each nested pair to double
+/// quotes independently. Openers are anchored on grant verbs (`have '` / `has '`
+/// / `gain '` / `gains '`) or chained ` and '` so a possessive apostrophe in the
+/// subject phrase is never mistaken for the delimiter.
+pub(crate) fn promote_nested_ability_quotes(body: &str) -> String {
+    let mut pairs = Vec::new();
+    let mut search_from = 0;
+    while let Some((open_quote, close_quote)) = next_nested_ability_quote_span(body, search_from) {
+        pairs.push((open_quote, close_quote));
+        search_from = close_quote + 1;
+    }
+    if pairs.is_empty() {
+        return body.to_string();
+    }
+    let mut promoted = String::with_capacity(body.len());
+    let mut last = 0;
+    for (open_quote, close_quote) in pairs {
+        promoted.push_str(&body[last..open_quote]);
+        promoted.push('"');
+        promoted.push_str(&body[open_quote + 1..close_quote]);
+        promoted.push('"');
+        last = close_quote + 1;
+    }
+    promoted.push_str(&body[last..]);
+    promoted
+}
+
 pub(crate) fn strip_quoted_segments(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut in_quote = false;
@@ -1334,7 +1393,12 @@ pub(crate) fn parse_single_pt_value(text: &str) -> Option<i32> {
 pub(crate) fn parse_quoted_rule_static_modifications(
     text: &str,
 ) -> Option<Vec<ContinuousModification>> {
-    if find_cost_separator(text).is_some() {
+    // CR 602.1: A cost separator inside a double-quoted granted ability
+    // (`Creatures you control have "{T}: Add {R}."`) is part of the inner
+    // activated ability, not the outer static line — mask quoted spans before
+    // testing so the static grant path is not skipped (Roar of the Fifth People
+    // chapter II, #5978).
+    if find_cost_separator(&strip_quoted_segments(text)).is_some() {
         return None;
     }
 
@@ -2496,4 +2560,42 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
     }
 
     Some(definition)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::promote_nested_ability_quotes;
+
+    #[test]
+    fn promote_nested_ability_quotes_old_growth_troll_chained_grants() {
+        let body = "Enchanted Forest has '{T}: Add {G}{G}' and '{1}, {T}, Sacrifice this land: Create a tapped 4/4 green Troll Warrior creature token with trample.'";
+        assert_eq!(
+            promote_nested_ability_quotes(body),
+            "Enchanted Forest has \"{T}: Add {G}{G}\" and \"{1}, {T}, Sacrifice this land: Create a tapped 4/4 green Troll Warrior creature token with trample.\""
+        );
+    }
+
+    #[test]
+    fn promote_nested_ability_quotes_harold_and_bob_single_grant() {
+        let body = "Enchanted Forest has '{T}: Add three mana of any one color. You get two rad counters.'";
+        assert_eq!(
+            promote_nested_ability_quotes(body),
+            "Enchanted Forest has \"{T}: Add three mana of any one color. You get two rad counters.\""
+        );
+    }
+
+    #[test]
+    fn promote_nested_ability_quotes_roar_creature_tap_mana_grant() {
+        let body = "Creatures you control have '{T}: Add {R}, {G}, or {W}.'";
+        assert_eq!(
+            promote_nested_ability_quotes(body),
+            "Creatures you control have \"{T}: Add {R}, {G}, or {W}.\""
+        );
+    }
+
+    #[test]
+    fn promote_nested_ability_quotes_leaves_unquoted_bodies_unchanged() {
+        let body = "Creatures you control have flying";
+        assert_eq!(promote_nested_ability_quotes(body), body);
+    }
 }

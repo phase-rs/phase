@@ -1037,6 +1037,15 @@ pub(crate) enum TargetedImperativeAst {
         /// True for the untargeted mass form ("gain control of all/each …"),
         /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
         all: bool,
+        /// CR 115.1d + CR 601.2c: Variable target count for "gain control of up to N target
+        /// …" (The Super Hero Civil War's "up to two target creatures with total
+        /// mana value 6 or less"; Jace, Ingenious Mind-Mage's "up to three target
+        /// creatures"). `None` for the common single-target "gain control of
+        /// target creature". Carried onto `ParsedEffectClause.multi_target` at
+        /// lowering so the targeting system surfaces N optional slots — without
+        /// it the count collapsed to one and only a single creature could be
+        /// chosen (issue #6205). Mirrors the same field on `Tap`/`Untap`.
+        multi_target: Option<MultiTargetSpec>,
     },
     ControlNextTurn {
         target: TargetFilter,

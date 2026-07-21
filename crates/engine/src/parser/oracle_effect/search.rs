@@ -111,15 +111,46 @@ pub(super) fn parse_search_library_details(
         None
     };
 
+    // CR 608.2c: "for that many/much [FILTER] cards" without "up to" — an
+    // anaphoric back-reference to a count produced by an earlier instruction in
+    // the same resolution (Settle the Wreckage: "Exile all attacking creatures
+    // target player controls. That player may search their library for that many
+    // basic land cards …"). Distinct from the "up to that many" path above: this
+    // is an exact count (find that many if able), not an up-to ceiling. The
+    // returned offset points past "that many/much" so the trailing type phrase
+    // ("basic land cards") is still handed to the filter parser below — without
+    // this branch the whole clause fell through to the `Fixed { 1 }` default with
+    // a dropped filter, so the search silently became "find one card of any type".
+    let for_that_many_match =
+        if up_to_match.is_none() && any_number_tail.is_none() && for_match.is_none() {
+            scan_preceded(lower, "for ", |input| {
+                // Delegate to the single demonstrative-amount authority
+                // (`parse_that_much_or_many`, CR 608.2h) rather than re-composing
+                // the "that many"/"that much" tags here, so the count-prefix
+                // grammar stays defined in exactly one place.
+                map(nom_quantity::parse_that_much_or_many, |qty| {
+                    QuantityExpr::Ref { qty }
+                })
+                .parse(input)
+            })
+        } else {
+            None
+        };
+
     // CR 107.1c + CR 701.23d: up_to=true ⇒ searcher picks 0..=count (vs. exactly count).
     // "any number of" uses i32::MAX as an unbounded ceiling — the resolver floors it
     // against matching.len(), so the effective ceiling is always the legal-option set.
-    let (count, count_end_in_for, up_to) = match (any_number_tail, up_to_match, for_match) {
-        (Some(off), _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
-        (None, Some((expr, off)), _) => (expr, Some(off), true),
-        (None, None, Some((expr, _))) => (expr, None, false),
-        (None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
-    };
+    let (count, count_end_in_for, up_to) =
+        match (any_number_tail, up_to_match, for_match, for_that_many_match) {
+            (Some(off), _, _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
+            (None, Some((expr, off)), _, _) => (expr, Some(off), true),
+            (None, None, Some((expr, _)), _) => (expr, None, false),
+            // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
+            // phrase is parsed into the filter (unlike the numeric `for` path, whose
+            // pre-existing filter handling is intentionally left unchanged here).
+            (None, None, None, Some((expr, off))) => (expr, Some(off), false),
+            (None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
+        };
 
     // Extract the type filter from after "for a/an" or from the tail after "up to N"
     // or "any number of".

@@ -968,10 +968,10 @@ pub(crate) fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDe
 }
 
 /// CR 101.2 + CR 109.5 + CR 508.1 + CR 601.3a: "Each [scope] who [did X] this turn
-/// can't [Y]" — a static prohibition gated on a PER-AFFECTED-PLAYER turn-activity
-/// predicate (Angelic Arbiter).
+/// can't [Y]" — a static prohibition gated on a PER-AFFECTED-PLAYER predicate
+/// (Angelic Arbiter, Ward of Bones).
 ///
-/// The two clauses are:
+/// The clauses are:
 /// - "Each opponent who attacked with a creature this turn can't cast spells."
 ///   → `CantBeCast { who: Opponents }` + `per_player_condition: YouAttackedThisTurn`
 ///   (CR 601.3a cast prohibition).
@@ -979,11 +979,23 @@ pub(crate) fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDe
 ///   → `CantAttack` with `affected = opponents' creatures` +
 ///   `per_player_condition: YouCastSpellThisTurn { filter: None }` (CR 508.1
 ///   declare-attackers prohibition).
+/// - "Each opponent who controls more lands than you can't play lands." (Ward
+///   of Bones, line 2) → `StaticMode::Other("CantPlayLand")`, `affected` =
+///   opponents' player scope, `per_player_condition: QuantityComparison`
+///   (`controls_more_than_you_condition` — a relative permanent-count gate
+///   rather than a turn-activity predicate).
 ///
-/// The turn-activity predicate is stored in `per_player_condition` (CR 109.5:
-/// evaluated against the AFFECTED player — the caster, or the attacking creature's
-/// controller), NEVER in `condition` (which is the source-relative functioning
-/// gate). `condition` stays `None` so the prohibition is not globally gated.
+/// Ward of Bones's OTHER clause ("controls more creatures than you can't cast
+/// creature spells. The same is true for artifacts and enchantments.") is NOT
+/// handled here — each named type is an independent per-type prohibition, so
+/// it needs a multi-def result and is owned by the sibling
+/// `parse_relative_count_typed_cast_prohibitions` on the multi-static path.
+///
+/// The per-affected-player predicate is stored in `per_player_condition` (CR
+/// 109.5: evaluated against the AFFECTED player — the caster, or the attacking
+/// creature's controller), NEVER in `condition` (which is the source-relative
+/// functioning gate). `condition` stays `None` so the prohibition is not
+/// globally gated.
 ///
 /// Composed from the shared `strip_casting_prohibition_subject` building block plus
 /// nom `tag`/`alt`/`value` — no string-matching dispatch.

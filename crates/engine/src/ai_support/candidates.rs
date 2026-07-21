@@ -17,7 +17,7 @@ use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
     CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CounterCostChoice,
     CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind,
-    PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -2929,6 +2929,19 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 732.2a: an accepted object-growth loop collapses into a finite count
+        // the controller names. `max` is the engine's 1000-wide loop bound; the AI
+        // never wants a huge pile, so offer only the default N=1 — this bounds
+        // search regardless of the display cap. Must precede the general arm below.
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: PayableResource::LoopCollapse { .. },
+            ..
+        } => vec![candidate(
+            GameAction::SubmitPayAmount { amount: 1 },
+            TacticalClass::Selection,
+            Some(*player),
+        )],
         // CR 107.1c + CR 107.14: Enumerate every legal amount in [min, max].
         // AI search layer picks among these; for a damage-scaling effect like
         // Galvanic Discharge the evaluator prefers the maximum (most damage).
@@ -4992,6 +5005,7 @@ mod tests {
         StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::LoopCollapseAxis;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -5688,6 +5702,43 @@ mod tests {
         let actions = candidate_actions(&state);
         assert_eq!(actions.len(), 2);
         assert!(matches!(actions[0].action, GameAction::ChooseTarget { .. }));
+    }
+
+    /// CR 732.2a: at a `PayableResource::LoopCollapse` prompt the AI enumerates ONLY
+    /// the default N=1 — never the 1000-wide `min..=max` range (which would explode
+    /// search). Drives the real `candidate_actions` production entry point.
+    ///
+    /// REVERT-PROBE: delete the `LoopCollapse` arm in
+    /// `candidate_actions_broad_with_probe` → the general PayAmountChoice arm
+    /// enumerates `0..=1000` → this single-candidate assertion FLIPS.
+    #[test]
+    fn pay_amount_loop_collapse_offers_only_default_one() {
+        let state = GameState {
+            waiting_for: WaitingFor::PayAmountChoice {
+                player: PlayerId(0),
+                resource: PayableResource::LoopCollapse {
+                    axis: LoopCollapseAxis::Tokens,
+                },
+                min: 0,
+                max: 1000,
+                accumulated: 0,
+                source_id: crate::types::identifiers::ObjectId(0),
+                pending_mana_ability: None,
+            },
+            ..GameState::new_two_player(42)
+        };
+        let pay_amounts: Vec<u32> = candidate_actions(&state)
+            .iter()
+            .filter_map(|a| match a.action {
+                GameAction::SubmitPayAmount { amount } => Some(amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pay_amounts,
+            vec![1],
+            "LoopCollapse offers only the default N=1, not the 1000-wide range"
+        );
     }
 
     #[test]

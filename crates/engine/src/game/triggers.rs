@@ -192,6 +192,13 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
         WardCost::PayLife(amount) => AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: *amount },
         },
+        WardCost::PayLifeEqualToPower => AbilityCost::PayLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Source,
+                },
+            },
+        },
         WardCost::DiscardCard => AbilityCost::Discard {
             count: QuantityExpr::Fixed { value: 1 },
             filter: None,
@@ -1612,12 +1619,78 @@ fn source_has_trigger_in_zone(state: &GameState, source_id: ObjectId, zone: Zone
     })
 }
 
-fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
+pub(crate) fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone) -> bool {
     if def.trigger_zones.is_empty() {
         zone == Zone::Battlefield
     } else {
         def.trigger_zones.contains(&zone)
     }
+}
+
+/// CR 603.2 / CR 603.6a: can this observer's trigger event ever fire on the growing fodder
+/// class ENTERING the battlefield? Returns `true` iff it PROVABLY cannot — a scalar
+/// single-clause enters-the-battlefield trigger (`ChangesZone`/`ChangesZoneAll`,
+/// `destination == Battlefield`, no disjunctive `zone_change_clauses`) whose positive
+/// `valid_card` matcher excludes `class_member` (wrong subtype/type, `NonToken` vs a token, or
+/// a controller scope bound to a player other than the loop controller — CR 603.6a checks the
+/// entering permanent against the matcher). Matching is delegated verbatim to
+/// `trigger_matchers::valid_card_matches` (the SAME `matches_target_filter` +
+/// source-relative `FilterContext` path `match_changes_zone` uses at fire time), so no new
+/// subtype/controller logic is written here.
+///
+/// SOUNDNESS + ORDERING (GAP-1, load-bearing — do not reorder the callers): such a trigger never
+/// fires on the loop's per-cycle token creation because two invariants, checked IN ORDER inside
+/// `analysis::resource::loop_states_cover_modulo_fodder_growth`, guarantee the fodder is the ONLY
+/// class that changes across the covered cycle:
+///
+/// 1. the FIRST accept-time frame pair's single-new-battlefield-object is guaranteed by
+///    `game::engine::derived_fodder_class` (engine.rs:1996 — it returns `None` if more than one
+///    object entered the battlefield that cycle, so a `Some` fodder class means the fodder was
+///    the sole entrant); and
+/// 2. the SECOND cover frame pair's "only the fodder partition grows" is guaranteed SOLELY by
+///    `analysis::resource::board_covers_modulo_fodder` (resource.rs:1058), whose all-zones
+///    stable-partition content-equality is asserted at resource.rs:1145 — which PRECEDES the
+///    firewall call at resource.rs:1156. A reader/refactor must not reorder the
+///    `board_covers_modulo_fodder` gate after the firewall: the disjointness argument here
+///    relies on it having already proven that nothing but the fodder entered.
+///
+/// Therefore a matcher that provably excludes the fodder does not observe the loop and must not
+/// veto the CR 732.2a offer.
+///
+/// Fail-closed on every axis it cannot classify: a broad (`valid_card == None`), disjunctive
+/// (`zone_change_clauses` non-empty), non-battlefield-destination, or genuinely-matching observer
+/// returns `false` (it may observe the loop → the firewall keeps its conservative veto).
+pub(crate) fn etb_observer_provably_excludes_class(
+    def: &TriggerDefinition,
+    state: &GameState,
+    class_member: ObjectId,
+    source_id: ObjectId,
+) -> bool {
+    matches!(
+        def.mode,
+        TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll
+    ) && def.zone_change_clauses.is_empty()
+        && def.destination == Some(Zone::Battlefield)
+        && def.valid_card.is_some()
+        && {
+            // `valid_card_matches` takes an observation-time source-context snapshot
+            // (upstream's LKI-by-incarnation refactor) rather than a bare id, so
+            // source-relative refs in the `valid_card` filter resolve against the
+            // source's characteristics. Project the live functioning source the same
+            // way the trigger pipeline does (`trigger_source_context_for_latch`).
+            // `source_id` is the object being scanned, so it is always present;
+            // fail-closed (keep the veto) if it somehow isn't.
+            let Some(source) = state.objects.get(&source_id) else {
+                return false;
+            };
+            let source_context = trigger_source_context_for_latch(state, source);
+            !crate::game::trigger_matchers::valid_card_matches(
+                def,
+                state,
+                class_member,
+                &source_context,
+            )
+        }
 }
 
 fn source_was_not_co_departed_into_zone(
@@ -5293,6 +5366,9 @@ fn apply_trigger_order_template(
                 | PinnedDecision::Mode { .. }
                 | PinnedDecision::MayChoice { .. }
                 | PinnedDecision::UnlessBreak { .. }
+                // CR 608.2d: a mana-color pin is a CR 732.2a loop-choice template pin, never a
+                // CR 603.3b trigger-ordering pin.
+                | PinnedDecision::ManaColor { .. }
                 // CR 601.2h: a convoke cost-payment pin is a CR 732.2a loop-choice
                 // template pin, never a CR 603.3b trigger-ordering pin.
                 | PinnedDecision::ConvokeTaps { .. } => None,
@@ -7847,17 +7923,67 @@ fn additional_cost_paid_matches(
     }
 }
 
+/// Rejects a `ZoneChanged` event whose independently serialized provenance
+/// authorities disagree.
+///
+/// CR 400.7: A zone move creates a new object, so a later same-storage-id
+/// incarnation must not answer for the event's pre-change object.
+fn zone_changed_condition_provenance_is_coherent(event: &GameEvent) -> bool {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return true;
+    };
+
+    if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to {
+        return false;
+    }
+
+    record.trigger_source_context().is_none_or(|context| {
+        context.identity.reference.object_id == *object_id
+            && from.is_none_or(|from| context.identity.expected_zone == from)
+    })
+}
+
 /// Check whether an intervening-if condition is satisfied.
 /// Used both at fire-time and resolution-time.
 ///
-/// Predicates check player/game state directly.
-/// Combinators (`And`/`Or`) recurse into their children.
+/// CR 603.4: An intervening-if condition is checked when the ability would
+/// trigger and again as it resolves. Invalid zone-change provenance fails the
+/// whole check before boolean combinators can invert or mask it.
 ///
 /// `source_context` is the sole source-relative authority. Its object id may
 /// still be used for event attribution, but source facts must read through
 /// `TriggerSourceContext::source_read` so a later same-id incarnation cannot
 /// answer an intervening-if check.
 pub(crate) fn check_trigger_condition_with_source(
+    state: &GameState,
+    condition: &TriggerCondition,
+    controller: PlayerId,
+    source_context: Option<&TriggerSourceContext>,
+    trigger_event: Option<&GameEvent>,
+) -> bool {
+    if trigger_event.is_some_and(|event| !zone_changed_condition_provenance_is_coherent(event)) {
+        return false;
+    }
+
+    evaluate_trigger_condition_with_source(
+        state,
+        condition,
+        controller,
+        source_context,
+        trigger_event,
+    )
+}
+
+/// Evaluates a condition after the outer event-provenance boundary has accepted
+/// its input. Boolean combinators recurse here so invalid provenance cannot be
+/// reinterpreted as an ordinary false operand.
+fn evaluate_trigger_condition_with_source(
     state: &GameState,
     condition: &TriggerCondition,
     controller: PlayerId,
@@ -8750,19 +8876,14 @@ pub(crate) fn check_trigger_condition_with_source(
                 false
             }
         }
-        // CR 603.10 + CR 608.2h: "if it had counters on it" — "it" is the
+        // CR 603.10a + CR 608.2h: "if it had counters on it" — "it" is the
         // triggering object (the creature that left/died), not the trigger
         // source. Counters cease to exist when a permanent changes zones
-        // (CR 122.2), so this look-back reads the counters the object had as it
-        // left from its last-known information. For a watcher that observes
-        // OTHER permanents leaving (The Ozolith: "Whenever a creature you
-        // control leaves the battlefield, if IT had counters on it"), the
-        // triggering object is the leaving creature, extracted from the event;
-        // its LKI is keyed by its own ObjectId, not the source's. For a
-        // self-referential trigger (Undying's "When this creature dies, if it
-        // had no +1/+1 counters on it"), the triggering object IS the source.
-        // The event-less fallback reads the captured source LKI rather than a
-        // later object that happens to reuse its storage id.
+        // (CR 122.2), so a coherent ZoneChanged record owns the exact
+        // pre-change LKI. Only a legacy/defaulted record with no context may
+        // fall back to the ObjectId-keyed cache. Other event subjects retain
+        // the existing cache lookup, while an event-less condition reads the
+        // captured source LKI.
         TriggerCondition::HadCounters { counter_type } => {
             let matches_counter = |lki: &crate::types::game_state::LKISnapshot| match counter_type {
                 Some(counter_type) => lki
@@ -8771,17 +8892,28 @@ pub(crate) fn check_trigger_condition_with_source(
                     .is_some_and(|&count| count > 0),
                 None => lki.counters.values().any(|&count| count > 0),
             };
-            if let Some(event_object_id) =
-                trigger_event.and_then(crate::game::targeting::extract_source_from_event)
-            {
-                // Event-subject LKI is keyed by the triggering object.
-                state
-                    .lki_cache
-                    .get(&event_object_id)
-                    .is_some_and(matches_counter)
-            } else {
-                source_context
-                    .is_some_and(|source| matches_counter(&source.source_read(state).lki()))
+            match trigger_event {
+                Some(GameEvent::ZoneChanged {
+                    object_id, record, ..
+                }) => match record.trigger_source_context() {
+                    Some(context) => matches_counter(&context.lki),
+                    None => state.lki_cache.get(object_id).is_some_and(matches_counter),
+                },
+                Some(event) => {
+                    if let Some(event_object_id) =
+                        crate::game::targeting::extract_source_from_event(event)
+                    {
+                        state
+                            .lki_cache
+                            .get(&event_object_id)
+                            .is_some_and(matches_counter)
+                    } else {
+                        source_context
+                            .is_some_and(|source| matches_counter(&source.source_read(state).lki()))
+                    }
+                }
+                None => source_context
+                    .is_some_and(|source| matches_counter(&source.source_read(state).lki())),
             }
         }
         // CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they]
@@ -8806,15 +8938,27 @@ pub(crate) fn check_trigger_condition_with_source(
             _ => false,
         },
         TriggerCondition::And { conditions } => conditions.iter().all(|c| {
-            check_trigger_condition_with_source(state, c, controller, source_context, trigger_event)
+            evaluate_trigger_condition_with_source(
+                state,
+                c,
+                controller,
+                source_context,
+                trigger_event,
+            )
         }),
         TriggerCondition::Or { conditions } => conditions.iter().any(|c| {
-            check_trigger_condition_with_source(state, c, controller, source_context, trigger_event)
+            evaluate_trigger_condition_with_source(
+                state,
+                c,
+                controller,
+                source_context,
+                trigger_event,
+            )
         }),
         // CR 603.4 + CR 608.2c: Logical negation — invert the wrapped condition's
         // truth value. Used for "unless [phrase]" intervening-if patterns; mirrors
         // `TargetFilter::Not` and `StaticCondition::Not`.
-        TriggerCondition::Not { condition } => !check_trigger_condition_with_source(
+        TriggerCondition::Not { condition } => !evaluate_trigger_condition_with_source(
             state,
             condition,
             controller,
@@ -10030,6 +10174,7 @@ pub mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::events::{GameEvent, ManaTapState};
     use crate::types::game_state::{
         DamageRecord, DelayedTrigger, DistributionUnit, GameState, LayersDirty, LoopDetectionMode,
@@ -18177,6 +18322,19 @@ pub mod tests {
             }
         ));
 
+        let power_life = WardCost::PayLifeEqualToPower;
+        let result = ward_cost_to_ability_cost(&power_life);
+        assert!(matches!(
+            result,
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    }
+                }
+            }
+        ));
+
         // Discard
         let discard = WardCost::DiscardCard;
         let result = ward_cost_to_ability_cost(&discard);
@@ -19457,6 +19615,89 @@ pub mod tests {
             PlayerId(0),
             Some(src),
             None,
+        ));
+    }
+
+    #[test]
+    fn had_counters_without_event_uses_latched_source_context() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Countered prior incarnation".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .expect("source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let source_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source).expect("source exists"),
+        );
+
+        move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+        move_to_zone(&mut state, source, Zone::Battlefield, &mut Vec::new());
+        assert!(
+            state.objects[&source].counters.is_empty(),
+            "CR 122.2: the later live incarnation must be counterless"
+        );
+
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &TriggerCondition::HadCounters {
+                counter_type: Some(CounterType::Plus1Plus1),
+            },
+            PlayerId(0),
+            Some(&source_context),
+            None,
+        ));
+    }
+
+    #[test]
+    fn had_counters_non_zone_event_preserves_event_subject_cache_lookup() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counterless watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let subject = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Countered event subject".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&subject)
+            .expect("subject exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let watcher_context = trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&watcher).expect("watcher exists"),
+        );
+        move_to_zone(&mut state, subject, Zone::Graveyard, &mut Vec::new());
+        let event = GameEvent::PermanentTapped {
+            object_id: subject,
+            caused_by: None,
+        };
+
+        assert!(check_trigger_condition_with_source(
+            &state,
+            &TriggerCondition::HadCounters {
+                counter_type: Some(CounterType::Plus1Plus1),
+            },
+            PlayerId(0),
+            Some(&watcher_context),
+            Some(&event),
         ));
     }
 

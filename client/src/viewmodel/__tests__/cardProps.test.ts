@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { GameObject } from "../../adapter/types";
-import { toCardProps, toRoman } from "../cardProps";
+import { formatCounterTooltip, toCardProps, toRoman } from "../cardProps";
 
 function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   return {
@@ -184,5 +184,48 @@ describe("toRoman", () => {
 
   it("falls back to the arabic numeral for a Class level beyond V", () => {
     expect(toRoman(6)).toBe("6");
+  });
+});
+
+// LOW-4 (CR 732.2a / CR 701.34a): while an accepted counter-growth loop pumps a counter, the
+// badge renders `∞` — the tooltip summary must say "unbounded" and NOT leak the still-finite
+// count. `isUnbounded` is the display-only flag threaded from the engine's `unbounded_counters`
+// membership set (never computed in the frontend).
+describe("formatCounterTooltip — unbounded summary", () => {
+  it("says ∞ and hides the finite count when unbounded (fallback, no translator)", () => {
+    const summary = formatCounterTooltip("charge", 4, undefined, true);
+    expect(summary).toContain("∞");
+    expect(summary).not.toContain("4");
+  });
+
+  it("shows the finite count when bounded (fallback, no translator) — matched pair", () => {
+    const summary = formatCounterTooltip("charge", 4, undefined, false);
+    expect(summary).toContain("4");
+    expect(summary).not.toContain("∞");
+  });
+
+  it("routes to the summaryUnbounded key WITHOUT forwarding the finite count (translator path)", () => {
+    const calls: Array<{ key: string; opts: Record<string, unknown> }> = [];
+    const translate = ((key: string, opts: Record<string, unknown>) => {
+      calls.push({ key, opts });
+      return key;
+    }) as never;
+    formatCounterTooltip("charge", 4, translate, true);
+    const call = calls.find((c) => c.key === "counterTooltip.summaryUnbounded");
+    expect(call, "the unbounded flag must select the summaryUnbounded key").toBeDefined();
+    // The finite `count` is NOT interpolated into the unbounded summary (no leak).
+    expect(call?.opts).not.toHaveProperty("count");
+  });
+
+  it("routes to the plural summary key WITH the count when bounded (revert-flip matched pair)", () => {
+    const calls: Array<{ key: string; opts: Record<string, unknown> }> = [];
+    const translate = ((key: string, opts: Record<string, unknown>) => {
+      calls.push({ key, opts });
+      return key;
+    }) as never;
+    formatCounterTooltip("charge", 4, translate, false);
+    const call = calls.find((c) => c.key === "counterTooltip.summary");
+    expect(call, "the bounded path must select the numeric summary key").toBeDefined();
+    expect(call?.opts).toMatchObject({ count: 4 });
   });
 });

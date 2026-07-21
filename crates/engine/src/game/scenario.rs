@@ -1864,6 +1864,7 @@ pub struct SpellCast<'a> {
     alternative_cast: Option<AlternativeCastDecision>,
     adventure_creature: Option<bool>,
     casting_variant: Option<CastingVariant>,
+    free_cast: bool,
     modes: Option<Vec<usize>>,
     x: Option<u32>,
     target_players: Vec<PlayerId>,
@@ -1891,6 +1892,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast: None,
             adventure_creature: None,
             casting_variant: None,
+            free_cast: false,
             modes: None,
             x: None,
             target_players: Vec::new(),
@@ -1956,6 +1958,15 @@ impl<'a> SpellCast<'a> {
     /// surfaces a variant choice without an explicit test intent.
     pub fn casting_variant(mut self, variant: CastingVariant) -> Self {
         self.casting_variant = Some(variant);
+        self
+    }
+
+    /// Elect the free `HandPermission` option at a `CastingVariantChoice` without
+    /// having to name the granting source's `ObjectId` (CR 118.9 / CR 118.9a). The
+    /// driver picks the first `CastingVariant::HandPermission` option the menu
+    /// offers — the Omniscience-class "cast without paying its mana cost" branch.
+    pub fn free_cast(mut self) -> Self {
+        self.free_cast = true;
         self
     }
 
@@ -2100,6 +2111,7 @@ impl<'a> SpellCast<'a> {
             alternative_cast,
             adventure_creature,
             casting_variant,
+            free_cast,
             modes,
             x,
             target_players,
@@ -2200,21 +2212,38 @@ impl<'a> SpellCast<'a> {
                     )?;
                 }
                 WaitingFor::CastingVariantChoice { options, .. } => {
-                    let variant = casting_variant.unwrap_or_else(|| {
-                        panic!(
-                            "SpellCast reached WaitingFor::CastingVariantChoice but no \
-                             .casting_variant(..) was declared — declare the intended cast variant"
-                        )
-                    });
-                    let index = options
-                        .iter()
-                        .position(|option| option.variant == variant)
-                        .unwrap_or_else(|| {
+                    // CR 118.9 / CR 118.9a: `.free_cast()` elects the first
+                    // `HandPermission` option without naming the source id;
+                    // otherwise match the explicitly declared `.casting_variant(..)`.
+                    let index = if free_cast {
+                        options
+                            .iter()
+                            .position(|option| {
+                                matches!(option.variant, CastingVariant::HandPermission { .. })
+                            })
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "SpellCast .free_cast() found no HandPermission option in {:?}",
+                                    options
+                                )
+                            })
+                    } else {
+                        let variant = casting_variant.unwrap_or_else(|| {
                             panic!(
-                                "SpellCast could not find requested cast variant {:?} in options {:?}",
-                                variant, options
+                                "SpellCast reached WaitingFor::CastingVariantChoice but no \
+                                 .casting_variant(..) was declared — declare the intended cast variant"
                             )
                         });
+                        options
+                            .iter()
+                            .position(|option| option.variant == variant)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "SpellCast could not find requested cast variant {:?} in options {:?}",
+                                    variant, options
+                                )
+                            })
+                    };
                     selected_casting_variant = Some(options[index].clone());
                     act_collect(
                         runner,

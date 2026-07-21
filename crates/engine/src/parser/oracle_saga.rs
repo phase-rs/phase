@@ -578,6 +578,89 @@ mod tests {
         );
     }
 
+    /// CR 611.2b + CR 714.2b + CR 602.5: Roar of the Fifth People chapter II
+    /// grants the Saga a static ability whose text is "Creatures you control have
+    /// '{T}: Add {R}, {G}, or {W}.'". The nested single-quoted tap ability must
+    /// parse as a `GrantStaticAbility` on creatures you control — NOT a broken
+    /// activated ability on the Saga itself (#5978).
+    #[test]
+    fn roar_chapter_two_grants_creature_tap_mana_ability() {
+        use crate::game::mana_abilities::is_mana_ability;
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, ManaProduction, TypeFilter,
+        };
+        use crate::types::mana::ManaColor;
+
+        let lines = vec![
+            "II — This Saga gains \"Creatures you control have '{T}: Add {R}, {G}, or {W}.'\"",
+        ];
+        let (triggers, _etb, _consumed) = saga_test_chapters(&lines, "Roar of the Fifth People");
+        assert_eq!(triggers.len(), 1);
+        let exec = triggers[0].execute.as_ref().unwrap();
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*exec.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", exec.effect);
+        };
+        assert_eq!(
+            duration.as_ref(),
+            Some(&Duration::UntilHostLeavesPlay),
+            "chapter-granted ability must persist while saga is in play"
+        );
+        let ContinuousModification::GrantStaticAbility { definition } =
+            &static_abilities[0].modifications[0]
+        else {
+            panic!(
+                "expected GrantStaticAbility for nested static grant, got {:?}",
+                static_abilities[0].modifications
+            );
+        };
+        let affected = definition
+            .affected
+            .as_ref()
+            .expect("inner static must scope creatures you control");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("expected typed creature filter, got {other:?}"),
+        }
+        let ContinuousModification::GrantAbility {
+            definition: granted,
+        } = &definition
+            .modifications
+            .iter()
+            .find(|m| matches!(m, ContinuousModification::GrantAbility { .. }))
+            .expect("inner static must grant the tap mana ability")
+        else {
+            unreachable!();
+        };
+        assert!(
+            is_mana_ability(granted),
+            "granted ability must be a mana ability"
+        );
+        assert!(
+            matches!(&*granted.effect, Effect::Mana { .. }),
+            "granted ability must add mana, got {:?}",
+            granted.effect
+        );
+        if let Effect::Mana {
+            produced: ManaProduction::AnyOneColor { color_options, .. },
+            ..
+        } = &*granted.effect
+        {
+            assert!(color_options.contains(&ManaColor::Red));
+            assert!(color_options.contains(&ManaColor::Green));
+            assert!(color_options.contains(&ManaColor::White));
+        } else {
+            panic!("expected AnyOneColor mana production");
+        }
+    }
+
     /// CR 514.2: Roar of the Fifth People chapter IV explicitly says "until end
     /// of turn" — the explicit duration must NOT be promoted to
     /// `UntilHostLeavesPlay`. Regression guard for the promoter's

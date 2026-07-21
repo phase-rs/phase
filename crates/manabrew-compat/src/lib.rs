@@ -1851,6 +1851,7 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::SetAutoPass { .. }
         | GameAction::CancelAutoPass
         | GameAction::SetPhaseStops { .. }
+        | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {

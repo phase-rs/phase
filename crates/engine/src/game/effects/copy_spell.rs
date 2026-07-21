@@ -304,9 +304,7 @@ fn apply_spell_copy_modifications(
             // Stamp base + live (mirroring blitz's dies-trigger seeding) so the
             // trigger persists once the copy becomes a token permanent.
             ContinuousModification::GrantTrigger { trigger } => {
-                std::sync::Arc::make_mut(&mut copy_obj.base_trigger_definitions)
-                    .push((**trigger).clone());
-                copy_obj.trigger_definitions.push((**trigger).clone());
+                copy_obj.push_printed_trigger((**trigger).clone());
             }
             _ => {}
         }

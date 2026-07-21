@@ -2092,6 +2092,52 @@ fn set_phase_stops_from_non_priority_actor_succeeds() {
 }
 
 #[test]
+fn set_priority_passing_mode_is_actor_scoped_sparse_and_any_state() {
+    use crate::types::game_state::PriorityPassingMode;
+
+    let mut state = setup_game_at_main_phase();
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+    let waiting = state.waiting_for.clone();
+    let passes = state.priority_passes.clone();
+    let auto_pass = state.auto_pass.clone();
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::SkipLowUseWindows,
+        },
+    )
+    .expect("non-priority actor may set their own mode");
+
+    assert_eq!(result.events, Vec::new());
+    assert_eq!(state.waiting_for, waiting);
+    assert_eq!(state.priority_passes, passes);
+    assert_eq!(state.auto_pass, auto_pass);
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(0)),
+        PriorityPassingMode::SkipLowUseWindows
+    );
+    assert_eq!(
+        state.priority_passing_mode(PlayerId(1)),
+        PriorityPassingMode::Standard
+    );
+
+    apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetPriorityPassingMode {
+            mode: PriorityPassingMode::Standard,
+        },
+    )
+    .expect("Standard removes the sparse preference entry");
+    assert!(state.priority_passing_modes.is_empty());
+}
+
+#[test]
 fn cancel_auto_pass_routes_by_actor() {
     // Regression: P0 had an auto-pass session; P1 holds priority and submits
     // CancelAutoPass on P0's behalf would previously cancel *P1's* session
@@ -10562,5 +10608,59 @@ fn morph_casts_face_down_under_multiple_name_prohibitions() {
     assert!(
         obj.name.is_empty(),
         "CR 708.2a: a face-down spell has no name"
+    );
+}
+
+/// LOW-2 (CR 732.2a / CR 111.10): `derived_fodder_class` is the single-new-object gate that
+/// guarantees the boundary Tokens mint's per-cycle fodder count k ≡ 1. It returns `Some(class)`
+/// for a period that reproduced EXACTLY one new battlefield object, and `None` for a period that
+/// reproduced two+ (a non-certifiable multi-fodder shape ⇒ no `Tokens` stash ⇒ no k·N undercount).
+/// This is the structural proof behind the k≡1 annotation at the boundary mint and on the
+/// `PersistentAxisMaterialization::Tokens` variant.
+///
+/// REVERT-FAILING assertion: delete `if new_ids.next().is_some() { return None }` in
+/// `derived_fodder_class` (engine.rs) ⇒ the two-new-object case returns `Some(first)` ⇒ the
+/// `is_none()` assert below flips to FAIL. Non-vacuity: the paired one-new-object `Some` case is
+/// the positive reach-guard (the gate genuinely admits the k≡1 shape).
+#[test]
+fn derived_fodder_class_is_single_new_object_gate() {
+    let before = GameState::new_two_player(7);
+
+    // One new battlefield object across the period ⇒ Some(class) (the k≡1 certifiable shape).
+    let mut after_one = before.clone();
+    let saproling = create_object(
+        &mut after_one,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    let class = derived_fodder_class(&before, &after_one);
+    assert!(
+        class.as_ref().is_some_and(|o| o.id == saproling),
+        "reach-guard: one new battlefield object ⇒ the reproduced fodder class; got {class:?}"
+    );
+
+    // Two new battlefield objects across the period ⇒ None: a multi-fodder period is not this
+    // shape, so no `Tokens` stash is registered and the k>1 undercount is unreachable.
+    let mut after_two = before.clone();
+    create_object(
+        &mut after_two,
+        CardId(1),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    create_object(
+        &mut after_two,
+        CardId(2),
+        PlayerId(0),
+        "Saproling".to_string(),
+        Zone::Battlefield,
+    );
+    assert!(
+        derived_fodder_class(&before, &after_two).is_none(),
+        "single-new-object gate: two new battlefield objects ⇒ None (delete the second-`next` \
+         guard and this flips to Some)"
     );
 }
