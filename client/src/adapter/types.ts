@@ -321,10 +321,19 @@ export interface MeldSelection {
 // engine surfaces on the declare-attackers/blockers waiting payloads for
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
-  | { kind: "MustAttack"; players: PlayerId[] }
-  | { kind: "MustBlock" }
-  | { kind: "CantAttack" }
-  | { kind: "CantBlock" };
+  | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
+  | { kind: "MustBlock"; sources?: ObjectId[] }
+  | { kind: "CantAttack"; sources?: ObjectId[] }
+  | { kind: "CantBlock"; sources?: ObjectId[] };
+
+// CR 702.111b (Menace) + CR 509.1b ("except by N or more"): the minimum-blocker
+// COUNT floor for one attacker, with `sources` naming the carriers imposing it
+// (the attacker itself for Menace; each `MinBlockers` static's carrier otherwise).
+// Mirrors the Rust `BlockRequirement`; `sources` omitted when empty.
+export interface BlockRequirementInfo {
+  count: number;
+  sources?: ObjectId[];
+}
 
 // CR 702.19: Which trample variant applies to combat damage assignment.
 export type TrampleKind = "Standard" | "OverPlaneswalkers";
@@ -362,6 +371,9 @@ export interface PhaseStop {
   phase: Phase;
   scope: PhaseStopScope;
 }
+
+/** Standing engine preference for ordinary priority recommendations. */
+export type PriorityPassingMode = "Standard" | "SkipLowUseWindows";
 
 export type Zone =
   | "Library"
@@ -558,9 +570,13 @@ export type CastingVariant =
   | { type: "Foretell" }
   | { type: "Overload" }
   | { type: "Bestow" }
+  | { type: "Mutate" }
   | { type: "Awaken" }
   | { type: "Cleave" }
+  | { type: "Impending" }
   | { type: "MoreThanMeetsTheEye" }
+  | { type: "Prototype" }
+  | { type: "FaceDown" }
   | { type: "Freerunning" }
   | { type: "Fuse" };
 
@@ -854,6 +870,31 @@ export type PhaseStatus =
   | { status: "PhasedIn" }
   | { status: "PhasedOut"; cause: "Directly" | "Indirectly" };
 
+/**
+ * CR 602.5: Why one of an object's activated abilities is blocked from
+ * activation. Mirrors the Rust `AbilityBlockKind` (serde `tag = "type"`).
+ * Display only.
+ */
+export type AbilityBlockKind =
+  | "CantBeActivated"
+  | "CantActivateDuring"
+  | "Prohibited";
+
+/**
+ * CR 602.5: A single blocked-ability read-out entry. `ability_index` indexes the
+ * object's activated-ability definition space (`0..abilities.length` for printed
+ * abilities; `>= abilities.length` for runtime-granted ones — render the reason
+ * text alone in that case). `sources` are the prohibiting permanents' object ids
+ * (each may be absent from `gameState.objects` if it has since left play; two
+ * Pithing Needles naming the same card → both). Mirrors the Rust
+ * `AbilityBlockEntry` (flattened reason); `sources` is omitted when empty.
+ */
+export interface AbilityBlockEntry {
+  ability_index: number;
+  sources?: number[];
+  type: AbilityBlockKind;
+}
+
 export interface GameObject {
   id: ObjectId;
   card_id: CardId;
@@ -908,6 +949,13 @@ export interface GameObject {
   class_level?: number;
   devotion?: number;
   available_mana_pips?: ManaPip[];
+  /**
+   * CR 602.5: Display-only read-out of which of this object's activated abilities
+   * are currently blocked from activation, and by what source. Populated by the
+   * engine derive sweep; omitted when empty. The frontend renders a badge/tooltip
+   * from this — it MUST NOT infer block state from any other field.
+   */
+  blocked_abilities?: AbilityBlockEntry[];
   /** CR 701.15c: players who have goaded this creature (it must attack a
    *  player other than them, if able). Empty/omitted when not goaded. */
   goaded_by?: PlayerId[];
@@ -1481,7 +1529,7 @@ export type WaitingFor =
   | { type: "PayAmountChoice"; data: { player: PlayerId; resource: PayableResource; min: number; max: number; accumulated?: number; source_id: ObjectId; pending_mana_ability?: unknown } }
   | { type: "TargetSelection"; data: { player: PlayerId; pending_cast: PendingCast; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; selection: TargetSelectionProgress } }
   | { type: "DeclareAttackers"; data: { player: PlayerId; valid_attacker_ids: ObjectId[]; valid_attack_targets?: AttackTarget[]; valid_attack_targets_by_attacker?: Record<string, AttackTarget[]>; attacker_constraints?: Record<string, CombatRequirement> } }
-  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, number>; blocker_constraints?: Record<string, CombatRequirement> } }
+  | { type: "DeclareBlockers"; data: { player: PlayerId; valid_blocker_ids: ObjectId[]; valid_block_targets: Record<string, ObjectId[]>; block_requirements?: Record<string, BlockRequirementInfo>; blocker_constraints?: Record<string, CombatRequirement> } }
   | { type: "GameOver"; data: { winner: PlayerId | null } }
   | { type: "ReplacementChoice"; data: { player: PlayerId; candidate_count: number; candidates?: ReplacementCandidateSummary[] } }
   | { type: "OrderTriggers"; data: { player: PlayerId; triggers: PendingTriggerSummary[] } }
@@ -1506,8 +1554,8 @@ export type WaitingFor =
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; trigger_controller?: PlayerId; trigger_event?: GameEvent; trigger_events?: GameEvent[]; target_slots: TargetSelectionSlot[]; mode_labels?: (string | null)[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source_id?: ObjectId } }
-  | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source_id: ObjectId; proposition_truth?: boolean } }
+  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" }; persist_player?: PlayerId } }
+  | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
@@ -2085,6 +2133,7 @@ export type GameAction =
     }
   | { type: "CancelAutoPass" }
   | { type: "SetPhaseStops"; data: { stops: PhaseStop[] } }
+  | { type: "SetPriorityPassingMode"; data: { mode: PriorityPassingMode } }
   | { type: "SetPriorityYield"; data: { op: PriorityYieldOp } }
   | { type: "SetMayTriggerAutoChoice"; data: { op: MayTriggerAutoChoiceOp } }
   // CR 603.3b: mirror engine GameAction::SetTriggerOrderTemplate (PR-7 phase-2 boundary sync).
@@ -2142,11 +2191,18 @@ export type ShardChoice =
   | { type: "PayMana" }
   | { type: "PayLife" };
 
+// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
+// into — a display-only label so the prompt names the correct axis.
+export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
+
 export type PayableResource =
   | { type: "Energy" }
   | { type: "ManaGeneric"; data: { per_x: number } }
   | { type: "Counters" }
-  | { type: "Speed" };
+  | { type: "Speed" }
+  // CR 732.2a: not a resource payment — the finite count an accepted
+  // object-growth loop shortcut collapses into (display-only; the engine mints).
+  | { type: "LoopCollapse"; data: { axis: LoopCollapseAxis } };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }
@@ -2455,6 +2511,7 @@ export type DecisionPointKind =
   | { Targets: { legal_targets: TargetRef[] } }
   | { ConvokeTaps: { tappable: ObjectId[] } }
   | { Mode: { available_modes: number[] } }
+  | { ManaColor: { color: ManaColor } }
   | "MayChoice"
   | "UnlessBreak";
 
@@ -2580,6 +2637,25 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_resources`.
    */
   unbounded_resources?: UnboundedResourceView[];
+  /**
+   * CR 732.2a / CR 110.1: battlefield object IDs forming an accepted object-growth
+   * loop's "∞ pile" (the winning controller's tapped fodder-class members). Engine-
+   * authored membership — the FE renders `∞` (not `×N`) on any battlefield group
+   * whose members are all in this set, and never re-derives which objects are the pile.
+   * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
+   */
+  unbounded_pile?: ObjectId[];
+  /**
+   * CR 732.2a / CR 701.34a: per-object `∞` counter channel — for each battlefield
+   * object (keyed by ObjectId-as-string), the counter-type keys whose preserved
+   * `Generic` counters an accepted counter-growth loop (proliferate charge, burden)
+   * pumps unboundedly. Each value string matches the object's `counters` map key
+   * (e.g. `"charge"`). The FE renders `∞` (not `×N`) on any counter pill whose type
+   * is in this set, and never re-derives which counters are unbounded. Empty/omitted
+   * when no counter-growth loop is active. Mirrors
+   * `engine::game::derived_views::DerivedViews::unbounded_counters`.
+   */
+  unbounded_counters?: Record<string, string[]>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */
@@ -2765,6 +2841,7 @@ export interface GameState {
   command_zone?: ObjectId[];
   auto_pass?: Record<number, AutoPassMode>;
   phase_stops?: Record<number, PhaseStop[]>;
+  priority_passing_modes?: Record<number, PriorityPassingMode>;
   /** CR 117.3d: the viewer's standing priority-yield preferences. */
   priority_yields?: PriorityYield[];
   /** CR 603.5: the viewer's stored "don't ask again" auto-choices for optional ("may") triggers. */
@@ -2965,6 +3042,13 @@ export const AdapterErrorCode = {
    * correctly refused a stale action. Dispatch treats it as a no-op rather
    * than surfacing it as a crash.
    */
+  /**
+   * The engine refused the submitted action. Long used as a bare string literal
+   * by the remote adapters; registered here so `actionRejectionError` — and any
+   * future caller — can reference it type-safely. Same wire value, so existing
+   * string comparisons are unaffected.
+   */
+  ACTION_REJECTED: "ACTION_REJECTED",
   STALE_ACTION: "STALE_ACTION",
 } as const;
 
@@ -2987,6 +3071,71 @@ export function isStateLostMessage(message: string): boolean {
  */
 export function isStaleActionMessage(message: string): boolean {
   return message === "Engine error: Wrong player" || message === "Engine error: Not your priority";
+}
+
+/**
+ * Transport-neutral test for "the engine rejected this action, but nothing
+ * changed and nothing needs recovering". Single authority for what counts as a
+ * benign stale rejection, so every transport agrees.
+ */
+export function isStaleRejectionMessage(message: string): boolean {
+  return isStaleActionMessage(message) || isStaleReorderMessage(message);
+}
+
+/**
+ * Build the `AdapterError` for an engine action rejection, classified the same
+ * way regardless of which transport delivered it.
+ *
+ * The rejection reason originates in the ENGINE, so its classification cannot
+ * depend on whether the verdict arrived from a local WASM call, a WebSocket
+ * server, or a P2P host. Routing every rejection path through here is what lets
+ * `dispatchAction` suppress the benign stale race (issue #5913) for remote
+ * players too, instead of only for the local-WASM seat.
+ *
+ * Stale rejections are NOT recoverable-by-retry: the action is void and the
+ * caller should drop it, not re-submit. Every other rejection stays a
+ * recoverable `ACTION_REJECTED` so existing retry/surface behavior is unchanged.
+ */
+export function actionRejectionError(reason: string): AdapterError {
+  return isStaleRejectionMessage(reason)
+    ? new AdapterError(AdapterErrorCode.STALE_ACTION, reason, false)
+    : new AdapterError(AdapterErrorCode.ACTION_REJECTED, reason, true);
+}
+
+/**
+ * Detect the engine's rejection of a `ReorderHand` whose order no longer names
+ * the current hand. `apply_action` formats
+ * `EngineError::InvalidAction("ReorderHand: expected {n} ids, got {m}")` as
+ * `Engine error: ReorderHand: expected ...` and returns it BEFORE mutating any
+ * player state, so — exactly like the actor-authorization rejections above —
+ * nothing changed and there is nothing to recover.
+ *
+ * This is the benign client/engine desync behind issue #5913: a drag computes
+ * its order against the hand as displayed, but a draw or discard can land in
+ * the engine while the client store still holds the pre-animation snapshot
+ * (`dispatch.ts` commits only AFTER the animation window). The client cannot
+ * predict that divergence — the store it would check against is the stale one —
+ * so the honest place to absorb it is here, on the engine's own verdict.
+ *
+ * Hand order carries no game-rules meaning (CR 402.3), so a dropped reorder
+ * costs the player nothing beyond re-dragging.
+ *
+ * Covers BOTH staleness rejections `apply_action` can raise, because a hand can
+ * go stale two ways in the same window:
+ *   - the count changed (a draw or a discard alone) — "expected {n} ids, got
+ *     {m}", a prefix match since the message embeds the counts;
+ *   - the count held but the ids moved (a discard AND a draw) — "order is not a
+ *     permutation of the current hand", matched exactly.
+ *
+ * Deliberately NOT covered: "ReorderHand: actor ... is not a valid player
+ * index". That one means the caller submitted a nonsense seat, which is a real
+ * bug and must keep surfacing.
+ */
+export function isStaleReorderMessage(message: string): boolean {
+  return (
+    message.startsWith("Engine error: ReorderHand: expected ") ||
+    message === "Engine error: ReorderHand: order is not a permutation of the current hand"
+  );
 }
 
 /**

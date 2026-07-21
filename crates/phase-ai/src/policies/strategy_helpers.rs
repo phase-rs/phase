@@ -292,7 +292,11 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
 /// costs check the corresponding resource (life, a spare card, sacrificeable
 /// permanents). Conservative on the unknown: a cost we can't analyse returns
 /// `true` so the AI is never blocked from a cast we can't prove is wasted.
-pub(crate) fn can_pay_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> bool {
+pub(crate) fn can_pay_ward_cost(
+    ctx: &PolicyContext<'_>,
+    ward: &WardCost,
+    warded: &GameObject,
+) -> bool {
     match ward {
         WardCost::Mana(cost) | WardCost::Waterbend(cost) => {
             available_mana_after_spell(ctx) >= cost.mana_value()
@@ -301,6 +305,9 @@ pub(crate) fn can_pay_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> boo
         // amount. CR 704.5a: a player at 0 life loses, so the AI treats a payment
         // that would drop it to 0 as unaffordable — it leaves at least 1 life.
         WardCost::PayLife(amount) => ctx.state.players[ctx.ai_player.0 as usize].life > *amount,
+        WardCost::PayLifeEqualToPower => {
+            ctx.state.players[ctx.ai_player.0 as usize].life > warded.power.unwrap_or(0).max(0)
+        }
         WardCost::DiscardCard => {
             let source_id = ctx.source_object().map(|source| source.id);
             ctx.state.players[ctx.ai_player.0 as usize]
@@ -330,7 +337,9 @@ pub(crate) fn can_pay_ward_cost(ctx: &PolicyContext<'_>, ward: &WardCost) -> boo
         // CR 702.21a: every conjoined sub-cost must be payable. Mana contention
         // between multiple mana sub-costs is approximated (each checked against
         // the full post-spell pool) — rare enough not to warrant exact tracking.
-        WardCost::Compound(costs) => costs.iter().all(|cost| can_pay_ward_cost(ctx, cost)),
+        WardCost::Compound(costs) => costs
+            .iter()
+            .all(|cost| can_pay_ward_cost(ctx, cost, warded)),
     }
 }
 

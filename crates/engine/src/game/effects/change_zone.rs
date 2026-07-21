@@ -1,6 +1,7 @@
 use rand::Rng;
 
 use crate::game::game_object::AttachTarget;
+#[cfg(test)]
 use crate::game::zones;
 use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, FilterProp, LibraryPosition,
@@ -11,9 +12,12 @@ use crate::types::ability::{
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCounterPostAction, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{
+    GameState, PendingCounterPostAction, PendingZoneChangeDelivery, WaitingFor,
+};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 303.4f + CR 701.23a: Search effects that put an Aura onto the battlefield
@@ -274,6 +278,22 @@ pub(crate) use crate::game::zone_pipeline::{
     ZoneMoveResult,
 };
 
+/// Records the identity/proposal boundary before an Aura or copy-target prompt
+/// returns control after delivery. Replacement-ordering pauses replace this
+/// anticipated event with the authoritative `PendingReplacement` proposal.
+pub(crate) fn anticipated_zone_change_delivery(
+    state: &GameState,
+    object_id: ObjectId,
+    destination: Zone,
+    source_id: ObjectId,
+) -> Option<PendingZoneChangeDelivery> {
+    let object = state.objects.get(&object_id)?;
+    Some(PendingZoneChangeDelivery::new(
+        ObjectIncarnationRef::from_object(object),
+        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id)),
+    ))
+}
+
 fn append_effect_resolved_after_counter_pause(
     state: &mut GameState,
     kind: EffectKind,
@@ -488,14 +508,11 @@ pub fn resolve(
             return Ok(());
         }
 
-        // CR 400.7: SelfRef resolves to the source only while it is still the
-        // same object (same incarnation). When `resolved_targets` returned empty
-        // because `source_is_current()` was false (the source left and re-entered
-        // the battlefield since the ability was created), the zone-scan fallback
-        // must NOT re-discover the source by raw id equality — that would bypass
-        // the incarnation guard. Short-circuit here so the stale self-reference
-        // does nothing (e.g. a Warp delayed exile after a blink).
-        if matches!(target_filter, TargetFilter::SelfRef) && !ability.source_is_current(state) {
+        // CR 400.7: SelfRef resolves only to the exact source or, for a departure
+        // trigger, its immediate recorded event successor. When no such binding
+        // remains (for example, a Warp delayed exile after a blink), the zone-scan
+        // fallback must not rediscover a same-id return by raw equality.
+        if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -881,6 +898,9 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
+    let mut logical_zone_change_group =
+        crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+    let logical_group_event_start = events.len();
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         if dest_zone == Zone::Exile {
             let acting_player = state
@@ -894,6 +914,12 @@ pub fn resolve(
                 *obj_id,
                 acting_player,
             ) {
+                logical_zone_change_group
+                    .record_delivery_completion(
+                        *obj_id,
+                        crate::types::game_state::ZoneMoveCompletion::Remained,
+                    )
+                    .expect("muzzled ChangeZone member remains in its original zone");
                 continue;
             }
         }
@@ -921,18 +947,40 @@ pub fn resolve(
             ),
             ..ctx.clone()
         };
-        match process_one_zone_move(state, &per_obj_ctx, *obj_id, events) {
-            ZoneMoveResult::Done => {
+        let anticipated_pause = anticipated_zone_change_delivery(
+            state,
+            *obj_id,
+            per_obj_ctx.destination,
+            per_obj_ctx.source_id,
+        );
+        let delivery_start = events.len();
+        match process_one_zone_move_with_terminal(state, &per_obj_ctx, *obj_id, events) {
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                logical_zone_change_group
+                    .record_delivery_completion(*obj_id, completion)
+                    .expect("logical ChangeZone member records its exact terminal outcome");
                 if moved_to_dest(state) {
                     moved_count += 1;
                 }
             }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 if moved_to_dest(state) {
                     moved_count += 1;
                 }
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        paused_current: anticipated_pause.map(|mut boundary| {
+                            boundary.append_delivery_events(&events[delivery_start..]);
+                            boundary.mark_counted();
+                            boundary
+                        }),
                         remaining: targeted_objects[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -965,14 +1013,32 @@ pub fn resolve(
                     });
                 return Ok(());
             }
-            ZoneMoveResult::NeedsChoice(player) => {
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
                 // CR 614.12b + CR 614.1c + CR 614.13: stash the unprocessed targets
                 // so `drain_pending_change_zone_iteration` resumes the loop after
                 // the player resolves this replacement. Without the stash, every
                 // target after the first NeedsChoice would be silently dropped
                 // (issue #535).
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        paused_current: Some(
+                            state
+                                .pending_zone_change_delivery_from_replacement()
+                                .or_else(|| {
+                                    anticipated_pause.map(|mut boundary| {
+                                        boundary.append_delivery_events(&events[delivery_start..]);
+                                        boundary
+                                    })
+                                })
+                                .expect("zone-change pause must retain its exact boundary"),
+                        ),
                         remaining: targeted_objects[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -1003,14 +1069,6 @@ pub fn resolve(
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
-                // CR 608.2c: this object is paused mid-move on a replacement choice
-                // and will be delivered by the replacement resume (NOT by the drain's
-                // `remaining` loop). Record it as in-flight, with its pre-move zone, so
-                // the drain counts it toward `moved_count` once it reaches the
-                // destination — otherwise a downstream "that many" undercounts by one.
-                if let Some(before) = before_zone {
-                    state.pending_change_zone_in_flight = Some((*obj_id, before));
-                }
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                 // may already have surfaced its own `EffectZoneChoice`.
                 crate::game::replacement::park_waiting_for(state, player);
@@ -1031,6 +1089,13 @@ pub fn resolve(
     // single-object branches above. (The paused path defers this stamp to the
     // drain, which owns the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
+
+    crate::game::triggers::complete_logical_zone_trigger_collection(
+        state,
+        &mut logical_zone_change_group,
+        &mut events[logical_group_event_start..],
+    )
+    .expect("completed ChangeZone owns every terminal member outcome");
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -1190,6 +1255,15 @@ pub(crate) fn process_one_zone_move(
     obj_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
+    process_one_zone_move_with_terminal(state, ctx, obj_id, events).into_zone_move_result()
+}
+
+pub(crate) fn process_one_zone_move_with_terminal(
+    state: &mut GameState,
+    ctx: &ChangeZoneIterationCtx,
+    obj_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     // CR 400.7 + CR 111.7: An object that has already left the game (a token
     // that ceased to exist via CR 704.5d, or any other object removed from
     // `state.objects` since this effect snapshotted it as a target) cannot
@@ -1200,12 +1274,16 @@ pub(crate) fn process_one_zone_move(
     // is the common path here: the token dies in combat before the delayed
     // trigger fires.
     if !state.objects.contains_key(&obj_id) {
-        return ZoneMoveResult::Done;
+        return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
+            crate::types::game_state::ZoneMoveCompletion::Remained,
+        );
     }
 
     // CR 114.5: Emblems cannot be moved between zones.
     if state.objects.get(&obj_id).is_some_and(|o| o.is_emblem) {
-        return ZoneMoveResult::Done;
+        return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
+            crate::types::game_state::ZoneMoveCompletion::Remained,
+        );
     }
 
     let from_zone = state
@@ -1218,7 +1296,9 @@ pub(crate) fn process_one_zone_move(
     // no longer in that zone, the zone change is impossible — skip silently.
     if let Some(expected_origin) = ctx.origin {
         if from_zone != expected_origin {
-            return ZoneMoveResult::Done;
+            return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
+                crate::types::game_state::ZoneMoveCompletion::Remained,
+            );
         }
     }
 
@@ -1239,7 +1319,7 @@ pub(crate) fn process_one_zone_move(
         ctx.enters_attacking,
         ctx.enters_modified_if.as_ref(),
     );
-    let result = execute_zone_move(
+    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal(
         state,
         obj_id,
         from_zone,
@@ -1257,7 +1337,10 @@ pub(crate) fn process_one_zone_move(
         events,
     );
 
-    if let ZoneMoveResult::Done = result {
+    if matches!(
+        result,
+        crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(_)
+    ) {
         // CR 508.4: Place on battlefield attacking (not declared as attacker).
         if eff_attacking && ctx.destination == Zone::Battlefield {
             let controller = state
@@ -1559,7 +1642,9 @@ pub fn resolve_all(
     }
 
     let mut moved_count: i32 = 0;
-    let mut departed: Vec<ObjectId> = Vec::new();
+    let mut logical_zone_change_group =
+        crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
+    let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
         // CR 400.3: Each object's actual current zone is the source zone for the
@@ -1576,7 +1661,10 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        match execute_zone_move(
+        let anticipated_pause =
+            anticipated_zone_change_delivery(state, obj_id, dest_zone, ability.source_id);
+        let delivery_start = events.len();
+        match crate::game::zone_pipeline::execute_zone_move_with_terminal(
             state,
             obj_id,
             per_object_origin,
@@ -1593,21 +1681,11 @@ pub fn resolve_all(
             None,
             events,
         ) {
-            ZoneMoveResult::Done => {
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                logical_zone_change_group
+                    .record_delivery_completion(obj_id, completion)
+                    .expect("logical ChangeZoneAll member records its exact terminal outcome");
                 moved_count += 1;
-                // CR 603.10a + CR 608.2f: Collect battlefield-origin objects that
-                // actually left (post-move zone != Battlefield). `execute_zone_move`
-                // returns `Done` even when a replacement Prevented the move, so the
-                // post-move zone check excludes prevented members from the
-                // co-departed group.
-                if per_object_origin == Zone::Battlefield
-                    && state
-                        .objects
-                        .get(&obj_id)
-                        .is_some_and(|o| o.zone != Zone::Battlefield)
-                {
-                    departed.push(obj_id);
-                }
                 // CR 400.7 + CR 608.2c: Track hand-origin exiles separately so
                 // QuantityRef::ExiledFromHandThisResolution can resolve "draws a
                 // card for each card exiled from their hand this way".
@@ -1621,7 +1699,7 @@ pub fn resolve_all(
                     state.exile_links.retain(|link| link.exiled_id != obj_id);
                 }
             }
-            ZoneMoveResult::NeedsChoice(player) => {
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
                 // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
                 // own `EffectZoneChoice` (or a counter-pause replacement choice).
                 // Stash the unprocessed co-entering members so
@@ -1635,8 +1713,26 @@ pub fn resolve_all(
                 // resume carrier so resumed members of a face-down mass entry (the
                 // Cyber-Controller class) still enter face down — the drain's mover
                 // (`process_one_zone_move`) now reads it from the ctx.
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        paused_current: Some(
+                            state
+                                .pending_zone_change_delivery_from_replacement()
+                                .or_else(|| {
+                                    anticipated_pause.map(|mut boundary| {
+                                        boundary.append_delivery_events(&events[delivery_start..]);
+                                        boundary
+                                    })
+                                })
+                                .expect("zone-change pause must retain its exact boundary"),
+                        ),
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -1660,15 +1756,10 @@ pub fn resolve_all(
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
-                // CR 608.2c: record the replacement-paused member as in-flight (with
-                // its pre-move zone) so the drain counts it once delivered — mirrors
-                // the targeted loop, keeping "that many" correct across a mass-move
-                // replacement pause.
-                state.pending_change_zone_in_flight = Some((obj_id, per_object_origin));
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
-            ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                 // CR 303.4f + CR 614.13a: returning an Aura to the battlefield
                 // surfaces a host-choice prompt (the `ReturnAsAuraTarget`
                 // WaitingFor is already installed by `execute_zone_move`). Stash
@@ -1682,8 +1773,20 @@ pub fn resolve_all(
                 // is the pending WaitingFor) and the Devour snapshot is NOT
                 // cleared — the mass-entry event is no longer terminal here and
                 // the resumed members may still consume it.
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &events[logical_group_event_start..],
+                )
+                .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
+                        logical_zone_change_group,
+                        paused_current: anticipated_pause.map(|mut boundary| {
+                            boundary.append_delivery_events(&events[delivery_start..]);
+                            boundary.mark_counted();
+                            boundary
+                        }),
                         remaining: matching[i + 1..].to_vec(),
                         source_id: ability.source_id,
                         controller: ability.controller,
@@ -1720,17 +1823,19 @@ pub fn resolve_all(
     // sacrifice + remaining co-entering members still need it).
     let _ = state.devour_eligible_snapshot.take();
 
-    // CR 603.10a + CR 608.2f: Every battlefield-origin object that left did so as
-    // part of the same mass zone-change event, so leaves-the-battlefield observers
-    // among the departed group observe each other via last-known information.
-    zones::mark_simultaneous_departures(events, &departed);
-
     // CR 608.2c: "that many" in a later instruction refers back to the prior
     // action's count. Record the number of objects moved so downstream
     // sub-abilities using QuantityRef::EventContextAmount resolve correctly —
     // e.g., Whirlpool Drake: "shuffle the cards from your hand into your library,
     // then draw that many cards."
     state.last_effect_count = Some(moved_count);
+
+    crate::game::triggers::complete_logical_zone_trigger_collection(
+        state,
+        &mut logical_zone_change_group,
+        &mut events[logical_group_event_start..],
+    )
+    .expect("completed ChangeZoneAll owns every terminal member outcome");
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -5739,6 +5844,12 @@ mod tests {
 
         state.pending_change_zone_iteration =
             Some(crate::types::game_state::PendingChangeZoneIteration {
+                logical_zone_change_group:
+                    crate::game::triggers::allocate_logical_zone_change_group(
+                        &mut state,
+                        &[hero, soldier],
+                    ),
+                paused_current: None,
                 remaining: vec![hero, soldier],
                 source_id: ObjectId(100),
                 controller: PlayerId(0),
@@ -6114,7 +6225,6 @@ mod tests {
     #[test]
     fn amulet_of_vigor_untaps_permanent_entering_tapped() {
         use crate::game::stack::resolve_top;
-        use crate::game::triggers::process_triggers;
         use crate::types::card_type::CoreType;
 
         let mut state = GameState::new_two_player(42);
@@ -6150,13 +6260,15 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let events = enter_permanent_via_change_zone(&mut state, land, true);
+        let _events = enter_permanent_via_change_zone(&mut state, land, true);
         assert!(
             state.objects[&land].tapped,
             "land must enter tapped (enter_tapped replacement applied)"
         );
 
-        process_triggers(&mut state, &events);
+        let mut trigger_events = Vec::new();
+        let _ =
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
         assert_eq!(
             state.stack.len(),
             1,
@@ -6181,7 +6293,6 @@ mod tests {
     /// condition genuinely gates on the entering object's tapped state.
     #[test]
     fn amulet_of_vigor_ignores_permanent_entering_untapped() {
-        use crate::game::triggers::process_triggers;
         use crate::types::card_type::CoreType;
 
         let mut state = GameState::new_two_player(42);
@@ -6213,10 +6324,12 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let events = enter_permanent_via_change_zone(&mut state, land, false);
+        let _events = enter_permanent_via_change_zone(&mut state, land, false);
         assert!(!state.objects[&land].tapped, "land entered untapped");
 
-        process_triggers(&mut state, &events);
+        let mut trigger_events = Vec::new();
+        let _ =
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
         assert!(
             state.stack.is_empty(),
             "a permanent entering untapped must not fire Amulet of Vigor"
@@ -6228,7 +6341,6 @@ mod tests {
     /// triggered ability is placed on the stack independently).
     #[test]
     fn two_amulets_of_vigor_both_trigger() {
-        use crate::game::triggers::process_triggers;
         use crate::types::card_type::CoreType;
 
         let mut state = GameState::new_two_player(42);
@@ -6260,8 +6372,10 @@ mod tests {
             .core_types
             .push(CoreType::Land);
 
-        let events = enter_permanent_via_change_zone(&mut state, land, true);
-        process_triggers(&mut state, &events);
+        let _events = enter_permanent_via_change_zone(&mut state, land, true);
+        let mut trigger_events = Vec::new();
+        let _ =
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
         // CR 603.3b (#531): controller has 2 simultaneous triggers — drain
         // the OrderTriggers prompt with identity order.
         crate::game::triggers::drain_order_triggers_with_identity(&mut state);
@@ -6276,7 +6390,6 @@ mod tests {
     /// observer trigger fires when an opponent's permanent enters *untapped*.
     #[test]
     fn charismatic_conqueror_triggers_on_opponent_untapped_etb() {
-        use crate::game::triggers::process_triggers;
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, ControllerRef, TriggerCondition, TriggerDefinition,
             TypedFilter,
@@ -6362,7 +6475,9 @@ mod tests {
             "opponent creature entered untapped"
         );
 
-        process_triggers(&mut state, &events);
+        let mut trigger_events = Vec::new();
+        let _ =
+            crate::game::triggers::drain_deferred_trigger_queue(&mut state, &mut trigger_events);
         assert_eq!(
             state.stack.len(),
             1,
@@ -8270,10 +8385,20 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        for _ in 0..3 {
+        for expected_retained_occurrences in 0..3 {
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected ReplacementChoice at each iteration"
+            );
+            let group = &state
+                .pending_change_zone_iteration
+                .as_ref()
+                .expect("each pending replacement choice retains the logical owner")
+                .logical_zone_change_group;
+            assert_eq!(
+                group.all_origin_occurrences.len(),
+                expected_retained_occurrences,
+                "each re-pause must retain exactly the completed delivery segments"
             );
             let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
                 .expect("decline shock");
@@ -8352,7 +8477,6 @@ mod tests {
         }
 
         assert!(state.pending_change_zone_iteration.is_none());
-        assert!(state.pending_change_zone_in_flight.is_none());
         for shock in [s1, s2, s3] {
             assert_eq!(state.objects[&shock].zone, Zone::Battlefield);
         }

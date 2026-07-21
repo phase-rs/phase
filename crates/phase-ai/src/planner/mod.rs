@@ -7,6 +7,7 @@ use engine::ai_support::{
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
+use engine::types::actions::GameAction;
 use engine::types::counter::{has_positive_counters, positive_counter_entries};
 use engine::types::game_state::{DayNight, GameState, WaitingFor};
 use engine::types::keywords::Keyword;
@@ -351,6 +352,25 @@ pub struct TtEntry {
 /// never binds in practice; it mirrors the `eval_cache` 256-entry guard idiom.
 const TT_CAPACITY: usize = 4096;
 
+/// Ply depth covered by the killer-move table. `max_depth` is <= 3 on every
+/// difficulty/platform (see `config.rs`), so 8 leaves ample margin; killers
+/// recorded past this ply are simply not tracked (inert, never wrong).
+const MAX_KILLER_PLY: usize = 8;
+
+/// Per-rung iterative-deepening witness: did the depth-N rung complete, and how
+/// much of its node budget it consumed. AI-local search-*quality* record (not an
+/// engine perf counter — `perf_counters.rs` is out of scope). A saturated rung
+/// is one where `nodes_used >= max_nodes` (`SearchBudget::tick` increments
+/// unconditionally while `exhausted()` checks `>=`, so the counter can equal or
+/// overshoot the cap by one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RungStat {
+    pub depth: u32,
+    pub completed: bool,
+    pub nodes_used: u32,
+    pub max_nodes: u32,
+}
+
 fn hash_waiting_for(waiting_for: &WaitingFor, hasher: &mut impl Hasher) {
     let value = serde_json::to_value(waiting_for).expect("WaitingFor serializes");
     hash_json_value(&value, hasher);
@@ -469,6 +489,25 @@ pub struct PlannerServices<'a> {
     /// without threading `SearchBudget` everywhere. Populated from the caller's
     /// time budget at construction time; `Deadline::none()` when no budget.
     pub deadline: engine::util::Deadline,
+    /// CR-free search heuristic: the last 2 moves (indexed by ply-from-root) that
+    /// caused a beta cutoff. Decision-scoped like the TT — rebuilt per
+    /// determinized sample (`score_candidates_core`), so killers never leak
+    /// across sampled worlds. `GameAction` is `PartialEq` but not `Hash`, so a
+    /// fixed 2-slot array compared by `==` is the idiomatic fit (no serialized
+    /// key on the hot path; that key exists for cross-sample HashMap merging).
+    /// `pub(crate)` for cross-module witness tests (mirrors `tt_hits`).
+    pub(crate) killers: [[Option<GameAction>; 2]; MAX_KILLER_PLY],
+    /// Witness: beta cutoffs recorded this decision. Not an engine perf counter;
+    /// the reach-guard that a cutoff branch actually executed (see V1/V8 tests).
+    pub beta_cutoffs: u32,
+    /// Witness: times a killer was present in a beam and rotated forward. The
+    /// direct efficacy signal for the within-beam-vs-rescue follow-up decision.
+    pub killer_orderings: u32,
+    /// Witness: one entry per iterative-deepening rung, pushed by
+    /// `run_iterative_deepening`. Evidence that ordering work converts to
+    /// realized search depth (did the deep rung complete, with how much
+    /// node headroom).
+    pub rung_stats: Vec<RungStat>,
 }
 
 impl<'a> PlannerServices<'a> {
@@ -545,6 +584,10 @@ impl<'a> PlannerServices<'a> {
             tt_hits: 0,
             candidate_cache: HashMap::new(),
             deadline,
+            killers: Default::default(),
+            beta_cutoffs: 0,
+            killer_orderings: 0,
+            rung_stats: Vec::new(),
         }
     }
 
@@ -651,6 +694,11 @@ impl<'a> PlannerServices<'a> {
             b.prior
                 .partial_cmp(&a.prior)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                // Issue #4878: without this tie-break, a prior tie falls back
+                // to `priors`' pre-sort order, ultimately traceable to the
+                // engine's unsorted `candidate_actions(state)` — mirrors
+                // search.rs:1956/2205 and the sibling fix in `rank_candidates`.
+                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
         });
         priors
             .into_iter()
@@ -731,6 +779,51 @@ impl<'a> PlannerServices<'a> {
                     },
                 );
             }
+        }
+    }
+
+    /// Record `action` as the primary killer at `ply` using standard two-slot
+    /// replacement: shift slot 0 -> slot 1, then store into slot 0. No-op when
+    /// `action` already occupies slot 0 (keeps slot 1 as the second-best killer)
+    /// or when `ply` exceeds the tracked depth.
+    fn record_killer(&mut self, ply: usize, action: &GameAction) {
+        if ply >= MAX_KILLER_PLY {
+            return;
+        }
+        if self.killers[ply][0].as_ref() == Some(action) {
+            return; // already the primary killer — don't evict the secondary
+        }
+        self.killers[ply][1] = self.killers[ply][0].take();
+        self.killers[ply][0] = Some(action.clone());
+    }
+
+    /// Reorder-only killer heuristic: stable-rotate candidates whose action
+    /// matches a killer slot at `ply` to the front of the already-truncated beam
+    /// (slot 0 before slot 1), preserving relative order among killers and among
+    /// non-killers. **Scores are never modified** — killers change only visit
+    /// order, so the value function (`ranked.score` uses at planner/mod.rs and
+    /// search.rs) is untouched. Increments `killer_orderings` only when a killer
+    /// was actually present in the beam.
+    fn order_killers_first(&mut self, ply: usize, ranked: &mut [RankedCandidate]) {
+        if ply >= MAX_KILLER_PLY {
+            return;
+        }
+        let killers = &self.killers[ply];
+        // 0 = primary killer, 1 = secondary killer, 2 = non-killer. A stable sort
+        // on this key rotates killers to the front while preserving the relative
+        // order of every other candidate (and of the two killer slots).
+        let rank = |r: &RankedCandidate| -> u8 {
+            if killers[0].as_ref() == Some(&r.candidate.action) {
+                0
+            } else if killers[1].as_ref() == Some(&r.candidate.action) {
+                1
+            } else {
+                2
+            }
+        };
+        if ranked.iter().any(|r| rank(r) < 2) {
+            ranked.sort_by_key(rank);
+            self.killer_orderings += 1;
         }
     }
 
@@ -1074,10 +1167,12 @@ pub struct BeamContinuationPlanner {
 }
 
 impl BeamContinuationPlanner {
-    fn search_value(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_value(
         &self,
         state: &GameState,
         depth: u32,
+        ply: usize,
         mut alpha: f64,
         mut beta: f64,
         services: &mut PlannerServices<'_>,
@@ -1115,7 +1210,7 @@ impl BeamContinuationPlanner {
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
-        let ranked = rank_candidates(
+        let mut ranked = rank_candidates(
             ctx.candidates.clone(),
             // Interior beam node: `search_value` is always entered ≥1 ply below
             // the decision root, so move-ordering scoring runs in lookahead.
@@ -1130,6 +1225,10 @@ impl BeamContinuationPlanner {
             },
             services.config.search.max_branching as usize,
         );
+        // Move ordering: try killer moves (prior beta-cutoff causers at this ply)
+        // first to maximize alpha-beta pruning. Reorder-only — candidate scores
+        // are never mutated (they leak into the value function below).
+        services.order_killers_first(ply, &mut ranked);
 
         // Alpha-beta pruning: explicit loop for early cutoff.
         // Move ordering from rank_candidates (best-first) maximizes pruning effectiveness.
@@ -1149,7 +1248,7 @@ impl BeamContinuationPlanner {
             let Some(sim) = services.apply_candidate(state, &ranked.candidate) else {
                 continue;
             };
-            let value = self.search_value(&sim, depth - 1, alpha, beta, services, budget)
+            let value = self.search_value(&sim, depth - 1, ply + 1, alpha, beta, services, budget)
                 + (ranked.score * 0.05);
 
             if is_maximizing {
@@ -1161,6 +1260,10 @@ impl BeamContinuationPlanner {
             }
 
             if alpha >= beta {
+                // Beta cutoff: record the cutting move as a killer for this ply
+                // and count the cutoff (both witness-only; scores untouched).
+                services.beta_cutoffs += 1;
+                services.record_killer(ply, &ranked.candidate.action);
                 break;
             }
         }
@@ -1191,9 +1294,12 @@ impl ContinuationPlanner for BeamContinuationPlanner {
         if self.depth == 0 {
             services.evaluate_state_quiesced(state)
         } else {
+            // Ply-from-root starts at 0 for the rung root: a killer recorded at
+            // ply 1 of one rung is reused at ply 1 of the next (chess convention).
             self.search_value(
                 state,
                 self.depth,
+                0,
                 f64::NEG_INFINITY,
                 f64::INFINITY,
                 services,
@@ -1222,6 +1328,10 @@ where
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            // Issue #4878: without this tie-break, equal-score candidates fall
+            // back to `ranked`'s pre-sort (enumeration) order, which is not
+            // guaranteed stable across processes — mirrors search.rs:1956/2205.
+            .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
     });
     ranked.truncate(limit);
     ranked
@@ -1237,6 +1347,7 @@ pub fn apply_candidate(state: &GameState, candidate: &CandidateAction) -> Option
 mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, TacticalClass};
+    use engine::game::combat::BlockRequirement;
     use engine::game::perf_counters;
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -1315,6 +1426,139 @@ mod tests {
         assert!(services.context.deadline.remaining().is_none());
     }
 
+    /// Serve reconstruction ≡ planner leaf eval. The harvested `FeatureRow`
+    /// weighted by the archetype-adjusted weights the planner actually applies,
+    /// plus the TWO serve-time carve-outs (`energy_offset`, `threat_adjustment`),
+    /// must equal `evaluate_with_strategy` to 1e-9. This pins the train/serve
+    /// invariant: a future `evaluate_with_strategy` term without a matching
+    /// `FeatureRow` field would break this identity loudly. Runs a reach-guard
+    /// pair — one config where `threat_adjustment` is provably nonzero, one where
+    /// it is zero — and asserts the energy term is non-vacuous (`p0.energy > 0`).
+    #[test]
+    fn serve_reconstruction_equals_planner_leaf_eval() {
+        use crate::context::AiContext;
+        use crate::deck_profile::DeckArchetype;
+        use crate::duel_suite::harvest::FeatureRow;
+        use crate::threat_profile::{ThreatProbabilities, ThreatProfile};
+        use engine::game::DeckEntry;
+        use engine::types::card::CardFace;
+        use engine::types::card_type::{CardType, CoreType};
+
+        // A small aggressive deck so `adjusted_weights` genuinely differs from the
+        // base set (exercises the archetype-adjusted path, not a no-op remap).
+        let deck: Vec<DeckEntry> = (0..8)
+            .map(|i| DeckEntry {
+                card: CardFace {
+                    name: format!("Goblin {i}"),
+                    card_type: CardType {
+                        core_types: vec![CoreType::Creature],
+                        subtypes: vec!["Goblin".to_string()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                count: 4,
+            })
+            .collect();
+
+        // Mid-game, non-terminal state from p0's perspective, energy > 0, and NO
+        // lands for p0 so `available_mana(p0) <= 1` makes the counter-tapout
+        // penalty reachable.
+        let mut state = make_state();
+        state.turn_number = 5;
+        state.players[0].life = 17;
+        state.players[1].life = 12;
+        state.players[0].energy = 4;
+        for (owner, power, toughness) in [
+            (PlayerId(0), 2, 1),
+            (PlayerId(0), 3, 3),
+            (PlayerId(1), 4, 4),
+        ] {
+            let card_id = CardId(state.next_object_id);
+            let id = create_object(
+                &mut state,
+                card_id,
+                owner,
+                "Body".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(power);
+            obj.toughness = Some(toughness);
+        }
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = crate::policies::PolicyRegistry::shared();
+
+        // Case A: opponent_threat present with a high counterspell probability →
+        // threat_adjustment is nonzero.
+        let mut ctx_threat = AiContext::analyze_for_player(
+            &deck,
+            &config.weights,
+            &config.archetype_multipliers,
+            PlayerId(0),
+        );
+        ctx_threat.opponent_threat = Some(ThreatProfile {
+            probabilities: ThreatProbabilities {
+                counterspell: 0.9,
+                ..Default::default()
+            },
+            opponent_archetype: DeckArchetype::Control,
+            category_pools: Default::default(),
+            pool_size: 0,
+            hand_size: 0,
+        });
+        let services = PlannerServices::new(PlayerId(0), &config, policies, ctx_threat);
+
+        let turn = state.turn_number;
+        let weights = services.context.adjusted_weights.for_turn(turn);
+        let row = FeatureRow::extract(&state, &services.context.session, PlayerId(0))
+            .expect("mid-game state is non-terminal");
+        let threat_adj = services.threat_adjustment(&state);
+        let reconstructed = row.weighted_total(weights) + row.energy_offset + threat_adj;
+        let planner_eval = services.evaluate_with_strategy(&state);
+
+        assert!(
+            row.energy_offset > 0.0,
+            "energy term must be non-vacuous (p0.energy > 0)"
+        );
+        assert!(
+            threat_adj.abs() > 0.0,
+            "reach-guard: threat_adjustment must be provably nonzero here, got {threat_adj}"
+        );
+        assert!(
+            (planner_eval - reconstructed).abs() < 1e-9,
+            "serve reconstruction diverged: planner={planner_eval} reconstructed={reconstructed}"
+        );
+
+        // Case B: no opponent_threat → threat_adjustment == 0, identity still holds
+        // (the reach-guard's zero pole).
+        let ctx_none = AiContext::analyze_for_player(
+            &deck,
+            &config.weights,
+            &config.archetype_multipliers,
+            PlayerId(0),
+        );
+        let services_none = PlannerServices::new(PlayerId(0), &config, policies, ctx_none);
+        let weights_none = services_none.context.adjusted_weights.for_turn(turn);
+        let row_none = FeatureRow::extract(&state, &services_none.context.session, PlayerId(0))
+            .expect("non-terminal");
+        let threat_adj_none = services_none.threat_adjustment(&state);
+        let reconstructed_none = row_none.weighted_total(weights_none) + row_none.energy_offset;
+        let planner_eval_none = services_none.evaluate_with_strategy(&state);
+
+        assert_eq!(
+            threat_adj_none, 0.0,
+            "no opponent_threat ⇒ threat_adjustment is exactly zero"
+        );
+        assert!(
+            (planner_eval_none - reconstructed_none).abs() < 1e-9,
+            "serve reconstruction (no threat) diverged: planner={planner_eval_none} \
+             reconstructed={reconstructed_none}"
+        );
+    }
+
     #[test]
     fn candidate_cache_key_hashes_waiting_for_payload() {
         let state = make_state();
@@ -1339,15 +1583,39 @@ mod tests {
         left_targets.insert(ObjectId(10), vec![ObjectId(1), ObjectId(2)]);
         left_targets.insert(ObjectId(20), vec![ObjectId(3)]);
         let mut left_requirements = HashMap::new();
-        left_requirements.insert(ObjectId(10), 2);
-        left_requirements.insert(ObjectId(20), 1);
+        left_requirements.insert(
+            ObjectId(10),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
+        left_requirements.insert(
+            ObjectId(20),
+            BlockRequirement {
+                count: 1,
+                sources: vec![],
+            },
+        );
 
         let mut right_targets = HashMap::new();
         right_targets.insert(ObjectId(20), vec![ObjectId(3)]);
         right_targets.insert(ObjectId(10), vec![ObjectId(1), ObjectId(2)]);
         let mut right_requirements = HashMap::new();
-        right_requirements.insert(ObjectId(20), 1);
-        right_requirements.insert(ObjectId(10), 2);
+        right_requirements.insert(
+            ObjectId(20),
+            BlockRequirement {
+                count: 1,
+                sources: vec![],
+            },
+        );
+        right_requirements.insert(
+            ObjectId(10),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
 
         let mut left = make_state();
         left.waiting_for = WaitingFor::DeclareBlockers {
@@ -1405,6 +1673,46 @@ mod tests {
             ranked[0].candidate.action,
             GameAction::MulliganDecision { .. }
         ));
+    }
+
+    /// Issue #4878: on an exact score tie, `rank_candidates`' tie-break must
+    /// be `GameAction::cmp_stable` (a total order), not `ranked`'s pre-sort
+    /// (encounter) order. Reverting the `.then_with(cmp_stable)` tie-break
+    /// makes this test flip: `sort_by` is stable, so two calls differing only
+    /// in input order would then rank the same tied pair differently.
+    #[test]
+    fn rank_candidates_ties_break_by_cmp_stable_not_encounter_order() {
+        let pass = CandidateAction {
+            action: GameAction::PassPriority,
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Pass,
+            },
+        };
+        let mulligan = CandidateAction {
+            action: GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
+            metadata: ActionMetadata {
+                actor: Some(PlayerId(0)),
+                tactical_class: TacticalClass::Selection,
+            },
+        };
+        let tied_scorer = |_candidate: &CandidateAction| 1.0;
+
+        let forward = rank_candidates(vec![pass.clone(), mulligan.clone()], tied_scorer, 2);
+        let reversed = rank_candidates(vec![mulligan, pass], tied_scorer, 2);
+
+        let forward_actions: Vec<_> = forward.iter().map(|r| r.candidate.action.clone()).collect();
+        let reversed_actions: Vec<_> = reversed
+            .iter()
+            .map(|r| r.candidate.action.clone())
+            .collect();
+
+        assert_eq!(
+            forward_actions, reversed_actions,
+            "tied candidates must rank identically regardless of input encounter order"
+        );
     }
 
     #[test]
@@ -2241,6 +2549,7 @@ mod tests {
         let value = planner.search_value(
             &state,
             2,
+            0,
             f64::NEG_INFINITY,
             f64::INFINITY,
             &mut services,
@@ -2298,6 +2607,7 @@ mod tests {
         let value = planner.search_value(
             &state,
             2,
+            0,
             f64::NEG_INFINITY,
             f64::INFINITY,
             &mut services,
@@ -2338,6 +2648,7 @@ mod tests {
         let _ = planner.search_value(
             &state,
             1,
+            0,
             f64::NEG_INFINITY,
             f64::INFINITY,
             &mut services,
@@ -2359,6 +2670,221 @@ mod tests {
         assert!(
             !services.deadline.expired(),
             "measurement deadline is none() -> expired() is always false"
+        );
+    }
+
+    // ---- U2: move ordering (killers) + witness counters ----
+
+    fn ranked_candidate(action: GameAction, score: f64) -> RankedCandidate {
+        RankedCandidate {
+            candidate: CandidateAction {
+                action,
+                metadata: ActionMetadata {
+                    actor: Some(PlayerId(0)),
+                    tactical_class: TacticalClass::Pass,
+                },
+            },
+            score,
+        }
+    }
+
+    // V1: a beta cutoff records the cutting move as the ply's primary killer.
+    #[test]
+    fn beta_cutoff_records_cutting_action_as_killer() {
+        let mut state = make_state();
+        add_mana_land(&mut state, PlayerId(0)); // >= 2 candidates (tap + pass)
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+
+        // Reconstruct the exact interior ordering the search visits (killers are
+        // empty, so `order_killers_first` is a no-op). Under a collapsed window
+        // the cut fires after the FIRST applicable candidate in rank order.
+        let ctx = services.build_decision_context(&state);
+        let scoring_player = state
+            .waiting_for
+            .acting_player()
+            .unwrap_or(services.ai_player);
+        let expected_ranked = rank_candidates(
+            ctx.candidates.clone(),
+            |c| services.tactical_score(&state, &ctx, c, scoring_player, SearchDepth::Lookahead),
+            config.search.max_branching as usize,
+        );
+        let cutting = expected_ranked
+            .iter()
+            .find(|r| apply_candidate(&state, &r.candidate).is_some())
+            .map(|r| r.candidate.action.clone())
+            .expect("fixture must have an applicable candidate");
+
+        let planner = BeamContinuationPlanner {
+            depth: 1,
+            rollout_depth: 1,
+        };
+        let mut budget = SearchBudget::new(100_000);
+        // Collapsed window (alpha == beta) forces alpha >= beta after the first
+        // applied candidate — a deterministic cutoff.
+        let _ = planner.search_value(&state, 1, 0, 0.0, 0.0, &mut services, &mut budget);
+
+        // Reach-guard: the cutoff branch actually executed (non-vacuous).
+        assert!(
+            services.beta_cutoffs > 0,
+            "reach-guard: a beta cutoff must have fired"
+        );
+        // Revert-failing: removing `record_killer` at the break leaves this None.
+        assert_eq!(
+            services.killers[0][0].as_ref(),
+            Some(&cutting),
+            "the beta-cutting action must be recorded as the ply-0 primary killer"
+        );
+    }
+
+    // V2: killer ordering rotates matching candidates to the front of the beam
+    // WITHOUT mutating any score, and only counts when a killer is present.
+    #[test]
+    fn killer_ordering_reorders_within_beam_without_touching_scores() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+
+        // Beam of 3, already best-first by score; the killer is ranked LAST.
+        let control = vec![
+            ranked_candidate(GameAction::PassPriority, 3.0),
+            ranked_candidate(GameAction::CancelCast, 2.0),
+            ranked_candidate(GameAction::DeclineShortcut, 1.0),
+        ];
+        // Full (action -> score-bits) map — every key AND value, not set equality.
+        let score_map = |b: &[RankedCandidate]| -> std::collections::BTreeMap<String, u64> {
+            b.iter()
+                .map(|r| (format!("{:?}", r.candidate.action), r.score.to_bits()))
+                .collect()
+        };
+
+        // Primary: last-ranked killer rotates to the front, scores untouched.
+        let mut services = hard_services(&config, &policies);
+        services.record_killer(0, &GameAction::DeclineShortcut);
+        let mut beam = control.clone();
+        services.order_killers_first(0, &mut beam);
+        assert_eq!(
+            beam[0].candidate.action,
+            GameAction::DeclineShortcut,
+            "the seeded killer is rotated to the front"
+        );
+        assert_eq!(
+            score_map(&beam),
+            score_map(&control),
+            "reorder is score-preserving (every action keeps its exact score)"
+        );
+        assert_eq!(
+            services.killer_orderings, 1,
+            "a present killer counts as exactly one ordering"
+        );
+
+        // Sibling: with two killers, slot 0 must precede slot 1.
+        let mut services2 = hard_services(&config, &policies);
+        services2.record_killer(0, &GameAction::DeclineShortcut); // -> slot 0
+        services2.record_killer(0, &GameAction::CancelCast); // -> slot 0, prev -> slot 1
+        let mut beam2 = control.clone();
+        services2.order_killers_first(0, &mut beam2);
+        assert_eq!(
+            beam2[0].candidate.action,
+            GameAction::CancelCast,
+            "slot-0 killer orders first"
+        );
+        assert_eq!(
+            beam2[1].candidate.action,
+            GameAction::DeclineShortcut,
+            "slot-1 killer orders second"
+        );
+
+        // Hostile: a killer absent from the candidate set leaves order untouched
+        // (the `==` match miss path) and never counts an ordering.
+        let mut services3 = hard_services(&config, &policies);
+        services3.record_killer(
+            0,
+            &GameAction::MulliganDecision {
+                choice: MulliganChoice::Keep,
+            },
+        );
+        let mut beam3 = control.clone();
+        services3.order_killers_first(0, &mut beam3);
+        let actions = |b: &[RankedCandidate]| {
+            b.iter()
+                .map(|r| r.candidate.action.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            actions(&beam3),
+            actions(&control),
+            "an absent killer leaves the beam order identical to control"
+        );
+        assert_eq!(
+            services3.killer_orderings, 0,
+            "no killer present in the beam => no ordering counted"
+        );
+    }
+
+    // V7a: freshly constructed services carry no killers and zeroed witnesses.
+    // Combined with the per-sample construction site in `score_candidates_core`,
+    // this pins that every determinized sample starts clean (no cross-world leak).
+    #[test]
+    fn fresh_services_has_clean_killers_and_witnesses() {
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let services = hard_services(&config, &policies);
+        assert!(
+            services
+                .killers
+                .iter()
+                .all(|ply| ply.iter().all(Option::is_none)),
+            "fresh services must have no killers"
+        );
+        assert_eq!(services.beta_cutoffs, 0);
+        assert_eq!(services.killer_orderings, 0);
+        assert!(services.rung_stats.is_empty());
+    }
+
+    // V8: the cutoff counter tracks real cutoffs, not spurious increments.
+    #[test]
+    fn beta_cutoff_counter_is_honest() {
+        let mut state = make_state();
+        add_mana_land(&mut state, PlayerId(0)); // >= 2 candidates
+        let policies = PolicyRegistry::default();
+
+        // Positive: collapsed window at a maximizing node forces a cutoff.
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        let mut services = hard_services(&config, &policies);
+        let mut budget = SearchBudget::new(100_000);
+        let planner = BeamContinuationPlanner {
+            depth: 1,
+            rollout_depth: 1,
+        };
+        let _ = planner.search_value(&state, 1, 0, 0.0, 0.0, &mut services, &mut budget);
+        assert!(
+            services.beta_cutoffs > 0,
+            "a real cutoff must increment the counter"
+        );
+
+        // Negative: `max_branching == 1` under a full (-inf, +inf) window can
+        // never cut — a single sibling cannot push alpha past beta. Counter == 0.
+        let mut narrow_config = create_config(AiDifficulty::Hard, Platform::Native);
+        narrow_config.search.max_branching = 1;
+        let mut services_n = hard_services(&narrow_config, &policies);
+        let mut budget_n = SearchBudget::new(100_000);
+        let planner_n = BeamContinuationPlanner {
+            depth: 2,
+            rollout_depth: 1,
+        };
+        let _ = planner_n.search_value(
+            &state,
+            2,
+            0,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            &mut services_n,
+            &mut budget_n,
+        );
+        assert_eq!(
+            services_n.beta_cutoffs, 0,
+            "a single-width full-window search cannot produce a cutoff"
         );
     }
 }

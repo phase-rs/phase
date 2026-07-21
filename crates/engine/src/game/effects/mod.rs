@@ -9,7 +9,7 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ChosenAttribute, ControllerRef,
+    AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
@@ -29,6 +29,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::{Player, PlayerId};
+use crate::types::resolution::{ResolutionFrame, ResolutionStack};
 use crate::types::zones::Zone;
 
 pub mod adapt;
@@ -740,6 +741,11 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     subject: None,
                 });
             }
+            if !waits_for_resolution_choice(&state.waiting_for) {
+                // CR 615.5: a resumed continuation completes its own paused
+                // resident drain only after it has not raised another choice.
+                state.post_replacement_drains.finish_paused_dispatch();
+            }
         }
     }
     // CR 701.38d: Resume per-ballot vote iteration after an interactive
@@ -787,6 +793,110 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // full-drain lifetime — clear it alongside the applied seed so it never
         // leaks into a later, unrelated `EventContextAmount` read.
         state.post_replacement_token_substitution_count = None;
+    }
+}
+
+/// Resume the active typed resolution-frame view through its established legacy
+/// authority while Phase 2 still keeps the mutable runtime slots in `GameState`.
+///
+/// The dispatcher reads only `frames.last()`. The one shipped coupled shape is
+/// represented structurally: a `MultiDraw` whose immediate predecessor is a
+/// paused `PostReplacement` drain is a paired child; all other `MultiDraw`
+/// frames are independent roots. Both delegate to `draw::resume_draw_sequence`,
+/// whose existing resident-drain cleanup preserves the paused parent. No frame
+/// is popped here, and the central legacy drains remain authoritative until
+/// Phase 3 owns the stack at runtime.
+pub(crate) fn resume_resolution_frames(
+    state: &mut GameState,
+    frames: &ResolutionStack,
+    events: &mut Vec<GameEvent>,
+) {
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+
+    let Some(frame) = frames.last() else {
+        return;
+    };
+
+    match frame {
+        ResolutionFrame::AbilityContinuation(_)
+        | ResolutionFrame::RepeatFor(_)
+        | ResolutionFrame::RepeatUntil(_)
+        | ResolutionFrame::ChangeZone(_) => drain_pending_continuation(state, events),
+        ResolutionFrame::RepeatedOptionalPayment(_) => {
+            // The optional-effect action owns both the next payment prompt and
+            // its reflexive tail; a priority boundary has nothing to resume.
+        }
+        ResolutionFrame::BatchDelivery(_) => {
+            crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
+        }
+        ResolutionFrame::CounterMoves(_) => counters::drain_pending_counter_moves(state, events),
+        ResolutionFrame::CounterRemovals(_) => {
+            counters::drain_pending_counter_removals(state, events);
+        }
+        ResolutionFrame::CounterAdditions(_) => {
+            counters::drain_pending_counter_additions(state, events);
+        }
+        ResolutionFrame::CopyToken(_) => {
+            token_copy::drain_pending_copy_token_resolution(state, events);
+        }
+        ResolutionFrame::EachPlayerCopyChosen(_) => {
+            each_player_copy_chosen::drain_pending(state, events);
+        }
+        ResolutionFrame::ChooseOneOf(_) => choose_one_of::resume_pending(state, events),
+        ResolutionFrame::VoteBallot(_) => {
+            vote::drain_pending_vote_ballot_iteration(state, events);
+        }
+        ResolutionFrame::PerPlayerZoneChoice(_) => {
+            choose_from_zone::drain_pending_per_player_zone_choice(state, &[], events);
+        }
+        ResolutionFrame::PerCategoryZoneChoice(_) => {
+            let _ = choose_from_zone::drain_pending_per_category_zone_choice(state, &[], events);
+        }
+        ResolutionFrame::OptionalEffect(_)
+        | ResolutionFrame::CoinFlip(_)
+        | ResolutionFrame::Proliferate(_)
+        | ResolutionFrame::MutateMerge(_) => {
+            // Direct-choice frames resume only through their corresponding
+            // action handlers, never by a priority-time drain.
+        }
+        ResolutionFrame::MultiDraw(_) => {
+            let paired_parent = matches!(
+                frames.active_predecessor(),
+                Some(ResolutionFrame::PostReplacement(drains))
+                    if matches!(
+                        drains.resident().map(|drain| &drain.status),
+                        Some(crate::types::game_state::DrainStatus::Paused)
+                    )
+            );
+            if paired_parent {
+                // The resident drain is retained and retired only by the
+                // existing typed dispatch lifecycle inside the draw authority.
+                debug_assert!(state.post_replacement_drains.resident().is_some());
+            }
+            if let Some(frame_id) = state.draw_sequences.active().map(|draw| draw.frame_id) {
+                let _ = draw::resume_draw_sequence(state, frame_id, events);
+            }
+        }
+        ResolutionFrame::ConniveReentry(_) => {
+            let _ = crate::game::engine_replacement::drain_pending_connive_reentry(state, events);
+        }
+        ResolutionFrame::LifeTotalAssignment(_) => {
+            life::drain_pending_life_total_assignment(state, events);
+        }
+        ResolutionFrame::SpellResolution(_) => {
+            if let Some(pending) = state.pending_spell_resolution.clone() {
+                crate::game::engine_replacement::apply_pending_spell_resolution(
+                    state, &pending, events,
+                );
+            }
+        }
+        ResolutionFrame::PostReplacement(_) => {
+            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                state, None, None, None, events,
+            );
+        }
     }
 }
 
@@ -887,6 +997,8 @@ fn should_stop_repeat_until(
 fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<GameEvent>) {
     while let Some(pending) = state.pending_change_zone_iteration.take() {
         let crate::types::game_state::PendingChangeZoneIteration {
+            mut logical_zone_change_group,
+            paused_current,
             remaining,
             source_id,
             controller,
@@ -907,34 +1019,58 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             enter_attached_to,
             effect_kind,
         } = pending;
-        // CR 608.2c: the object that paused this iteration on a replacement CHOICE
-        // (`pending_change_zone_in_flight`) was delivered out-of-band by the
-        // replacement resume, NOT by the `remaining` loop below. Count it now — iff
-        // it actually reached this iteration's destination (a same-zone no-op or a
-        // prevented/redirected move is excluded by the `before != destination` and
-        // post-move zone checks) — so a downstream `QuantityRef::EventContextAmount`
-        // ("that many") includes the member that prompted the replacement.
-        if let Some((in_flight_id, before)) = state.pending_change_zone_in_flight.take() {
-            if let Some(count) = moved_count.as_mut() {
-                if before != destination
-                    && state
-                        .objects
-                        .get(&in_flight_id)
-                        .is_some_and(|object| object.zone == destination)
-                {
-                    *count += 1;
+        // CR 608.2c: the object that paused this iteration on a replacement
+        // choice was delivered out-of-band by the replacement resume, not by
+        // `remaining`. Count only its explicitly captured delivery slice; a
+        // current-object lookup could bind a same-id later incarnation.
+        if let Some(paused_current) = paused_current {
+            if matches!(
+                paused_current.count,
+                crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
+            ) {
+                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                    state,
+                    &mut logical_zone_change_group,
+                    &paused_current.delivery_events,
+                )
+                .expect("replacement-resumed ChangeZone delivery retains its exact segment");
+            }
+            if let Some(terminal_completion) = paused_current.terminal_completion {
+                logical_zone_change_group
+                    .record_delivery_completion(
+                        paused_current.member.object_id,
+                        terminal_completion,
+                    )
+                    .expect("resumed ChangeZone member records its exact terminal outcome");
+            }
+            if matches!(
+                paused_current.count,
+                crate::types::game_state::PausedZoneChangeDeliveryCount::NeedsCount
+            ) {
+                if let Some(count) = moved_count.as_mut() {
+                    let moved_to_destination = paused_current.delivery_events.iter().any(|event| {
+                        matches!(
+                            event,
+                            GameEvent::ZoneChanged {
+                                object_id,
+                                from: Some(from),
+                                to,
+                                ..
+                            } if *object_id == paused_current.member.object_id
+                                && *from != destination
+                                && *to == destination
+                        )
+                    });
+                    if moved_to_destination {
+                        *count += 1;
+                    }
                 }
             }
         }
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
-        // members moved in THIS resume can be stamped as a co-departed group and
-        // their observer triggers collected. NOTE (no-field DEFERRED residual):
-        // members moved in a PRIOR pause segment (before this resume) cannot be
-        // grouped with these without a co_departed_group carrier field on
-        // PendingChangeZoneIteration — the cross-pause observation gap is
-        // documented by an ignored test. See plan STEP 4b.
+        // members moved in this resume join the logical co-departed group and
+        // their observer triggers are collected with earlier pause segments.
         let events_before_drain = events.len();
-        let mut paused = false;
         for (i, obj_id) in remaining.iter().enumerate() {
             let per_obj_enter_counters =
                 crate::game::effects::change_zone::enter_with_counters_for_pending_object(
@@ -972,10 +1108,25 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                 enter_attached_to,
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
-            match crate::game::effects::change_zone::process_one_zone_move(
+            let anticipated_pause = state.objects.get(obj_id).map(|object| {
+                crate::types::game_state::PendingZoneChangeDelivery::new(
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+                    crate::types::proposed_event::ProposedEvent::zone_change(
+                        *obj_id,
+                        object.zone,
+                        ctx.destination,
+                        Some(ctx.source_id),
+                    ),
+                )
+            });
+            let delivery_start = events.len();
+            match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state, &ctx, *obj_id, events,
             ) {
-                crate::game::effects::change_zone::ZoneMoveResult::Done => {
+                crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                    logical_zone_change_group
+                        .record_delivery_completion(*obj_id, completion)
+                        .expect("resumed ChangeZone member records its exact terminal outcome");
                     if let Some(count) = moved_count.as_mut() {
                         if before_zone != Some(ctx.destination)
                             && state
@@ -987,7 +1138,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         }
                     }
                 }
-                crate::game::effects::change_zone::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
                     if let Some(count) = moved_count.as_mut() {
                         if before_zone != Some(ctx.destination)
                             && state
@@ -998,8 +1149,25 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             *count += 1;
                         }
                     }
+                    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                        .iter()
+                        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+                        .cloned()
+                        .collect();
+                    crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                        state,
+                        &mut logical_zone_change_group,
+                        &trigger_events,
+                    )
+                    .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
+                            logical_zone_change_group,
+                            paused_current: anticipated_pause.map(|mut boundary| {
+                                boundary.append_delivery_events(&events[delivery_start..]);
+                                boundary.mark_counted();
+                                boundary
+                            }),
                             remaining: remaining[i + 1..].to_vec(),
                             source_id: ctx.source_id,
                             controller: ctx.controller,
@@ -1025,12 +1193,33 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         });
-                    paused = true;
-                    break;
+                    return;
                 }
-                crate::game::effects::change_zone::ZoneMoveResult::NeedsChoice(player) => {
+                crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
+                    let paused_current = state
+                        .pending_zone_change_delivery_from_replacement()
+                        .or_else(|| {
+                            anticipated_pause.map(|mut boundary| {
+                                boundary.append_delivery_events(&events[delivery_start..]);
+                                boundary
+                            })
+                        })
+                        .expect("zone-change pause must retain its exact boundary");
+                    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
+                        .iter()
+                        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+                        .cloned()
+                        .collect();
+                    crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                        state,
+                        &mut logical_zone_change_group,
+                        &trigger_events,
+                    )
+                    .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.pending_change_zone_iteration =
                         Some(crate::types::game_state::PendingChangeZoneIteration {
+                            logical_zone_change_group,
+                            paused_current: Some(paused_current),
                             remaining: remaining[i + 1..].to_vec(),
                             source_id: ctx.source_id,
                             controller: ctx.controller,
@@ -1056,48 +1245,34 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         });
-                    // CR 608.2c: a further member paused mid-move on a replacement
-                    // choice; it will be delivered by the resume, not this drain's
-                    // `remaining` loop. Record it as in-flight (with its pre-move zone)
-                    // so the NEXT drain pass counts it once it reaches the destination.
-                    if let Some(before) = before_zone {
-                        state.pending_change_zone_in_flight = Some((*obj_id, before));
-                    }
                     // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                     // may already have surfaced its own `EffectZoneChoice` during the
                     // resumed member's entry.
                     crate::game::replacement::park_waiting_for(state, player);
-                    paused = true;
-                    break;
+                    return;
                 }
             }
         }
-        if paused {
-            // CR 603.10a: paused again on a further choice. Stamp the members
-            // this pass moved so any co-departing observer among them observes
-            // the rest, then B2-park their observer triggers: `waiting_for` is
-            // now a choice (not Priority), so `run_post_action_pipeline` will
-            // not scan these events — deferring keeps issue #423 dies-triggers
-            // from being lost across the pause.
-            crate::game::zones::stamp_simultaneous_from_slice(
-                state,
-                &mut events[events_before_drain..],
-            );
-            let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                .iter()
-                .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
-                .cloned()
-                .collect();
-            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
-            break;
-        }
-        // Loop completed — stamp the members this pass moved (CR 603.10a) so a
-        // co-departing observer among the resumed group observes the rest, then
-        // emit the trailing EffectResolved event that the non-pause path emits at
-        // the tail of `change_zone::resolve`.
-        crate::game::zones::stamp_simultaneous_from_slice(
+        crate::game::triggers::complete_logical_zone_trigger_collection(
             state,
+            &mut logical_zone_change_group,
             &mut events[events_before_drain..],
+        )
+        .expect("completed resumed ChangeZone owns every terminal member outcome");
+        // The resumed delivery preceded `events_before_drain`, so synchronize its
+        // completed-owner departure stamp alongside the final drain segment.
+        crate::game::triggers::sync_logical_zone_change_departure_stamps(
+            &logical_zone_change_group,
+            events,
+        );
+        // The completed logical owner already collected these exact zone-change
+        // occurrences. Claim every occurrence from this action that belongs to
+        // the owner, including the resumed delivery emitted before this drain,
+        // so a replacement choice returning to Priority cannot scan it again.
+        crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+            state,
+            &logical_zone_change_group,
+            events,
         );
         // CR 614.13a: the resumed mass/targeted co-entry finished without pausing —
         // the whole ChangeZone entry event is complete, so clear the pre-entry
@@ -1118,7 +1293,12 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
         // ones this resume produced; otherwise leave them parked for the next drain.
         let trigger_events: Vec<GameEvent> = events[events_before_drain..]
             .iter()
-            .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
+            .filter(|ev| {
+                !matches!(
+                    ev,
+                    GameEvent::PhaseChanged { .. } | GameEvent::ZoneChanged { .. }
+                )
+            })
             .cloned()
             .collect();
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -2386,6 +2566,16 @@ fn inject_last_revealed_targets(
 ) -> Vec<TargetRef> {
     if let Some(filter) = target_filter_for_last_revealed_sub(&sub.effect) {
         let ctx = crate::game::filter::FilterContext::from_ability(parent_ability);
+        // CR 701.20e + CR 608.2c: In an immediate look-then-act chain, an exact
+        // `ParentTarget` names the object produced by the parent look even though
+        // looking does not move it or create an ordinary target. Bind that one
+        // sentinel through the existing look ledger. Composed filters remain
+        // intact so their concrete restrictions are still evaluated.
+        let filter = if matches!(filter, TargetFilter::ParentTarget) {
+            &TargetFilter::LastRevealed
+        } else {
+            filter
+        };
         return crate::game::filter::last_revealed_library_ids_matching(state, filter, &ctx)
             .into_iter()
             .map(TargetRef::Object)
@@ -3748,6 +3938,7 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         // published its affected ids, and the `TrackedSetAggregate` reduced an
         // empty set to 0 — a fully-supported-looking card that exiles nothing.
         Effect::ExileTop { count, .. } => quantity_hits_tracked(count),
+        Effect::Incubate { count } => quantity_hits_tracked(count),
         Effect::Token {
             count,
             power,
@@ -3777,6 +3968,13 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     }
     if let Effect::PutCounterAll { target, .. } = effect {
         if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
+    if let Effect::SearchLibrary { filter, .. } = effect {
+        if filter_references_tracked_set(filter)
+            || filter_properties_reference_tracked_quantity(filter)
+        {
             return true;
         }
     }
@@ -3887,6 +4085,46 @@ fn filter_references_tracked_set(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => filter_references_tracked_set(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(filter_references_tracked_set)
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c + CR 202.3: A search filter whose typed properties carry a
+/// dynamic quantity (`FilterProp::Cmc { value: Ref(FilteredTrackedSetSize) }`,
+/// Hunger Tide Rises chapter IV) consumes the chain tracked set even when the
+/// filter itself is not a bare `TrackedSet`/`TrackedSetFiltered` reference.
+fn filter_properties_reference_tracked_quantity(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(filter_prop_references_tracked_quantity),
+        TargetFilter::Not { filter } => filter_properties_reference_tracked_quantity(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(filter_properties_reference_tracked_quantity),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: Dynamic `Counters`, `Cmc`, and `PtComparison` values are all
+/// quantity-bearing search properties. Keep their tracked-set detection at the
+/// property boundary so a parent producer publishes its set for every axis.
+fn filter_prop_references_tracked_quantity(prop: &crate::types::ability::FilterProp) -> bool {
+    match prop {
+        crate::types::ability::FilterProp::Counters { count, .. } => {
+            quantity_expr_references_tracked_set(count)
+        }
+        crate::types::ability::FilterProp::Cmc { value, .. }
+        | crate::types::ability::FilterProp::PtComparison { value, .. } => {
+            quantity_expr_references_tracked_set(value)
+        }
+        crate::types::ability::FilterProp::AnyOf { props } => {
+            props.iter().any(filter_prop_references_tracked_quantity)
+        }
+        crate::types::ability::FilterProp::Not { prop } => {
+            filter_prop_references_tracked_quantity(prop)
         }
         _ => false,
     }
@@ -4761,22 +4999,14 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
 
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
 /// whose only reachable outcome is a no-op must not be offered as a "you may"
-/// prompt at all. Currently the sole such class is `Effect::PutChosenCounter`
-/// reached after a `ChooseCounterKind` whose 0-kind branch fired: the iterated
-/// permanent had no counters, so no `ChosenAttribute::Counter` was persisted onto
-/// the source and "put an additional counter of that kind" has no "that kind" to
-/// add. The Caves of Androzani II/III iterates over EVERY non-Saga permanent, so
-/// without this guard the controller is flooded with impossible yes/no prompts
-/// for lands and counterless creatures. Suppressing the prompt lets the effect
-/// resolve as its defined no-op instead (CR 122.6).
+/// prompt at all. Each arm below proves infeasibility through its authoritative
+/// typed state: a missing chosen counter kind, no removable matching counter, or
+/// an exact `ParentTarget` hand-off that records no produced object. Suppressing
+/// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutChosenCounter { .. } => {
-            !state.objects.get(&ability.source_id).is_some_and(|src| {
-                src.chosen_attributes
-                    .iter()
-                    .any(|attr| matches!(attr, ChosenAttribute::Counter(_)))
-            })
+            choose_counter_kind::chosen_counter_kind(state).is_none()
         }
         // CR 122.1: "you may remove a <kind> counter from <object>. If you do, X"
         // with zero matching counters cannot be performed — removing a counter
@@ -4784,6 +5014,73 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         // `OptionalEffectPerformed` rider) must be suppressed (Sun Droplet #4776).
         Effect::RemoveCounter { .. } => {
             counters::remove_counter_optional_is_infeasible(state, ability)
+        }
+        Effect::CastFromZone {
+            mode,
+            target,
+            constraint,
+            ..
+        } => {
+            // CR 608.2d: An optional exact "cast/play that card" instruction is
+            // impossible when its parent hand-off records that no object was
+            // produced. Neither a lingering permission nor `Play` mode can make
+            // the missing referent actionable, and unrelated inherited targets
+            // cannot supply the exact referent. Concrete parent targets and
+            // ordinary zone selections carry no such provenance and remain
+            // eligible.
+            if matches!(target, TargetFilter::ParentTarget)
+                && ability.parent_target_missing_reason.is_some()
+            {
+                return true;
+            }
+
+            // CR 202.3 + CR 305.1 + CR 601.2e + CR 608.2d: A CastFromZone
+            // option with bound objects is feasible when at least one of those
+            // objects can currently be cast. Probe each object independently:
+            // lands never enter the cast path, fixed permission constraints use
+            // the casting pipeline's typed offer-time authority, and the cloned
+            // resolver retains all other CR 601 legality checks. Dynamic/X
+            // constraints remain deferred by that shared authority. `Play`
+            // permits lands, so this probe is Cast-only. An empty bound set
+            // retains the original whole-ability dry-run, which keeps successful
+            // zone-selection fallbacks feasible while preserving other errors.
+            if matches!(mode, CardPlayMode::Cast) {
+                let bound_objects: Vec<_> = ability
+                    .targets
+                    .iter()
+                    .filter_map(|target| match target {
+                        TargetRef::Object(id) => Some(*id),
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect();
+                if bound_objects.is_empty() {
+                    let mut simulated = state.clone();
+                    return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new())
+                        .is_err();
+                }
+
+                return !bound_objects.into_iter().any(|id| {
+                    let Some(object) = state.objects.get(&id) else {
+                        return false;
+                    };
+                    if object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                        || !crate::game::casting::cast_permission_constraint_allows_cast(
+                            state, object, constraint, None,
+                        )
+                    {
+                        return false;
+                    }
+
+                    let mut candidate = ability.clone();
+                    candidate.targets = vec![TargetRef::Object(id)];
+                    let mut simulated = state.clone();
+                    cast_from_zone::resolve(&mut simulated, &candidate, &mut Vec::new()).is_ok()
+                });
+            }
+            false
         }
         _ => false,
     }
@@ -6034,7 +6331,18 @@ fn perform_player_scope_sacrifices(
             .expect("a game cannot announce more sacrifices than i32 can represent"),
     );
     if completion.publish_fresh_tracked_set {
-        publish_fresh_tracked_set(state, completion.sacrificed.clone());
+        let set_id = publish_fresh_tracked_set(state, completion.sacrificed.clone());
+        // CR 608.2c + CR 701.21a: an interactive sacrifice that publishes a
+        // fresh tracked set for a chained "sacrificed this way" consumer must
+        // stamp the Sacrificed cause on each member — otherwise
+        // `FilteredTrackedSetSize { caused_by: Sacrificed }` reads 0 (Hunger
+        // Tide Rises chapter IV, #5977).
+        if matches!(completion.effect_kind, Some(EffectKind::Sacrifice)) {
+            let causes = state.tracked_set_member_causes.entry(set_id).or_default();
+            for id in &completion.sacrificed {
+                causes.insert(*id, ThisWayCause::Sacrificed);
+            }
+        }
     }
     if completion.propagate_parent_context {
         if let Some(snapshot) =
@@ -6427,6 +6735,10 @@ pub fn resolve_ability_chain(
     // across unrelated ability resolutions.
     if depth == 0 {
         state.last_revealed_ids.clear();
+        // CR 608.2c + CR 122.1: `ChooseCounterKind` overwrites this before
+        // every instruction, and a new top-level resolution cannot inherit a
+        // prior resolution's "that kind" if no such instruction is reached.
+        state.chosen_counter_kind_this_resolution = None;
         // CR 401.5 + CR 608.2c + CR 609.3 + issue #4950: Defense in depth —
         // `apply_parent_chain_context` already consumes this at the very next
         // parent->child hand-off after a Dig/ChooseFromZone/RevealHand sets
@@ -7397,6 +7709,29 @@ fn resolve_chain_body(
         }
     }
 
+    let optional_is_infeasible = ability.optional && optional_effect_is_infeasible(state, ability);
+
+    // CR 608.2c + CR 608.2d: An infeasible optional cast/play instruction does
+    // not happen. Route every such CastFromZone outcome through the existing
+    // decline authority instead of merely suppressing the prompt and falling
+    // through to `resolve_effect`: a missing exact parent could consume an
+    // unrelated inherited target, while another current-legality failure (such
+    // as trying to cast a land) could mutate casting permissions before the
+    // cast authority rejects it. The decline path also preserves the printed
+    // tail semantics: dependent "if you do" riders stay gated while independent
+    // sequential siblings and explicit decline branches continue. Other
+    // infeasible optional effects (PutChosenCounter/RemoveCounter) retain their
+    // established resolver no-op.
+    if optional_is_infeasible && matches!(ability.effect, Effect::CastFromZone { .. }) {
+        return resolve_optional_effect_decision(
+            state,
+            ability.clone(),
+            AutoMayChoice::Decline,
+            events,
+            depth + 1,
+        );
+    }
+
     // CR 608.2d + CR 101.4: "Any opponent may" / "Any player may" / "Any other
     // player may" — prompt the eligible players in APNAP order. The scope decides
     // who is excluded: AnyOpponent excludes the controller (unchanged); AnyPlayer
@@ -7478,7 +7813,7 @@ fn resolve_chain_body(
         && !has_kind_driven_repeat(ability)
         && !has_member_driven_repeat_after_hydration(state, ability)
         && !is_repeated_optional_payment(ability)
-        && !optional_effect_is_infeasible(state, ability)
+        && !optional_is_infeasible
     {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
@@ -9704,8 +10039,11 @@ pub(crate) fn evaluate_condition(
                 _ => None,
             })
             .is_some_and(|spell_id| {
+                // This is an ability-condition evaluation, so the triggering
+                // spell itself is the current-operation source.
+                let context = super::filter::FilterContext::from_source(state, spell_id);
                 super::restrictions::triggering_spell_targets_filter(
-                    state, spell_id, filter, spell_id,
+                    state, spell_id, filter, &context,
                 )
             }),
         // CR 608.2c: "If this creature/permanent is a [type]" — check source object.
@@ -10352,7 +10690,7 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
-    use crate::types::counter::CounterType;
+    use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
         AutoMayChoice, CastingVariant, ExileLink, ExileLinkKind, LKISnapshot, LinkedExileSnapshot,
@@ -10366,6 +10704,46 @@ mod tests {
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn search_filter_dynamic_property_axes_consume_the_tracked_set() {
+        let tracked = || QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let properties = [
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: tracked(),
+            },
+            FilterProp::Counters {
+                counters: CounterMatch::Any,
+                comparator: Comparator::LE,
+                count: tracked(),
+            },
+            FilterProp::PtComparison {
+                stat: crate::types::ability::PtStat::Power,
+                scope: crate::types::ability::PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: tracked(),
+            },
+        ];
+
+        for property in properties {
+            let effect = Effect::SearchLibrary {
+                source_zones: vec![Zone::Library],
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![property])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
+                split: None,
+            };
+            assert!(
+                effect_references_tracked_set(&effect),
+                "dynamic search filter property must make its parent publish the tracked set: {effect:?}"
+            );
+        }
+    }
 
     /// CR 608.2c: a single tapped creature becomes the resolution's anaphoric
     /// referent, so a later "that creature's power" (Enlist) reads it.
@@ -23541,6 +23919,500 @@ mod tests {
             3,
             "non-matching crewer: only the +1/+1 counter is added, no doubling"
         );
+    }
+
+    fn pure_peek_definition(sub: AbilityDefinition, count: i32) -> AbilityDefinition {
+        use crate::types::ability::DigSource;
+
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: count },
+                destination: None,
+                keep_count: Some(0),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: false,
+                enter_tapped: false,
+                source: DigSource::Library,
+            },
+        )
+        .sub_ability(sub)
+    }
+
+    /// CR 701.20e + CR 608.2c: a pure look leaves the card in the library, but
+    /// the immediate `ParentTarget` cast instruction still refers to that exact
+    /// looked-at object.
+    #[test]
+    fn pure_peek_parent_target_cast_injects_looked_library_card() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Look Source".to_string(),
+            Zone::Battlefield,
+        );
+        let looked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Looked Spell".to_string(),
+            Zone::Library,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Library Sibling".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&looked)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let cast = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+        );
+        let ability = build_resolved_from_def(&pure_peek_definition(cast, 1), source, PlayerId(0));
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("pure-peek cast chain must resolve");
+
+        assert_eq!(state.last_revealed_ids, vec![looked]);
+        assert_eq!(
+            state.objects[&looked].zone,
+            Zone::Exile,
+            "the exact looked card must enter the lingering cast-permission path"
+        );
+        assert!(state.objects[&looked]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+            )));
+        assert_eq!(state.objects[&sibling].zone, Zone::Library);
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    /// CR 608.2d + CR 601.2a: feasibility probing must preserve valid
+    /// resolution-time casts from public zones, including typed filters.
+    #[test]
+    fn optional_cast_feasibility_preserves_valid_graveyard_and_exile_spells() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        for zone in [Zone::Graveyard, Zone::Exile] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(900),
+                PlayerId(0),
+                "Cast Source".to_string(),
+                Zone::Battlefield,
+            );
+            let spell = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                format!("{zone:?} Spell"),
+                zone,
+            );
+            {
+                let object = state.objects.get_mut(&spell).unwrap();
+                object.card_types.core_types.push(CoreType::Instant);
+                object.base_card_types = object.card_types.clone();
+            }
+
+            let cast = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CastFromZone {
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Instant)
+                            .properties(vec![FilterProp::InZone { zone }]),
+                    ),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                },
+            )
+            .optional();
+            let mut ability = build_resolved_from_def(&cast, source, PlayerId(0));
+            ability.targets = vec![TargetRef::Object(spell)];
+
+            assert!(
+                !optional_effect_is_infeasible(&state, &ability),
+                "a valid typed cast from {zone:?} must remain offerable"
+            );
+        }
+    }
+
+    /// CR 608.2d: an exact missing parent cannot become actionable through the
+    /// independent cast/play or immediate/lingering axes.
+    #[test]
+    fn missing_parent_target_blocks_optional_cast_and_play_for_every_driver() {
+        use crate::types::ability::{
+            AbilityCost, CardPlayMode, CastFromZoneDriver, CastPermissionConstraint,
+            ParentTargetMissingReason,
+        };
+
+        let state = GameState::new_two_player(42);
+        for mode in [CardPlayMode::Cast, CardPlayMode::Play] {
+            for driver in [
+                CastFromZoneDriver::DuringResolution,
+                CastFromZoneDriver::LingeringPermission,
+            ] {
+                let mut ability = ResolvedAbility::new(
+                    Effect::CastFromZone {
+                        target: TargetFilter::ParentTarget,
+                        without_paying_mana_cost: false,
+                        mode,
+                        cast_transformed: false,
+                        alt_ability_cost: Some(AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        }),
+                        constraint: Some(CastPermissionConstraint::ManaValue {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        }),
+                        duration: Some(Duration::UntilEndOfTurn),
+                        driver,
+                        mana_spend_permission: None,
+                    },
+                    vec![],
+                    ObjectId(900),
+                    PlayerId(0),
+                );
+                ability.optional = true;
+                ability.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+
+                assert!(
+                    optional_effect_is_infeasible(&state, &ability),
+                    "missing ParentTarget must suppress {mode:?}/{driver:?} even with a duration, constraint, and alternative cost"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2d: explicit missing-parent provenance remains authoritative when
+    /// normal chain hand-off also inherits a player or unrelated object target.
+    #[test]
+    fn inherited_unrelated_targets_do_not_restore_a_missing_exact_parent() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver, ParentTargetMissingReason};
+
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability.parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
+
+        for inherited_targets in [
+            vec![TargetRef::Player(PlayerId(1))],
+            vec![TargetRef::Object(ObjectId(901))],
+        ] {
+            ability.targets = inherited_targets;
+            assert!(
+                optional_effect_is_infeasible(&state, &ability),
+                "unrelated inherited targets must not satisfy a missing exact ParentTarget: {:?}",
+                ability.targets
+            );
+        }
+    }
+
+    /// CR 608.2d: a concrete exact target is actionable; genuine parent hand-offs
+    /// carry the object rather than missing-parent provenance.
+    #[test]
+    fn concrete_parent_target_remains_feasible_for_optional_cast() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Cast Source".to_string(),
+            Zone::Battlefield,
+        );
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Concrete Spell".to_string(),
+            Zone::Exile,
+        );
+        {
+            let object = state.objects.get_mut(&spell).unwrap();
+            object.card_types.core_types.push(CoreType::Instant);
+            object.base_card_types = object.card_types.clone();
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![TargetRef::Object(spell)],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "a concrete exact target must remain offerable"
+        );
+    }
+
+    /// CR 608.2d: ordinary empty target lists without exact missing-parent
+    /// provenance remain valid no-op/zone-selection shapes.
+    #[test]
+    fn empty_non_parent_cast_shapes_remain_feasible_without_missing_provenance() {
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let state = GameState::new_two_player(42);
+        for target in [
+            TargetFilter::Any,
+            TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Instant)
+                    .properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
+        ] {
+            let mut ability = ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target: target.clone(),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::DuringResolution,
+                    mana_spend_permission: None,
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            ability.optional = true;
+
+            assert!(
+                !optional_effect_is_infeasible(&state, &ability),
+                "empty {target:?} without missing-parent provenance must remain offerable"
+            );
+        }
+    }
+
+    /// CR 701.20e + CR 608.2c: the sibling positional consumer binds the same
+    /// pure-look result and moves only that card.
+    #[test]
+    fn pure_peek_parent_target_put_at_library_position_moves_looked_card() {
+        use crate::types::ability::LibraryPosition;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Look Source".to_string(),
+            Zone::Battlefield,
+        );
+        let looked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Looked Card".to_string(),
+            Zone::Library,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Library Sibling".to_string(),
+            Zone::Library,
+        );
+        let put = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Bottom,
+            },
+        );
+        let ability = build_resolved_from_def(&pure_peek_definition(put, 1), source, PlayerId(0));
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("pure-peek positional chain must resolve");
+
+        assert_eq!(state.last_revealed_ids, vec![looked]);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![sibling, looked],
+            "only the looked top card must move to the requested position"
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+    }
+
+    /// An explicitly announced child target is authoritative. The pure-look
+    /// ledger must not overwrite it when the parent Dig finishes.
+    #[test]
+    fn pure_peek_preserves_explicit_cast_from_zone_child_target() {
+        use crate::game::ability_utils::assign_targets_in_chain;
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Look Source".to_string(),
+            Zone::Battlefield,
+        );
+        let looked = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Looked Top".to_string(),
+            Zone::Library,
+        );
+        let sibling = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Looked Sibling".to_string(),
+            Zone::Library,
+        );
+        let explicit = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Explicit Exile Spell".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&explicit)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let cast = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Instant)
+                        .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                ),
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+            },
+        )
+        .optional();
+        let mut ability =
+            build_resolved_from_def(&pure_peek_definition(cast, 2), source, PlayerId(0));
+        // Model a resumed chain whose optional child already carries a real
+        // announced target, using the canonical assignment helper on that child.
+        assign_targets_in_chain(
+            &state,
+            ability.sub_ability.as_mut().unwrap(),
+            &[TargetRef::Object(explicit)],
+        )
+        .expect("the exile card must stamp onto the cast child");
+        assert!(
+            ability.targets.is_empty(),
+            "the Dig head has no target slot"
+        );
+        assert_eq!(
+            ability.sub_ability.as_ref().unwrap().targets,
+            vec![TargetRef::Object(explicit)],
+            "precondition: the cast child owns the explicit target"
+        );
+        assert!(state.last_revealed_ids.is_empty());
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0)
+            .expect("explicit-target pure-peek chain must reach its optional prompt");
+
+        assert_eq!(state.last_revealed_ids, vec![looked, sibling]);
+        let pending = state
+            .pending_optional_effect
+            .as_ref()
+            .expect("optional cast must be pending");
+        assert_eq!(
+            pending.targets,
+            vec![TargetRef::Object(explicit)],
+            "the live optional continuation must retain only the explicit exile target"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("accepting the explicit cast grant must succeed");
+
+        assert!(state.objects[&explicit]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(
+                permission,
+                CastingPermission::ExileWithAltCost { cost, .. } if *cost == ManaCost::zero()
+            )));
+        for id in [looked, sibling] {
+            assert_eq!(state.objects[&id].zone, Zone::Library);
+            assert!(state.objects[&id].casting_permissions.is_empty());
+        }
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
     }
 
     /// Issue #2019 — Kiora-style look-then-cast must filter chain-injected targets

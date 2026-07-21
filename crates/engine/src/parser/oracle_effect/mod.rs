@@ -11815,12 +11815,19 @@ fn try_parse_additional_land_this_turn(tp: TextPair) -> Option<ParsedEffectClaus
     let (count, rest_orig) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = opt(alt((tag("you may "), tag("may ")))).parse(input)?;
         let (input, _) = tag("play ").parse(input)?;
-        // "an additional land" (count 1) or "<number> additional lands".
+        // "an additional land" (count 1) or "[up to ]<number> additional lands".
+        // CR 305.2: "up to <n>" grants the same +n land-play allowance as a bare
+        // "<n>" — playing lands is already optional, so the "up to" hedge (Summer
+        // Bloom) is functionally identical to the fixed count.
         let (input, count) = alt((
             value(1u8, tag("an additional land")),
             map(
-                (nom_primitives::parse_number, tag(" additional lands")),
-                |(n, _)| n as u8,
+                (
+                    opt(tag("up to ")),
+                    nom_primitives::parse_number,
+                    tag(" additional lands"),
+                ),
+                |(_, n, _)| n as u8,
             ),
         ))
         .parse(input)?;
@@ -14638,7 +14645,12 @@ fn try_parse_verb_and_target<'a>(
         let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
             .parse(rest_lower.as_str())
             .is_ok();
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: preserve "up to N target …" here too — this compound/rider
+        // path (saga chapters carrying a trailing duration, e.g. The Super Hero
+        // Civil War) is the second `gain control of` entry point, and dropping
+        // the count here left issue #6205 half-fixed. Mirrors the `fight ` arm
+        // directly above.
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
         if tag::<_, _, OracleError<'_>>(" during that player's next turn")
@@ -14670,7 +14682,14 @@ fn try_parse_verb_and_target<'a>(
                 rem,
             ));
         }
-        return Some((TargetedImperativeAst::GainControl { target, all }, rem));
+        return Some((
+            TargetedImperativeAst::GainControl {
+                target,
+                all,
+                multi_target,
+            },
+            rem,
+        ));
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("earthbend ").parse(lower) {
@@ -19962,40 +19981,6 @@ fn strip_balanced_outer_quotes(s: &str) -> &str {
     s
 }
 
-/// An emblem grants its ability one quote-nesting level deep, so a granted
-/// ability is single-quoted (Koth of the Hammer: `Mountains you control have
-/// '{T}: ~ deals 1 damage to any target.'`). Every downstream grant parser
-/// (`parse_static_line`, `parse_quoted_ability_modifications`) recognises only
-/// double-quoted ability bodies — single quotes are ambiguous with
-/// apostrophes — so promote the nested pair to double quotes. The opening
-/// quote is anchored on a grant verb
-/// (`have '` / `has '` / `gain '` / `gains '`) so a possessive apostrophe in
-/// the subject phrase is never mistaken for the delimiter; the closing quote is
-/// the final `'` in the body. Bodies without a nested single-quoted ability are
-/// returned unchanged.
-fn promote_nested_ability_quotes(body: &str) -> String {
-    const OPEN_ANCHORS: [&str; 4] = [" have '", " has '", " gain '", " gains '"];
-    // Grant verbs are mid-sentence and therefore lowercase in Oracle text, so
-    // they can be matched against `body` directly without lowercasing.
-    let open_quote = OPEN_ANCHORS
-        .iter()
-        .filter_map(|anchor| body.find(anchor).map(|pos| pos + anchor.len() - 1))
-        .min();
-    let (Some(open_quote), Some(close_quote)) = (open_quote, body.rfind('\'')) else {
-        return body.to_string();
-    };
-    if close_quote <= open_quote {
-        return body.to_string();
-    }
-    let mut promoted = String::with_capacity(body.len());
-    promoted.push_str(&body[..open_quote]);
-    promoted.push('"');
-    promoted.push_str(&body[open_quote + 1..close_quote]);
-    promoted.push('"');
-    promoted.push_str(&body[close_quote + 1..]);
-    promoted
-}
-
 /// CR 114.1: Parse emblem creation from Oracle text.
 /// Handles both full form "you get an emblem with \"[text]\"" and
 /// subject-stripped form "get an emblem with \"[text]\"".
@@ -20014,7 +19999,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     // parsers recognise it (Koth of the Hammer's "Mountains you control have
     // '{T}: ~ deals 1 damage to any target.'").
     let body = strip_balanced_outer_quotes(rest);
-    let promoted = promote_nested_ability_quotes(body);
+    let promoted = crate::parser::oracle_static::promote_nested_ability_quotes(body);
     let inner = promoted.trim().trim_end_matches('.').trim();
 
     if inner.is_empty() {
@@ -23059,6 +23044,62 @@ fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
     }
 }
 
+/// The match arms naming every effect that establishes a NON-targeting
+/// object POPULATION — the `*All` / scope-`All` family whose `target` (or
+/// `filter`) is a population filter rather than a chosen target. This is why they
+/// are absent from `has_typed_target_widened`'s single-target whitelist:
+/// `ParentTarget` cannot bind to them because nothing was chosen.
+///
+/// The arms live in a macro so the SINGLE authoritative variant list generates
+/// both the shared `&` and `&mut` accessors below — two hand-written matches would
+/// be two lists that drift. Callers must go through those accessors rather than
+/// re-listing variants.
+macro_rules! mass_population_filter_arms {
+    ($effect:expr) => {
+        match $effect {
+            Effect::CounterAll { target } | Effect::GainControlAll { target } => Some(target),
+            Effect::PumpAll { target, .. }
+            | Effect::DamageAll { target, .. }
+            | Effect::DestroyAll { target, .. }
+            | Effect::BounceAll { target, .. }
+            | Effect::PutCounterAll { target, .. }
+            | Effect::DoublePTAll { target, .. } => Some(target),
+            Effect::ExploreAll { filter } => Some(filter),
+            Effect::SetTapState {
+                target,
+                scope: EffectScope::All,
+                ..
+            } => Some(target),
+            _ => None,
+        }
+    };
+}
+
+/// The NON-targeting mass population filter of an "each <type>"
+/// (`*All` / scope-`All`) effect — the single authority for "which effects
+/// establish an object population". Read-only dual of
+/// [`mass_population_filter_mut`]; both are generated from one variant list
+/// (`mass_population_filter_arms!`).
+pub(crate) fn mass_population_filter(effect: &Effect) -> Option<&TargetFilter> {
+    mass_population_filter_arms!(effect)
+}
+
+/// Mutable form of [`mass_population_filter`], for walkers that rewrite
+/// a mass population in place (e.g. `oracle_trigger`'s attached-host "each other"
+/// retarget). Shares the same authoritative variant list.
+pub(crate) fn mass_population_filter_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
+    mass_population_filter_arms!(effect)
+}
+
+/// CR 608.2c: If this clause is a mass ("each …") effect, return the object
+/// POPULATION filter it acted on. Feeds `ParseContext::chain_prior_mass_population`
+/// so a later same-chain anaphor ("They gain vigilance until end of turn") binds
+/// to that population. Delegates to the shared [`mass_population_filter`]
+/// authority rather than re-listing variants.
+fn clause_ir_mass_population(clause: &ClauseIr) -> Option<TargetFilter> {
+    mass_population_filter(&clause.parsed.effect).cloned()
+}
+
 /// CR 400.1/400.2 + CR 601.2a: Map a possessive-hand player reference (as
 /// produced by `parse_hand_possessive_target`) to the `ControllerRef` axis
 /// used to scope a card filter to that same player's hand. Exhaustive over
@@ -24621,13 +24662,13 @@ fn inject_chosen_color_choice_grant(def: &mut AbilityDefinition, parent_is_color
             Box::new(Effect::Choose {
                 choice_type: ChoiceType::color(),
                 // CR 607.2d + CR 613.1: `persist: true` so the choice resolver
-                // carries `source_id` into `WaitingFor::NamedChoice`; answering
-                // it then routes through `bind_named_choice`, which writes
+                // carries exact source authority into `WaitingFor::NamedChoice`;
+                // answering it then routes through `bind_named_choice`, which writes
                 // `ChosenAttribute::Color` onto the granting source and re-runs
                 // layers. The layer applier reads that color off the source
                 // (`game/layers.rs` `chosen_color` pre-read) to bake the grant's
                 // `Protection`/`HexproofFrom(ChosenColor)` into a concrete color.
-                // With `persist: false` no `source_id` is stored, the source
+                // With `persist: false` no exact object persistence is granted, the source
                 // never gets a chosen color, and the grant resolves to a no-op
                 // (issue #4371). Matches `try_parse_become_choice`'s persisted
                 // `AddChosenColor` choice.
@@ -28243,6 +28284,16 @@ pub(crate) fn parse_effect_chain_ir(
                 .iter()
                 .rev()
                 .find_map(clause_ir_hand_reveal_target),
+            // CR 608.2c: the most-recent earlier same-chain mass ("each …")
+            // population, so a later "They <grant>" anaphor binds to it rather
+            // than reaching past it to the trigger's own subject (Ardbert,
+            // Warrior of Darkness). Mass effects choose nothing, so
+            // `parent_target_available` / `ParentTarget` cannot carry this.
+            chain_prior_mass_population: builder
+                .clauses()
+                .iter()
+                .rev()
+                .find_map(clause_ir_mass_population),
             // CR 608.2c: bind a bare "it" in this chunk's counter/anaphor to the
             // token created by an earlier clause when that token is the chain's
             // most-recent object referent (Esper Terra's "put up to three lore

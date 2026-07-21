@@ -4166,6 +4166,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
     match m {
         ContinuousModification::CopyValues { .. } => "copy values".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
+        ContinuousModification::SetTextName { name } => format!("set text name {name}"),
         ContinuousModification::AddPower { value } => format!("power {:+}", value),
         ContinuousModification::AddToughness { value } => format!("toughness {:+}", value),
         ContinuousModification::SetPower { value } => format!("base power {value}"),
@@ -11307,10 +11308,10 @@ mod tests {
     fn analyze_token_coverage_treats_source_defined_pt_as_represented() {
         let summary = analyze_token_coverage();
 
-        assert_eq!(summary.total_tokens, 2844);
-        assert_eq!(summary.supported_tokens, 2844);
-        assert_eq!(summary.rules_text_tokens, 1479);
-        assert_eq!(summary.parsed_rules_text_tokens, 1479);
+        assert_eq!(summary.total_tokens, 2845);
+        assert_eq!(summary.supported_tokens, 2845);
+        assert_eq!(summary.rules_text_tokens, 1480);
+        assert_eq!(summary.parsed_rules_text_tokens, 1480);
         assert_eq!(summary.total_tokens - summary.supported_tokens, 0);
         assert!(!summary.top_gaps.iter().any(|gap| {
             gap.handler == TOKEN_BODY_DYNAMIC_OR_SOURCE_DEFINED_POWER_TOUGHNESS_LABEL
@@ -12118,6 +12119,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    source_object: None,
                     bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
@@ -12164,6 +12166,7 @@ mod tests {
                     description: None,
                     attack_defended: None,
                     source_controller: None,
+                    source_object: None,
                     bypass_beneficiary: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
@@ -13235,6 +13238,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13268,6 +13272,7 @@ mod tests {
             ),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13299,6 +13304,7 @@ mod tests {
             description: None,
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13448,6 +13454,7 @@ mod tests {
             description: Some("Skip your draw step.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13479,6 +13486,7 @@ mod tests {
             description: Some("Players skip their upkeep steps.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13520,6 +13528,7 @@ mod tests {
             description: Some("Players can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13552,6 +13561,7 @@ mod tests {
             description: Some("You can't draw cards.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13586,6 +13596,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 
@@ -13626,6 +13637,7 @@ mod tests {
                 description: Some(description.to_string()),
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             });
         }
@@ -13793,6 +13805,7 @@ mod tests {
             description: Some(oracle.to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         });
 

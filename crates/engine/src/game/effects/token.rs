@@ -129,6 +129,12 @@ fn materialize_predefined_token_payload(
         }
     }
     if let Some(spec) = role_spec {
+        // CR 111.10k: A Monster Role (like every predefined Role) has enchant creature.
+        materialized
+            .keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
         materialized.static_definitions = spec.statics;
         materialized.trigger_definitions = spec.triggers;
     }
@@ -1075,23 +1081,52 @@ pub(crate) fn apply_copiable_values_to_liminal_object(
     crate::game::printed_cards::install_copiable_values_as_base(object, values);
 }
 
+/// Commit ONE liminal copy-token to the battlefield WITHOUT driving the rest of
+/// the batch. Returns `false` if an ETB-counter replacement paused mid-commit (a
+/// `ContinueLiminalCopyTokenBatch` post-action was stashed to resume). The
+/// per-token batch loop in `apply_copy_token_after_replacement_with_created_ids`
+/// calls this and iterates, so minting N copies uses O(1) stack depth — the old
+/// commit->continue->apply recursion built one large `im::HashMap` COW frame per
+/// token. CR 707.2: shared by every liminal copy-token batch.
+pub(crate) fn commit_liminal_copy_token_entry(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let continuation = liminal_copy_token_continuation_for_event(state, &event);
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+}
+
+fn commit_liminal_copy_token_entry_with_continuation(
+    state: &mut GameState,
+    event: ProposedEvent,
+    continuation: Option<LiminalCopyTokenContinuation>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let post_actions = continuation
+        .map(liminal_copy_token_continuation_post_action)
+        .into_iter()
+        .collect();
+    commit_liminal_token_entry_with_post_actions(
+        state,
+        event,
+        events,
+        TokenEntryEventEmission::Emit,
+        post_actions,
+    )
+}
+
 pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
     state: &mut GameState,
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    let post_actions = continuation
-        .clone()
-        .map(liminal_copy_token_continuation_post_action)
-        .into_iter()
-        .collect();
-    if !commit_liminal_token_entry_with_post_actions(
+    if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
+        continuation.clone(),
         events,
-        TokenEntryEventEmission::Emit,
-        post_actions,
     ) {
         return false;
     }
@@ -3067,10 +3102,16 @@ fn apply_token_ability_payload(obj: &mut GameObject, materialized: TokenAbilityM
         obj.static_definitions.push(static_def);
     }
     if !materialized.trigger_definitions.is_empty() {
-        Arc::make_mut(&mut obj.base_trigger_definitions)
-            .extend(materialized.trigger_definitions.iter().cloned());
+        // CR 111.3: A token's abilities are defined as it is created, so these
+        // entries are printed slots of the token's own base set — not grants.
+        // They must carry a real `Printed` occurrence ref: pushing the bare
+        // `TriggerDefinition` would go through `From<TriggerDefinition>` and
+        // stamp `TriggerDefinitionOccurrenceRef::Unmaterialized`, which
+        // `validate_trigger_definitions` rejects from an observable state and
+        // which `#[serde(skip_serializing)]` turns into a hard serialization
+        // failure the moment the state crosses the WASM bridge.
         for trigger in materialized.trigger_definitions {
-            obj.trigger_definitions.push(trigger);
+            obj.push_printed_trigger(trigger);
         }
     }
     if !materialized.abilities.is_empty() {
@@ -4408,6 +4449,70 @@ mod tests {
         );
     }
 
+    /// CR 111.3: A catalog-materialized token ability is a printed slot of the
+    /// token's own base set, so its live entry must carry a real `Printed`
+    /// occurrence ref.
+    ///
+    /// RED before the fix: `apply_token_ability_payload` pushed the bare
+    /// `TriggerDefinition`, which `Definitions::push<U: Into<T>>` routed through
+    /// `From<TriggerDefinition> for TriggerEntry` and stamped
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized`. That variant is
+    /// `#[serde(skip_serializing)]`, so the first time the state crossed the
+    /// WASM bridge `to_js` panicked ("the enum variant
+    /// `TriggerDefinitionOccurrenceRef::Unmaterialized` cannot be serialized"),
+    /// killing the worker — the engine computed the right tokens and then died
+    /// handing them to the UI. No in-process test caught it because engine tests
+    /// never serialize.
+    #[test]
+    fn catalog_token_trigger_carries_printed_occurrence_and_serializes() {
+        use crate::types::ability::TriggerDefinitionOccurrenceRef;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "14c28cbd-1740-5c17-98ea-4aea094067f1",
+        )
+        .expect("BLC Pest preset");
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Pest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.token_image_ref = preset.token_image_ref.clone();
+        }
+        inject_catalog_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(obj.trigger_definitions.len(), 1);
+
+        let entry = obj.trigger_definitions.iter_all().next().unwrap();
+        assert!(
+            matches!(
+                entry.occurrence,
+                TriggerDefinitionOccurrenceRef::Printed { .. }
+            ),
+            "CR 111.3: a catalog token trigger is a printed slot of the token's own \
+             base set, got {:?}",
+            entry.occurrence
+        );
+
+        // The object-local provenance invariant must hold: `Unmaterialized` is
+        // explicitly rejected from an observable game state.
+        obj.validate_trigger_definitions()
+            .expect("catalog token trigger must have observable occurrence provenance");
+
+        // The bridge check. `engine-wasm`'s `to_js` panics on serialization
+        // failure, so an unserializable entry is fatal, not degraded.
+        serde_json::to_string(obj)
+            .expect("catalog token object must serialize for the WASM bridge");
+        serde_json::to_string(&state).expect("full game state must serialize for the WASM bridge");
+    }
+
     #[test]
     fn catalog_pest_dies_trigger_fires_through_zone_pipeline() {
         use crate::game::triggers::process_triggers;
@@ -4859,6 +4964,121 @@ mod tests {
             obj.static_definitions.len(),
             1,
             "Monster Role must carry its enchanted-creature +1/+1-and-trample static"
+        );
+    }
+
+    /// CR 111.10k + CR 704.5m: a Monster Role has enchant creature, so it
+    /// must be put into its owner's graveyard when an animated Mishra's
+    /// Foundry stops being a creature during cleanup. The token then ceases
+    /// to exist, but the battlefield-to-graveyard event still occurs.
+    #[test]
+    fn monster_role_on_animated_foundry_dies_during_cleanup() {
+        let mut state = GameState::new_two_player(42);
+        let foundry = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(0),
+            "Mishra's Foundry".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&foundry).unwrap();
+            object.card_types.core_types.push(CoreType::Land);
+            object.base_card_types = object.card_types.clone();
+        }
+
+        let animate = ResolvedAbility::new(
+            Effect::Animate {
+                power: Some(PtValue::Fixed(2)),
+                toughness: Some(PtValue::Fixed(2)),
+                types: vec!["Artifact".to_string(), "Creature".to_string()],
+                remove_types: vec![],
+                keywords: vec![],
+                target: TargetFilter::None,
+            },
+            vec![],
+            foundry,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        crate::game::effects::animate::resolve(&mut state, &animate, &mut events).unwrap();
+        crate::game::layers::flush_layers(&mut state);
+        assert!(
+            state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must be a creature before the Role is created"
+        );
+
+        let create_role = ResolvedAbility::new(
+            Effect::Token {
+                name: "Monster Role".to_string(),
+                power: PtValue::Fixed(0),
+                toughness: PtValue::Fixed(0),
+                types: vec![
+                    "Enchantment".to_string(),
+                    "Aura".to_string(),
+                    "Role".to_string(),
+                ],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: Some(TargetFilter::ParentTarget),
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(foundry)],
+            foundry,
+            PlayerId(0),
+        );
+        resolve(&mut state, &create_role, &mut events).unwrap();
+        let role = state.last_created_token_ids[0];
+        assert_eq!(
+            state.objects[&role].attached_to,
+            Some(AttachTarget::Object(foundry)),
+            "Monster Role must enter attached to Mishra's Foundry"
+        );
+        assert!(
+            // allow-raw-authority: the test verifies the exact intrinsic Enchant filter, which the keyword-kind authority cannot inspect
+            state.objects[&role].keywords.iter().any(|keyword| matches!(
+                keyword,
+                Keyword::Enchant(TargetFilter::Typed(filter))
+                    if filter.type_filters.contains(&TypeFilter::Creature)
+            )),
+            "Monster Role must have the intrinsic enchant creature ability"
+        );
+
+        events.clear();
+        assert!(crate::game::turns::execute_cleanup(&mut state, &mut events).is_none());
+        crate::game::sba::check_state_based_actions(&mut state, &mut events);
+
+        assert!(
+            !state.objects[&foundry]
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "Mishra's Foundry must stop being a creature during cleanup"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(Zone::Battlefield),
+                    to: Zone::Graveyard,
+                    ..
+                } if *object_id == role
+            )),
+            "the illegal Aura must move from the battlefield to its owner's graveyard"
+        );
+        assert!(
+            !state.objects.contains_key(&role),
+            "a Role token put into a graveyard must cease to exist"
         );
     }
 

@@ -2255,17 +2255,19 @@ mod tests {
         let old_equipment = spawn_with_subtype(&mut state, "Old Sword", "Equipment");
         let new_equipment = spawn_with_subtype(&mut state, "New Sword", "Equipment");
 
-        state.zone_changes_this_turn.push(ZoneChangeRecord {
+        state.zone_changes_this_turn.push_back(ZoneChangeRecord {
             attachments: vec![AttachmentSnapshot {
                 object_id: old_equipment,
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Equipment,
             }],
             ..ZoneChangeRecord::test_minimal(zack, Some(Zone::Battlefield), Zone::Graveyard)
         });
-        state.zone_changes_this_turn.push(ZoneChangeRecord {
+        state.zone_changes_this_turn.push_back(ZoneChangeRecord {
             attachments: vec![AttachmentSnapshot {
                 object_id: new_equipment,
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Equipment,
             }],

@@ -477,7 +477,18 @@ fn apply_ability_stickers(obj: &mut GameObject) {
         }
         Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
         for trigger in parsed.triggers {
-            obj.trigger_definitions.push(trigger);
+            // FIXME(stickers): needs a real occurrence ref. Unlike the other
+            // sites in this change, a sticker-granted trigger is NOT a printed
+            // slot — `rebuild_public_zone_stickers` reverts to base and
+            // re-applies, so pushing to `base_trigger_definitions` would make
+            // the sticker permanent. It wants a Layer-6 grant producer key, but
+            // neither `TriggerProducerOrigin::Static` (no owning static
+            // definition) nor `Transient` (no continuous-effect id) describes a
+            // sticker without a design decision. Left explicit rather than
+            // guessed; a stickered object still fails to serialize.
+            obj.trigger_definitions.push(
+                crate::types::ability::TriggerEntry::unmaterialized_legacy(trigger),
+            );
         }
         for replacement in parsed.replacements {
             obj.replacement_definitions.push(replacement);

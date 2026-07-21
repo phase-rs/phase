@@ -17,7 +17,7 @@ use crate::types::counter::CounterMatch;
 use crate::types::game_state::{
     CastOfferKind, CastPaymentMode, CompanionDeclaration, ConvokeMode, CounterCostChoice,
     CounterMoveChoice, CounterRemoveChoice, GameState, MulliganDecisionPhase, PayCostKind,
-    PendingMulliganAction, TargetSelectionSlot, WaitingFor,
+    PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -1474,9 +1474,17 @@ pub fn candidate_actions_broad_with_probe(
             player,
             options,
             choice_type,
-            source_id,
+            source,
             ..
-        } => named_choice_actions(state, *player, options, choice_type, *source_id),
+        } => named_choice_actions(
+            state,
+            *player,
+            options,
+            choice_type,
+            source
+                .as_ref()
+                .map(|source| source.prompt.display_name.as_str()),
+        ),
         // CR 608.2d: every printed guess is a legal candidate. Enumerated
         // uniformly here for legality + server validation; the AI's actual pick
         // is made by a hidden-info determinization pre-emption in
@@ -1501,14 +1509,8 @@ pub fn candidate_actions_broad_with_probe(
             player,
             options,
             choice_type,
-            pending_cast,
-        } => named_choice_actions(
-            state,
-            *player,
-            options,
-            choice_type,
-            Some(pending_cast.object_id),
-        ),
+            pending_cast: _,
+        } => named_choice_actions(state, *player, options, choice_type, None),
         // Alchemy spellbook draft: one candidate per card in the spellbook list.
         WaitingFor::SpellbookDraft {
             player, options, ..
@@ -2927,6 +2929,19 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 732.2a: an accepted object-growth loop collapses into a finite count
+        // the controller names. `max` is the engine's 1000-wide loop bound; the AI
+        // never wants a huge pile, so offer only the default N=1 — this bounds
+        // search regardless of the display cap. Must precede the general arm below.
+        WaitingFor::PayAmountChoice {
+            player,
+            resource: PayableResource::LoopCollapse { .. },
+            ..
+        } => vec![candidate(
+            GameAction::SubmitPayAmount { amount: 1 },
+            TacticalClass::Selection,
+            Some(*player),
+        )],
         // CR 107.1c + CR 107.14: Enumerate every legal amount in [min, max].
         // AI search layer picks among these; for a damage-scaling effect like
         // Galvanic Discharge the evaluator prefers the maximum (most damage).
@@ -4226,7 +4241,7 @@ fn remove_counter_cost_distribution_candidate(
         let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
-        let available: Vec<_> = match counter_type {
+        let mut available: Vec<_> = match counter_type {
             CounterMatch::OfType(counter_type) => obj
                 .counters
                 .get(counter_type)
@@ -4240,6 +4255,10 @@ fn remove_counter_cost_distribution_candidate(
                 .map(|(counter_type, count)| (counter_type.clone(), *count))
                 .collect(),
         };
+        // Issue #4878: `obj.counters` is a default-RandomState HashMap; sort by
+        // CounterType so the emitted distribution's content is a function of
+        // game state, not per-process hash iteration order.
+        available.sort_by(|a, b| a.0.cmp(&b.0));
         for (counter_type, available) in available {
             if remaining == 0 {
                 break;
@@ -4319,10 +4338,10 @@ fn named_choice_actions(
     player: PlayerId,
     options: &[String],
     choice_type: &ChoiceType,
-    source_id: Option<ObjectId>,
+    source_display_name: Option<&str>,
 ) -> Vec<CandidateAction> {
     if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
-        return card_name_choice_candidates(state, player, source_id)
+        return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
             .map(|choice| {
                 candidate(
@@ -4350,7 +4369,7 @@ fn named_choice_actions(
 fn card_name_choice_candidates(
     state: &GameState,
     player: PlayerId,
-    source_id: Option<ObjectId>,
+    source_display_name: Option<&str>,
 ) -> Vec<String> {
     const MAX_CARD_NAME_CANDIDATES: usize = 24;
 
@@ -4379,10 +4398,8 @@ fn card_name_choice_candidates(
         choices.push(name.to_string());
     }
 
-    if let Some(source_id) = source_id {
-        if let Some(source) = state.objects.get(&source_id) {
-            push_name(&source.name, &legal_names, &mut seen, &mut choices);
-        }
+    if let Some(source_display_name) = source_display_name {
+        push_name(source_display_name, &legal_names, &mut seen, &mut choices);
     }
 
     let mut push_object_name = |id: ObjectId| {
@@ -4988,6 +5005,7 @@ mod tests {
         StaticDefinition, TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::LoopCollapseAxis;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -5686,6 +5704,43 @@ mod tests {
         assert!(matches!(actions[0].action, GameAction::ChooseTarget { .. }));
     }
 
+    /// CR 732.2a: at a `PayableResource::LoopCollapse` prompt the AI enumerates ONLY
+    /// the default N=1 — never the 1000-wide `min..=max` range (which would explode
+    /// search). Drives the real `candidate_actions` production entry point.
+    ///
+    /// REVERT-PROBE: delete the `LoopCollapse` arm in
+    /// `candidate_actions_broad_with_probe` → the general PayAmountChoice arm
+    /// enumerates `0..=1000` → this single-candidate assertion FLIPS.
+    #[test]
+    fn pay_amount_loop_collapse_offers_only_default_one() {
+        let state = GameState {
+            waiting_for: WaitingFor::PayAmountChoice {
+                player: PlayerId(0),
+                resource: PayableResource::LoopCollapse {
+                    axis: LoopCollapseAxis::Tokens,
+                },
+                min: 0,
+                max: 1000,
+                accumulated: 0,
+                source_id: crate::types::identifiers::ObjectId(0),
+                pending_mana_ability: None,
+            },
+            ..GameState::new_two_player(42)
+        };
+        let pay_amounts: Vec<u32> = candidate_actions(&state)
+            .iter()
+            .filter_map(|a| match a.action {
+                GameAction::SubmitPayAmount { amount } => Some(amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pay_amounts,
+            vec![1],
+            "LoopCollapse offers only the default N=1, not the 1000-wide range"
+        );
+    }
+
     #[test]
     fn declare_attackers_includes_pass_and_all_attack() {
         // PLAN-v3 completion contract: candidate generation routes each proposal
@@ -5933,7 +5988,7 @@ mod tests {
     #[test]
     fn named_card_choice_uses_bounded_in_game_names() {
         let mut state = GameState::new_two_player(42);
-        let source = create_object(
+        let _source = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
@@ -5954,7 +6009,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::CardName,
             options: Vec::new(),
-            source_id: Some(source),
+            source: None,
             persist_player: None,
         };
 
@@ -6027,10 +6082,24 @@ mod tests {
     #[test]
     fn exact_selection_count_above_pool_cap_keeps_progress_candidate() {
         let mut state = GameState::new_two_player(42);
+        let conniver_id = ObjectId(100);
+        state.objects.insert(
+            conniver_id,
+            crate::game::game_object::GameObject::new(
+                conniver_id,
+                crate::types::identifiers::CardId(100),
+                PlayerId(0),
+                "Conniver".to_string(),
+                Zone::Battlefield,
+            ),
+        );
+        state.battlefield.push_back(conniver_id);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::ConniveDiscard {
             player: PlayerId(0),
-            conniver_id: ObjectId(100),
+            conniver: state
+                .capture_connive_subject(conniver_id)
+                .expect("fixture conniver exists"),
             source_id: ObjectId(100),
             cards,
             count: SELECTION_POOL_CAP + 1,

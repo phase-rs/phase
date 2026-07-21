@@ -17,7 +17,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
-    auto_pass_recommended as engine_auto_pass, legal_actions_full as engine_legal_actions_full,
+    auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
+    legal_actions_full as engine_legal_actions_full,
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
@@ -245,8 +246,8 @@ fn build_game_started_message(
     events: Vec<GameEvent>,
 ) -> ServerMessage {
     let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
-    let auto_pass = engine_auto_pass(&session.state, &legal_actions);
     let is_actor = server_core::is_acting(&session.state, player);
+    let auto_pass = engine_auto_pass_for_viewer(&session.state, player, &legal_actions);
     let filtered = server_core::filter_state_for_player(&session.state, player);
     let opponent_name = engine::game::players::opponents(&session.state, player)
         .first()
@@ -266,7 +267,7 @@ fn build_game_started_message(
         opponent_name,
         player_names: session.display_names.clone(),
         legal_actions: if is_actor { legal_actions } else { Vec::new() },
-        auto_pass_recommended: if is_actor { auto_pass } else { false },
+        auto_pass_recommended: auto_pass,
         spell_costs: if is_actor {
             spell_costs_all
         } else {
@@ -310,7 +311,7 @@ fn build_state_update_message(
         events,
         legal_actions,
         log_entries,
-        auto_pass,
+        _auto_pass,
         spell_costs,
         legal_actions_by_object,
     ) = result;
@@ -322,7 +323,7 @@ fn build_state_update_message(
         legal_actions_by_object,
         spell_costs,
     })?;
-    let is_actor = raw_state.waiting_for.acting_players().contains(&player);
+    let is_actor = server_core::is_acting(raw_state, player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_transport_views(raw_state, &filtered, Some(player));
 
@@ -334,7 +335,7 @@ fn build_state_update_message(
         } else {
             Vec::new()
         },
-        auto_pass_recommended: if is_actor { *auto_pass } else { false },
+        auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
         eliminated_players: Vec::new(),
         log_entries: log_entries.clone(),
         spell_costs: if is_actor {
@@ -2806,7 +2807,7 @@ async fn broadcast_takeback_approved(
     snapshot: server_core::BroadcastSnapshot,
     resolved_by: Option<PlayerId>,
 ) {
-    let (raw_state, legal_actions, auto_pass, spell_costs, by_object) = snapshot;
+    let (raw_state, legal_actions, _auto_pass, spell_costs, by_object) = snapshot;
     let filtered_states: Vec<(PlayerId, GameState)> = (0..player_count)
         .map(|i| {
             let pid = PlayerId(i);
@@ -2816,16 +2817,15 @@ async fn broadcast_takeback_approved(
 
     let conns = connections.lock().await;
     if let Some(players) = conns.get(game_code) {
-        let actors = raw_state.waiting_for.acting_players();
         for (pid, pstate) in &filtered_states {
             if let Some(s) = players.get(pid) {
-                let is_actor = actors.contains(pid);
+                let is_actor = server_core::is_acting(&raw_state, *pid);
                 let player_legals = if is_actor {
                     legal_actions.clone()
                 } else {
                     vec![]
                 };
-                let p_auto_pass = if is_actor { auto_pass } else { false };
+                let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
                 let p_spell_costs = if is_actor {
                     spell_costs.clone()
                 } else {
@@ -3276,7 +3276,7 @@ async fn handle_client_message(
                         events,
                         legal_actions,
                         log_entries,
-                        auto_pass_rec,
+                        _auto_pass_rec,
                         spell_costs,
                         legal_actions_by_object,
                     ),
@@ -3323,16 +3323,19 @@ async fn handle_client_message(
                         if let Some(players) = conns.get(&game_code) {
                             for (pid, pstate) in &filtered_states {
                                 if let Some(s) = players.get(pid) {
-                                    let actors = raw_state.waiting_for.acting_players();
-                                    let is_actor = actors.contains(pid);
+                                    let is_actor = server_core::is_acting(&raw_state, *pid);
                                     let player_legals = if ai_results.is_empty() && is_actor {
                                         legal_actions.clone()
                                     } else {
                                         // AI will act next — don't send legal actions yet
                                         vec![]
                                     };
-                                    let p_auto_pass = if ai_results.is_empty() && is_actor {
-                                        auto_pass_rec
+                                    let p_auto_pass = if ai_results.is_empty() {
+                                        engine_auto_pass_for_viewer(
+                                            &raw_state,
+                                            *pid,
+                                            &legal_actions,
+                                        )
                                     } else {
                                         false
                                     };
@@ -3399,7 +3402,7 @@ async fn handle_client_message(
                             ai_events,
                             ai_legal,
                             ai_log_entries,
-                            ai_auto_pass,
+                            _ai_auto_pass,
                             ai_spell_costs,
                             ai_by_object,
                         ) = result;
@@ -3425,19 +3428,18 @@ async fn handle_client_message(
                             })
                             .collect();
 
-                        let ai_actors = ai_raw_state.waiting_for.acting_players();
                         let conns = connections.lock().await;
                         if let Some(players) = conns.get(&game_code) {
                             for (pid, pstate) in &ai_filtered {
                                 if let Some(s) = players.get(pid) {
-                                    let is_actor = ai_actors.contains(pid);
+                                    let is_actor = server_core::is_acting(ai_raw_state, *pid);
                                     let player_legals = if is_last && is_actor {
                                         ai_legal.clone()
                                     } else {
                                         vec![]
                                     };
-                                    let p_auto_pass = if is_last && is_actor {
-                                        *ai_auto_pass
+                                    let p_auto_pass = if is_last {
+                                        engine_auto_pass_for_viewer(ai_raw_state, *pid, ai_legal)
                                     } else {
                                         false
                                     };
@@ -5951,9 +5953,78 @@ async fn handle_client_message(
 mod state_transport_derived_tests {
     use super::*;
     use engine::types::ability::SearchSelectionConstraint;
+    use engine::types::actions::GameAction;
     use engine::types::game_state::{
-        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, WaitingFor,
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, PriorityPassingMode, WaitingFor,
     };
+    use engine::types::identifiers::ObjectId;
+    use engine::types::phase::Phase;
+
+    fn low_use_window_priority_result(
+        semantic_player: PlayerId,
+        controller: Option<PlayerId>,
+    ) -> ActionResult {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = semantic_player;
+        state.priority_player = controller.unwrap_or(semantic_player);
+        state.waiting_for = WaitingFor::Priority {
+            player: semantic_player,
+        };
+        state.turn_decision_controller = controller;
+        state.phase = Phase::End;
+        state.priority_passing_modes.insert(
+            controller.unwrap_or(semantic_player),
+            PriorityPassingMode::SkipLowUseWindows,
+        );
+        let legal_actions = vec![
+            GameAction::PassPriority,
+            GameAction::TurnFaceUp {
+                object_id: ObjectId(999),
+                x: 0,
+            },
+        ];
+
+        (
+            state,
+            Vec::new(),
+            legal_actions,
+            Vec::new(),
+            true,
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    fn state_update_action_fields(result: &ActionResult, viewer: PlayerId) -> (usize, bool) {
+        match build_state_update_message(result, viewer).expect("fixture state update") {
+            ServerMessage::StateUpdate {
+                legal_actions,
+                auto_pass_recommended,
+                ..
+            } => (legal_actions.len(), auto_pass_recommended),
+            other => panic!("expected StateUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn turn_controller_receives_low_use_window_recommendation_instead_of_controlled_seat() {
+        let controlled = PlayerId(0);
+        let controller = PlayerId(1);
+        let result = low_use_window_priority_result(controlled, Some(controller));
+
+        assert_eq!(state_update_action_fields(&result, controller), (2, true));
+        assert_eq!(state_update_action_fields(&result, controlled), (0, false));
+    }
+
+    #[test]
+    fn ordinary_actor_receives_low_use_window_recommendation_and_nonactor_does_not() {
+        let actor = PlayerId(0);
+        let nonactor = PlayerId(1);
+        let result = low_use_window_priority_result(actor, None);
+
+        assert_eq!(state_update_action_fields(&result, actor), (2, true));
+        assert_eq!(state_update_action_fields(&result, nonactor), (0, false));
+    }
 
     #[test]
     fn human_ai_and_takeback_transports_derive_search_authority_from_raw_state() {

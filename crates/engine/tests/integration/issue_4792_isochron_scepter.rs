@@ -3,8 +3,9 @@
 use engine::game::rehydrate_game_from_card_db;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{ExileLink, ExileLinkKind, WaitingFor};
+use engine::types::game_state::{ExileLink, ExileLinkKind, StackEntryKind, WaitingFor};
 use engine::types::identifiers::TrackedSetId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -115,6 +116,70 @@ fn isochron_scepter_copies_and_casts_imprinted_instant() {
         runner.state().objects.get(&shock).map(|o| o.zone),
         Some(Zone::Exile),
         "imprinted Shock stays exiled after copying"
+    );
+}
+
+/// CR 608.2g + CR 113.2c + CR 702.60b: Isochron's copied spell is cast through
+/// the production `CopySpell` → `CastFromZone { ParentTarget }` reducer path.
+/// Its cast-time snapshot must include Thrumming Stone's Ripple grant so the
+/// synthesized trigger reaches the stack after the copy's retarget choice.
+#[test]
+fn isochron_cast_copy_snapshots_thrumming_stone_ripple() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Thrumming Stone",
+        1,
+        1,
+        "Spells you cast have ripple 4. (When you cast a spell, you may reveal the top four cards of your library. You may cast any revealed cards with the same name as the cast spell without paying their mana costs. Put the rest on the bottom of your library in any order.)",
+    );
+    let scepter = scenario.add_real_card(P0, "Isochron Scepter", Zone::Battlefield, db);
+    let shock = scenario.add_real_card(P0, "Shock", Zone::Exile, db);
+    let mut runner = scenario.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+    link_imprinted_instant(&mut runner, scepter, shock);
+    fund_generic(&mut runner, 2);
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: scepter,
+            ability_index: 0,
+        })
+        .expect("activate Isochron Scepter");
+    let copy_id = (0..20)
+        .find_map(|_| match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Isochron copy/cast choice");
+                None
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+                None
+            }
+            WaitingFor::CopyRetarget { copy_id, .. } => Some(copy_id),
+            other => panic!("unexpected Isochron cast state: {other:?}"),
+        })
+        .expect("copied Shock must request a target");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Player(P1)),
+        })
+        .expect("target copied Shock");
+
+    assert!(
+        runner.state().stack.iter().any(|entry| matches!(
+            &entry.kind,
+            StackEntryKind::TriggeredAbility { source_id, ability, .. }
+                if *source_id == copy_id && matches!(ability.effect, Effect::Ripple { count: 4 })
+        )),
+        "the cast copy must create Thrumming Stone's Ripple trigger"
     );
 }
 

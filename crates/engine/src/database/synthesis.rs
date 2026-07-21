@@ -3127,13 +3127,11 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
             .iter_all()
             .any(|entry| is_evoke_sac(entry.definition()))
         {
-            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+            obj.relive_printed_trigger(is_evoke_sac);
         }
         return;
     }
-    let trigger = build_evoke_etb_sac_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    obj.push_printed_trigger(build_evoke_etb_sac_trigger());
 }
 
 fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinition {
@@ -3224,15 +3222,14 @@ pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
             if !obj.trigger_definitions.iter_all().any(|entry| {
                 is_offspring_etb_copy_trigger_for_ordinal(entry.definition(), origin_ordinal)
             }) {
-                obj.trigger_definitions
-                    .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
+                obj.relive_printed_trigger(|trigger| {
+                    is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal)
+                });
             }
             continue;
         }
 
-        let trigger = offspring_etb_copy_trigger_for_ordinal(origin_ordinal);
-        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-        obj.trigger_definitions.push(trigger);
+        obj.push_printed_trigger(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
     }
 }
 
@@ -9940,6 +9937,23 @@ fn build_oracle_face_inner(
     // keywords (e.g., Morph) and CR 113.2c multi-instance keywords (Cascade/Storm/
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
     merge_extracted_keywords(&mut keywords, extracted_keywords);
+
+    // CR 611.3a + CR 702: MTGJSON can list a keyword that is granted only by a
+    // conditional static (Goddric's flying). Keep it on the static and drop the
+    // unconditional copy unless a standalone keyword line corroborates it.
+    keywords.retain(|keyword| {
+        oracle_corroborated.iter().any(|entry| entry == keyword)
+            || !parsed.statics.iter().any(|definition| {
+                definition.condition.is_some()
+                    && definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword { keyword: granted }
+                                if granted == keyword
+                        )
+                    })
+            })
+    });
 
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces

@@ -29,7 +29,7 @@ use crate::mana_colors::demand_aware_single_color;
 use crate::plan::PlanSnapshot;
 use crate::planner::{
     apply_candidate, BeamContinuationPlanner, ContinuationPlanner, PlannerServices,
-    RankedCandidate, SearchBudget,
+    RankedCandidate, RungStat, SearchBudget,
 };
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::copy_value::score_legend_rule_keep;
@@ -250,7 +250,7 @@ fn random_card_predicate_guess(
         player,
         choice_type,
         options,
-        source_id: Some(source_id),
+        source: Some(source),
         persist_player: _,
     } = &state.waiting_for
     else {
@@ -259,8 +259,7 @@ fn random_card_predicate_guess(
     if *player != ai_player || !choice_type.is_card_predicate_guess() {
         return None;
     }
-    let source = state.objects.get(source_id)?;
-    if source.controller == ai_player || options.is_empty() {
+    if source.prompt.controller == ai_player || options.is_empty() {
         return None;
     }
     let index = rng.random_range(0..options.len());
@@ -268,8 +267,8 @@ fn random_card_predicate_guess(
     tracing::info!(
         target: "phase_ai::choice",
         ai_player = ai_player.0,
-        source_id = source_id.0,
-        source_name = %source.name,
+        source_id = source.prompt.identity.reference.object_id.0,
+        source_name = %source.prompt.display_name,
         guess = %choice,
         "AI randomly guessed card predicate"
     );
@@ -2035,81 +2034,7 @@ fn score_candidates_core(
         });
         ranked.truncate(branching);
 
-        // Iterative deepening: rung 0 (quiesced eval per candidate) -> ceiling.
-        // Return the deepest *fully completed* rung. The deepest rung reproduces
-        // origin/main's fixed-depth pass; the TT (per-decision, on `services`)
-        // accelerates the re-search of transposing subtrees across rungs.
-        let ceiling: u32 = match config.search.planner_mode {
-            PlannerMode::BeamOnly => 0,
-            PlannerMode::BeamPlusRollout => config.search.max_depth.saturating_sub(1),
-        };
-
-        // No-regression floor == origin/main's deadline collapse: tactical-only for
-        // every candidate. Overwritten by each completed rung; returned as-is only
-        // if not even rung 0 is entered (deadline pre-expired), which reproduces
-        // origin/main's zero-apply collapse exactly.
-        let mut best_scored: Vec<(GameAction, f64)> = ranked
-            .iter()
-            .map(|r| (r.candidate.action.clone(), r.score * tactical_weight))
-            .collect();
-
-        for iter_depth in 0..=ceiling {
-            // Guard EVERY rung (incl. rung 0) at entry. Interactive: a pre-expired
-            // deadline returns the tactical-only floor with zero applies (==
-            // origin/main). Measurement: services.deadline is none() => never
-            // expires => full fixed ceiling => deterministic.
-            if services.deadline.expired() {
-                break;
-            }
-            // Fresh node budget per rung sharing the one services.deadline (none()
-            // in measurement, so this single constructor is correct for both modes).
-            // The deepest rung thus gets the full max_nodes just like origin/main's
-            // single pass.
-            let mut budget =
-                SearchBudget::with_deadline(config.search.max_nodes, services.deadline);
-            let mut planner = BeamContinuationPlanner {
-                depth: iter_depth,
-                rollout_depth: config.search.rollout_depth,
-            };
-
-            let mut rung_scored = Vec::with_capacity(ranked.len());
-            let mut completed = true;
-            for r in &ranked {
-                // Rungs >= 1 may bail mid-rung (interior search is expensive) and
-                // discard the partial. Rung 0 is cheap (branching quiesced evals)
-                // and runs atomically once entered, so it is never left partial.
-                if iter_depth > 0 && services.deadline.expired() {
-                    completed = false;
-                    break;
-                }
-                let score = if let Some(sim) = apply_candidate(state, &r.candidate) {
-                    let cont = planner.evaluate_after_action(&sim, &mut services, &mut budget);
-                    cont + (r.score * tactical_weight)
-                } else {
-                    // Action failed simulation — same penalty as origin/main so the
-                    // AI prefers any valid alternative.
-                    r.score - 1000.0
-                };
-                rung_scored.push((r.candidate.action.clone(), score));
-            }
-
-            // "Fully completed" also requires the deadline to be live after the
-            // LAST candidate: expiry mid-final-evaluation is invisible to the
-            // per-candidate entry check and would accept a rung whose tail score
-            // was truncated. Rung 0 stays exempt (atomic once entered — it is the
-            // no-regression floor, == origin/main's deadline collapse). Node-budget
-            // exhaustion deliberately does NOT discard: the deepest rung consuming
-            // its full `max_nodes` reproduces origin/main's single fixed-depth pass.
-            if completed && (iter_depth == 0 || !services.deadline.expired()) {
-                best_scored = rung_scored; // deepest fully-completed rung so far
-            } else {
-                break;
-            }
-        }
-
-        let mut out = best_scored;
-        out.sort_by(|a, b| a.0.cmp_stable(&b.0));
-        out
+        run_iterative_deepening(state, ranked, tactical_weight, config, &mut services)
     } else {
         // Heuristic-only scoring
         let mut out: Vec<_> = gated
@@ -2127,6 +2052,168 @@ fn score_candidates_core(
             .collect();
         out.sort_by(|a, b| a.0.cmp_stable(&b.0));
         out
+    }
+}
+
+/// Runs rung-0..=ceiling iterative deepening over the pre-ranked root beam.
+/// Extracted from `score_candidates_core` so tests can construct
+/// `PlannerServices`, run the loop, and inspect witness state (`rung_stats`,
+/// killers, counters) — mirroring how `tt_hits` is observable via direct
+/// `search_value` calls. The pre-rung tactical-only floor, the rung loop, and
+/// the acceptance logic all live here; `score_candidates_core` just delegates.
+///
+/// PV threading (D2) and the rung witness (D3) are the only additions over the
+/// pre-extraction behavior; both are no-ops for `rung_stats`/ordering when the
+/// beam is a single candidate or the killers are empty.
+fn run_iterative_deepening(
+    state: &GameState,
+    mut ranked: Vec<RankedCandidate>,
+    tactical_weight: f64,
+    config: &AiConfig,
+    services: &mut PlannerServices<'_>,
+) -> Vec<(GameAction, f64)> {
+    // Iterative deepening: rung 0 (quiesced eval per candidate) -> ceiling.
+    // Return the deepest *fully completed* rung. The deepest rung reproduces
+    // origin/main's fixed-depth pass; the TT (per-decision, on `services`)
+    // accelerates the re-search of transposing subtrees across rungs.
+    let ceiling: u32 = match config.search.planner_mode {
+        PlannerMode::BeamOnly => 0,
+        PlannerMode::BeamPlusRollout => config.search.max_depth.saturating_sub(1),
+    };
+
+    // No-regression floor == origin/main's deadline collapse: tactical-only for
+    // every candidate. Overwritten by each completed rung; returned as-is only
+    // if not even rung 0 is entered (deadline pre-expired), which reproduces
+    // origin/main's zero-apply collapse exactly.
+    let mut best_scored: Vec<(GameAction, f64)> = ranked
+        .iter()
+        .map(|r| (r.candidate.action.clone(), r.score * tactical_weight))
+        .collect();
+
+    for iter_depth in 0..=ceiling {
+        // Guard EVERY rung (incl. rung 0) at entry. Interactive: a pre-expired
+        // deadline returns the tactical-only floor with zero applies (==
+        // origin/main). Measurement: services.deadline is none() => never
+        // expires => full fixed ceiling => deterministic.
+        if services.deadline.expired() {
+            break;
+        }
+        // Fresh node budget per rung sharing the one services.deadline (none()
+        // in measurement, so this single constructor is correct for both modes).
+        // The deepest rung thus gets the full max_nodes just like origin/main's
+        // single pass.
+        let mut budget = SearchBudget::with_deadline(config.search.max_nodes, services.deadline);
+        let mut planner = BeamContinuationPlanner {
+            depth: iter_depth,
+            rollout_depth: config.search.rollout_depth,
+        };
+
+        let mut rung_scored = Vec::with_capacity(ranked.len());
+        let mut completed = true;
+        for r in &ranked {
+            // Rungs >= 1 may bail mid-rung (interior search is expensive) and
+            // discard the partial. Rung 0 is cheap (branching quiesced evals)
+            // and runs atomically once entered, so it is never left partial.
+            if iter_depth > 0 && services.deadline.expired() {
+                completed = false;
+                break;
+            }
+            let score = if let Some(sim) = apply_candidate(state, &r.candidate) {
+                let cont = planner.evaluate_after_action(&sim, services, &mut budget);
+                cont + (r.score * tactical_weight)
+            } else {
+                // Action failed simulation — same penalty as origin/main so the
+                // AI prefers any valid alternative.
+                r.score - 1000.0
+            };
+            rung_scored.push((r.candidate.action.clone(), score));
+        }
+
+        // "Fully completed" also requires the deadline to be live after the
+        // LAST candidate: expiry mid-final-evaluation is invisible to the
+        // per-candidate entry check and would accept a rung whose tail score
+        // was truncated. Rung 0 stays exempt (atomic once entered — it is the
+        // no-regression floor, == origin/main's deadline collapse). Node-budget
+        // exhaustion deliberately does NOT discard: the deepest rung consuming
+        // its full `max_nodes` reproduces origin/main's single fixed-depth pass.
+        let accepted = completed && (iter_depth == 0 || !services.deadline.expired());
+
+        // D3: one witness per executed rung (completion + node headroom). A
+        // pre-expired deadline breaks at the entry guard above, so zero rungs
+        // execute and `rung_stats` stays empty — the honest "no search" trace.
+        services.rung_stats.push(RungStat {
+            depth: iter_depth,
+            completed: accepted,
+            nodes_used: budget.nodes_evaluated,
+            max_nodes: budget.max_nodes,
+        });
+
+        if accepted {
+            // D2: thread the principal variation into the NEXT rung. Gated to
+            // searched rungs (`iter_depth >= 1`): rung 0's argmax mixes quiesced
+            // eval with the tactical term, so rotating on it would change rung
+            // 1's order vs today. Rung 1 therefore provably sees today's
+            // ordering; divergence begins at rung 2, where it is a legitimate
+            // budget-allocation improvement (see `pv_argmax`).
+            if iter_depth >= 1 {
+                if let Some(pv) = pv_argmax(&rung_scored) {
+                    rotate_pv_to_front(&mut ranked, pv);
+                }
+            }
+            best_scored = rung_scored; // deepest fully-completed rung so far
+        } else {
+            break;
+        }
+    }
+
+    tracing::debug!(
+        rungs = services.rung_stats.len(),
+        completed = services.rung_stats.iter().filter(|r| r.completed).count(),
+        deepest = services.rung_stats.last().map_or(0, |r| r.depth),
+        nodes_used = services
+            .rung_stats
+            .iter()
+            .map(|r| r.nodes_used)
+            .sum::<u32>(),
+        beta_cutoffs = services.beta_cutoffs,
+        killer_orderings = services.killer_orderings,
+        "iterative deepening rung summary"
+    );
+
+    let mut out = best_scored;
+    out.sort_by(|a, b| a.0.cmp_stable(&b.0));
+    out
+}
+
+/// Deterministic principal-variation selection over a completed rung's scores.
+/// Budget-allocation policy, not alpha-beta: root siblings share one per-rung
+/// `SearchBudget` (constructed once per rung in `run_iterative_deepening`) and
+/// each opens a fresh `(-inf, +inf)` window, so PV-first spends the shared pool
+/// on the strongest known candidate before the tail starves — no alpha carries
+/// between root siblings.
+///
+/// NaN-safe: `unwrap_or(Equal)` defers to the `cmp_stable` total order so ties
+/// and non-finite scores resolve deterministically, never a bare
+/// `max_by(|a, b| a.partial_cmp(b).unwrap())`.
+fn pv_argmax(rung_scored: &[(GameAction, f64)]) -> Option<&GameAction> {
+    rung_scored
+        .iter()
+        .max_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| b.0.cmp_stable(&a.0)) // ties: cmp_stable decides
+        })
+        .map(|(action, _)| action)
+}
+
+/// Stable-rotate the candidate whose action equals `pv` to the front of
+/// `ranked`, preserving the relative order of every other candidate. No-op when
+/// `pv` is absent (e.g. it was the `-1000.0`-penalized illegal candidate that a
+/// later rung will re-validate anyway).
+fn rotate_pv_to_front(ranked: &mut Vec<RankedCandidate>, pv: &GameAction) {
+    if let Some(idx) = ranked.iter().position(|r| &r.candidate.action == pv) {
+        let pv_candidate = ranked.remove(idx);
+        ranked.insert(0, pv_candidate);
     }
 }
 
@@ -3012,15 +3099,18 @@ mod tests {
     use super::*;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::ChoiceType;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, CategoryChooserScope, ContinuousModification, Duration,
         Effect, EffectKind, QuantityExpr, ResolvedAbility, StaticDefinition, TargetFilter,
         TargetRef, TypedFilter,
     };
+    use engine::types::ability::{ChoiceType, ChosenAttribute};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
-    use engine::types::game_state::{StackEntry, StackEntryKind};
+    use engine::types::game_state::{
+        NamedChoiceSource, NamedChoiceSourceBinding, OpponentGuessOwner, OpponentGuessSource,
+        PromptSourceBinding, StackEntry, StackEntryKind,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::mana::{ManaType, ManaUnit};
     use engine::types::phase::Phase;
@@ -3042,6 +3132,14 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn resolution_choice_source(state: &GameState, object_id: ObjectId) -> NamedChoiceSource {
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            state,
+            state.objects.get(&object_id).unwrap(),
+        );
+        NamedChoiceSource::from_trigger_source(context, NamedChoiceSourceBinding::ResolutionContext)
     }
 
     #[test]
@@ -5170,7 +5268,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let config = create_config(AiDifficulty::Medium, Platform::Native);
@@ -5195,6 +5293,63 @@ mod tests {
     }
 
     #[test]
+    fn opponent_guess_ai_choice_is_independent_of_private_answer_authority() {
+        let mut state = make_state();
+        let source_id = create_object(
+            &mut state,
+            CardId(0x0A11),
+            PlayerId(1),
+            "Private guess source".to_string(),
+            Zone::Battlefield,
+        );
+        let context = engine::game::triggers::trigger_source_context_for_latch(
+            &state,
+            state.objects.get(&source_id).expect("source exists"),
+        );
+        state.waiting_for = WaitingFor::OpponentGuess {
+            player: PlayerId(0),
+            options: vec!["greater".to_string(), "not greater".to_string()],
+            choice_type: ChoiceType::Labeled {
+                options: vec!["greater".to_string(), "not greater".to_string()],
+            },
+            source: OpponentGuessSource {
+                prompt: PromptSourceBinding::from_trigger_source(&context),
+            },
+            owner: Some(OpponentGuessOwner {
+                context: context.clone(),
+                committed_choice: Some(ChosenAttribute::Number(7)),
+            }),
+            proposition_truth: Some(true),
+        };
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let mut first_rng = SmallRng::seed_from_u64(71);
+        let first = choose_action(&state, PlayerId(0), &config, &mut first_rng)
+            .expect("the guesser receives a legal option");
+
+        let WaitingFor::OpponentGuess {
+            owner,
+            proposition_truth,
+            ..
+        } = &mut state.waiting_for
+        else {
+            unreachable!("fixture remains an opponent guess");
+        };
+        *owner = Some(OpponentGuessOwner {
+            context,
+            committed_choice: Some(ChosenAttribute::Number(1)),
+        });
+        *proposition_truth = Some(false);
+        let mut second_rng = SmallRng::seed_from_u64(71);
+        let second = choose_action(&state, PlayerId(0), &config, &mut second_rng)
+            .expect("the guesser receives a legal option after private facts change");
+
+        assert_eq!(
+            first, second,
+            "the seeded AI may use only public options, never private truth or committed choice"
+        );
+    }
+
+    #[test]
     fn ai_regular_land_nonland_choice_does_not_use_guess_randomizer() {
         let mut state = make_state();
         let source_id = create_object(
@@ -5212,7 +5367,7 @@ mod tests {
             options: ChoiceType::card_predicate_labels(
                 &ChoiceType::land_or_nonland_card_predicate_options(),
             ),
-            source_id: Some(source_id),
+            source: Some(resolution_choice_source(&state, source_id)),
             persist_player: None,
         };
         let mut rng = SmallRng::seed_from_u64(1);
@@ -6020,6 +6175,454 @@ mod tests {
             floor, rung0,
             "pre-expired deadline must do ZERO continuation applies (option a), \
              so its floor differs from the rung-0 quiesced baseline"
+        );
+    }
+
+    // ---- U2: PV threading + rung witnesses (drive `run_iterative_deepening`) ----
+
+    /// Rebuild the root beam exactly as `score_candidates_core` does (validate ->
+    /// gate -> tactical rank -> #4878 stable sort -> truncate) so tests can drive
+    /// `run_iterative_deepening` directly and inspect the witness state it leaves
+    /// on `services`. `&PlannerServices` — reads only (validate/tactical_score are
+    /// `&self`); the caller owns construction so it controls the deadline/TT.
+    fn build_root_beam(state: &GameState, services: &PlannerServices<'_>) -> Vec<RankedCandidate> {
+        let ctx = build_decision_context(state);
+        let candidates = services.validate_candidates(state, ctx.candidates.clone());
+        let gated = gate_candidates(
+            state,
+            &ctx,
+            candidates,
+            services.ai_player,
+            services.config,
+            &services.context,
+        );
+        let mut ranked: Vec<RankedCandidate> = gated
+            .iter()
+            .map(|g| {
+                let tactical = services.tactical_score(
+                    state,
+                    &ctx,
+                    &g.candidate,
+                    services.ai_player,
+                    SearchDepth::Root,
+                );
+                RankedCandidate {
+                    candidate: g.candidate.clone(),
+                    score: tactical + g.penalty,
+                }
+            })
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.candidate.action.cmp_stable(&b.candidate.action))
+        });
+        ranked.truncate(services.config.search.max_branching as usize);
+        ranked
+    }
+
+    fn score_of(scored: &[(GameAction, f64)], action: &GameAction) -> f64 {
+        scored
+            .iter()
+            .find(|(a, _)| a == action)
+            .map(|(_, s)| *s)
+            .unwrap_or_else(|| panic!("action {action:?} absent from scored output"))
+    }
+
+    /// Fixture with several cheap castable creatures + an opponent threat, so the
+    /// search tree has rich interior branching (subtrees far exceed a tiny node
+    /// cap => genuine budget starvation) AND a value gradient (casting a creature
+    /// beats passing, so the search argmax can differ from a pass-first beam).
+    fn starvation_state() -> GameState {
+        let mut state = make_state();
+        state.lands_played_this_turn = 1;
+        let _opp = add_creature(&mut state, PlayerId(1), 3, 3);
+        for i in 0..4u64 {
+            let id = create_object(
+                &mut state,
+                CardId(900 + i),
+                PlayerId(0),
+                format!("Bear{i}"),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.mana_cost = engine::types::mana::ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 1,
+            };
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+        state
+    }
+
+    /// Extract (PassPriority, first CastSpell) real candidates from `state`.
+    fn pass_and_first_cast(state: &GameState) -> (CandidateAction, CandidateAction) {
+        let ctx = build_decision_context(state);
+        let pass = ctx
+            .candidates
+            .iter()
+            .find(|c| matches!(c.action, GameAction::PassPriority))
+            .cloned()
+            .expect("a PassPriority candidate exists at priority");
+        let cast = ctx
+            .candidates
+            .iter()
+            .find(|c| matches!(c.action, GameAction::CastSpell { .. }))
+            .cloned()
+            .expect("a CastSpell candidate exists (creatures in hand + mana)");
+        (pass, cast)
+    }
+
+    // V5: empty-state equivalence — a BeamOnly (ceiling 0) run enters `search_value`
+    // zero times, so killers stay clean, both cutoff/ordering counters are 0, and
+    // exactly one rung witness (rung 0) is recorded.
+    #[test]
+    fn beam_only_run_is_search_value_free() {
+        let state = searchable_state();
+        let policies = PolicyRegistry::shared();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.planner_mode = PlannerMode::BeamOnly; // ceiling 0
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let ranked = build_root_beam(&state, &services);
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+
+        assert!(!out.is_empty(), "rung 0 produces the floor");
+        // Reach-guard: rung 0 ran (non-vacuous).
+        assert_eq!(services.rung_stats.len(), 1, "exactly rung 0 executed");
+        assert!(services.rung_stats[0].completed);
+        assert_eq!(services.rung_stats[0].depth, 0);
+        assert_eq!(services.beta_cutoffs, 0, "no search_value => no cutoffs");
+        assert_eq!(
+            services.killer_orderings, 0,
+            "no search_value => no killer ordering"
+        );
+        assert!(
+            services
+                .killers
+                .iter()
+                .all(|ply| ply.iter().all(Option::is_none)),
+            "no cutoffs => killer table stays empty"
+        );
+    }
+
+    // V6: the rung witness records completion + node usage for every executed rung.
+    #[test]
+    fn rung_stats_record_completion_and_node_usage() {
+        let state = searchable_state();
+        let policies = PolicyRegistry::shared();
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let ranked = build_root_beam(&state, &services);
+        let _ = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+
+        let ceiling = config.search.max_depth.saturating_sub(1);
+        assert!(
+            ceiling >= 1,
+            "fixture precondition: ceiling deepens past rung 0"
+        );
+        assert_eq!(
+            services.rung_stats.len() as u32,
+            ceiling + 1,
+            "one witness per rung 0..=ceiling"
+        );
+        assert!(
+            services.rung_stats.iter().all(|r| r.completed),
+            "roomy measurement budget: every rung completes"
+        );
+        for r in services.rung_stats.iter().filter(|r| r.depth >= 1) {
+            assert!(
+                r.nodes_used > 0,
+                "searched rungs (depth >= 1) consume nodes"
+            );
+        }
+    }
+
+    // V6 hostile (saturation): a tiny node cap saturates the deepest searched rung
+    // while it is still ACCEPTED (node-budget exhaustion does not discard). The
+    // saturation predicate is `nodes_used >= max_nodes` (not `==`): `tick()`
+    // increments unconditionally at `search_value` entry while `exhausted()` checks
+    // `>=`, so the counter can overshoot the cap by one.
+    #[test]
+    fn rung_stats_saturated_rung_is_still_accepted() {
+        let state = searchable_state();
+        let policies = PolicyRegistry::shared();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.max_nodes = 4; // tiny -> deepest searched rung saturates
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let ranked = build_root_beam(&state, &services);
+        let _ = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+
+        let deepest = services.rung_stats.last().expect("at least rung 0 ran");
+        assert!(
+            deepest.completed,
+            "node-budget exhaustion must NOT discard a rung"
+        );
+        assert!(
+            services
+                .rung_stats
+                .iter()
+                .any(|r| r.depth >= 1 && r.nodes_used >= r.max_nodes),
+            "a searched rung must saturate the tiny node pool (nodes_used >= max_nodes)"
+        );
+    }
+
+    // V6 hostile (pre-expired): an already-expired interactive deadline breaks at
+    // the rung-entry guard before any candidate loop runs, so zero rungs execute
+    // and the witness list is empty — the honest "no search happened" trace (and
+    // the floor is still returned).
+    #[test]
+    fn pre_expired_deadline_records_no_rungs() {
+        let state = searchable_state();
+        let policies = PolicyRegistry::shared();
+        let config = create_config(AiDifficulty::Hard, Platform::Native); // interactive
+        let context = crate::context::AiContext::empty(&config.weights);
+        let mut services = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            policies,
+            context,
+            Some(engine::util::Deadline::after(0)), // pre-expired
+        );
+        let ranked = build_root_beam(&state, &services);
+        assert!(!ranked.is_empty(), "reach-guard: the beam is non-empty");
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+        assert!(!out.is_empty(), "the tactical-only floor is still returned");
+        assert!(
+            services.rung_stats.is_empty(),
+            "a pre-expired deadline executes zero rungs => no rung witness"
+        );
+    }
+
+    // V3 tie row: `pv_argmax` resolves ties and non-finite scores through the
+    // `cmp_stable` total order — deterministic across calls and panic-free on NaN
+    // (never a bare `max_by(|a, b| a.partial_cmp(b).unwrap())`).
+    #[test]
+    fn pv_argmax_is_deterministic_and_nan_safe() {
+        let tied = vec![
+            (GameAction::PassPriority, 5.0),
+            (GameAction::CancelCast, 5.0),
+        ];
+        let pick = pv_argmax(&tied).cloned();
+        assert_eq!(
+            pv_argmax(&tied).cloned(),
+            pick,
+            "tie resolution is byte-stable across repeated calls"
+        );
+        assert!(
+            pick == Some(GameAction::PassPriority) || pick == Some(GameAction::CancelCast),
+            "the winner is one of the tied actions"
+        );
+        // A NaN score must resolve via the Equal fallback, never panic.
+        let with_nan = vec![
+            (GameAction::PassPriority, f64::NAN),
+            (GameAction::CancelCast, 1.0),
+        ];
+        let _ = pv_argmax(&with_nan);
+        assert!(pv_argmax(&[]).is_none(), "empty input yields None");
+    }
+
+    // V3: the rung-1 PV rotate steers the shared per-rung budget to the PV
+    // candidate. Budget-starvation fixture: a tight node cap means the first-
+    // searched root subtree drains the pool. With the rotate, the PV candidate B
+    // is searched FIRST at rung 2, so its rung-2 score equals its independent
+    // full-depth continuation (computed on FRESH services). Reverting the rotate
+    // makes A drain the pool first and B collapse toward quiesced eval.
+    #[test]
+    fn pv_rotate_gives_pv_candidate_full_depth_under_starvation() {
+        let state = starvation_state();
+        let policies = PolicyRegistry::shared();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.max_depth = 3; // ceiling 2 (rung 1 sets PV, rung 2 uses it)
+        config.search.max_nodes = 6; // tight: one root subtree drains the pool
+        let tw = 0.1;
+
+        // Beam deliberately ordered PASS-FIRST so ranked[0] = A = pass while the
+        // board-improving cast (B) is the search argmax — the case where the PV
+        // rotate matters. Scores are 0.0 so the value function is pure continuation
+        // (no tactical term interfering with the demonstration).
+        let (pass, cast) = pass_and_first_cast(&state);
+        let ranked = vec![
+            RankedCandidate {
+                candidate: pass.clone(),
+                score: 0.0,
+            },
+            RankedCandidate {
+                candidate: cast.clone(),
+                score: 0.0,
+            },
+        ];
+        let a = ranked[0].candidate.action.clone();
+
+        // The PV rung 2 searches first == rung-1's argmax under this beam/budget.
+        let b = {
+            let mut cfg1 = config.clone();
+            cfg1.search.max_depth = 2; // ceiling 1
+            let mut s = PlannerServices::new_default(PlayerId(0), &cfg1, policies);
+            let rung1 = run_iterative_deepening(&state, ranked.clone(), tw, &cfg1, &mut s);
+            pv_argmax(&rung1).cloned().expect("rung 1 has an argmax")
+        };
+        assert_ne!(b, a, "reach-guard: the PV must differ from ranked[0]");
+
+        let b_ranked = ranked
+            .iter()
+            .find(|r| r.candidate.action == b)
+            .expect("B is in the beam");
+        let b_tactical = b_ranked.score;
+        let b_sim = apply_candidate(&state, &b_ranked.candidate).expect("B applies");
+
+        // Independent full-depth control on FRESH services (empty TT) + fresh
+        // budget. `eval_cache` is a pure-function memo (value-transparent), so only
+        // the TT could contaminate the comparison — guarded below by tt_hits == 0.
+        let control_cont = {
+            let mut fresh = PlannerServices::new_default(PlayerId(0), &config, policies);
+            let mut fresh_budget = SearchBudget::new(config.search.max_nodes);
+            let planner = BeamContinuationPlanner {
+                depth: 2,
+                rollout_depth: config.search.rollout_depth,
+            };
+            planner.search_value(
+                &b_sim,
+                2,
+                0,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+                &mut fresh,
+                &mut fresh_budget,
+            )
+        };
+        let control_quiesced = {
+            let mut q = PlannerServices::new_default(PlayerId(0), &config, policies);
+            q.evaluate_state_quiesced(&b_sim)
+        };
+        // Precondition (b): B's searched value differs from its quiesced eval, else
+        // reverting the rotate could not fail the score assertion.
+        assert_ne!(
+            control_cont, control_quiesced,
+            "B's depth-2 searched value must differ from its quiesced eval"
+        );
+
+        // Measured run: ceiling 2, pass-first beam. Rung 1 sets PV = B; rung 2
+        // rotates B to the front and searches it first with the fresh per-rung pool.
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, policies);
+        let out = run_iterative_deepening(&state, ranked, tw, &config, &mut services);
+
+        // TT-contamination reach-guard: the measured/control equality is TT-free.
+        assert_eq!(
+            services.tt_hits, 0,
+            "no transposition hits => control equality is TT-provenance-free"
+        );
+        // Starvation regime reach-guard: a searched rung saturated the pool.
+        assert!(
+            services
+                .rung_stats
+                .iter()
+                .any(|r| r.depth >= 1 && r.nodes_used >= r.max_nodes),
+            "a searched rung saturated the node pool (the starvation regime)"
+        );
+
+        let out_b = score_of(&out, &b);
+        assert!(
+            (out_b - (control_cont + b_tactical * tw)).abs() < 1e-9,
+            "PV-first gives B its full-depth continuation value \
+             (got {out_b}, expected {})",
+            control_cont + b_tactical * tw
+        );
+    }
+
+    // V4: the rung-0 rotate is skipped (the `iter_depth >= 1` gate), so rung 1
+    // provably sees today's ordering. Two ceiling-1 runs on fresh services: one on
+    // the natural beam, one on a beam pre-rotated to put rung-0's argmax first.
+    // With the gate present, run 1's rung-0 does NOT rotate, so its rung-1 order
+    // differs from the pre-rotated run under starvation => outputs differ. Removing
+    // the gate makes run 1 also rotate rung-0's argmax to the front, collapsing the
+    // two outputs to equality — so `assert_ne!` is revert-failing for the gate.
+    #[test]
+    fn rung_zero_rotate_is_gated_off() {
+        let state = starvation_state();
+        let policies = PolicyRegistry::shared();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.max_depth = 2; // ceiling 1
+                                     // Depth-1 rung subtrees are shallow, so the cap must be very tight to
+                                     // starve at rung 1 (make its output order-sensitive). 3 nodes lets the
+                                     // first candidate search while the second collapses to quiesced eval.
+        config.search.max_nodes = 3;
+        let tw = 0.1;
+
+        // Pass-first beam so rung-0's argmax (the board-improving cast) differs
+        // from ranked[0] = pass — making a rung-0 rotate observable.
+        let (pass, cast) = pass_and_first_cast(&state);
+        let ranked = vec![
+            RankedCandidate {
+                candidate: pass.clone(),
+                score: 0.0,
+            },
+            RankedCandidate {
+                candidate: cast.clone(),
+                score: 0.0,
+            },
+        ];
+        let a = ranked[0].candidate.action.clone();
+
+        // rung-0 argmax (quiesced eval per candidate) via a ceiling-0 run.
+        let b0 = {
+            let mut cfg0 = config.clone();
+            cfg0.search.planner_mode = PlannerMode::BeamOnly; // ceiling 0
+            let mut s = PlannerServices::new_default(PlayerId(0), &cfg0, policies);
+            let rung0 = run_iterative_deepening(&state, ranked.clone(), tw, &cfg0, &mut s);
+            pv_argmax(&rung0).cloned().expect("rung 0 has an argmax")
+        };
+        // Reach-guard: rung-0 argmax must differ from ranked[0], else pre-rotating
+        // is a no-op and the test is vacuous.
+        assert_ne!(
+            b0, a,
+            "reach-guard: rung-0 argmax differs from ranked[0] (rotate is observable)"
+        );
+
+        // Run 1: natural beam (with the gate, rung 1 keeps this order).
+        let out_natural = {
+            let mut s = PlannerServices::new_default(PlayerId(0), &config, policies);
+            run_iterative_deepening(&state, ranked.clone(), tw, &config, &mut s)
+        };
+        // Run 2: beam pre-rotated so B0 is first (mimics an un-gated rung-0 rotate).
+        let out_prerotated = {
+            let mut pre = ranked.clone();
+            rotate_pv_to_front(&mut pre, &b0);
+            let mut s = PlannerServices::new_default(PlayerId(0), &config, policies);
+            run_iterative_deepening(&state, pre, tw, &config, &mut s)
+        };
+
+        assert_ne!(
+            out_natural, out_prerotated,
+            "with the rung-0 gate, rung 1 keeps today's order; the pre-rotated \
+             (un-gated) order diverges under starvation. Removing the gate makes \
+             these equal."
+        );
+    }
+
+    // V7b: ensemble determinism on the public surface. K >= 2 measurement runs must
+    // be byte-identical — the new killer/rung state is arrays with no HashMap
+    // iteration order, so #4878-style ordering stability holds end-to-end.
+    #[test]
+    fn ensemble_is_deterministic_with_move_ordering() {
+        let state = searchable_state();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.determinization_samples = 2;
+        let session = AiSession::arc_from_game(&state);
+
+        let first = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+        let second = score_candidates_with_session(&state, PlayerId(0), &config, &session);
+
+        assert!(
+            has_cast(&first),
+            "reach-guard: the search-enabled ID loop is reached"
+        );
+        assert_eq!(
+            first, second,
+            "K >= 2 ensemble output must be byte-identical across runs"
         );
     }
 }

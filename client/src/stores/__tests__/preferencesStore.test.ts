@@ -16,6 +16,7 @@ describe("preferencesStore", () => {
         vfxQuality: "full",
         animationSpeedMultiplier: 1.0,
         pacingMultipliers: { effects: 1.0, combat: 1.0, banners: 1.0 },
+        priorityPassingMode: "Standard",
         masterVolume: 100,
         sfxVolume: 70,
         musicVolume: 40,
@@ -40,6 +41,7 @@ describe("preferencesStore", () => {
     expect(state.boardBackground).toBe("auto-wubrg");
     expect(state.multiplayerBoardLayout).toBe("focused");
     expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
+    expect(state.priorityPassingMode).toBe("Standard");
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -213,6 +215,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setCardSize("large");
       usePreferencesStore.getState().setMasterVolume(20);
       usePreferencesStore.getState().setPacingMultiplier("combat", 1.5);
+      usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
     });
 
     act(() => {
@@ -223,6 +226,7 @@ describe("preferencesStore", () => {
     expect(state.cardSize).toBe("medium");
     expect(state.masterVolume).toBe(100);
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
+    expect(state.priorityPassingMode).toBe("Standard");
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -377,6 +381,24 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().phaseStops).toEqual([]);
+  });
+
+  it.each([24, 25])("migrates the legacy Smart value from v%i", (version) => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { priorityPassingMode: "Smart" }, version }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("SkipLowUseWindows");
+  });
+
+  it("safely normalizes invalid v25 priority-passing modes", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { priorityPassingMode: "Aggressive" }, version: 25 }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+    expect(usePreferencesStore.getState().priorityPassingMode).toBe("Standard");
   });
 
   // --- Audio preferences ---

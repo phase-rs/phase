@@ -1147,9 +1147,10 @@ fn check_legend_rule(
             })
             .collect();
 
-        // Group by name
-        let mut by_name: std::collections::HashMap<String, Vec<_>> =
-            std::collections::HashMap::new();
+        // Group by name. BTreeMap (not HashMap) so iteration below is
+        // name-sorted and deterministic across processes — issue #4878.
+        let mut by_name: std::collections::BTreeMap<String, Vec<_>> =
+            std::collections::BTreeMap::new();
         for id in legendaries {
             if let Some(obj) = state.objects.get(&id) {
                 by_name.entry(obj.name.clone()).or_default().push(id);
@@ -2584,6 +2585,41 @@ mod tests {
                 assert_eq!(legend_name, "Thalia");
                 assert!(candidates.contains(&id1));
                 assert!(candidates.contains(&id2));
+            }
+            other => panic!("Expected ChooseLegend, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sba_legend_rule_presents_groups_in_deterministic_name_order() {
+        // Issue #4878: `check_legend_rule` used to group same-name legendaries
+        // into a `std::collections::HashMap<String, Vec<ObjectId>>` (default
+        // RandomState) and present the FIRST group encountered during hash
+        // iteration — process-random order, not a function of game state.
+        // With two independently-duplicated legend names controlled by the
+        // same player, the BTreeMap fix must always present the
+        // alphabetically-first name first, deterministically, regardless of
+        // insertion order.
+        let mut state = setup();
+        // Insert the alphabetically-LATER name's duplicates first, so a
+        // naive insertion-order-preserving container (or a lucky HashMap
+        // iteration) would be tempted to present "Zeppelin Twins" first —
+        // only a genuine sort-by-name fixes this.
+        add_legendary(&mut state, CardId(1), PlayerId(0), "Zeppelin Twins", 1);
+        add_legendary(&mut state, CardId(2), PlayerId(0), "Zeppelin Twins", 2);
+        add_legendary(&mut state, CardId(3), PlayerId(0), "Aardvark Sentinel", 1);
+        add_legendary(&mut state, CardId(4), PlayerId(0), "Aardvark Sentinel", 2);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        match &state.waiting_for {
+            WaitingFor::ChooseLegend { legend_name, .. } => {
+                assert_eq!(
+                    legend_name, "Aardvark Sentinel",
+                    "the alphabetically-first duplicated legend name must be presented \
+                     first, deterministically — got {legend_name:?}"
+                );
             }
             other => panic!("Expected ChooseLegend, got {:?}", other),
         }

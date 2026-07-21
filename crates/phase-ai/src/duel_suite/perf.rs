@@ -144,6 +144,7 @@ impl PerfCounters {
         let PerfCounterSnapshot {
             state_clone_for_legality,
             static_full_scans,
+            spell_keyword_grant_scans,
             layers_full_eval,
             layers_incremental,
             layers_escalated,
@@ -178,6 +179,10 @@ impl PerfCounters {
             state_clone_for_legality,
         );
         map.insert("static_full_scans".to_string(), static_full_scans);
+        map.insert(
+            "spell_keyword_grant_scans".to_string(),
+            spell_keyword_grant_scans,
+        );
         map.insert("layers_full_eval".to_string(), layers_full_eval);
         map.insert("layers_incremental".to_string(), layers_incremental);
         map.insert("layers_escalated".to_string(), layers_escalated);
@@ -892,6 +897,7 @@ mod tests {
         let snapshot = PerfCounterSnapshot {
             state_clone_for_legality: 1,
             static_full_scans: 2,
+            spell_keyword_grant_scans: 29,
             layers_full_eval: 3,
             layers_incremental: 4,
             layers_escalated: 5,

@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloquée",
+    "cantBeActivated": "Cette capacité ne peut pas être activée",
+    "cantActivateDuring": "Ne peut pas être activée pour l'instant",
+    "prohibited": "L'activation de cette capacité est interdite"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -570,6 +576,14 @@
     "resourceMana": "mana",
     "resourceCounters": "marqueurs",
     "resourceSpeed": "vitesse",
+    "loopCollapseTitleTokens": "Choisissez combien de jetons créer",
+    "loopCollapseTitleCounters": "Choisissez combien de fois ajouter des marqueurs",
+    "loopCollapseTitleLife": "Choisissez combien de fois gagner des points de vie",
+    "loopCollapseTitleMixed": "Choisissez combien de fois répéter la boucle",
+    "loopCollapseAmountTokens": "Créer {{value}} jetons",
+    "loopCollapseAmountCounters": "Ajouter des marqueurs {{value}}×",
+    "loopCollapseAmountLife": "Gagner des points de vie {{value}}×",
+    "loopCollapseAmountMixed": "Répéter la boucle {{value}}×",
     "manualMana": "Manuel",
     "manualManaTooltip": "Mana manuel — cette partie seulement. Engagez vos propres terrains et mana pour payer.",
     "spendHint": "Cliquez sur votre mana pour le dépenser pour ce coût",
@@ -1759,6 +1773,13 @@
     "variantBestow": "Lancer avec Don",
     "variantFreerunning": "Lancer avec Freerunning",
     "variantFuse": "Lancer avec Fusion",
+    "variantMutate": "Lancer avec Mutate",
+    "variantAwaken": "Lancer avec Éveil",
+    "variantCleave": "Lancer avec Tranchage",
+    "variantImpending": "Lancer avec Imminence",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancer avec Prototype",
+    "variantFaceDown": "Lancer face cachée",
     "variantFallback": "Lancer avec {{type}}"
   },
   "categoryChoice": {

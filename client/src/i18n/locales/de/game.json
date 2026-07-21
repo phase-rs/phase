@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Blockiert",
+    "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
+    "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
+    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -570,6 +576,14 @@
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo",
+    "loopCollapseTitleTokens": "Wähle, wie viele Spielsteine erzeugt werden",
+    "loopCollapseTitleCounters": "Wähle, wie oft Marken hinzugefügt werden",
+    "loopCollapseTitleLife": "Wähle, wie oft Leben dazugewonnen wird",
+    "loopCollapseTitleMixed": "Wähle, wie oft die Schleife wiederholt wird",
+    "loopCollapseAmountTokens": "{{value}} Spielsteine erzeugen",
+    "loopCollapseAmountCounters": "Marken hinzufügen {{value}}×",
+    "loopCollapseAmountLife": "Leben dazugewinnen {{value}}×",
+    "loopCollapseAmountMixed": "Schleife wiederholen {{value}}×",
     "manualMana": "Manuell",
     "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
     "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
@@ -1759,6 +1773,13 @@
     "variantBestow": "Mit Verleihen wirken",
     "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
+    "variantMutate": "Mit Mutate wirken",
+    "variantAwaken": "Mit Erwecken wirken",
+    "variantCleave": "Mit Abspalten wirken",
+    "variantImpending": "Mit Drohend wirken",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Mit Prototyp wirken",
+    "variantFaceDown": "Verdeckt wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
   "categoryChoice": {

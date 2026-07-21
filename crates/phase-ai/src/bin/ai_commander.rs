@@ -8,6 +8,8 @@
 //! Usage:
 //!   cargo run --release --bin ai-commander -- client/public
 //!   cargo run --release --bin ai-commander -- client/public --seed 7 --difficulty Easy
+//!   cargo run --release --bin ai-commander -- client/public --difficulty Easy \
+//!       --difficulty-p2 VeryHard --action-cap 50000
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
@@ -21,12 +23,14 @@ use engine::game::deck_loading::{
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
-use phase_ai::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
+use phase_ai::auto_play::{run_driver_loop, DriverExit};
+use phase_ai::config::{
+    create_config_for_players, AiConfig, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
+};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 
-const MAX_TOTAL_ACTIONS: usize = 200_000;
+const DEFAULT_ACTION_CAP: usize = 200_000;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -40,6 +44,10 @@ fn main() {
 
     let mut seed: u64 = 42;
     let mut difficulty = AiDifficulty::Easy;
+    // Per-seat override of `difficulty` (pod-lab gauntlet mixed-skill tables).
+    // `None` means "use the table-wide --difficulty for this seat".
+    let mut seat_difficulty: [Option<AiDifficulty>; 4] = [None; 4];
+    let mut action_cap: usize = DEFAULT_ACTION_CAP;
     let mut feed: String = "feeds/mtggoldfish-commander.json".to_string();
     let mut args_iter = args.iter().skip(1).peekable();
     while let Some(arg) = args_iter.next() {
@@ -56,12 +64,34 @@ fn main() {
                     difficulty = parse_difficulty(v);
                 }
             }
+            "--action-cap" => {
+                if let Some(v) = args_iter.next() {
+                    action_cap = parse_action_cap(v);
+                }
+            }
             "--feed" => {
                 if let Some(v) = args_iter.next() {
                     feed = v.clone();
                 }
             }
-            _ => {}
+            other => {
+                // `--difficulty-p0` .. `--difficulty-p3`: single-seat override,
+                // parameterized on seat index rather than four bespoke flags.
+                // The value arg is consumed unconditionally so a bad index can't
+                // leak its label into the catch-all; `parse_seat_override`
+                // hard-fails (like the sibling parsers) instead of silently
+                // dropping a mistyped flag and running a mislabeled seat.
+                if let Some(suffix) = other.strip_prefix("--difficulty-p") {
+                    let value = args_iter.next().map(String::as_str);
+                    match parse_seat_override(suffix, value) {
+                        Ok((idx, label)) => seat_difficulty[idx] = Some(parse_difficulty(label)),
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -155,6 +185,24 @@ fn main() {
     };
     let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
 
+    // Post-resolution deck-count line (plan §3.9): `resolve_deck_list` silently
+    // skips any name the card database doesn't recognize, so the pre-resolution
+    // "main: N cards" print above can't prove a deck actually loaded full-size.
+    // Print the resolved per-seat counts too, so a harness parsing stdout can
+    // detect silent-skip drift (a resolved count short of the pre-resolution
+    // one) without needing engine internals.
+    println!("Resolved deck sizes (post name-resolution, 0-indexed by seat):");
+    for (i, seat) in [&payload.player, &payload.opponent]
+        .into_iter()
+        .chain(payload.ai_decks.iter())
+        .enumerate()
+    {
+        let main_count: u32 = seat.main_deck.iter().map(|e| e.count).sum();
+        let commander_count: u32 = seat.commander.iter().map(|e| e.count).sum();
+        println!("  P{i}  main={main_count:>3}  commander={commander_count}");
+    }
+    println!();
+
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
     load_deck_into_state(&mut state, &payload);
 
@@ -164,70 +212,115 @@ fn main() {
     println!();
 
     let ai_players: HashSet<PlayerId> = (0..4).map(|i| PlayerId(i as u8)).collect();
-    let config = create_config_for_players(difficulty, Platform::Native, 4);
+    // Effective per-seat difficulty is echoed (not just the table-wide
+    // --difficulty) so the resolved tier each seat actually plays at is an
+    // operator-visible artifact of the run — silent drift onto the wrong
+    // tier is the phase#6080 failure class.
+    println!("Per-seat difficulty (0-indexed by seat):");
     let mut ai_configs: HashMap<PlayerId, AiConfig> = HashMap::new();
-    for i in 0..4 {
-        ai_configs.insert(PlayerId(i as u8), config.clone());
+    for (i, override_diff) in seat_difficulty.iter().enumerate() {
+        let seat_diff = override_diff.unwrap_or(difficulty);
+        println!("  P{i}  difficulty={seat_diff:?}");
+        ai_configs.insert(
+            PlayerId(i as u8),
+            create_config_for_players(seat_diff, Platform::Native, 4),
+        );
     }
+    println!();
 
     let start = Instant::now();
     let dump_log_path = read_dump_env("PHASE_DUMP_LOG");
     let mut game_log: Vec<engine::types::log::GameLogEntry> = Vec::new();
     let dump_actions_path = read_dump_env("PHASE_DUMP_ACTIONS");
     let mut actions_log: Vec<String> = Vec::new();
-    let mut total_actions: usize = 0;
     let mut last_turn_reported: u32 = 0;
-    let mut aborted = false;
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
+    // Tracks each seat's is_eliminated (the engine already flips this per
+    // CR 800.4 when a player leaves the game) so we print exactly one line
+    // per elimination event instead of re-announcing an already-eliminated
+    // seat every batch.
+    let mut was_eliminated = [false; 4];
 
-    loop {
-        let mut results = run_ai_actions(
-            &mut state,
-            &ai_players,
-            &ai_configs,
-            &mut ai_rng,
-            &ai_session,
-        );
-        if results.is_empty() {
-            break;
-        }
-        if dump_log_path.is_some() {
-            for r in &mut results {
-                game_log.extend(std::mem::take(&mut r.log_entries));
+    // The batch / remaining-budget boundary is owned by `run_driver_loop` (the
+    // single authority — see its doc). This observer carries every per-batch
+    // side effect 1:1; it must NOT read the outer `state`/total (both are owned
+    // by the helper for the duration of the call). It reads the observer's
+    // `state` arg (post-batch) and `total_before` (the PRE-batch running total,
+    // which the turn line and ELIMINATED lines both printed before).
+    let outcome = run_driver_loop(
+        &mut state,
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        action_cap,
+        &mut |results, state, total_before| {
+            if dump_log_path.is_some() {
+                for r in &mut *results {
+                    game_log.extend(std::mem::take(&mut r.log_entries));
+                }
             }
-        }
-        if dump_actions_path.is_some() {
-            for r in &results {
-                actions_log.push(format!("{:?}", r.action));
+            if dump_actions_path.is_some() {
+                for r in &*results {
+                    actions_log.push(format!("{:?}", r.action));
+                }
             }
-        }
-        total_actions += results.len();
 
-        if state.turn_number != last_turn_reported {
-            last_turn_reported = state.turn_number;
-            let snapshot: Vec<String> = state
-                .players
-                .iter()
-                .enumerate()
-                .map(|(i, p)| format!("P{i}:{}", p.life))
-                .collect();
-            println!(
-                "Turn {:>2} (active P{})  actions={:>6}  {}",
-                state.turn_number,
-                state.active_player.0,
-                total_actions,
-                snapshot.join(" ")
-            );
-            let _ = std::io::stdout().flush();
-        }
+            if state.turn_number != last_turn_reported {
+                last_turn_reported = state.turn_number;
+                let snapshot: Vec<String> = state
+                    .players
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("P{i}:{}", p.life))
+                    .collect();
+                println!(
+                    "Turn {:>2} (active P{})  actions={:>6}  elapsed={:>6.1}s  {}",
+                    state.turn_number,
+                    state.active_player.0,
+                    total_before,
+                    start.elapsed().as_secs_f64(),
+                    snapshot.join(" ")
+                );
+                let _ = std::io::stdout().flush();
+            }
 
-        if total_actions >= MAX_TOTAL_ACTIONS {
-            aborted = true;
-            println!();
-            println!("ABORT: hit MAX_TOTAL_ACTIONS={MAX_TOTAL_ACTIONS}");
-            break;
-        }
+            // Print one line the moment a seat's is_eliminated first flips, with
+            // turn + wall-clock context so a gauntlet harness can distinguish an
+            // expected early elimination from a stall or a perf regression
+            // without re-deriving it from the per-turn life snapshots above.
+            for (i, was) in was_eliminated.iter_mut().enumerate() {
+                if !*was && state.players[i].is_eliminated {
+                    *was = true;
+                    println!(
+                        "ELIMINATED: P{i}  turn={}  actions={:>6}  elapsed={:.1}s",
+                        state.turn_number,
+                        total_before,
+                        start.elapsed().as_secs_f64()
+                    );
+                    let _ = std::io::stdout().flush();
+                }
+            }
+        },
+    );
+
+    let total_actions = outcome.total_actions;
+    let aborted = matches!(outcome.exit, DriverExit::CapReached);
+    // phase#6080: the reason the driver broke early (one of the batch break
+    // doors), so a stall can be diagnosed from the game output alone instead of
+    // a `tracing::error` no harness captures. A cap abort carries no break door.
+    let last_break_reason = match outcome.exit {
+        DriverExit::BatchBreak(reason) => Some(reason),
+        DriverExit::CapReached => None,
+    };
+    // STDOUT PARITY: the abort path prints a blank line + the ABORT line here,
+    // immediately after the driver returns and BEFORE the unconditional blank +
+    // "=== RESULT ===" epilogue below — so an abort prints two blank lines
+    // (this one and the epilogue's), exactly as the pre-refactor in-loop abort did.
+    if aborted {
+        println!();
+        println!("ABORT: hit action cap={action_cap}");
     }
 
     let elapsed = start.elapsed();
@@ -238,15 +331,69 @@ fn main() {
     println!("Turns played: {}", state.turn_number);
     println!();
 
-    match &state.waiting_for {
-        WaitingFor::GameOver { winner } => {
+    let outcome = classify_run_outcome(aborted, &state.waiting_for);
+    match outcome {
+        RunOutcome::Completed => {
+            // `classify_run_outcome` only returns `Completed` for `GameOver`;
+            // the fallthrough arm is unreachable and never prints.
+            let winner = match &state.waiting_for {
+                WaitingFor::GameOver { winner } => *winner,
+                _ => None,
+            };
             println!(
                 "Game ended cleanly. Winner: {}",
                 winner.map_or("draw".to_string(), |p| format!("P{}", p.0))
             );
         }
-        other => {
-            println!("Game did NOT reach GameOver. waiting_for = {other:?}");
+        // An action-cap abort already printed its own ABORT line above and is a
+        // distinct, already-diagnosed outcome — it deliberately skips the
+        // softlock STALL block (which asserts `last_break_reason` is unknown,
+        // never set on the abort door) so an abort is never misreported as an
+        // unexplained stall. Only the shared "did NOT reach GameOver" line prints.
+        RunOutcome::Aborted => {
+            println!(
+                "Game did NOT reach GameOver. waiting_for = {:?}",
+                state.waiting_for
+            );
+        }
+        RunOutcome::Stalled => {
+            // phase#6080: an empty AI-action batch while parked on anything but
+            // GameOver is a driver stall, not a normal game end (the family of
+            // p0-softlock issues #5250/#4345/#5958/#6172/#3886/#3919/#3233).
+            // Print a machine-readable line with enough context to reproduce
+            // (waiting_for variant, turn, active/priority player, pending-cast
+            // summary) plus which break door fired, then exit with a distinct
+            // code — the caller must not silently treat this as a completed game.
+            println!(
+                "STALL: waiting_for={} turn={} active=P{} priority=P{} pending_cast={}",
+                state.waiting_for.variant_name(),
+                state.turn_number,
+                state.active_player.0,
+                state.priority_player.0,
+                state
+                    .pending_cast
+                    .as_ref()
+                    .map(|pc| format!(
+                        "object={:?} card={:?} variant={:?}",
+                        pc.object_id, pc.card_id, pc.casting_variant
+                    ))
+                    .unwrap_or_else(|| "none".to_string()),
+            );
+            match &last_break_reason {
+                Some(reason) => println!("STALL: break_reason={reason:?}"),
+                None => println!(
+                    "STALL: break_reason=unknown (run_ai_actions batch was non-empty; \
+                     stall detected on a later empty batch this process did not observe)"
+                ),
+            }
+            // Preserved verbatim: pod-lab's runner.py classifies outcomes by
+            // matching this exact substring in stdout — do not reword it.
+            // Printed in both the abort and stall cases (kept identical
+            // deliberately, see comment above).
+            println!(
+                "Game did NOT reach GameOver. waiting_for = {:?}",
+                state.waiting_for
+            );
         }
     }
 
@@ -283,8 +430,13 @@ fn main() {
         println!("Dumped {} game-log entries to {path}", game_log.len());
     }
 
-    if aborted {
-        std::process::exit(2);
+    // Distinct exit codes so a caller keying off exit status alone (phase#6080)
+    // can never mistake a clean finish (0), an action-cap abort (2), and a
+    // driver stall (3) for one another.
+    match outcome {
+        RunOutcome::Completed => {}
+        RunOutcome::Aborted => std::process::exit(2),
+        RunOutcome::Stalled => std::process::exit(3),
     }
 }
 
@@ -301,13 +453,170 @@ fn read_dump_env(key: &str) -> Option<String> {
         .expect("invalid Unicode in dump-destination env var")
 }
 
+/// Parses a `--difficulty` value. Delegates the actual label→enum mapping to
+/// `AiDifficulty::from_label` (the crate's single authority — see its doc
+/// comment) so this binary's understanding of each label can never drift from
+/// every other transport that parses one. Unlike `from_label` itself, which
+/// silently downgrades an unrecognized label to `Medium`, an unrecognized
+/// label here is a hard startup error: silently running a garbled
+/// `--difficulty` value would poison an entire batch of games with a
+/// mislabeled skill tier with no indication anything went wrong (phase#6080
+/// diagnosis; pod-lab gauntlet plan §3.8/§4.5, whose local tier-echo guard
+/// exists precisely because this class of silent downgrade was possible).
 fn parse_difficulty(s: &str) -> AiDifficulty {
-    match s {
-        "VeryEasy" => AiDifficulty::VeryEasy,
-        "Easy" => AiDifficulty::Easy,
-        "Medium" => AiDifficulty::Medium,
-        "Hard" => AiDifficulty::Hard,
-        "VeryHard" => AiDifficulty::VeryHard,
-        _ => AiDifficulty::Easy,
+    if !ACCEPTED_DIFFICULTY_LABELS
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(s.trim()))
+    {
+        eprintln!(
+            "error: unrecognized --difficulty {s:?}; accepted values: {}",
+            ACCEPTED_DIFFICULTY_LABELS.join(", ")
+        );
+        std::process::exit(1);
+    }
+    AiDifficulty::from_label(s)
+}
+
+/// Parses an `--action-cap` value, aborting startup on a garbled cap. Thin
+/// exiting wrapper over [`parse_action_cap_checked`] — see it for the rule.
+fn parse_action_cap(s: &str) -> usize {
+    parse_action_cap_checked(s).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    })
+}
+
+/// Validates an `--action-cap` value: a positive integer (whitespace trimmed).
+/// A garbled cap (non-numeric, or zero) would either silently keep the built-in
+/// default or abort every game on the first batch — both the same silent-poison
+/// failure class `parse_difficulty` guards against — so it is returned as an
+/// `Err` the wrapper turns into a hard startup error rather than falling back.
+fn parse_action_cap_checked(s: &str) -> Result<usize, String> {
+    match s.trim().parse::<usize>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(format!(
+            "error: --action-cap {s:?} must be a positive integer"
+        )),
+    }
+}
+
+/// Resolves a `--difficulty-pN <label>` seat override. `suffix` is the text
+/// after `--difficulty-p`; `value` is the following CLI arg (the label), if
+/// present. Mirrors the hard-fail discipline of `parse_difficulty` /
+/// `parse_action_cap`: a non-numeric or out-of-range (`>= 4`) seat index, or a
+/// missing label, is a startup error rather than a silently dropped flag —
+/// which previously also swallowed the label arg, cascading it into the
+/// catch-all. Label validity is delegated to `parse_difficulty` by the caller.
+fn parse_seat_override<'a>(
+    suffix: &str,
+    value: Option<&'a str>,
+) -> Result<(usize, &'a str), String> {
+    let idx = suffix
+        .parse::<usize>()
+        .ok()
+        .filter(|&i| i < 4)
+        .ok_or_else(|| format!("error: --difficulty-p{suffix}: seat index must be 0..=3"))?;
+    let label =
+        value.ok_or_else(|| format!("error: --difficulty-p{idx} requires a difficulty label"))?;
+    Ok((idx, label))
+}
+
+/// End-of-run disposition, derived purely from whether the action cap was hit
+/// and where `waiting_for` parked. Drives both the epilogue text and the exit
+/// code. Abort takes precedence: `(aborted, GameOver)` is narrowly reachable —
+/// if the game-ending action is exactly the last of the remaining budget, the
+/// batch fills `remaining` by count with no break reason and `run_driver_loop`
+/// returns `DriverExit::CapReached` on a `GameOver` state — and it is
+/// deliberately folded into `Aborted` rather than given a fourth state (exit
+/// code 2 either way; reporting the abort is more self-consistent than claiming
+/// a clean finish for a run the cap cut short).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunOutcome {
+    Completed,
+    Aborted,
+    Stalled,
+}
+
+fn classify_run_outcome(aborted: bool, waiting_for: &WaitingFor) -> RunOutcome {
+    match (aborted, waiting_for) {
+        (true, _) => RunOutcome::Aborted,
+        (false, WaitingFor::GameOver { .. }) => RunOutcome::Completed,
+        (false, _) => RunOutcome::Stalled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_action_cap_accepts_positive_integer() {
+        assert_eq!(parse_action_cap_checked("50000"), Ok(50000));
+        assert_eq!(parse_action_cap_checked("  7 "), Ok(7));
+    }
+
+    #[test]
+    fn parse_action_cap_rejects_zero_and_non_numeric() {
+        assert!(parse_action_cap_checked("0").is_err());
+        assert!(parse_action_cap_checked("-5").is_err());
+        assert!(parse_action_cap_checked("abc").is_err());
+        assert!(parse_action_cap_checked("").is_err());
+    }
+
+    #[test]
+    fn parse_seat_override_rejects_non_numeric_index() {
+        assert!(parse_seat_override("x", Some("Hard")).is_err());
+    }
+
+    #[test]
+    fn parse_seat_override_rejects_out_of_range_index() {
+        assert!(parse_seat_override("4", Some("Hard")).is_err());
+        assert!(parse_seat_override("9", Some("Hard")).is_err());
+    }
+
+    #[test]
+    fn parse_seat_override_requires_a_label_value() {
+        assert!(parse_seat_override("2", None).is_err());
+    }
+
+    #[test]
+    fn parse_seat_override_accepts_valid_seat_and_label() {
+        assert_eq!(parse_seat_override("2", Some("Hard")), Ok((2, "Hard")));
+        assert_eq!(
+            parse_seat_override("0", Some("VeryHard")),
+            Ok((0, "VeryHard"))
+        );
+    }
+
+    #[test]
+    fn classify_run_outcome_completed_only_on_clean_gameover() {
+        let over = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(classify_run_outcome(false, &over), RunOutcome::Completed);
+    }
+
+    #[test]
+    fn classify_run_outcome_aborted_when_cap_hit() {
+        // Abort wins over the parked state, and also over the narrowly-reachable
+        // `(aborted, GameOver)` corner (game ends on the last action of the
+        // remaining budget, then the cap fires) — which is deliberately folded
+        // into `Aborted`.
+        let parked = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert_eq!(classify_run_outcome(true, &parked), RunOutcome::Aborted);
+        let over = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        assert_eq!(classify_run_outcome(true, &over), RunOutcome::Aborted);
+    }
+
+    #[test]
+    fn classify_run_outcome_stalled_when_parked_off_gameover() {
+        let parked = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert_eq!(classify_run_outcome(false, &parked), RunOutcome::Stalled);
     }
 }

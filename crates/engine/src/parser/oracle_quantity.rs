@@ -27,7 +27,9 @@ use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
-use super::oracle_nom::condition::{inject_controller_you, parse_spell_history_filter};
+use super::oracle_nom::condition::{
+    inject_controller_you, parse_life_total_comparator, parse_spell_history_filter,
+};
 use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -1410,6 +1412,7 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
     let ((relation, attr, comparator, value_expr), rest) = nom_on_lower(clause, clause, |input| {
         let (input, relation) = parse_player_population(input)?;
         let (input, (attr, comparator, value_expr)) = alt((
+            parse_life_total_who_attr_clause,
             map(parse_hand_size_who_attr_clause, |(a, c, n)| {
                 (a, c, QuantityExpr::Fixed { value: n })
             }),
@@ -1435,6 +1438,35 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
             value: Box::new(value_expr),
         },
     })
+}
+
+/// CR 119: "whose life total is <comparator> <quantity>" → the candidate player's
+/// own life total (CR 119.1), compared under <comparator> to a threshold quantity.
+/// Anya, Merciless Angel: "for each opponent whose life total is less than half
+/// their starting life total" → LifeTotal LT DivideRounded(StartingLifeTotal, 2,
+/// Down). Reuses `parse_life_total_comparator` (the shared life-total ordering
+/// grammar) and `nom_quantity::parse_quantity` (the shared threshold grammar) —
+/// the exact pair the existential "an opponent's life total is <cmp> <qty>" static
+/// condition uses, so this per-candidate predicate's RHS is AST-identical to
+/// Anya's indestructible-ability condition RHS. The `PlayerScope` on the LHS ref
+/// is inert at runtime (the `PlayerAttribute` resolver reads each candidate player
+/// directly); `ScopedPlayer` documents the "each candidate's own life total" read.
+fn parse_life_total_who_attr_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, Comparator, QuantityExpr)> {
+    let (input, _) = tag("whose life total is ").parse(input)?;
+    let (input, comparator) = parse_life_total_comparator(input)?;
+    let (input, value) = nom_quantity::parse_quantity(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator,
+            value,
+        ),
+    ))
 }
 
 /// CR 402.1: "who has/have N or fewer|more cards in hand" → the candidate's hand

@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloccata",
+    "cantBeActivated": "Questa abilità non può essere attivata",
+    "cantActivateDuring": "Non può essere attivata ora",
+    "prohibited": "L'attivazione di questa abilità è proibita"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -570,6 +576,14 @@
     "resourceMana": "mana",
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità",
+    "loopCollapseTitleTokens": "Scegli quante pedine creare",
+    "loopCollapseTitleCounters": "Scegli quante volte aggiungere segnalini",
+    "loopCollapseTitleLife": "Scegli quante volte guadagnare punti vita",
+    "loopCollapseTitleMixed": "Scegli quante volte ripetere il ciclo",
+    "loopCollapseAmountTokens": "Crea {{value}} pedine",
+    "loopCollapseAmountCounters": "Aggiungi segnalini {{value}}×",
+    "loopCollapseAmountLife": "Guadagna punti vita {{value}}×",
+    "loopCollapseAmountMixed": "Ripeti il ciclo {{value}}×",
     "manualMana": "Manuale",
     "manualManaTooltip": "Mana manuale — solo questa partita. TAPpa le tue terre e il tuo mana per pagare.",
     "spendHint": "Clicca sul tuo mana per spenderlo per questo costo",
@@ -1759,6 +1773,13 @@
     "variantBestow": "Lancia con Conferire",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
+    "variantMutate": "Lancia con Mutate",
+    "variantAwaken": "Lancia con Risveglio",
+    "variantCleave": "Lancia con Fendere",
+    "variantImpending": "Lancia con Incombere",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancia con Prototipo",
+    "variantFaceDown": "Lancia a faccia in giù",
     "variantFallback": "Lancia con {{type}}"
   },
   "categoryChoice": {

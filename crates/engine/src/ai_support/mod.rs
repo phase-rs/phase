@@ -20,7 +20,7 @@ use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
-    PendingMulliganAction, WaitingFor,
+    PendingMulliganAction, PriorityPassingMode, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -1220,6 +1220,7 @@ fn beneficial_mana_tap_trigger_hold(
             let Some(obj) = state.objects.get(&trigger_source) else {
                 return false;
             };
+            let source_context = triggers::trigger_source_context_for_latch(state, obj);
             obj.trigger_definitions.iter_all().any(|trigger| {
                 let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
@@ -1238,12 +1239,12 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             mana_source,
-                            trigger_source,
+                            &source_context,
                         ) && crate::game::trigger_matchers::valid_player_matches(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     // CR 605.1b: a `ManaAdded` trigger has no card filter
@@ -1255,7 +1256,7 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     _ => false,
@@ -1292,6 +1293,10 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         WaitingFor::Priority { player } => *player,
         _ => return false,
     };
+    // CR 723.5: a player controlling another player makes that player's
+    // decisions. Preferences belong to the authenticated decision maker, while
+    // rules-facing priority checks continue to use the semantic priority seat.
+    let mode_owner = crate::game::turn_control::authorized_submitter_for_player(state, player);
 
     // Lazy, compute-once locals shared across rungs (§C):
     //  - `cast_probe`: one `PriorityCastProbe` built when the first castability
@@ -1306,19 +1311,18 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     let mut grouped_mana_priority: Option<bool> = None;
 
     // A phase stop on the current phase (empty stack = initial priority window)
-    // means the player asked to pause here — never recommend auto-pass. Moved
+    // means the authorized decision maker asked to pause here — never recommend
+    // auto-pass. Moved
     // from the frontend so the engine is the single authority. Disjoint from the
     // CR 117.3d yield short-circuit below, which requires a NON-empty stack
     // (`stack.back()` is `Some`); this branch requires an EMPTY stack.
     //
-    // Seat note: this gate keys on the `WaitingFor::Priority` player bound
-    // above; the frontend gate it replaced keyed on `state.priority_player`.
-    // CR 723.5: while controlling another player, one player makes all of that
-    // player's choices — so the priority holder and `priority_player` can be
-    // different seats. With an empty stack those two seats diverge only in that
-    // turn-control case, and this divergence is accepted (the checked seat is
-    // the one actually being asked to act).
-    if state.stack.is_empty() && state.phase_stop_hit(player) {
+    // CR 723.5: while controlling another player, the controller makes the
+    // controlled player's choices. Preference ownership therefore follows the
+    // same authorized submitter as `PriorityPassingMode`; consulting the
+    // controlled seat here would both honor the wrong user's preference and
+    // reveal it through the viewer-scoped recommendation bit.
+    if state.stack.is_empty() && state.phase_stop_hit(mode_owner) {
         return false;
     }
 
@@ -1333,6 +1337,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         .is_some_and(|top| state.is_priority_yielded(player, top))
     {
         return true;
+    }
+
+    if state.priority_passing_mode(mode_owner) == PriorityPassingMode::SkipLowUseWindows {
+        // CR 117.3a + CR 503.1 + CR 504.2 + CR 513.1: the active player gets
+        // the ordinary priority window in these steps after turn-based actions
+        // and beginning-of-step triggers have been handled. This opt-in mode is
+        // opt-in pre-commitment to pass these empty-stack windows even when a
+        // meaningful instant-speed action exists. CR 117.3d/117.4 remain
+        // authoritative because the frontend still submits PassPriority.
+        if state.stack.is_empty()
+            && player == state.active_player
+            && matches!(state.phase, Phase::Upkeep | Phase::Draw | Phase::End)
+        {
+            return true;
+        }
     }
 
     // Rung 4 — MTGA-style: auto-pass when the player's own spell/ability is on
@@ -1468,6 +1487,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     }
 
     false
+}
+
+/// Viewer-scoped auto-pass recommendation for transport adapters.
+///
+/// CR 117.1 + CR 723.5: only a viewer authorized to submit the current
+/// semantic player's decision may receive a positive recommendation. The
+/// authoritative helper still resolves which player's standing preference
+/// applies, including turn-control redirection.
+pub fn auto_pass_recommended_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+    actions: &[GameAction],
+) -> bool {
+    crate::game::turn_control::is_authorized_submitter(state, viewer)
+        && auto_pass_recommended(state, actions)
 }
 
 /// Returns the legal actions for the current game state.
@@ -1912,8 +1946,8 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
         CastingVariant, ConvokeMode, DistributionUnit, GameState, MulliganDecisionEntry,
-        MulliganDecisionPhase, PendingCast, PendingMulliganAction, StackEntry, StackEntryKind,
-        WaitingFor,
+        MulliganDecisionPhase, PendingCast, PendingMulliganAction, PriorityPassingMode, StackEntry,
+        StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -1942,6 +1976,129 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    fn meaningful_priority_actions() -> Vec<GameAction> {
+        vec![
+            GameAction::PassPriority,
+            GameAction::TurnFaceUp {
+                object_id: ObjectId(999),
+                x: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn low_use_window_mode_fast_passes_only_own_empty_upkeep_draw_and_end() {
+        for phase in [Phase::Upkeep, Phase::Draw, Phase::End] {
+            let mut state = setup_priority();
+            state.phase = phase;
+            let actions = meaningful_priority_actions();
+
+            assert!(
+                !super::auto_pass_recommended(&state, &actions),
+                "Standard must preserve the meaningful-action hold in {phase:?}"
+            );
+            state
+                .priority_passing_modes
+                .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+            assert!(
+                super::auto_pass_recommended(&state, &actions),
+                "the low-use-window mode should pass the active player's empty {phase:?} window"
+            );
+        }
+
+        let mut precombat = setup_priority();
+        precombat.phase = Phase::PreCombatMain;
+        precombat
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &precombat,
+            &meaningful_priority_actions()
+        ));
+
+        let mut opponent_turn = setup_opponent_priority(Phase::End);
+        opponent_turn
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &opponent_turn,
+            &meaningful_priority_actions()
+        ));
+
+        let mut non_priority = setup_priority();
+        non_priority.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        non_priority
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &non_priority,
+            &meaningful_priority_actions()
+        ));
+    }
+
+    #[test]
+    fn low_use_window_mode_uses_only_the_authorized_submitters_phase_stops() {
+        let stop = PhaseStop {
+            phase: Phase::End,
+            scope: PhaseStopScope::AllTurns,
+        };
+        let mut state = setup_priority();
+        state.phase = Phase::End;
+        state.turn_decision_controller = Some(PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+        let actions = meaningful_priority_actions();
+
+        assert!(super::auto_pass_recommended(&state, &actions));
+        state.phase_stops.insert(PlayerId(0), vec![stop]);
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "the controlled seat's private stop must not affect its controller"
+        );
+        state.phase_stops.clear();
+        state.phase_stops.insert(PlayerId(1), vec![stop]);
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "the authorized controller's stop must suppress the recommendation"
+        );
+        state.phase_stops.clear();
+        state.phase_stops.insert(PlayerId(2), vec![stop]);
+        assert!(super::auto_pass_recommended(&state, &actions));
+    }
+
+    #[test]
+    fn viewer_wrapper_reaches_low_use_window_mode_only_for_authorized_submitter() {
+        let mut state = setup_priority();
+        state.phase = Phase::End;
+        state.turn_decision_controller = Some(PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+        let actions = meaningful_priority_actions();
+
+        assert!(super::auto_pass_recommended(&state, &actions));
+        assert!(super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(1),
+            &actions
+        ));
+        assert!(!super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(0),
+            &actions
+        ));
+        assert!(!super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(2),
+            &actions
+        ));
     }
 
     fn create_land(state: &mut GameState, name: &str, subtypes: &[&str]) -> ObjectId {
@@ -4662,6 +4819,7 @@ mod tests {
                 ),
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             };
             obj.static_definitions = vec![def].into();
@@ -4733,6 +4891,134 @@ mod tests {
             shards,
             &vec![ManaCostShard::Red],
             "colored shards remain untouched by Affinity"
+        );
+    }
+
+    /// CR 118.9a + decision D1: the frontend's `spellCosts` map (from
+    /// `legal_actions_full`) must report a hand spell as `NoCost` while Omniscience
+    /// is on the battlefield, so the UI can overlay a {0} pip. The cost overlay is
+    /// the CHEAPEST-legal-cast floor (Display mode), independent of whether the
+    /// printed cost is affordable — the free-vs-printed election lives in the
+    /// `CastingVariantChoice` menu at cast time, not in the overlay. This test pins
+    /// both the zero-mana case and (as the discriminating extension) the ample-mana
+    /// case, so the Display-mode floor cannot silently regress to the printed cost
+    /// once a real cast becomes affordable.
+    #[test]
+    fn spell_costs_report_nocost_for_hand_spell_under_omniscience() {
+        use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
+        use crate::types::StaticDefinition;
+
+        let mut state = setup_priority();
+
+        let omniscience_id = create_object(
+            &mut state,
+            CardId(4200),
+            PlayerId(0),
+            "Omniscience".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&omniscience_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            let def = StaticDefinition {
+                mode: StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                },
+                affected: Some(TargetFilter::Any),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "You may cast spells from your hand without paying their mana costs."
+                        .to_string(),
+                ),
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // A 7UUU spell in hand — the exact class the display overlay should zero.
+        let spell_id = create_object(
+            &mut state,
+            CardId(4201),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+                generic: 7,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("Test Spell", "test spell"),
+            ));
+        }
+
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience must display the hand spell as NoCost, got {displayed:?}"
+        );
+
+        // Discriminating extension (decision D1): give the caster ample mana to
+        // afford the printed {7}{U}{U}{U}. The Display-mode overlay must STILL floor
+        // to NoCost — the affordable printed cost is only surfaced as a menu option
+        // at cast time, never in the overlay. Under the Actual-mode election logic
+        // this same board would offer {Normal(printed), HandPermission({0})}; the
+        // overlay deliberately does not.
+        for _ in 0..7 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience overlay must stay NoCost even when the printed cost is \
+             affordable (Display-mode floor), got {displayed:?}"
         );
     }
 
@@ -4842,7 +5128,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
-            source_id: None,
+            source: None,
             persist_player: None,
         };
 
@@ -5316,8 +5602,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        ability.source_incarnation = Some(2);
-        ability.source_card_id = Some(CardId(77));
+        ability.set_test_trigger_source_recursive(2, CardId(77));
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
             source_id: source,

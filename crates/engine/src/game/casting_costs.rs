@@ -1240,7 +1240,13 @@ pub(super) fn drain_deferred_triggers_after_stack_object_announcement(
     events: &mut Vec<GameEvent>,
     waiting_for: WaitingFor,
 ) -> WaitingFor {
-    if !matches!(waiting_for, WaitingFor::Priority { .. }) {
+    // CR 603.3b + CR 608.2g: a terminal Ripple completion waits for the
+    // *current* final cast's SpellCast event to join the earlier parked casts.
+    // The ordinary post-announcement helper would otherwise drain B here,
+    // before the reducer's priority pipeline has collected C.
+    if !matches!(waiting_for, WaitingFor::Priority { .. })
+        || state.pending_resolution_completion.is_some()
+    {
         return waiting_for;
     }
     crate::game::triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
@@ -8186,14 +8192,19 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .unwrap_or_default();
     let convoked_creature_count = convoked_creatures.len();
 
-    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast snapshot the
-    // PR-7 Phase 4d-ii loop-shortcut hook replays. Gated to a buyback-paid,
-    // permanent-creating (token) spell so the hook's cheap precondition (`last_recast_context
-    // == Some`) is set ~never. Fail-safe note: a spurious capture from buyback + some OTHER
-    // optional cost only makes the clone-drive run — its cover/abort rejects any non-covering
-    // recast, so this can never false-certify. Cleared (set `None`) on any non-matching cast,
-    // so a stale context never lingers. `ability.effect` is read here before `ability` is
-    // moved into `stack_ability` below.
+    // CR 601.2a + CR 702.27a + CR 702.51a: capture the object-growth recast as a 1-element
+    // loop-action sequence the PR-7 Phase 4d-ii / P7 v3 loop-shortcut hook replays. Gated to a
+    // buyback-paid, permanent-creating (token) spell so the hook's cheap precondition
+    // (`!last_loop_action_sequence.is_empty()`) is set ~never. Fail-safe note: a spurious capture
+    // from buyback + some OTHER optional cost only makes the clone-drive run — its cover/abort
+    // rejects any non-covering recast, so this can never false-certify. Cleared (set `[]`) on any
+    // non-matching cast, so a stale sequence never lingers. Additionally gated on
+    // `!in_simulation_probe()` so the detection/materialize drive (which re-runs this same cast
+    // under a `SimulationProbeGuard`) does NOT re-write the field — the sequence must stay
+    // byte-stable across the cover's s_n/s_n1/s_n2 frames (it is COMPARED, resource.rs). Overwrite
+    // is idempotent for a recast, but the shared invariant keeps the multi-activation path (which
+    // APPENDS, engine.rs) honest. `ability.effect` is read here before `ability` is moved into
+    // `stack_ability` below.
     {
         let is_token_creating =
             matches!(ability.effect, crate::types::ability::Effect::Token { .. });
@@ -8210,20 +8221,34 @@ fn finalize_cast_with_phyrexian_choices_inner(
             (has_buyback, convoke)
         });
         // #4603 opt-in gate: OFF (`!samples()`) must be byte-identical to pre-PR-7 on the
-        // SERIALIZED surface too — `last_recast_context` is `skip_serializing_if=is_none`, so a
-        // spurious `Some(..)` in OFF mode would appear in a save/replay/scenario. Gate on the
-        // SAME accessor the consuming hook uses (engine.rs:448) so the mode gate has one source.
-        state.last_recast_context = (state.loop_detection.samples()
-            && additional_cost_paid
-            && has_buyback
-            && is_token_creating)
-            .then_some(crate::types::game_state::RecastContext {
-                card_id,
-                controller: player,
-                from_zone: source_zone,
-                uses_buyback: crate::types::game_state::BuybackUsage::Used,
-                convoke,
-            });
+        // SERIALIZED surface too — `last_loop_action_sequence` is `skip_serializing_if=is_empty`, so
+        // a spurious element in OFF mode would appear in a save/replay/scenario. Gate on the SAME
+        // accessor the consuming hook uses so the mode gate has one source. The whole
+        // set-or-clear is skipped inside a `SimulationProbeGuard` (the detection/materialize drive
+        // re-casts on a clone): the sequence must stay byte-STABLE across the cover's s_n/s_n1/s_n2
+        // frames (it is COMPARED, resource.rs), so the probe must LEAVE it untouched rather than
+        // clear it. Overwrite-with-`vec![ctx]`-or-`[]` is the real-cast behavior (idempotent for a
+        // homogeneous recast; a non-matching real cast clears a stale sequence).
+        if !crate::game::engine::in_simulation_probe() {
+            state.last_loop_action_sequence = (state.loop_detection.samples()
+                && additional_cost_paid
+                && has_buyback
+                && is_token_creating)
+                .then_some(crate::types::game_state::LoopActionContext {
+                    card_id,
+                    controller: player,
+                    action: crate::types::game_state::LoopAction::Recast {
+                        from_zone: source_zone,
+                        uses_buyback: crate::types::game_state::BuybackUsage::Used,
+                    },
+                    convoke,
+                    // FIX-1: a buyback recast pins its loop choices via `convoke`, not the
+                    // FIX-1 tap-cost/color/proliferate choices — recorded pinless.
+                    pins: Vec::new(),
+                })
+                .map(|ctx| vec![ctx])
+                .unwrap_or_default();
+        }
     }
 
     // Determine whether this spell has a meaningful on-resolve ability.
@@ -8897,11 +8922,28 @@ fn handle_resolution_cast_success(
             if remaining_hits.is_empty() {
                 // CR 702.60a: after the last accepted hit, put the revealed
                 // cards not cast this way on the library bottom.
+                //
+                // This marker is installed before the replacement-aware batch
+                // because that batch can pause. The resumed cast must still
+                // collect its eventual SpellCast trigger with the earlier
+                // accepted hits, rather than drain them during the prompt.
+                state.pending_resolution_completion =
+                    Some(crate::types::game_state::PendingResolutionCompletion {
+                        player,
+                        source_id,
+                        final_cast: Some(cast_object),
+                    });
                 match crate::game::effects::cascade::shuffle_to_bottom(
                     state,
                     &exiled_misses,
                     source_id,
-                    None,
+                    Some(
+                        crate::types::game_state::BatchCompletion::RippleTerminalComplete {
+                            player,
+                            source_id,
+                            final_cast: Some(cast_object),
+                        },
+                    ),
                     events,
                 ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => None,

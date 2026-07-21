@@ -20,6 +20,8 @@ export interface AttackRequirement {
   objectId: ObjectId;
   kind: CombatRequirement["kind"];
   status: AttackRequirementStatus;
+  /** Engine-provided objects imposing this requirement (CR 508.1c/d). */
+  sources: ObjectId[];
 }
 
 export interface AttackRequirements {
@@ -53,9 +55,19 @@ export function useAttackRequirements(): AttackRequirements {
       const objectId = Number(key);
       if (requirement.kind === "MustAttack") {
         const status: AttackRequirementStatus = selected.has(objectId) ? "satisfied" : "pending";
-        byObject.set(objectId, { objectId, kind: requirement.kind, status });
+        byObject.set(objectId, {
+          objectId,
+          kind: requirement.kind,
+          status,
+          sources: requirement.sources ?? [],
+        });
       } else if (requirement.kind === "CantAttack") {
-        byObject.set(objectId, { objectId, kind: requirement.kind, status: "info" });
+        byObject.set(objectId, {
+          objectId,
+          kind: requirement.kind,
+          status: "info",
+          sources: requirement.sources ?? [],
+        });
       }
     }
 

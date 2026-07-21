@@ -23,7 +23,13 @@ jobs:
     name: Paired-seed AI gate
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30m was too tight and flaked out on slow runners. Measured budget on a
+    # cache miss: ~6.5m for the "Generate card data" step (5m `tool` build + gen)
+    # + a cold debug build + the debug run itself (30 games at ~1.1m/game on a
+    # slow runner ≈ 34m). Hosted-runner speed varies ~2x, so a fast runner
+    # finishes well under 30m while a slow one overruns. 60m preserves the full
+    # `--games 10` coverage; the ceiling only bills the failure case.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -97,7 +103,13 @@ jobs:
     name: Decision-cost perf gate
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Same runner-variance overrun as the paired gate above. Measured budget on
+    # a cache miss: ~6.5m card-data gen + cold debug build + the perf suite
+    # (PERF_SAMPLE_COUNT=5 cold child processes × 3 scenarios × PERF_ACTION_CAP
+    # 3000 actions ≈ 21m in debug on a slow runner). The per-counter median
+    # assertion (#4878) is variance-robust; the wall-clock is not. 60m gives
+    # headroom without changing the fixed workload.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 

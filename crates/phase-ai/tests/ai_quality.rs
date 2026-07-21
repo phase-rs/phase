@@ -18,7 +18,7 @@ use engine::types::game_state::{PlayerDeckPool, WaitingFor};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::{driver_step, run_ai_actions, AiActionsBreakReason};
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
 use phase_ai::score_candidates;
@@ -260,6 +260,81 @@ fn ai_vs_ai_completes_combat_sequence() {
         results.len() < 200,
         "AI should not hit the safety cap (got {} actions)",
         results.len()
+    );
+}
+
+#[test]
+fn run_ai_actions_non_empty_batch_carries_break_reason() {
+    // phase#6080 follow-up (PR #6194 review): `run_ai_actions` can complete
+    // one or more actions and *still* stop on a break door (here: P1 is
+    // nominally AI-controlled via `ai_players` but has no entry in
+    // `ai_configs`). That door reports `MissingAiConfig { player }`: an actor
+    // was found and is AI-controlled, so it is a caller wiring gap, not the
+    // `NoActor` stall. The old `ai_commander` driver only checked
+    // `break_reason` when the returned batch was empty, so this exact
+    // shape (non-empty batch + Some(break_reason)) got silently discarded.
+    // This asserts `run_ai_actions` reports it, and that `driver_step` — the
+    // helper the driver now uses — preserves it and signals a stop.
+    let mut scenario = GameScenario::new();
+    scenario.with_life(P0, 5);
+    let attacker = scenario.add_creature(P1, "Attacker", 6, 6).id();
+    let blocker = scenario.add_creature(P0, "Blocker", 2, 2).id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::DeclareBlockers;
+        state.active_player = P1;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, P0)],
+            ..Default::default()
+        });
+        state.waiting_for = WaitingFor::DeclareBlockers {
+            player: P0,
+            valid_blocker_ids: vec![blocker],
+            valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+            block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
+        };
+    }
+
+    // Both P0 and P1 are declared AI-controlled, but only P0 has a config.
+    // P0's DeclareBlockers action applies successfully; priority then moves
+    // to P1 (the active player), whose missing config stops the batch —
+    // after that one action already completed.
+    let ai_players: HashSet<PlayerId> = [P0, P1].into_iter().collect();
+    let config = create_config(AiDifficulty::Medium, Platform::Native);
+    let ai_configs = HashMap::from([(P0, config)]);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let results = run_ai_actions(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+    );
+
+    assert!(
+        !results.is_empty(),
+        "P0's DeclareBlockers action should have applied before the batch stopped"
+    );
+    assert!(
+        matches!(
+            results.break_reason,
+            Some(AiActionsBreakReason::MissingAiConfig { player: P1 })
+        ),
+        "expected MissingAiConfig(P1): P1 is an AI seat with no ai_configs entry, \
+         which is not the same stall as NoActor"
+    );
+
+    let step = driver_step(results);
+    assert_eq!(step.actions_taken, 1);
+    assert!(
+        step.break_reason.is_some(),
+        "driver_step must preserve the break reason from a non-empty batch \
+         so the driver stops at this boundary instead of discarding it"
     );
 }
 

@@ -67,6 +67,7 @@ data/mtgjson/AtomicCards.json
 data/mtgjson/CardTypes.json
 data/mtgjson/Meta.json
 data/mtgjson/SetList.json
+data/mtgjson/.refresh-week
 data/mtgjson/decks/
 data/mtgjson/sets/
 !data/abilities/

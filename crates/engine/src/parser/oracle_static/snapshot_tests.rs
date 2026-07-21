@@ -1086,6 +1086,31 @@ fn grand_master_of_flowers_becomes_777_dragon_god_creature() {
     );
 }
 
+#[test]
+fn goddric_celebration_grants_complete_dragon_characteristics() {
+    let text = "Celebration — As long as two or more nonland permanents entered the battlefield under your control this turn, ~ is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (It loses all other creature types.)";
+    let def = parse_static_line(text).expect("Goddric Celebration static must parse");
+    let mods = &def.modifications;
+    assert!(mods.contains(&ContinuousModification::RemoveAllSubtypes {
+        set: SubtypeSet::Creature
+    }));
+    assert!(mods.contains(&ContinuousModification::AddSubtype {
+        subtype: "Dragon".to_string()
+    }));
+    assert!(mods.contains(&ContinuousModification::SetPower { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::SetToughness { value: 4 }));
+    assert!(mods.contains(&ContinuousModification::AddKeyword {
+        keyword: Keyword::Flying
+    }));
+    assert!(mods.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::GrantAbility { definition }
+            if definition.kind == AbilityKind::Activated
+    )));
+    assert!(!mods.contains(&ContinuousModification::AddPower { value: 1 }));
+    assert!(def.condition.is_some());
+}
+
 /// CR 613.1d + CR 613.4b + CR 613.1g (issue #2363): "she's a" gendered pronoun
 /// variant — confirms the parser accepts feminine pronouns on cards like future
 /// Planeswalkers that become creatures.

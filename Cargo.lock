@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -481,6 +487,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -643,7 +658,7 @@ checksum = "780955b8b195a21ab8e4ac6b60dd1dbdcec1dc6c51c0617964b08c81785e12c9"
 
 [[package]]
 name = "draft-core"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -655,7 +670,7 @@ dependencies = [
 
 [[package]]
 name = "draft-wasm"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "console_error_panic_hook",
  "draft-core",
@@ -727,10 +742,11 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "assert_matches",
  "engine",
+ "flate2",
  "im",
  "indexmap 2.14.0",
  "insta",
@@ -755,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "engine-inventory-gen"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "proc-macro2",
@@ -768,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "engine-wasm"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "console_error_panic_hook",
  "engine",
@@ -820,7 +836,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "feed-scraper"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "clap",
  "reqwest",
@@ -840,6 +856,16 @@ name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "fnv"
@@ -1602,7 +1628,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "lobby-broker"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "engine",
  "serde",
@@ -1633,7 +1659,7 @@ checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
 name = "manabrew-compat"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "engine",
  "pretty_assertions",
@@ -1700,6 +1726,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1712,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "mtgish-import"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "anyhow",
  "engine",
@@ -1940,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "phase-ai"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "engine",
  "rand 0.9.4",
@@ -1955,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "phase-server"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "axum",
  "clap",
@@ -2601,7 +2637,7 @@ dependencies = [
 
 [[package]]
 name = "seat-reducer"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "engine",
  "phase-ai",
@@ -2790,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "server-core"
-version = "0.29.0"
+version = "0.31.0"
 dependencies = [
  "draft-core",
  "engine",
@@ -2851,6 +2887,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "similar"

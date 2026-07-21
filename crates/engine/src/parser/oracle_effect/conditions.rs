@@ -275,7 +275,21 @@ pub(crate) fn strip_leading_general_conditional(
         .unwrap_or(&condition_fragment)
         .trim();
 
-        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text, ctx)
+        let body_lower = body.to_lowercase();
+        let player_damage_scry = tag::<_, _, OracleError<'_>>("scry ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_previous_effect_player_damage_condition(cond_text))
+            .flatten();
+        let effect_discard_drain = tag::<_, _, OracleError<'_>>("each opponent loses ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_effect_discard_instant_or_sorcery_condition(cond_text))
+            .flatten();
+
+        if let Some(condition) = player_damage_scry
+            .or(effect_discard_drain)
+            .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
             .or_else(|| parse_condition_text(cond_text))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
             .or_else(|| parse_and_conjunction_condition(cond_text, ctx))
@@ -6321,6 +6335,53 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
         comparator: Comparator::GT,
         rhs: QuantityExpr::Fixed { value: 0 },
         channel: DamageChannel::Excess,
+    })
+}
+
+/// CR 120.3 + CR 608.2c: "a player is dealt damage this way" gates a rider
+/// on both the recipient and the damage event emitted by the preceding
+/// instruction. Deal-damage targets are either players or permanents, so a
+/// player target is represented by the negated permanent match; the total
+/// channel prevents the rider from firing when all damage was prevented.
+fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "a player is dealt damage this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Total,
+            },
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                    use_lki: true,
+                    subject_slot: None,
+                }),
+            },
+        ],
+    })
+}
+
+/// CR 701.8a + CR 608.2c: Vohar's drain checks the card discarded by the
+/// preceding effect, not an object paid as an additional cost. The discard
+/// publishes its hand-to-graveyard move in the resolution-local zone-change
+/// ledger, which preserves the discarded card's types for this rider.
+fn parse_effect_discard_instant_or_sorcery_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "you discarded an instant or sorcery card this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery,
+        ]))),
     })
 }
 

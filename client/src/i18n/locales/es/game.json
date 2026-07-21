@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloqueada",
+    "cantBeActivated": "Esta habilidad no puede activarse",
+    "cantActivateDuring": "No puede activarse ahora",
+    "prohibited": "Activar esta habilidad está prohibido"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -570,6 +576,14 @@
     "resourceMana": "maná",
     "resourceCounters": "contadores",
     "resourceSpeed": "velocidad",
+    "loopCollapseTitleTokens": "Elige cuántas fichas crear",
+    "loopCollapseTitleCounters": "Elige cuántas veces añadir contadores",
+    "loopCollapseTitleLife": "Elige cuántas veces ganar vida",
+    "loopCollapseTitleMixed": "Elige cuántas veces repetir el bucle",
+    "loopCollapseAmountTokens": "Crear {{value}} fichas",
+    "loopCollapseAmountCounters": "Añadir contadores {{value}}×",
+    "loopCollapseAmountLife": "Ganar vida {{value}}×",
+    "loopCollapseAmountMixed": "Repetir el bucle {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Maná manual — solo esta partida. Toca tus propias tierras y maná para pagar.",
     "spendHint": "Haz clic en tu maná para gastarlo en este coste",
@@ -1759,6 +1773,13 @@
     "variantBestow": "Lanzar con Otorgar",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
+    "variantMutate": "Lanzar con Mutate",
+    "variantAwaken": "Lanzar con Despertar",
+    "variantCleave": "Lanzar con Recortar",
+    "variantImpending": "Lanzar con Inminencia",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lanzar con Prototipo",
+    "variantFaceDown": "Lanzar boca abajo",
     "variantFallback": "Lanzar con {{type}}"
   },
   "categoryChoice": {

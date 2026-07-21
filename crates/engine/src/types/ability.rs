@@ -13,7 +13,7 @@ use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
 use super::game_state::{
     is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
-    TargetSelectionConstraint,
+    TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use super::keywords::{Keyword, KeywordKind};
@@ -178,6 +178,31 @@ mod trigger_occurrence_tests {
             .unwrap()[0]
             .0;
         assert_eq!(instance, TriggerGrantInstanceRef(1));
+    }
+
+    #[test]
+    fn abandoning_a_recipient_retires_grants_without_rewinding_the_allocator() {
+        let producer = TriggerGrantProducerKey::Granted {
+            origin: static_origin(),
+            output_index: 0,
+        };
+        let mut state = TriggerOccurrenceState::default();
+        let first = state
+            .reconcile_grant_instances(vec![(producer.clone(), ())])
+            .unwrap()[0]
+            .0;
+
+        state.retire_all_grants();
+        assert_eq!(state.active_grants().count(), 0);
+
+        let replacement = state
+            .reconcile_grant_instances(vec![(producer, ())])
+            .unwrap()[0]
+            .0;
+        assert!(
+            replacement.0 > first.0,
+            "an abandoned recipient must not resurrect a retired grant generation"
+        );
     }
 }
 
@@ -2515,6 +2540,47 @@ pub enum ProhibitedActivity {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         land_filter: Option<TargetFilter>,
     },
+}
+
+/// Why a specific activated ability is currently blocked from activation.
+///
+/// Display read-out only (populated by the derive sweep): carries no enforcement
+/// authority. The three arms mirror the three enforcement predicates in
+/// `game::casting`, in the same order those gates consult them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AbilityBlockKind {
+    /// CR 602.5: A static ability prohibits this ability from being activated at
+    /// all (Pithing Needle's named source, Immortal Sun's loyalty abilities).
+    CantBeActivated,
+    /// CR 602.5 + CR 117.1b: A timing restriction forbids activation right now
+    /// (City of Solitude — only during the affected player's own turn).
+    CantActivateDuring,
+    /// CR 602.5: A temporary continuous effect prohibits this activity axis for
+    /// the affected players (Kang-class `ProhibitActivity`).
+    Prohibited,
+}
+
+/// A block reason paired with every prohibiting source object of this kind.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AbilityBlockReason {
+    /// CR 602.5: sorted, deduped permanents whose static/effect each independently
+    /// impose this block kind (two Pithing Needles naming the same card → both).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<ObjectId>,
+    #[serde(flatten)]
+    pub kind: AbilityBlockKind,
+}
+
+/// A single blocked-ability read-out entry: which ability index is blocked and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AbilityBlockEntry {
+    /// Index into the object's activated-ability definition space
+    /// (`activated_ability_definitions`): `0..printed_len` for printed abilities,
+    /// `printed_len + offset` for runtime-granted ones.
+    pub ability_index: usize,
+    #[serde(flatten)]
+    pub reason: AbilityBlockReason,
 }
 
 /// When a game restriction expires.
@@ -18875,8 +18941,18 @@ impl TriggerEntry {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl From<TriggerDefinition> for TriggerEntry {
     fn from(definition: TriggerDefinition) -> Self {
+        Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
+    }
+}
+
+impl TriggerEntry {
+    /// Legacy wire bridge: a payload-only entry with no occurrence provenance.
+    /// Only the deserializer may mint one; a later normalization pass migrates
+    /// it to a provable printed slot or rejects the state.
+    pub(crate) fn unmaterialized_legacy(definition: TriggerDefinition) -> Self {
         Self::new(TriggerDefinitionOccurrenceRef::Unmaterialized, definition)
     }
 }
@@ -18905,7 +18981,9 @@ impl<'de> Deserialize<'de> for TriggerEntry {
             // provable printed/base slot. Keeping the marker here preserves the
             // distinction instead of guessing copied/granted provenance from
             // definition bytes at the serde boundary.
-            TriggerEntryWire::LegacyPayload(definition) => Ok(definition.into()),
+            TriggerEntryWire::LegacyPayload(definition) => {
+                Ok(Self::unmaterialized_legacy(definition))
+            }
         }
     }
 }
@@ -19080,6 +19158,13 @@ impl TriggerOccurrenceState {
     pub fn retire_absent_grants(&mut self, live_instances: &[TriggerGrantInstanceRef]) {
         self.active_grants
             .retain(|active| live_instances.contains(&active.instance));
+    }
+
+    /// Retires every active producer while preserving the monotonic allocator.
+    /// A player-left-game transition abandons the recipient permanently; a
+    /// future allocation must never resurrect one of its former grants.
+    pub fn retire_all_grants(&mut self) {
+        self.active_grants.clear();
     }
 
     pub fn active_grants(
@@ -19353,6 +19438,27 @@ pub struct StaticDefinition {
     /// Piper, Marble Priest; unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_controller: Option<crate::types::player::PlayerId>,
+    /// CR 508.1d + CR 611.2c: The object that grafted this static onto its
+    /// carrier (the ForceAttack/Encore/mass-coerce source for a
+    /// `MustAttackPlayer` requirement). Stamped at materialization from the
+    /// resolving continuous effect's `source_id`, but ONLY for static modes in
+    /// the directing-source attribution class (see
+    /// `static_mode_carries_directing_source` in game/layers.rs) — mirrors the
+    /// conditional `source_controller` stamp. `None` = either an intrinsic def
+    /// or a grafted mode outside that class → the carrier object is its own
+    /// source (combat attributes the creature itself).
+    ///
+    /// This is a stable *reference* captured at graft time, not a snapshot of
+    /// the source's characteristics; per CR 611.2c the requirement persists
+    /// after the source leaves the battlefield, so this id may reference a
+    /// departed object. Consumers (combat source collector, frontend badge)
+    /// tolerate a departed id — it is never dereferenced in the collector.
+    ///
+    /// Serde-defaulted so pre-existing serialized statics (all `None`)
+    /// round-trip unchanged; only ever `Some` on the derived (layer-rebuilt)
+    /// `static_definitions`, never on serialized `base_static_definitions`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_object: Option<crate::types::identifiers::ObjectId>,
     /// CR 702.11e + CR 609.4 + CR 109.5: For an object-scoped `IgnoreHexproof`
     /// static (one carrying an `affected` filter), which players' spells and
     /// abilities receive the "as though it didn't have hexproof" targeting
@@ -19390,6 +19496,7 @@ impl StaticDefinition {
             description: None,
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         }
     }
@@ -19434,6 +19541,15 @@ impl StaticDefinition {
     /// field doc). Set at graft time by the `AddStaticMode` layer arm.
     pub fn source_controller(mut self, controller: crate::types::player::PlayerId) -> Self {
         self.source_controller = Some(controller);
+        self
+    }
+
+    /// CR 611.2c: Stamp the directing object as this grafted static's source
+    /// (see the `source_object` field doc). Set at graft time by the
+    /// `AddStaticMode` layer arm from `effect.source_id`, gated on
+    /// `static_mode_carries_directing_source`.
+    pub fn source_object(mut self, source: crate::types::identifiers::ObjectId) -> Self {
+        self.source_object = Some(source);
         self
     }
 
@@ -20280,6 +20396,12 @@ pub enum ContinuousModification {
     SetName {
         name: String,
     },
+    /// CR 612.8 + CR 613.1c: A continuous effect that gives an object a
+    /// literal name is a text-changing effect, not a copiable-value override
+    /// (Witness Protection). Applied in Layer 3.
+    SetTextName {
+        name: String,
+    },
     AddPower {
         value: i32,
     },
@@ -20717,18 +20839,20 @@ impl CopyCountStatus {
 /// CR 608.2c: Distinguishes WHY an immediately-chained `ParentTarget` child
 /// ability was handed off with nothing to act on. The three sources are
 /// mutually exclusive per hand-off (only one effect can be the immediate
-/// parent of a given child), and each is consulted by exactly one downstream
-/// site, so they used to be three parallel boolean fields on `ResolvedAbility`
-/// / `GameState` before being consolidated here (see the PR #5834/#5836
-/// review that requested this).
+/// parent of a given child). Downstream consumers inspect the typed reason only
+/// when their exact `ParentTarget` operation needs to distinguish a missing
+/// referent from an ordinary empty target list. These used to be three parallel
+/// boolean fields on `ResolvedAbility` / `GameState` before being consolidated
+/// here (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
     /// CR 401.5 (issue #1365): A `Dig` looked at an empty library. Consulted
-    /// solely by the `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`)
-    /// to resolve a `target: ParentTarget` with no selection to NO target
-    /// instead of the generic self-fallback, which would otherwise move the
-    /// Dig's own source (e.g. a reanimated Thassa's Oracle) into the library
-    /// it just found empty.
+    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
+    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
+    /// cast/play operations avoid offering a nonexistent card regardless of
+    /// whether their driver is immediate or lingering.
+    /// Without the first guard, the Dig's own source (e.g. a reanimated
+    /// Thassa's Oracle) would move into the library it just found empty.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained
@@ -20755,24 +20879,25 @@ pub enum ParentTargetMissingReason {
 pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
+    /// Attribution only. Triggered abilities additionally carry the exact
+    /// context below; callers must never use this raw id to rebind a departed
+    /// source to a newer incarnation.
     pub source_id: ObjectId,
-    /// CR 400.7: The source object's `incarnation` captured when this ability was
-    /// created. Set only for triggered abilities (where the source can change
-    /// zones between firing and resolution); `None` for activated abilities,
-    /// casts, and engine-internal abilities, which then bypass the epoch guard.
-    /// At resolution a self-reference (`~`) resolves to the source only while its
-    /// incarnation still matches — once the source has left and re-entered the
-    /// battlefield it is a new object and the self-reference finds nothing.
+    /// CR 400.7: Exact source incarnation captured for self-transform guards.
+    /// The full `trigger_source` context remains the authority for all triggered
+    /// source facts; this field preserves the source epoch for activated and
+    /// delayed self-transform abilities that do not carry trigger provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_incarnation: Option<u64>,
-    /// CR 400.7 identity latch + CR 704.5d token cessation: the source's card
-    /// identity snapshotted at trigger push, so an `AllCopies` priority yield
-    /// can match by card identity after the source object ceases to exist (a
-    /// token that has left the battlefield is removed from `state.objects`
-    /// before priority is next offered). Set only for triggered abilities;
-    /// `None` for activated abilities, casts, and engine-internal abilities.
+    /// CR 400.7 + CR 113.7a: Complete event-time authority for a triggered
+    /// source. This is recursive across an ability chain and replaces the old
+    /// independent incarnation/card-id latches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_card_id: Option<CardId>,
+    pub trigger_source: Option<TriggerSourceContext>,
+    /// Exact live definition occurrence that created this triggered ability.
+    /// `ability_index` remains presentation/compatibility only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_definition_ref: Option<TriggerDefinitionRef>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -21048,7 +21173,8 @@ impl ResolvedAbility {
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -21065,10 +21191,83 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 400.7: Propagate the source's captured incarnation to this ability and
-    /// every sub/else branch (chained "...then exile ~" effects share the source).
-    /// Stamped when a triggered ability fires; read by the self-reference epoch
-    /// guard at resolution.
+    /// Install one owned triggered-source authority over this entire ability
+    /// chain. Each branch resolves against the same observed incarnation.
+    pub fn set_trigger_source_recursive(&mut self, source: TriggerSourceContext) {
+        self.source_id = source.identity.reference.object_id;
+        self.source_incarnation = Some(source.identity.reference.incarnation);
+        self.controller = source.lki.controller;
+        self.original_controller = Some(source.lki.controller);
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_trigger_source_recursive(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_trigger_source_recursive(source);
+        }
+    }
+
+    /// CR 608.2c: Updates the owned source projection for the current
+    /// resolution segment without rebinding its source/controller or crossing
+    /// an independent sequential instruction.
+    pub fn update_trigger_source_context_in_resolution_segment(
+        &mut self,
+        source: TriggerSourceContext,
+    ) {
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self
+            .sub_ability
+            .as_mut()
+            .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)
+        {
+            sub.update_trigger_source_context_in_resolution_segment(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.update_trigger_source_context_in_resolution_segment(source);
+        }
+    }
+
+    /// Install the exact definition occurrence over every continuation branch.
+    pub fn set_trigger_definition_ref_recursive(&mut self, definition_ref: TriggerDefinitionRef) {
+        self.trigger_definition_ref = Some(definition_ref.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_trigger_definition_ref_recursive(definition_ref.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_trigger_definition_ref_recursive(definition_ref);
+        }
+    }
+
+    /// Clears provenance that distinguishes otherwise identical triggered
+    /// abilities for structural comparison. This deliberately clears the
+    /// complete owned authorities together; retaining either a source context
+    /// or a definition occurrence would reintroduce object-identity drift.
+    pub fn clear_trigger_identity_recursive(&mut self) {
+        self.source_id = ObjectId(0);
+        self.source_incarnation = None;
+        self.trigger_source = None;
+        self.trigger_definition_ref = None;
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.clear_trigger_identity_recursive();
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.clear_trigger_identity_recursive();
+        }
+    }
+
+    pub fn trigger_source_incarnation(&self) -> Option<u64> {
+        self.trigger_source
+            .as_ref()
+            .map(|source| source.identity.reference.incarnation)
+    }
+
+    pub fn trigger_source_card_id(&self) -> Option<CardId> {
+        self.trigger_source.as_ref().map(|source| source.card_id)
+    }
+
+    /// CR 400.7: Propagate the source's captured incarnation to this ability
+    /// and every continuation branch. Used by self-transform guards that are
+    /// intentionally distinct from full triggered-source provenance.
     pub fn set_source_incarnation_recursive(&mut self, incarnation: Option<u64>) {
         self.source_incarnation = incarnation;
         if let Some(sub) = self.sub_ability.as_mut() {
@@ -21077,6 +21276,27 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_source_incarnation_recursive(incarnation);
         }
+    }
+
+    /// Test-only fixture helper for a triggered ability whose source has
+    /// already left the object map. Production code must capture a real
+    /// [`TriggerSourceContext`] at collection time instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_test_trigger_source_recursive(&mut self, incarnation: u64, card_id: CardId) {
+        let mut source = crate::game::game_object::GameObject::new(
+            self.source_id,
+            card_id,
+            self.controller,
+            "test trigger source".to_string(),
+            Zone::Battlefield,
+        );
+        source.controller = self.controller;
+        source.incarnation = incarnation;
+        let context = source
+            .snapshot_for_zone_change(source.id, Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context
+            .expect("test source snapshot always contains trigger context");
+        self.set_trigger_source_recursive(context);
     }
 
     /// CR 701.27f: Propagate the source's captured transformation generation
@@ -21090,17 +21310,34 @@ impl ResolvedAbility {
             else_branch.set_source_transformation_count_recursive(count);
         }
     }
-
     /// CR 400.7: True if the ability's source is still the same object instance it
-    /// was when the ability was created. A `None` capture (activated abilities,
-    /// casts, engine-internal abilities) is always current. Once the source has
-    /// left and re-entered the battlefield as a new object, its incarnation no
-    /// longer matches the captured value and this returns false.
+    /// was when the ability was created. Full triggered-source provenance takes
+    /// precedence; activated and delayed self-transform abilities fall back to
+    /// their captured source incarnation.
     pub fn source_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
-        match self.source_incarnation {
-            None => true,
-            Some(captured) => {
-                let current = state.objects.get(&self.source_id).map(|o| o.incarnation);
+        match self.trigger_source.as_ref() {
+            None => {
+                let current_incarnation = state
+                    .objects
+                    .get(&self.source_id)
+                    .map(|object| object.incarnation);
+                self.source_incarnation.is_none_or(|captured| {
+                    current_incarnation == Some(captured)
+                        || matches!(state.resolution_source_relatch, Some(r)
+                            if r.object_id == self.source_id
+                                && r.original_stamp == captured
+                                && Some(r.current_incarnation) == current_incarnation)
+                })
+            }
+            Some(source) => {
+                let captured = source.identity.reference.incarnation;
+                let current_incarnation = state
+                    .objects
+                    .get(&self.source_id)
+                    .map(|object| object.incarnation);
+                let current = state.objects.get(&self.source_id).and_then(|object| {
+                    (object.zone == source.identity.expected_zone).then_some(object.incarnation)
+                });
                 current == Some(captured)
                     // CR 400.7j (+ CR 400.7g/h cast hop): a source that moved (possibly
                     // twice) as part of THIS resolution carries its identity-dependent
@@ -21110,9 +21347,65 @@ impl ResolvedAbility {
                     || matches!(state.resolution_source_relatch, Some(r)
                         if r.object_id == self.source_id
                             && r.original_stamp == captured
-                            && Some(r.current_incarnation) == current)
+                            && Some(r.current_incarnation) == current_incarnation)
             }
         }
+    }
+
+    /// Returns whether a self-reference can resolve to the source's current
+    /// object. A normal triggered source must still be its exact captured
+    /// incarnation. The one exception is the immediate successor of the
+    /// source's own recorded zone-change event: a dies trigger's "it" refers
+    /// to the card now in the graveyard, while its source facts remain LKI.
+    ///
+    /// The per-turn record check is load-bearing. If the object has moved again
+    /// after the triggering event, it is no longer that immediate successor and
+    /// a same-id return must not be rebound as the old source.
+    pub fn self_ref_is_current(&self, state: &crate::types::game_state::GameState) -> bool {
+        if self.source_is_current(state) {
+            return true;
+        }
+
+        let Some(source) = self.trigger_source.as_ref() else {
+            return true;
+        };
+        let Some(crate::types::GameEvent::ZoneChanged {
+            object_id,
+            to,
+            record,
+            ..
+        }) = state.current_trigger_event.as_ref()
+        else {
+            return false;
+        };
+        if *object_id != self.source_id
+            || record.trigger_source_context().is_none_or(|event_source| {
+                event_source.identity.reference != source.identity.reference
+            })
+            || state
+                .objects
+                .get(object_id)
+                .is_none_or(|object| object.zone != *to)
+        {
+            return false;
+        }
+
+        let Some(recorded_event) = state
+            .zone_changes_this_turn
+            .get(record.turn_zone_change_index)
+        else {
+            return false;
+        };
+        recorded_event
+            .trigger_source_context()
+            .is_some_and(|event_source| {
+                event_source.identity.reference == source.identity.reference
+            })
+            && state
+                .zone_changes_this_turn
+                .iter()
+                .skip(record.turn_zone_change_index + 1)
+                .all(|later| later.object_id != self.source_id)
     }
 
     /// CR 608.2c: Bind a tracked-set sentinel (`TrackedSetId(0)`) to a CONCRETE
@@ -22630,6 +22923,7 @@ mod tests {
             description: Some("Other creatures you control get +1/+1.".to_string()),
             attack_defended: None,
             source_controller: None,
+            source_object: None,
             bypass_beneficiary: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
@@ -22922,6 +23216,7 @@ mod tests {
                 description: None,
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
