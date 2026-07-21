@@ -1741,8 +1741,6 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         tapped: false,
         // CR 701.60b: Carry suspected status from the zone-change snapshot.
         is_suspected: record.is_suspected,
-        // CR 702.171b: Carry saddled designation from the zone-change snapshot.
-        is_saddled: record.is_saddled,
         // CR 608.2h: The zone-change record already froze the exit-time attachment set
         // (SBA unattaches everything the instant the host leaves, CR 704.5m/n), so carry
         // it through rather than dropping it on the way into the LKI.
@@ -11085,7 +11083,6 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
-                is_saddled: false,
                 attachments: Vec::new(),
             },
         );
@@ -13357,7 +13354,6 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
-                is_saddled: false,
                 attachments: Vec::new(),
             },
         );

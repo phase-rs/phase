@@ -545,42 +545,91 @@ fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
     assert!(hellion.execute.is_some());
 }
 
+/// Recursively collect the leaf `TargetFilter`s under any nesting of
+/// `And`/`Or`/`Not`, so structural assertions are robust to
+/// `TargetFilter::normalized` flattening/reordering.
+fn collect_leaf_filters<'a>(filter: &'a TargetFilter, out: &mut Vec<&'a TargetFilter>) {
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters {
+                collect_leaf_filters(f, out);
+            }
+        }
+        TargetFilter::Not { filter } => collect_leaf_filters(filter, out),
+        leaf => out.push(leaf),
+    }
+}
+
+/// True if any `Typed` leaf anywhere under `filter` carries `FilterProp::IsSaddled`.
+fn filter_mentions_is_saddled(filter: &TargetFilter) -> bool {
+    let mut leaves = Vec::new();
+    collect_leaf_filters(filter, &mut leaves);
+    leaves.iter().any(
+        |f| matches!(f, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::IsSaddled)),
+    )
+}
+
+/// True if any embedded `TargetFilter` under `condition` mentions
+/// `FilterProp::IsSaddled` (recursing through `And`/`Or`/`Not`).
+fn condition_mentions_is_saddled(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::SourceMatchesFilter { filter }
+        | TriggerCondition::EventDamageSourceMatchesFilter { filter } => {
+            filter_mentions_is_saddled(filter)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(condition_mentions_is_saddled)
+        }
+        TriggerCondition::Not { condition } => condition_mentions_is_saddled(condition),
+        _ => false,
+    }
+}
+
 #[test]
 fn attacks_while_saddled_gates_trigger_on_saddled_filter() {
-    // CR 702.171b + CR 603.4 + ruling 2025-02-07: "Whenever this creature attacks
-    // while saddled" — the bare, elided-subject "saddled" participle gate lowers to
-    // the shared saddled filter (`SourceMatchesFilter { Typed([IsSaddled]) }`), the
-    // same runtime property the live object and the LKI snapshot both answer.
-    // Alacrian Jaguar and its 27-card class. Also guards the
-    // `strip_while_state_clause` alt-arm ordering: the subject-ful authority
-    // (`parse_inner_condition`) runs first and matches nothing on bare "saddled",
-    // so the elided-subject leaf is what supplies the condition.
+    // CR 508.1m + CR 702.171b + ruling 2025-02-07: "Whenever this creature
+    // attacks while saddled" — the elided-subject "saddled" participle is a
+    // DECLARATION-TIME subject qualifier, NOT a stored intervening-if
+    // condition. It folds into the attack trigger's `valid_card` as
+    // And { filters: [SelfRef, Typed([IsSaddled])] }, evaluated once when
+    // attackers are declared. Alacrian Jaguar and its 27-card class.
     let def = parse_trigger_line(
         "Whenever this creature attacks while saddled, it gets +2/+2 until end of turn.",
         "Alacrian Jaguar",
     );
     assert_eq!(def.mode, TriggerMode::Attacks);
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
 
-    // REVERT-FAILING: without the elided-subject leaf the while-gate is dropped
-    // and `condition` is `None`.
-    let Some(TriggerCondition::SourceMatchesFilter { filter }) = def.condition.as_ref() else {
-        panic!(
-            "expected SourceMatchesFilter condition, got {:?}",
-            def.condition
-        );
-    };
-    let TargetFilter::Typed(tf) = filter else {
-        panic!("expected Typed saddled filter, got {filter:?}");
-    };
+    // REVERT-FAILING: the pre-restructure behavior stored the saddled gate as a
+    // `TriggerCondition::SourceMatchesFilter`; the fold makes `condition` empty.
+    // Reverting step 1c (fold into valid_card) repopulates `condition` and fails
+    // this.
     assert!(
-        tf.properties.contains(&FilterProp::IsSaddled),
-        "filter must carry IsSaddled, got {:?}",
-        tf.properties
+        def.condition.is_none(),
+        "saddled gate must not be a stored condition, got {:?}",
+        def.condition
+    );
+
+    // REVERT-FAILING: `valid_card` must be an `And` carrying BOTH the original
+    // subject (SelfRef) and the saddled qualifier. Robust to And-flattening /
+    // normalization (`TargetFilter::normalized` merges Typed leaves and
+    // reorders): collect leaves and assert membership rather than matching a
+    // fixed nesting shape. Reverting the fold leaves `valid_card == SelfRef`
+    // (no IsSaddled), failing the second assertion.
+    let valid_card = def.valid_card.as_ref().expect("attack trigger valid_card");
+    let mut leaves = Vec::new();
+    collect_leaf_filters(valid_card, &mut leaves);
+    assert!(
+        leaves.iter().any(|f| matches!(f, TargetFilter::SelfRef)),
+        "valid_card must retain the SelfRef subject, got {valid_card:?}"
+    );
+    assert!(
+        filter_mentions_is_saddled(valid_card),
+        "valid_card must carry the IsSaddled qualifier, got {valid_card:?}"
     );
 
     // Reach-guard: the "while saddled" clause is stripped and the effect body
-    // still parses as the +2/+2 pump — no Effect::Unimplemented anywhere.
+    // still parses as the +2/+2 pump — no Effect::Unimplemented anywhere. This
+    // proves the fold branch did NOT short-circuit past effect parsing.
     let execute = def.execute.as_ref().expect("execute ability");
     match &*execute.effect {
         Effect::Pump {
@@ -602,6 +651,70 @@ fn attacks_while_saddled_gates_trigger_on_saddled_filter() {
         !has_unimplemented(execute),
         "effect chain leaked Unimplemented: {execute:?}"
     );
+}
+
+#[test]
+fn while_saddled_fold_refused_for_non_attacks_trigger_reparses_original() {
+    // CR 508.1m: the subject-state fold applies ONLY to attack triggers (the
+    // saddled state is a property of the declared attacker). A non-attacks
+    // while-gate must NOT fold into `valid_card`; the classifier discards the
+    // probe parse and re-parses the ORIGINAL unstripped clause.
+    //
+    // NOTE (GAP 2): this fall-through currently relies on `parse_dies_verb`'s
+    // tail-discard (parse_dies_verb matches `tag("die")` and drops the trailing
+    // " while saddled" without consuming it), which is why the dies trigger
+    // parses at all. A future card printing a REAL non-attacks while-state gate
+    // must be caught by the swallowed-clause check, not silently blessed by this
+    // test's tolerance of the discard.
+    let mut ctx = ParseContext::default();
+    let def = parse_trigger_line_with_index(
+        "When this creature dies while saddled, draw a card.",
+        "Synthetic Dies Gate",
+        None,
+        &mut ctx,
+    );
+
+    // REVERT-FAILING (fold-guard): reverting step 1c's mode/valid_card guard so
+    // the saddled state folds unconditionally would either mis-mode this trigger
+    // or attach IsSaddled to a dies trigger's `valid_card`. Proves the re-parse
+    // of the original clause happened: the mode is the dies ChangesZone mode.
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesZone,
+        "dies-while-saddled must re-parse to the dies ChangesZone mode"
+    );
+
+    // No IsSaddled anywhere in the trigger's subject filter OR stored condition —
+    // the gate was neither folded nor stored (the tail was discarded by the dies
+    // verb).
+    assert!(
+        !def.valid_card
+            .as_ref()
+            .is_some_and(filter_mentions_is_saddled),
+        "dies trigger valid_card must not carry IsSaddled, got {:?}",
+        def.valid_card
+    );
+    assert!(
+        !def.condition
+            .as_ref()
+            .is_some_and(condition_mentions_is_saddled),
+        "dies trigger condition must not carry IsSaddled, got {:?}",
+        def.condition
+    );
+
+    // Pairs with step 1c's `truncate`: the refused probe must not leak duplicate
+    // diagnostics into the final parse. Reverting the truncate would let the
+    // probe's diagnostics (when the probe parse is non-clean) accumulate on top
+    // of the final parse's; assert no identical entry appears twice.
+    for i in 0..ctx.diagnostics.len() {
+        for j in (i + 1)..ctx.diagnostics.len() {
+            assert_ne!(
+                format!("{:?}", ctx.diagnostics[i]),
+                format!("{:?}", ctx.diagnostics[j]),
+                "probe leaked a duplicate diagnostic"
+            );
+        }
+    }
 }
 
 #[test]

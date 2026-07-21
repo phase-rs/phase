@@ -33,7 +33,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | 19 | Perpetual (Alchemy) duration mis-mapped to UntilEndOfTurn | 67 | oracle_nom/duration.rs — add Perpetual duration combinator branch |
 | 20 | Damage subject/recipient set incomplete | 70 | Effect::DealDamage handling — capture all damage subjects/recipients per CR 120 |
 | 21 | Token entry flags / keyword / attachment clause dropped | 52 | oracle parser token-description handling — preserve attacking/tapped flags, keyword grants, attach target |
-| 22 | Attacks-alone / while-saddled combat constraint dropped | 43 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers (attacks-alone remainder); "while saddled" lowers via strip_while_state_clause → SourceMatchesFilter + FilterProp::IsSaddled (done) |
+| 22 | Attacks-alone / while-saddled combat constraint dropped | 43 | oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers (attacks-alone remainder); "while saddled" folds into the attack trigger's valid_card at declaration (And { filters: [subject, Typed([IsSaddled])] }, CR 508.1m) — no stored TriggerCondition, no LKI (done) |
 | 23 | Effect modeled with structurally wrong variant / ability class | 51 | add-engine-effect: select the correct Effect/ability variant for the clause class |
 | 24 | Variable X / where-X count unbound (sentinel or unresolved Variable) | 37 | oracle_cost.rs / oracle_quantity.rs — allow QuantityExpr in count fields and bind trailing 'where X is' clauses |
 | 25 | Wrong / dropped effect duration | 29 | oracle_nom/duration.rs — add until-event / two-turn / permanent duration variants |
@@ -4805,7 +4805,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 **Signature.** Attacks/while-saddled trigger emits constraint/condition null; the 'alone' sole-attacker or 'while saddled' qualifier is silently discarded.
 
-**Fix hint.** oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers for the attacks-alone remainder. The "while saddled" subset is DONE: strip_while_state_clause composes the elided-subject participle leaf (parse_elided_subject_state_condition) and lowers it via static_condition_to_trigger_condition to TriggerCondition::SourceMatchesFilter { Typed([FilterProp::IsSaddled]) } — not a bespoke TriggerCondition::SourceIsSaddled variant.
+**Fix hint.** oracle_trigger.rs scan_for_phase / attacks-trigger constraint parsing; add SourceAttackingAlone/MinCoAttackers for the attacks-alone remainder. The "while saddled" subset is DONE: strip_while_state_clause classifies the elided-subject participle leaf (parse_elided_subject_state_condition) as a declaration-time subject qualifier and folds it into the attack trigger's valid_card (And { filters: [subject, Typed([FilterProp::IsSaddled])] }) — evaluated once when attackers are declared (CR 508.1m). No stored TriggerCondition, no LKI snapshot: an "attacks while saddled" gate is not an intervening-if and is never rechecked at resolution.
 
 <details><summary>Cards</summary>
 

@@ -203,9 +203,6 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // CR 701.60b: Capture suspected status at zone exit for
                 // "was suspected" look-back riders.
                 is_suspected: obj.is_suspected,
-                // CR 702.171b: Capture saddled designation at zone exit for the
-                // "while saddled" attack gate re-checked at resolution (CR 603.4).
-                is_saddled: obj.is_saddled,
                 // CR 608.2h: The attachment set as it stood BEFORE SBA unattached it
                 // (CR 704.5m/n), so a source-referential intervening-if re-checked at
                 // resolution ("if this creature is enchanted" — Dreampod Druid) reads

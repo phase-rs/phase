@@ -136,7 +136,6 @@ fn gandalf_parsed_static_doubles_legendary_reentry_triggers() {
             entered_incarnation: None,
             turn_zone_change_index: 0,
             is_suspected: false,
-            is_saddled: false,
         }),
     };
 

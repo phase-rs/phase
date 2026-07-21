@@ -2683,8 +2683,6 @@ fn zone_change_record_from_spec(
         turn_zone_change_index: 0,
         // A freshly created token is never suspected (CR 701.60b).
         is_suspected: false,
-        // CR 702.171b: a freshly created token was never saddled.
-        is_saddled: false,
     }
 }
 

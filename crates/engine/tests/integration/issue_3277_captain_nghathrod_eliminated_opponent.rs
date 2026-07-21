@@ -106,7 +106,6 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             entered_incarnation: None,
             turn_zone_change_index: 0,
             is_suspected: false,
-            is_saddled: false,
         });
 
     let mut events = Vec::new();

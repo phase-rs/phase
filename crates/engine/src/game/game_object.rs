@@ -1805,9 +1805,6 @@ impl GameObject {
             // before `move_to_zone` resets the live flag — so an LTB / cost-paid
             // look-back ("the sacrificed creature was suspected") reads it.
             is_suspected: self.is_suspected,
-            // CR 702.171b: Snapshot saddled designation for the "while saddled"
-            // attack gate re-checked at resolution (CR 603.4).
-            is_saddled: self.is_saddled,
         }
     }
 
@@ -2063,9 +2060,6 @@ impl GameObject {
             // still on the battlefield (cost-paid snapshot precedes the sacrifice
             // zone-change that resets the flag), so `self.is_suspected` is authoritative.
             is_suspected: self.is_suspected,
-            // CR 702.171b: Capture live saddled designation, taken while the object
-            // is still on the battlefield.
-            is_saddled: self.is_saddled,
             // Empty by construction, NOT by choice: classifying an attachment as
             // Aura/Equipment requires looking each attached object up in `GameState`
             // (see `zones::capture_attachment_snapshot`), and this method has only

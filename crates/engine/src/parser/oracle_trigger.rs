@@ -4249,16 +4249,15 @@ pub(crate) fn static_condition_to_trigger_condition(
                 },
             ])),
         }),
-        // CR 702.171b + CR 603.4: "while saddled" attack gates and subject-ful
-        // "if ~ is saddled" intervening-ifs lower to the shared saddled filter.
-        // Official ruling (2025-02-07): the gate binds when the creature is
-        // declared as an attacker — the fire-time check runs per expanded
-        // single-attack event (CR 508.1, game/triggers.rs). The CR 603.4-machinery
-        // resolution recheck is truth-preserving: the designation is immutable for
-        // the turn while the permanent remains on the battlefield (CR 702.171b —
-        // saddle activates only as a sorcery, CR 702.171a), and a source that left
-        // the battlefield resolves via LKISnapshot::is_saddled (CR 608.2h + CR
-        // 113.7a, game/trigger_matchers.rs subject_filter_matches_with_lki).
+        // CR 702.171b + CR 603.4: subject-ful "if ~ is[n't] saddled"
+        // intervening-ifs lower to the shared saddled filter. This arm covers
+        // only the printed-subject intervening-`if` form (Caustic Bronco: "you
+        // lose life ... if ~ isn't saddled"); the elided-subject "attacks while
+        // saddled" gate is handled at declaration as a subject qualifier
+        // (CR 508.1m, see `strip_while_state_clause`) and never reaches here.
+        // As an intervening-if the condition is rechecked at resolution
+        // (CR 603.4), which reads the live object (FilterProp::IsSaddled,
+        // game/filter.rs) — a source that left the battlefield fails closed.
         StaticCondition::SourceIsSaddled => Some(TriggerCondition::SourceMatchesFilter {
             filter: source_saddled_filter(),
         }),
@@ -8111,42 +8110,55 @@ fn and_trigger_conditions(
     }
 }
 
-/// CR 603.4 + CR 508.1: Strip a trailing `"while [self-ref] is [combat
-/// state]"` gate from a trigger-event clause and convert it to a
-/// `TriggerCondition`.
+/// CR 603.2 + CR 508.1m: Classification of a trailing `"while [state]"` gate,
+/// distinguishing the two rules-distinct forms that share the `"while ..."`
+/// surface grammar.
+enum WhileStateGate {
+    /// Constrains the trigger EVENT's subject (elided-subject participle on an
+    /// attack trigger — "attacks while saddled"). Folds into `valid_card`,
+    /// checked at declaration (CR 508.1m), never rechecked at resolution.
+    AttackSubjectState(TargetFilter),
+    /// Stored trigger condition (subject-ful "while ~ is attacking" etc.) —
+    /// existing behavior, ANDed onto `def.condition`.
+    Condition(TriggerCondition),
+}
+
+/// CR 508.1m + CR 603.2: Strip a trailing `"while [state]"` gate from a
+/// trigger-event clause and classify it as either a declaration-time subject
+/// qualifier or a stored `TriggerCondition`.
 ///
-/// A `"while ..."` clause appended to the trigger event ("Whenever you cast a
-/// spell **while ~ is attacking**, ...") is a state gate that mirrors the
-/// intervening-`if` rule: the trigger only fires while the source is in that
-/// combat state, and the state is rechecked on resolution. Fire Lord Azula's
-/// copy trigger is the motivating card; the clause generalizes to any
-/// `"[event] while [self-ref] is attacking/blocking/blocked"` trigger, so it is
-/// stripped here — before mode dispatch — and the remaining event clause is
-/// parsed unchanged.
+/// Two rules-distinct forms share the `"while ..."` surface grammar:
+///
+/// 1. **Elided-subject participle on an attack trigger** ("Whenever this
+///    creature attacks **while saddled**" — Alacrian Jaguar and its class).
+///    The printed while-gate drops the subject; the subject is inherited from
+///    the trigger event's subject (the attacking creature = the source). This
+///    is NOT an intervening-`if` (no printed "if" — CR 603.4's rule only
+///    applies to an "if" that immediately follows a trigger condition), so it
+///    is not rechecked at resolution. Per CR 508.1m the ability triggers when
+///    attackers are declared; the saddle state is a property of the declared
+///    attacker at that moment, so it folds into the attack trigger's
+///    `valid_card` and is evaluated once, at declaration. Classified as
+///    `WhileStateGate::AttackSubjectState`.
+///
+/// 2. **Subject-ful state gate** ("Whenever you cast a spell **while ~ is
+///    attacking**, ..." — Fire Lord Azula). The clause names an explicit
+///    subject and stores a `TriggerCondition` ANDed onto the trigger. This is
+///    the existing behavior for combat-state and other representable gates;
+///    classified as `WhileStateGate::Condition`.
 ///
 /// Delegates condition recognition to `parse_inner_condition` (the shared
-/// combinator authority). The combat-state special case handles attacking
-/// directly (`SourceIsAttacking` is the sole combat-state variant of
-/// `TriggerCondition` — CR 508.1); other representable states are bridged
-/// through `static_condition_to_trigger_condition`. Recognized but
+/// combinator authority) with `parse_elided_subject_state_condition` as a
+/// second `alt()` arm for the bare participle. The combat-state special case
+/// handles attacking directly (`SourceIsAttacking` is the sole combat-state
+/// variant of `TriggerCondition` — CR 508.1); the saddled participle maps to
+/// `AttackSubjectState(source_saddled_filter())`; other representable states
+/// bridge through `static_condition_to_trigger_condition`. Recognized but
 /// unrepresentable states ("while ~ is blocking") return `None`, leaving the
 /// clause intact rather than dropping the gate silently. Returns the event
-/// clause with the `"while ..."` suffix removed plus the extracted condition, or
+/// clause with the `"while ..."` suffix removed plus the classified gate, or
 /// `None` when no representable `"while ..."` gate is present.
-///
-/// CR 603.2 + CR 702.171b: The while-gate grammar also admits an ELIDED-SUBJECT
-/// participle ("Whenever this creature attacks **while saddled**" — Alacrian
-/// Jaguar and its 27-card class). Unlike an intervening-if, which always prints
-/// an explicit subject, the printed while-gate drops it; the subject is
-/// inherited from the trigger event's subject (the attacking creature = the
-/// source). `parse_inner_condition` requires an explicit subject, so the bare
-/// participle is composed here as a second `alt()` arm
-/// (`parse_elided_subject_state_condition`) tried after the subject-ful
-/// authority. Official ruling (2025-02-07): "attacks while saddled" fires only
-/// if the creature is saddled when it's declared as an attacker (CR 508.1), and
-/// the gate is rechecked at resolution per the intervening-if machinery
-/// (CR 603.4).
-fn strip_while_state_clause(condition: &str) -> Option<(String, TriggerCondition)> {
+fn strip_while_state_clause(condition: &str) -> Option<(String, WhileStateGate)> {
     let lower = condition.to_lowercase();
     // The gate is introduced by " while " and runs to the end of the event
     // clause (the effect was already split off at the first ", " boundary).
@@ -8161,7 +8173,7 @@ fn strip_while_state_clause(condition: &str) -> Option<(String, TriggerCondition
     .parse(lower.as_str())
     .ok()?;
     let pos = before.len();
-    // CR 603.2 + CR 702.171b: subject-ful conditions parse first
+    // CR 603.2 + CR 508.1m: subject-ful conditions parse first
     // (`parse_inner_condition`); the elided-subject participle leaf handles the
     // bare "saddled" gate (Alacrian Jaguar) whose subject is inherited from the
     // trigger event's subject. `parse_source_is_saddled` requires an explicit
@@ -8172,37 +8184,66 @@ fn strip_while_state_clause(condition: &str) -> Option<(String, TriggerCondition
     let (rest, sc) = alt((parse_inner_condition, parse_elided_subject_state_condition))
         .parse(fragment.trim())
         .ok()?;
-    // CR 603.4: only accept when the whole "while ..." tail is the condition —
+    // CR 603.2: only accept when the whole "while ..." tail is the condition —
     // a dangling remainder means this isn't a clean state gate.
     if !rest.trim().is_empty() {
         return None;
     }
-    // CR 508.1 / CR 603.4: combat-state gates are not bridged by
-    // `static_condition_to_trigger_condition`, so handle attacking directly.
-    // All other representable static conditions (e.g. HasCounters for "while
-    // this enchantment has two or more quest counters on it") bridge through
-    // the shared mapper.
-    let cond = if matches!(sc, StaticCondition::SourceIsAttacking) {
-        TriggerCondition::SourceIsAttacking
-    } else {
-        static_condition_to_trigger_condition(&sc)?
+    // CR 508.1m: the elided-subject saddled participle is a declaration-time
+    // subject qualifier — fold into the attack trigger's `valid_card`, not a
+    // stored condition. CR 508.1: combat-state gates ("while ~ is attacking")
+    // are not bridged by `static_condition_to_trigger_condition`, so handle
+    // attacking directly. All other representable static conditions (e.g.
+    // HasCounters for "while this enchantment has two or more quest counters
+    // on it") bridge through the shared mapper as stored conditions.
+    let gate = match sc {
+        StaticCondition::SourceIsSaddled => {
+            WhileStateGate::AttackSubjectState(source_saddled_filter())
+        }
+        StaticCondition::SourceIsAttacking => {
+            WhileStateGate::Condition(TriggerCondition::SourceIsAttacking)
+        }
+        other => WhileStateGate::Condition(static_condition_to_trigger_condition(&other)?),
     };
-    Some((condition[..pos].trim_end().to_string(), cond))
+    Some((condition[..pos].trim_end().to_string(), gate))
 }
 
 pub(crate) fn parse_trigger_condition(
     condition: &str,
     ctx: &mut ParseContext,
 ) -> (TriggerMode, TriggerDefinition) {
-    // CR 603.4 + CR 508.1: A trailing "while [state]" gate on the trigger event
-    // ("Whenever you cast a spell while ~ is attacking") restricts the trigger to
-    // that state. Strip it before mode dispatch and AND it onto the parsed
-    // trigger's condition so the rest of the event clause parses exactly as it
-    // would unqualified.
-    if let Some((stripped, while_cond)) = strip_while_state_clause(condition) {
-        let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
-        def.condition = Some(and_trigger_conditions(def.condition.take(), while_cond));
-        return (mode, def);
+    // CR 508.1m + CR 603.2: A trailing "while [state]" gate on the trigger event
+    // is one of two rules-distinct forms (see `strip_while_state_clause`). Strip
+    // it before mode dispatch, then dispatch on the classification.
+    if let Some((stripped, gate)) = strip_while_state_clause(condition) {
+        match gate {
+            WhileStateGate::Condition(while_cond) => {
+                // Subject-ful state gate ("while ~ is attacking") — AND onto the
+                // parsed trigger's condition so the rest of the event clause
+                // parses exactly as it would unqualified.
+                let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
+                def.condition = Some(and_trigger_conditions(def.condition.take(), while_cond));
+                return (mode, def);
+            }
+            WhileStateGate::AttackSubjectState(filter) => {
+                // CR 508.1m + CR 603.2: probe-parse the event clause without the
+                // gate; fold the state into the trigger SUBJECT only for an attack
+                // trigger with a parsed subject filter.
+                let pre_probe_diagnostics = ctx.diagnostics.len();
+                let (mode, mut def) = parse_trigger_condition(&stripped, ctx);
+                if mode == TriggerMode::Attacks && def.valid_card.is_some() {
+                    let existing = def.valid_card.take().expect("checked is_some");
+                    def.valid_card = Some(TargetFilter::And {
+                        filters: vec![existing, filter],
+                    });
+                    return (mode, def);
+                }
+                // Fold refused: discard the probe's diagnostics and fall through
+                // to parsing the ORIGINAL unstripped clause (nothing silently
+                // dropped).
+                ctx.diagnostics.truncate(pre_probe_diagnostics);
+            }
+        }
     }
 
     // CR 603.4: Reset any stale relative-clause state before parsing this

@@ -113,7 +113,6 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             entered_incarnation: None,
             turn_zone_change_index: 0,
             is_suspected: false,
-            is_saddled: false,
         }),
     });
 }
@@ -227,7 +226,6 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
-            is_saddled: false,
             attachments: Vec::new(),
         },
     );

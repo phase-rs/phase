@@ -1661,9 +1661,6 @@ pub fn matches_target_filter_on_lki_snapshot(
         // CR 701.60b: Carry suspected status from the LKI snapshot so
         // `FilterProp::Suspected` reads the cost-paid look-back value.
         is_suspected: lki.is_suspected,
-        // CR 608.2h: Carry saddled designation from the LKI snapshot so
-        // `FilterProp::IsSaddled` reads the exit-time look-back value.
-        is_saddled: lki.is_saddled,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -3856,10 +3853,6 @@ fn source_context_from_filter<'a>(
                     counters: HashMap::new(),
                     tapped: false,
                     is_suspected: false,
-                    // CR 702.171b: unknown-source placeholder — no saddled
-                    // designation is knowable, so default false (fail-closed,
-                    // matching the pre-existing behavior for absent sources).
-                    is_saddled: false,
                     attachments: Vec::new(),
                 });
             (
@@ -5466,13 +5459,13 @@ fn zone_change_record_matches_property(
         // was suspected" reads the cost-paid LKI, taken before the sacrifice
         // zone-change reset the flag).
         FilterProp::Suspected => record.is_suspected,
-        // CR 702.171b + CR 608.2h: saddled designation snapshotted at zone exit
-        // (mirrors `Suspected`). NOTE: if a NEW incarnation re-entered at the same
-        // ObjectId before the recheck, the live-first gate in
-        // `subject_filter_matches_with_lki` answers from the live object — a
-        // pre-existing boundary shared with the enchanted/equipped bridges.
-        FilterProp::IsSaddled => record.is_saddled,
-        FilterProp::IsChosenColor
+        // CR 702.171b + CR 508.1m: saddled is no longer snapshotted onto
+        // zone-change records — the "attacks while saddled" attack gate is a
+        // declaration-time subject match folded into the trigger's `valid_card`
+        // (evaluated once when attackers are declared), not a resolution
+        // recheck. A departed source therefore fails closed here.
+        FilterProp::IsSaddled
+        | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::HasSingleTarget
         // ZoneChangeRecord carries no modal field — conservative gap (CR 700.2
@@ -5873,10 +5866,6 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
-            // CR 702.171b: unknown-source placeholder — no saddled designation
-            // is knowable, so default false (fail-closed, matching the
-            // pre-existing behavior for absent sources).
-            is_saddled: false,
             attachments: Vec::new(),
         });
     SourceContext {
@@ -6668,7 +6657,6 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
-                is_saddled: false,
                 attachments: Vec::new(),
             },
         );
@@ -11074,7 +11062,6 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
-            is_saddled: false,
             attachments: Vec::new(),
         };
         let filter =
@@ -11121,7 +11108,6 @@ mod tests {
             counters: Default::default(),
             tapped: false,
             is_suspected: false,
-            is_saddled: false,
             attachments: Vec::new(),
         };
         let filter =
@@ -11252,7 +11238,6 @@ mod tests {
             counters: Default::default(),
             tapped,
             is_suspected: false,
-            is_saddled: false,
             attachments: Vec::new(),
         };
 
@@ -12034,7 +12019,6 @@ mod tests {
             entered_incarnation: None,
             turn_zone_change_index: 0,
             is_suspected: false,
-            is_saddled: false,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -12128,7 +12112,6 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
-            is_saddled: false,
             attachments: Vec::new(),
         };
         let land_lki = LKISnapshot {
@@ -12150,7 +12133,6 @@ mod tests {
             counters: HashMap::new(),
             tapped: false,
             is_suspected: false,
-            is_saddled: false,
             attachments: Vec::new(),
         };
 
@@ -12297,7 +12279,6 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
-                is_saddled: false,
                 attachments: Vec::new(),
             },
         );
@@ -12369,7 +12350,6 @@ mod tests {
                 chosen_attributes: vec![],
                 tapped: false,
                 is_suspected: false,
-                is_saddled: false,
                 attachments: Vec::new(),
             },
         );

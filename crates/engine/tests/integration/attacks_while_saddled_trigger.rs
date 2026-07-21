@@ -6,19 +6,23 @@
 //!   permanent leaves the battlefield; it is a marker spells/abilities identify.
 //! CR 702.171c: the creatures that saddled the permanent.
 //! CR 508.1: attackers are declared as a turn-based action.
-//! CR 603.4: the state gate is checked when the ability triggers AND rechecked
-//!   as it resolves — if false at resolution the ability is removed.
+//! CR 508.1m: abilities that trigger on attackers being declared trigger then;
+//!   the "while saddled" gate is a declaration-time property of the declared
+//!   attacker, folded into the attack trigger's `valid_card` and evaluated ONCE
+//!   when attackers are declared.
 //! Official ruling (2025-02-07): "attacks while saddled" fires only if the
 //! creature is saddled when it's declared as an attacker.
 //!
-//! The gate lowers to `TriggerCondition::SourceMatchesFilter { Typed([IsSaddled]) }`.
-//! A source destroyed in response after the trigger is on the stack resolves via
-//! last known information (CR 608.2h + CR 113.7a): `LKISnapshot::is_saddled`
-//! carries the exit-time designation so the recheck still passes.
+//! The gate folds into the attack trigger's `valid_card` as
+//! `And { filters: [SelfRef, Typed([IsSaddled])] }`. It is NOT an intervening-if
+//! (no printed "if" — CR 603.4 does not apply) and carries NO stored
+//! `TriggerCondition`, so once the trigger is on the stack it resolves
+//! unconditionally even if its source has since left the battlefield — no LKI
+//! recheck is involved.
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{TargetRef, TriggerCondition};
+use engine::types::ability::{FilterProp, TargetFilter, TargetRef, TriggerCondition};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
@@ -146,19 +150,55 @@ fn choose_attack_trigger_target(runner: &mut GameRunner, target: ObjectId) {
     panic!("expected the attacks-while-saddled trigger to request a target");
 }
 
+/// Locate the triggered-ability stack entry for `source_id`. The OUTER `Option`
+/// is `Some` when such an entry exists on the stack; the INNER `Option` is the
+/// entry's stored `TriggerCondition` (`None` when it carries no condition). This
+/// lets a caller distinguish "no trigger on the stack" from "trigger on the
+/// stack with no stored condition" (`Some(None)`) — the latter is what the
+/// declaration-time saddled fold produces.
 fn stack_condition_for_source(
     runner: &GameRunner,
     source_id: ObjectId,
-) -> Option<TriggerCondition> {
+) -> Option<Option<TriggerCondition>> {
     runner.state().stack.iter().find_map(|entry| {
         if entry.source_id != source_id {
             return None;
         }
         match &entry.kind {
-            StackEntryKind::TriggeredAbility { condition, .. } => condition.clone(),
+            StackEntryKind::TriggeredAbility { condition, .. } => Some(condition.clone()),
             _ => None,
         }
     })
+}
+
+/// Recursively collect leaf `TargetFilter`s under `And`/`Or`/`Not`, so structural
+/// assertions survive `TargetFilter::normalized` flattening/reordering.
+fn collect_leaf_filters<'a>(filter: &'a TargetFilter, out: &mut Vec<&'a TargetFilter>) {
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters {
+                collect_leaf_filters(f, out);
+            }
+        }
+        TargetFilter::Not { filter } => collect_leaf_filters(filter, out),
+        leaf => out.push(leaf),
+    }
+}
+
+/// True if any `Typed` leaf anywhere under `filter` carries `FilterProp::IsSaddled`.
+fn filter_mentions_is_saddled(filter: &TargetFilter) -> bool {
+    let mut leaves = Vec::new();
+    collect_leaf_filters(filter, &mut leaves);
+    leaves.iter().any(
+        |f| matches!(f, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::IsSaddled)),
+    )
+}
+
+/// True if any leaf under `filter` is a `SelfRef`.
+fn filter_mentions_self_ref(filter: &TargetFilter) -> bool {
+    let mut leaves = Vec::new();
+    collect_leaf_filters(filter, &mut leaves);
+    leaves.iter().any(|f| matches!(f, TargetFilter::SelfRef))
 }
 
 fn add_jaguar(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
@@ -198,14 +238,16 @@ fn alacrian_jaguar_saddled_attack_pumps() {
     );
 }
 
-/// Test 2 — unsaddled: the trigger's condition is present (REVERT-FAILING
-/// reach-guard) but false at trigger time, so no pump.
+/// Test 2 — unsaddled: the trigger's subject-state gate lives in `valid_card`
+/// (REVERT-FAILING reach-guard) but is false at declaration, so no trigger, no
+/// pump.
 #[test]
 fn alacrian_jaguar_unsaddled_attack_no_pump() {
-    // Reach-guard: the parsed attacks trigger MUST carry a condition. Without the
-    // elided-subject while-gate leaf the gate is dropped and this is `None`,
-    // making the "stays 2/2" assertion below vacuous (an unconditional trigger
-    // that simply never fired for another reason). This flips if the fix reverts.
+    // Reach-guard: the parsed attacks trigger MUST carry the saddled qualifier in
+    // its `valid_card` (And{SelfRef, Typed([IsSaddled])}) and NO stored condition.
+    // Without the fold the gate is dropped, making the "stays 2/2" assertion below
+    // vacuous (an unconditional trigger that simply never fired for another
+    // reason). These flip if the fix reverts.
     let parsed = engine::parser::oracle::parse_oracle_text(
         ALACRIAN_JAGUAR,
         "Alacrian Jaguar",
@@ -219,12 +261,21 @@ fn alacrian_jaguar_unsaddled_attack_no_pump() {
         .find(|t| t.mode == engine::types::triggers::TriggerMode::Attacks)
         .expect("Alacrian Jaguar has an attacks trigger");
     assert!(
-        matches!(
-            attack_trigger.condition.as_ref(),
-            Some(TriggerCondition::SourceMatchesFilter { .. })
-        ),
-        "attacks-while-saddled trigger must carry a saddled SourceMatchesFilter gate, got {:?}",
+        attack_trigger.condition.is_none(),
+        "attacks-while-saddled gate must NOT be a stored condition, got {:?}",
         attack_trigger.condition
+    );
+    let valid_card = attack_trigger
+        .valid_card
+        .as_ref()
+        .expect("attacks trigger must carry a valid_card subject filter");
+    assert!(
+        filter_mentions_self_ref(valid_card),
+        "valid_card must retain the SelfRef subject, got {valid_card:?}"
+    );
+    assert!(
+        filter_mentions_is_saddled(valid_card),
+        "valid_card must carry the IsSaddled qualifier, got {valid_card:?}"
     );
 
     let mut scenario = GameScenario::new();
@@ -284,11 +335,55 @@ fn only_saddled_mount_triggers_in_shared_attack() {
     );
 }
 
-/// Test 4 — the LKI load-bearing case. A saddled Ornery Tumblewagg attacks, its
-/// doubling trigger is placed on the stack targeting creature B, then the Mount
-/// is DESTROYED in response through the real cast pipeline. The trigger still
-/// resolves because the saddled recheck reads last known information
-/// (CR 608.2h + CR 113.7a) via `LKISnapshot::is_saddled`.
+/// Test 5 — per-attacker identity. Two saddled Alacrian Jaguars both attack in
+/// the same DeclareAttackers. Each attacks-while-saddled trigger pumps ITS OWN
+/// source ("it gets +2/+2"), so each ends at exactly (4,4) — not (6,6). Guards
+/// against a fold that mis-binds the subject or applies both pumps to one Mount:
+/// the And{SelfRef, IsSaddled} `valid_card` matches per-source, so each Mount
+/// fires exactly one trigger against itself.
+#[test]
+fn both_saddled_mounts_each_pump_exactly_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mount_a = add_jaguar(&mut scenario, P0, "Alacrian Jaguar A");
+    let mount_b = add_jaguar(&mut scenario, P0, "Alacrian Jaguar B");
+    let rider_a = scenario.add_creature(P0, "Rider A", 1, 1).id();
+    let rider_b = scenario.add_creature(P0, "Rider B", 1, 1).id();
+    let mut runner = scenario.build();
+
+    // Saddle both Mounts (each with its own rider; the riders are tapped to pay,
+    // the Mounts stay untapped and legal to attack).
+    saddle_mount(&mut runner, mount_a, vec![rider_a]);
+    saddle_mount(&mut runner, mount_b, vec![rider_b]);
+
+    advance_to_declare_attackers(&mut runner, P0, None);
+    runner
+        .declare_attackers(&[
+            (mount_a, AttackTarget::Player(P1)),
+            (mount_b, AttackTarget::Player(P1)),
+        ])
+        .expect("both saddled Mounts should be legal attackers");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        effective_pt(&mut runner, mount_a),
+        (4, 4),
+        "Mount A must gain exactly +2/+2 from its own trigger (not +4/+4)"
+    );
+    assert_eq!(
+        effective_pt(&mut runner, mount_b),
+        (4, 4),
+        "Mount B must gain exactly +2/+2 from its own trigger (not +4/+4)"
+    );
+}
+
+/// Test 4 — no-stored-condition / source-death immunity. A saddled Ornery
+/// Tumblewagg attacks, its doubling trigger is placed on the stack targeting a
+/// counter bearer, then the Mount is DESTROYED in response through the real cast
+/// pipeline. Because the saddled gate folded into `valid_card` at declaration
+/// (CR 508.1m) and is NOT a stored intervening-if condition, the on-stack
+/// trigger carries no condition (`Some(None)`) and resolves unconditionally even
+/// after its source has left the battlefield — no CR 603.4 recheck, no LKI.
 #[test]
 fn ornery_tumblewagg_dies_in_response_trigger_survives() {
     let mut scenario = GameScenario::new();
@@ -325,19 +420,20 @@ fn ornery_tumblewagg_dies_in_response_trigger_survives() {
         .expect("saddled Mount should be a legal attacker");
     choose_attack_trigger_target(&mut runner, target);
 
-    // On-stack reach-guard: the saddled gate is NOT stripped (unlike event-only
-    // attack qualifiers) — it must be present for the CR 603.4 resolution recheck.
-    assert!(
-        matches!(
-            stack_condition_for_source(&runner, mount),
-            Some(TriggerCondition::SourceMatchesFilter { .. })
-        ),
-        "the doubling trigger must carry its saddled gate on the stack, got {:?}",
+    // On-stack reach-guard (REVERT-FAILING): the doubling trigger is on the
+    // stack for `mount` (outer `Some`) and carries NO stored condition (inner
+    // `None`) — the saddled gate was consumed at declaration into `valid_card`,
+    // not stored for a resolution recheck. Reverting the fold repopulates the
+    // inner condition and fails this `Some(None)` assertion.
+    assert_eq!(
+        stack_condition_for_source(&runner, mount),
+        Some(None),
+        "the doubling trigger must be on the stack with no stored condition, got {:?}",
         stack_condition_for_source(&runner, mount)
     );
 
     // Destroy the Mount in response — it leaves the battlefield BEFORE the
-    // doubling trigger resolves. This is what exercises the LKI thread.
+    // doubling trigger resolves.
     runner.cast(removal).target_object(mount).resolve();
     assert_eq!(
         runner.state().objects[&mount].zone,
@@ -349,14 +445,8 @@ fn ornery_tumblewagg_dies_in_response_trigger_survives() {
     assert_eq!(
         p1p1(&runner, target),
         2 * n,
-        "the doubling trigger must still resolve via LKI after its saddled source \
-         left the battlefield (CR 608.2h) — counters doubled from {n} to {}",
+        "the doubling trigger must still resolve after its source left the \
+         battlefield (no stored condition to recheck) — counters doubled from {n} to {}",
         2 * n
-    );
-    // The LKI snapshot recorded the exit-time saddled designation.
-    assert_eq!(
-        runner.state().lki_cache.get(&mount).map(|l| l.is_saddled),
-        Some(true),
-        "the destroyed Mount's LKI must retain is_saddled = true"
     );
 }

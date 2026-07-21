@@ -1873,12 +1873,17 @@ fn parse_source_is_saddled(input: &str) -> OracleResult<'_, StaticCondition> {
     Ok((rest, condition))
 }
 
-/// CR 702.171b + CR 603.4: Bare elided-subject participle state gate
+/// CR 702.171b + CR 508.1m: Bare elided-subject participle state gate
 /// ("Whenever this creature attacks while saddled" — Alacrian Jaguar). The
-/// printed while-gate elides the subject; intervening-if text always prints
-/// one, so this leaf is composed ONLY at the while-gate seam
-/// (`strip_while_state_clause`), NOT added to `parse_inner_condition`.
-/// Future bare-state participles join as `alt()` arms here.
+/// printed while-gate elides the subject; the participle is part of the trigger
+/// EVENT (a property of the attacking creature at declaration), so
+/// `strip_while_state_clause` folds it into the trigger subject filter
+/// (`valid_card`) evaluated once when attackers are declared (CR 508.1m) — it
+/// is NOT an intervening-`if` and is never rechecked at resolution. Intervening-
+/// if text always prints an explicit subject, so this leaf is composed ONLY at
+/// the while-gate seam (`strip_while_state_clause`), NOT added to
+/// `parse_inner_condition`. Future bare-state participles join as `alt()` arms
+/// here.
 pub(crate) fn parse_elided_subject_state_condition(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
