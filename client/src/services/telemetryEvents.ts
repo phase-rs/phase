@@ -104,8 +104,9 @@ function installStuckDecisionTracking(): void {
  * Emit `game_end` once per game when the state's `waiting_for` first becomes
  * `GameOver`. Deduped by `gameId` (multiplayer emits one per participating
  * client — counts are per-client sessions, not per game). `spectate` mode is
- * skipped entirely. Every payload value is an engine-provided field forwarded
- * verbatim; `winner_kind` uses the client-owned `aiSeatIds` binding.
+ * skipped entirely. Engine-provided payload values are forwarded verbatim;
+ * `winner_kind`, `engine_mode`, and `native_fallback_reason` use client-owned
+ * store bindings.
  */
 function installGameEndTracking(): void {
   let lastEmittedGameId: string | null = null;
@@ -114,7 +115,14 @@ function installGameEndTracking(): void {
     (s) => s.waitingFor,
     (waitingFor) => {
       if (!waitingFor || waitingFor.type !== "GameOver") return;
-      const { gameId, gameMode, gameState, aiSeatIds } = useGameStore.getState();
+      const {
+        gameId,
+        gameMode,
+        gameState,
+        aiSeatIds,
+        engineMode,
+        nativeEngineFallbackReason,
+      } = useGameStore.getState();
       if (gameMode === "spectate") return;
       if (gameId === null || gameId === lastEmittedGameId) return;
       lastEmittedGameId = gameId;
@@ -138,6 +146,8 @@ function installGameEndTracking(): void {
         game_mode: gameMode,
         unimplemented_oracle_ids: (gameState?.unimplemented_oracle_ids ?? []).slice(0, 20),
         pending_trigger_abandons: (gameState?.pending_trigger_abandons ?? []).slice(0, 20),
+        engine_mode: engineMode,
+        native_fallback_reason: nativeEngineFallbackReason,
       });
       // Flush promptly so a game_end isn't stranded if the user leaves the
       // results screen before the batch timer fires.
@@ -165,7 +175,13 @@ function installGameStartTracking(): void {
     (s) => s.gameState,
     (gameState) => {
       if (!gameState) return;
-      const { gameId, gameMode, aiSeatIds } = useGameStore.getState();
+      const {
+        gameId,
+        gameMode,
+        aiSeatIds,
+        engineMode,
+        nativeEngineFallbackReason,
+      } = useGameStore.getState();
       if (gameMode === "spectate") return;
       if (gameId === null || gameId === lastEmittedGameId) return;
       lastEmittedGameId = gameId;
@@ -175,6 +191,8 @@ function installGameStartTracking(): void {
         format: gameState.format_config?.format,
         player_count: gameState.players.length,
         ai_count: aiSeatIds.length,
+        engine_mode: engineMode,
+        native_fallback_reason: nativeEngineFallbackReason,
       });
     },
   );
