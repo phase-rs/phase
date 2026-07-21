@@ -26,6 +26,7 @@
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
+use std::panic::PanicHookInfo;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -99,11 +100,13 @@ fn main() {
                     feed = v.clone();
                 }
             }
-            "--games-file" => {
-                if let Some(v) = args_iter.next() {
-                    games_file = Some(v.clone());
+            "--games-file" => match args_iter.next() {
+                Some(v) => games_file = Some(v.clone()),
+                None => {
+                    eprintln!("error: --games-file requires a path");
+                    std::process::exit(1);
                 }
-            }
+            },
             other => {
                 // `--difficulty-p0` .. `--difficulty-p3`: single-seat override,
                 // parameterized on seat index rather than four bespoke flags.
@@ -644,8 +647,7 @@ fn play_one_game(
 /// restored afterward, so single-game mode (which never calls this) and
 /// anything the process does after the batch are unaffected.
 fn run_batch_isolated<T>(games: &[T], label: impl Fn(&T) -> String, mut play: impl FnMut(&T)) {
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|info| {
+    let _panic_hook_guard = PanicHookGuard::install(Box::new(|info| {
         eprintln!("panic (isolated to one batch game): {info}");
     }));
 
@@ -668,8 +670,27 @@ fn run_batch_isolated<T>(games: &[T], label: impl Fn(&T) -> String, mut play: im
             }
         }));
     }
+}
 
-    std::panic::set_hook(prev_hook);
+type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+/// Restores the process-wide panic hook even if batch-loop plumbing unwinds.
+struct PanicHookGuard(Option<PanicHook>);
+
+impl PanicHookGuard {
+    fn install(temporary_hook: PanicHook) -> Self {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(temporary_hook);
+        Self(Some(previous_hook))
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(previous_hook) = self.0.take() {
+            std::panic::set_hook(previous_hook);
+        }
+    }
 }
 
 /// Best-effort extraction of a human-readable message from a `catch_unwind`
@@ -836,6 +857,22 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    struct TempFileGuard(PathBuf);
+
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn temp_games_file_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ai_commander_{name}_{}_{:?}.txt",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
     #[test]
     fn parse_action_cap_accepts_positive_integer() {
         assert_eq!(parse_action_cap_checked("50000"), Ok(50000));
@@ -937,14 +974,10 @@ mod tests {
 
     #[test]
     fn parse_games_file_reads_multiple_lines_and_skips_blanks() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "ai_commander_games_file_test_{:?}.txt",
-            std::thread::current().id()
-        ));
+        let path = temp_games_file_path("games_file_test");
+        let _guard = TempFileGuard(path.clone());
         std::fs::write(&path, "1009,Easy\n\n1010,VeryHard\n  \n1011,Medium\n").unwrap();
         let games = parse_games_file(path.to_str().unwrap()).unwrap();
-        let _ = std::fs::remove_file(&path);
         assert_eq!(
             games,
             vec![
@@ -957,14 +990,10 @@ mod tests {
 
     #[test]
     fn parse_games_file_rejects_a_batch_with_any_malformed_line() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!(
-            "ai_commander_games_file_bad_test_{:?}.txt",
-            std::thread::current().id()
-        ));
+        let path = temp_games_file_path("games_file_bad_test");
+        let _guard = TempFileGuard(path.clone());
         std::fs::write(&path, "1009,Easy\nnotaseed,Easy\n").unwrap();
         let result = parse_games_file(path.to_str().unwrap());
-        let _ = std::fs::remove_file(&path);
         assert!(result.is_err());
     }
 
