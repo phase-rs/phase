@@ -1023,6 +1023,16 @@ export interface GameObject {
     abilities: SerializedAbility[];
     color: ManaColor[];
     printed_ref?: PrintedRef | null;
+    /**
+     * Engine-owned discriminant for what this stored half actually IS. The
+     * `back_face` slot is shared by several printed layouts, so its presence
+     * alone does NOT mean the object is double-faced: CR 710 Kamigawa flip
+     * cards park their alternative (bottom) half here, and Adventure/Omen
+     * cards park their alternative spell here. Only `"Transform"`, `"Modal"`,
+     * and `"Meld"` are real second faces (CR 712). Absent when the engine has
+     * no layout to report.
+     */
+    layout_kind?: LayoutKind | null;
   } | null;
   /**
    * CR 702.143c-d: Whether this card in exile is foretold. Its owner may look
@@ -1036,6 +1046,22 @@ export interface PrintedRef {
   oracle_id: string;
   face_name: string;
 }
+
+/**
+ * Mirror of the engine's `types::card::LayoutKind` (serialized as its plain
+ * variant name). Describes the printed layout that produced an object's stored
+ * `back_face`.
+ */
+export type LayoutKind =
+  | "Single"
+  | "Split"
+  | "Flip"
+  | "Transform"
+  | "Meld"
+  | "Adventure"
+  | "Modal"
+  | "Omen"
+  | "Prepare";
 
 export interface ObjectIncarnationRef {
   object_id: ObjectId;
@@ -2263,6 +2289,8 @@ export type GameEvent =
   | { type: "BecomesTarget"; data: { target: TargetRef; source_id: ObjectId } }
   | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }
   | { type: "Transformed"; data: { object_id: ObjectId } }
+  // CR 710.4: a Kamigawa flip permanent flipped to its alternative face.
+  | { type: "Flipped"; data: { object_id: ObjectId } }
   | { type: "DayNightChanged"; data: { new_state: string } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }

@@ -611,6 +611,12 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::TurnedFaceDown { .. } => {
             push(TriggerEventKey::FaceOrTransform);
         }
+        // CR 710.4 + CR 701.27b: flipping is its own game action, distinct from
+        // transforming and from turning face up/down, and no printed card
+        // triggers on a permanent flipping. Deliberately dispatches NO trigger
+        // key — folding it into `FaceOrTransform` would consult transform/
+        // face-change triggers for an event none of them can match.
+        GameEvent::Flipped { .. } => {}
         GameEvent::DayNightChanged { .. } => push(TriggerEventKey::DayNightChanged),
         GameEvent::CardsRevealed { .. } => push(TriggerEventKey::Revealed),
         GameEvent::CrimeCommitted { .. } => push(TriggerEventKey::PlayerActionPerformed),
@@ -931,6 +937,9 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // action; its own `EffectResolved` dispatches no trigger key.
         | EffectKind::BecomeSaddled
         | EffectKind::Transform
+        // CR 710.4: the flip fires no trigger; `GameEvent::Flipped` is a log/
+        // display notification and dispatches no key either.
+        | EffectKind::FlipPermanent
         | EffectKind::TurnFaceUp
         // CR 701.27b: a turned-face-down permanent fires any face-down trigger
         // via the dedicated `GameEvent::TurnedFaceDown`, not via this effect's

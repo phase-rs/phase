@@ -17510,6 +17510,8 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         // CR 702.26c: PhaseIn is the symmetric partner of PhaseOut; route its
@@ -17635,6 +17637,11 @@ fn replace_target_with_self(effect: &mut Effect) {
             *target = TargetFilter::SelfRef;
         }
         Effect::Transform { target, .. } => {
+            *target = TargetFilter::SelfRef;
+        }
+        // CR 710.4: every printed flip instruction is self-referential, so the
+        // same source-binding fixup applies.
+        Effect::FlipPermanent { target, .. } => {
             *target = TargetFilter::SelfRef;
         }
         Effect::GenericEffect {
@@ -19797,6 +19804,8 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::MoveCounters { target, .. }
         | Effect::Animate { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::RevealHand { target, .. }
         | Effect::TargetOnly { target, .. }
         | Effect::PreventDamage { target, .. }
@@ -23641,6 +23650,8 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         // CR 702.26c: PhaseIn mirrors PhaseOut; expose its target to tracked-set
@@ -23900,6 +23911,8 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::UnattachAll { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         // CR 702.26c: PhaseIn is the symmetric partner of PhaseOut above; expose

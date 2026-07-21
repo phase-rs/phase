@@ -1271,6 +1271,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Discard { .. } => {}
         Effect::Shuffle { .. } => {}
         Effect::Transform { .. } => {}
+        Effect::FlipPermanent { .. } => {}
         Effect::SearchLibrary { .. } => {}
         Effect::SearchOutsideGame { .. } => {}
         Effect::RevealHand { .. } => {}

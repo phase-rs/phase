@@ -1448,6 +1448,8 @@ pub(crate) fn extract_source_from_event(
         } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
+        // CR 710.4: the flipped permanent is the event's subject.
+        GameEvent::Flipped { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
         GameEvent::TurnedFaceDown { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),

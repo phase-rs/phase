@@ -993,6 +993,9 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Saddled { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::Transformed { .. }
+        // CR 710.4: no printed card triggers on a permanent flipping, so this
+        // event carries no per-object trigger subject.
+        | GameEvent::Flipped { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::DayNightChanged { .. }
         | GameEvent::TurnedFaceUp { .. }

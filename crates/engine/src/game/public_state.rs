@@ -376,6 +376,10 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // Transform changes copiable values (Layer 1) and can flip statics
             // on/off; conservatively all-dirty.
             | GameEvent::Transformed { .. }
+            // CR 710.1b: flipping replaces the permanent's name, type line,
+            // power, toughness, and text box (Layer 1 copiable values) and can
+            // flip statics on/off; conservatively all-dirty like Transform.
+            | GameEvent::Flipped { .. }
             | GameEvent::Specialized { .. }
             | GameEvent::TurnedFaceUp { .. }
             // Turning a permanent face down resets its copiable values to a 2/2

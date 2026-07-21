@@ -459,6 +459,9 @@ fn redundancy_delta(
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: flipping is one-way and idempotent by rule, so there is no
+        // redundancy signal to score — same no-op classification as Transform.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }

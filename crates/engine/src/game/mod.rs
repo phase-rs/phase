@@ -61,6 +61,8 @@ pub mod engine_resolve_batch;
 pub(crate) mod engine_stack;
 pub(crate) mod exile_links;
 pub mod filter;
+// CR 710: Kamigawa flip cards (flipping, alternative-face application).
+pub mod flip;
 pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;

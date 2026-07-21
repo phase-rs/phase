@@ -595,6 +595,7 @@ mod jaws_of_defeat;
 mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;
 mod kaito_integration;
+mod kamigawa_flip_cards;
 mod kaya_geist_hunter;
 mod kaya_spirits_justice_per_opponent_exile;
 mod kaysa_green_anthem;
