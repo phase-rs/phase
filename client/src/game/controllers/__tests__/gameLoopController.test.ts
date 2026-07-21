@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
 import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory";
-import { buildGameState, buildPlayers, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
+import { buildGameState, buildPlayers, buildPriorityWaitingFor, buildStackEntry } from "../../../test/factories/gameStateFactory";
 
 const dispatchAction = vi.fn();
 const dispatchResolveAll = vi.fn();
@@ -37,6 +37,7 @@ vi.mock("../../../stores/gameStore", () => ({
 }));
 
 let animationSpeedMultiplier = 1.0;
+let fullControl = false;
 
 vi.mock("../../../stores/preferencesStore", () => ({
   usePreferencesStore: {
@@ -46,8 +47,16 @@ vi.mock("../../../stores/preferencesStore", () => ({
 
 vi.mock("../../../stores/uiStore", () => ({
   useUiStore: {
-    getState: () => ({ fullControl: false }),
+    getState: () => ({ fullControl }),
   },
+}));
+
+vi.mock("../aiController", () => ({
+  createAIController: () => ({
+    start: vi.fn(),
+    stop: vi.fn(),
+    dispose: vi.fn(),
+  }),
 }));
 
 import { createGameLoopController } from "../gameLoopController";
@@ -74,6 +83,7 @@ describe("gameLoopController auto-pass authorization", () => {
     dispatchResolveAll.mockReset();
     waitingForSubscriber = null;
     animationSpeedMultiplier = 1.0;
+    fullControl = false;
   });
 
   afterEach(() => {
@@ -216,6 +226,50 @@ describe("gameLoopController auto-pass authorization", () => {
 
     // Zero multiplier collapses the beat to 0ms but must still dispatch the pass.
     await vi.advanceTimersByTimeAsync(0);
+    expect(dispatchAction).toHaveBeenCalledWith({ type: "PassPriority" });
+    controller.dispose();
+  });
+
+  it("never starts Resolve All at elevated pressure and honors Full Control", async () => {
+    const waitingFor = priority(0);
+    fullControl = true;
+    storeState = {
+      waitingFor,
+      gameState: {
+        ...stateFor(waitingFor, 0),
+        stack: Array.from({ length: 10 }, () => buildStackEntry()),
+      },
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "ai" });
+    controller.start();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("uses ordinary recommended auto-pass at elevated pressure when Full Control is off", async () => {
+    const waitingFor = priority(0);
+    fullControl = false;
+    storeState = {
+      waitingFor,
+      gameState: {
+        ...stateFor(waitingFor, 0),
+        stack: Array.from({ length: 10 }, () => buildStackEntry()),
+      },
+      autoPassRecommended: true,
+    };
+
+    const controller = createGameLoopController({ mode: "ai" });
+    controller.start();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(dispatchResolveAll).not.toHaveBeenCalled();
     expect(dispatchAction).toHaveBeenCalledWith({ type: "PassPriority" });
     controller.dispose();
   });
