@@ -34,7 +34,7 @@ use engine::game::deck_loading::{
 };
 use engine::game::derived_views::derive_views;
 use engine::game::engine::{apply, start_game};
-use engine::game::layers::flush_layers;
+use engine::game::layers::{flush_layers, mark_layers_full};
 use engine::game::scenario::GameRunner;
 use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
 use engine::types::actions::{GameAction, MulliganChoice};
@@ -496,7 +496,13 @@ fn build_fresh_4p_cast_offer_accept_writes_infinite_pile() {
         .map(|_| create_saproling(runner.state_mut(), P0))
         .collect();
     let sprout = place_card(runner.state_mut(), P0, SPROUT_SWARM, Zone::Hand, db);
-    // Flush layers so Witherbloom's affinity static is live before the cast computes cost.
+    // The raw `create_object`/`add_to_zone` scaffolding above bypasses the ETB dirty-marking
+    // that `move_to_zone` performs in real play, so `layers_dirty` is Clean and a bare
+    // `flush_layers` would be a no-op. Mark full first so the flush re-evaluates layers and
+    // rebuilds `static_mode_presence` — otherwise Witherbloom's affinity-granting
+    // `CastWithKeyword` static is invisible to the presence-gated grant scan (CR 604.1) and
+    // the {4} generic cannot be paid.
+    mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
 
     // Cast Sprout Swarm paying Buyback {3} and convoke-tapping one green Saproling for the {G}.
@@ -1501,6 +1507,11 @@ fn build_fresh_convoke_none_untapped_growth_does_not_seed_tapped_pile() {
         o.base_mana_cost = ManaCost::generic(1);
     }
     // Flush layers so Witherbloom's affinity static is live and the stripped keyword/cost stick.
+    // The raw scaffolding above never marks `layers_dirty`, so mark full first — otherwise the
+    // flush is a no-op and `static_mode_presence` never learns of Witherbloom's affinity-granting
+    // `CastWithKeyword` static, closing the presence-gated grant scan (CR 604.1) and making the
+    // {4} generic unpayable.
+    mark_layers_full(runner.state_mut());
     flush_layers(runner.state_mut());
 
     let sap_before_cast = count_battlefield_saprolings(runner.state());
