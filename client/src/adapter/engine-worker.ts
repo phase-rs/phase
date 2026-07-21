@@ -141,7 +141,11 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
   try {
     switch (msg.type) {
       case "init": {
-        await init();
+        if (__ENGINE_WASM_URL__) {
+          await init({ module_or_path: __ENGINE_WASM_URL__ });
+        } else {
+          await init();
+        }
         respond({ type: "ready" });
         break;
       }

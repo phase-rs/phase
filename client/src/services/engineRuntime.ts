@@ -27,7 +27,11 @@ export async function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
     wasmInitPromise = (async () => {
       const engine = await loadEngineModule();
-      await engine.default();
+      if (__ENGINE_WASM_URL__) {
+        await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
+      } else {
+        await engine.default();
+      }
     })();
   }
   return wasmInitPromise;
