@@ -457,4 +457,6 @@ jobs:
           # so a CI fix landed on main could never reach a stuck tag. `-f tag=` still pins
           # the SOURCE that gets built to the tag's SHA (see release.yml resolve-release-ref),
           # so this changes the CI config only, never the released code.
-          gh workflow run release.yml --ref main -f tag="$TAG"
+          # --repo is required: this job has no checkout, so gh cannot infer the
+          # repository from a local git directory and dies with "not a git repository".
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"
