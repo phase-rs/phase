@@ -5014,6 +5014,9 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // CR 612.8 / CR 613.1c: a literal-name text-changing effect reads no board
         // aggregate or projected resource (sibling of `SetChosenName`).
         | ContinuousModification::SetTextName { .. }
+        // CR 612.2 / CR 613.1c: the Layer-3 word swap carries a fixed `from`/`to`
+        // word pair — it reads no board aggregate or projected resource either.
+        | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -5381,6 +5384,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
+        // CR 612.1 + CR 115.1: `ChangeTextWords.target` is a single announced
+        // "target spell or permanent" slot (a2) read from `ResolvedAbility.targets`
+        // at resolution — an O(1) read that does not scale with the growing class.
+        | Effect::ChangeTextWords { .. }
         | Effect::Unimplemented { .. } => FilterReadContext::SnapshotOrEvent,
     }
 }
@@ -5730,6 +5737,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::RedistributeLifeTotals
         | Effect::ReverseTurnOrder
         | Effect::ChooseOneOf { .. }
+        // CR 612.1 + CR 115.1: a single announced "target spell or permanent" slot
+        // — bounded, no battlefield population read (mirrors `effect_target_ctx`).
+        | Effect::ChangeTextWords { .. }
         | Effect::Unimplemented { .. } => CensusRole::Relax(RelaxReason::BoundedOrNoPopulation),
     }
 }

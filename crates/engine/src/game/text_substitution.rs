@@ -289,10 +289,13 @@ pub fn walk_object_words(
     for ability in Arc::make_mut(&mut obj.abilities).iter_mut() {
         walk_ability_definition(ability, category, cursor);
     }
-    // Root 4: triggered abilities.
+    // Root 4: triggered abilities. Live entries are identity-bearing
+    // (`TriggerEntry`): only the `definition` payload carries printed rules text,
+    // so the walk projects it and leaves the `occurrence` provenance ref alone
+    // (CR 612.2 — an occurrence id is a runtime identity marker, not a word).
     for i in 0..obj.trigger_definitions.len() {
         if let Some(trigger) = obj.trigger_definitions.get_mut(i) {
-            walk_trigger_definition(trigger, category, cursor);
+            walk_trigger_definition(&mut trigger.definition, category, cursor);
         }
     }
     // Root 5: static abilities (affected set, condition, layered modifications).
@@ -601,10 +604,17 @@ fn walk_target_filter(
         TargetFilter::TrackedSetFiltered { filter, .. } => {
             walk_target_filter(filter, category, cursor)
         }
+        // CR 612.2 + CR 205.2a: `ControllerAndControlledPermanents.permanent_type`
+        // is an `Option<CoreType>` (a card TYPE, not a subtype or color word), and
+        // the player leg is a controller reference — no printed word to change.
+        // `Opponent` is a player-scope reference (CR 102.2). `PostReplacement*` are
+        // runtime event-context refs into the prevented damage event (CR 615.5).
         TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
+        | TargetFilter::ControllerAndControlledPermanents { .. }
         | TargetFilter::SelfRef
         | TargetFilter::GrantingObject
         | TargetFilter::SourceOrPaired
@@ -638,6 +648,7 @@ fn walk_target_filter(
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
@@ -773,6 +784,12 @@ fn walk_filter_prop(prop: &mut FilterProp, category: TextWordCategory, cursor: &
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
         | FilterProp::Renowned
+        // CR 701.15b/c: "goaded" is a designation marker, not a printed
+        // color/land/creature word.
+        | FilterProp::Goaded
+        // CR 715.2: "has an Adventure" is a structural card-shape predicate (an
+        // alternate face exists), not a subtype or color word.
+        | FilterProp::HasAdventure
         | FilterProp::ToughnessGTPower
         | FilterProp::PowerExceedsBase
         | FilterProp::InTrackedSet { .. }
@@ -781,6 +798,9 @@ fn walk_filter_prop(prop: &mut FilterProp, category: TextWordCategory, cursor: &
         | FilterProp::NotHistoric
         | FilterProp::InAnyZone { .. }
         | FilterProp::WasDealtDamageThisTurn
+        // CR 120.1: the active-voice damage-role dual of `WasDealtDamageThisTurn`
+        // — an event-history predicate with no printed word.
+        | FilterProp::DealtDamageThisTurn
         | FilterProp::EnteredThisTurn
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
@@ -1029,6 +1049,12 @@ fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: 
         // CR 101.2 + CR 109.5: "the number of players who control a Goblin" nests a
         // `PlayerFilter` whose control sub-filter can name a type/color word.
         QuantityRef::PlayerCount { filter } => walk_player_filter(filter, category, cursor),
+        // CR 603.2c + CR 109.5: "for each opponent dealt damage" counts the event
+        // batch's players through a `PlayerFilter` whose control / attribute
+        // sub-filters can name a creature type / land type / color word.
+        QuantityRef::EventContextPlayerCount { filter } => {
+            walk_player_filter(filter, category, cursor)
+        }
         // CR 612.2: "unspent [color] mana" spells the color WORD used as such —
         // consistent with `StaticMode::StepEndUnspentMana` (`None` is the any-color
         // form; contrast the `ManaSymbolsInManaCost` pip-count no-op below).
@@ -1076,6 +1102,9 @@ fn walk_quantity_ref(qty: &mut QuantityRef, category: TextWordCategory, cursor: 
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
+        // CR 700.2d: a count of modes chosen on the triggering spell — a runtime
+        // event-context snapshot, no printed word.
+        | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
@@ -1233,6 +1262,10 @@ fn walk_ability_condition(
         | AbilityCondition::TargetMatchesFilter { filter, .. }
         | AbilityCondition::TriggeringSpellTargetsFilter { filter }
         | AbilityCondition::SourceMatchesFilter { filter }
+        // CR 615.5 + CR 120.1: "if damage from a creature source is prevented this
+        // way" gates on a `TargetFilter` naming the prevented event's damage
+        // source — the same word-bearing carrier as `SourceMatchesFilter`.
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
         | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
         | AbilityCondition::ControllerControlsMatching { filter }
         | AbilityCondition::ControllerControlledMatchingAsCast { filter }
@@ -2026,6 +2059,9 @@ fn walk_static_mode(mode: &mut StaticMode, category: TextWordCategory, cursor: &
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
+        // CR 723.1a: a `ProhibitionScope` player-scope decision-authority override —
+        // no color / land / creature WORD (sibling of the two search prohibitions).
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
         | StaticMode::CantCauseSacrificeOrExile { .. }
         | StaticMode::CastWithFlash
         | StaticMode::GrantsExtraVote
@@ -2343,6 +2379,10 @@ fn walk_continuous_modification(
         }
         ContinuousModification::CopyValues { .. }
         | ContinuousModification::SetName { .. }
+        // CR 612.2 + CR 612.8: a literal NAME is not a color/land/creature word
+        // used as such — names are structurally excluded from the walk (sibling of
+        // `SetName` / `SetChosenName`).
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -2372,6 +2412,11 @@ fn walk_continuous_modification(
         | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        // CR 707.9a: a nullary "retain this object's other abilities" copy marker —
+        // it names no word; the retained abilities are read from the source object's
+        // own base sets, which the layer system re-seeds and re-walks (sibling of
+        // the two `RetainPrinted*FromSource` markers).
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -3008,6 +3053,14 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
                 walk_quantity_expr(k, category, cursor);
             }
             walk_target_filter(filter, category, cursor);
+        }
+        // CR 612.2 + CR 901.4: the planar-deck analog of `Dig`. The planar deck
+        // holds only plane / phenomenon cards, so there is no object filter here,
+        // but both counts are `QuantityExpr`s whose typed `ObjectCount` filter can
+        // name a creature/land/color word ("look at the top X, where X is …").
+        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
+            walk_quantity_expr(count, category, cursor);
+            walk_quantity_expr(keep_on_top, category, cursor);
         }
         Effect::RevealHand {
             card_filter, count, ..

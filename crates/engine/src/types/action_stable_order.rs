@@ -58,6 +58,15 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        // CR 612.1: the resolution-choice response is a single index into the
+        // engine-enumerated `(category, from, to)` option list — ordered by that
+        // index alone, exactly like the other indexed resolution choices.
+        GameAction::ChooseTextWordReplacement { index: a0 } => {
+            let GameAction::ChooseTextWordReplacement { index: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::PlayLand {
             object_id: a0,
             card_id: a1,

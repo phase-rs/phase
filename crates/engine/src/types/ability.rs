@@ -14989,6 +14989,7 @@ impl Effect {
             | Effect::VentureIntoDungeon
             | Effect::VentureInto { .. }
             | Effect::TakeTheInitiative
+            | Effect::ArrangePlanarDeckTop { .. }
             | Effect::Planeswalk
             | Effect::ChaosEnsues
             | Effect::RedistributeLifeTotals

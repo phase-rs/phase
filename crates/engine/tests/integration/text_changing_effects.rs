@@ -943,7 +943,7 @@ fn creature_type_in_trigger_intervening_if_changes_firing() {
     let cond = runner.state().objects[&scout]
         .trigger_definitions
         .iter_unchecked()
-        .find_map(|t| t.condition.clone());
+        .find_map(|t| t.definition().condition.clone());
     assert!(
         matches!(&cond, Some(TriggerCondition::ControlsType { .. })),
         "expected a ControlsType intervening-if on the attack trigger, got {cond:?}"
@@ -1507,7 +1507,9 @@ fn creature_type_in_attackers_declared_count_is_replaced() {
     fn subject_subtypes(obj: &GameObject) -> Vec<String> {
         let mut out = Vec::new();
         for t in obj.trigger_definitions.iter_unchecked() {
-            if let Some(TriggerCondition::AttackersDeclaredCount { subject, .. }) = &t.condition {
+            if let Some(TriggerCondition::AttackersDeclaredCount { subject, .. }) =
+                &t.definition().condition
+            {
                 let filter = match subject {
                     AttackersDeclaredCountSubject::Controller { filter, .. }
                     | AttackersDeclaredCountSubject::AttackTarget { filter, .. } => filter,
