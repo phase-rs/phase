@@ -32,7 +32,6 @@ jobs:
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       release_sha: ${{ steps.resolve.outputs.release_sha }}
-      is_calver: ${{ steps.resolve.outputs.is_calver }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,108 +59,12 @@ jobs:
           git fetch --force --tags origin "refs/tags/$TAG:refs/tags/$TAG"
           SHA=$(git rev-list -n 1 "$TAG")
 
-          if [[ "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
-            IS_CALVER=true
-          else
-            IS_CALVER=false
-          fi
-
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "is_calver=$IS_CALVER" >> "$GITHUB_OUTPUT"
-
-  tauri-preflight:
-    name: Tauri Preflight
-    needs: [resolve-release-ref]
-    # Fast-fail sanity check before paying for the full release matrix. Catches
-    # the structural class of failures that historically only surfaced 30-45
-    # minutes into the build-tauri job: malformed JSON, version drift between
-    # workspace Cargo.toml / tauri.conf.json / package.json (which
-    # cargo-release-local should keep in sync but won't if the release commit
-    # was hand-edited), and Rust-side compile errors in phase-tauri (excluded
-    # from regular CI's clippy/test runs in ci.yml). Linux-only — caught
-    # 99% of failures historically come from cross-platform-agnostic config or
-    # generic Rust mistakes, not from platform-specific Tauri internals.
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
-      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-
-      - name: Verify tag matches workspace + Tauri + package versions
-        run: |
-          set -euo pipefail
-          TAG="$RELEASE_TAG"
-          EXPECTED="${TAG#v}"
-
-          WORKSPACE_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          TAURI_CONF_VERSION=$(jq -r '.version' client/src-tauri/tauri.conf.json)
-          PACKAGE_JSON_VERSION=$(jq -r '.version' client/package.json)
-
-          fail=0
-          if [ "$WORKSPACE_VERSION" != "$EXPECTED" ]; then
-            echo "::error::Workspace Cargo.toml version $WORKSPACE_VERSION does not match tag $TAG"; fail=1
-          fi
-          if [ "$TAURI_CONF_VERSION" != "$EXPECTED" ]; then
-            echo "::error::tauri.conf.json version $TAURI_CONF_VERSION does not match tag $TAG"; fail=1
-          fi
-          if [ "$PACKAGE_JSON_VERSION" != "$EXPECTED" ]; then
-            echo "::error::client/package.json version $PACKAGE_JSON_VERSION does not match tag $TAG"; fail=1
-          fi
-          [ "$fail" = "0" ]
-
-      - name: Validate Tauri JSON configs
-        run: |
-          set -euo pipefail
-          jq empty client/src-tauri/tauri.conf.json
-          for f in client/src-tauri/capabilities/*.json; do
-            jq empty "$f"
-          done
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-shared-key: rust-tauri-preflight
-
-      - name: Install Linux Tauri build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
-
-      - name: Stub frontend dist for tauri::generate_context!
-        # `cargo check -p phase-tauri` runs `tauri::generate_context!()` which
-        # needs `frontendDist` (../dist per tauri.conf.json) to exist. We don't
-        # need the real frontend bundle for type-checking — a stub is enough.
-        run: |
-          mkdir -p client/dist
-          echo '<!doctype html><html></html>' > client/dist/index.html
-
-      - name: Stub phase-server sidecar + bundled resources for tauri-build
-        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and bundled data resources, so tauri-build's resource resolver
-        # requires those paths to exist
-        # at check time. The real sidecar / card-data are produced by the
-        # build-tauri matrix; for the preflight we only need the paths to
-        # exist (tauri-build validates existence, not content). Empty
-        # placeholders are sufficient.
-        run: |
-          mkdir -p client/src-tauri/binaries client/public
-          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
-          touch client/public/card-data.json
-          touch client/public/draft-pools.json
-
-      - name: cargo check phase-tauri
-        # phase-tauri is excluded from the root workspace (client/src-tauri),
-        # so `-p phase-tauri` from the repo root cannot resolve it. Drive the
-        # check via the crate's own manifest instead.
-        run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
 
   build-wasm:
     name: Build WASM + Frontend
-    needs: [resolve-release-ref, tauri-preflight]
+    needs: [resolve-release-ref]
     runs-on: ubuntu-latest
     # Card-data generation grows with the card/deck corpus: this job hit 28m for
     # v0.4.0 and crossed the prior 30m ceiling for v0.5.0 (killed mid-frontend
@@ -331,26 +234,6 @@ jobs:
           jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
           mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
-      - name: Stage frontend data files artifact
-        run: |
-          rm -rf release-data
-          mkdir -p release-data
-          while IFS= read -r f; do
-            if [ ! -f "client/public/$f" ]; then
-              echo "::error::Expected data file client/public/$f was not generated"
-              exit 1
-            fi
-            cp "client/public/$f" "release-data/$f"
-          done < <(jq -r '.[]' data-files.json)
-
-      - name: Upload frontend data files artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-data-files
-          path: release-data/*
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
@@ -451,8 +334,8 @@ jobs:
         # now one line in data-files.json and nothing else.
         #
         # Separately handled:
-        #   - card-data.json (non-manifest; kept in public/ for Tauri + server
-        #     bundles + local dev, but never deployed to Pages)
+        #   - card-data.json (non-manifest; kept in public/ for server bundles
+        #     + local dev, but never deployed to Pages)
         #   - card-data-<16hex>.json[.br] (content-addressed, lives on R2;
         #     glob matches only 16-hex suffixes, cannot match the 4-char
         #     `meta` suffix). This replaces the previous `find -regex` which
@@ -697,7 +580,7 @@ jobs:
 
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
+    needs: [resolve-release-ref, build-wasm, build-server-binary]
     runs-on: ${{ matrix.runner }}
     # The Windows leg ran ~33-34 min warm against a 35-min ceiling, so any cache
     # miss tripped the timeout and cancelled the release (a timed-out job reports
@@ -802,224 +685,6 @@ jobs:
             ${{ matrix.artifact }}.${{ matrix.archive_ext }}.sha256
           retention-days: 90
 
-  build-tauri:
-    name: Build Tauri (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm]
-    runs-on: ${{ matrix.runner }}
-    env:
-      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-latest
-            artifact: phase-tauri-linux
-            sidecar_triple: x86_64-unknown-linux-gnu
-          - os: macos
-            runner: macos-latest
-            artifact: phase-tauri-macos
-            sidecar_triple: aarch64-apple-darwin
-          - os: windows
-            runner: windows-latest
-            artifact: phase-tauri-windows
-            sidecar_triple: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          target: wasm32-unknown-unknown
-          cache-shared-key: rust-tauri-${{ matrix.os }}
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen-cli@0.2.121
-
-      - name: Install binaryen (Linux)
-        if: matrix.os == 'linux'
-        run: |
-          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
-
-      - name: Install binaryen (macOS)
-        if: matrix.os == 'macos'
-        run: brew install binaryen
-
-      - name: Install binaryen (Windows)
-        if: matrix.os == 'windows'
-        run: |
-          curl -L -o binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-windows.tar.gz
-          tar xzf binaryen.tar.gz
-          echo "$PWD\binaryen-version_123\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-        shell: pwsh
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: client/pnpm-lock.yaml
-
-      - name: Install system dependencies (Linux)
-        if: matrix.os == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf musl-tools
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Download card data
-        uses: actions/download-artifact@v4
-        with:
-          name: card-data
-          path: client/public
-
-      - name: Download frontend data files
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-data-files
-          path: client/public
-
-      - name: Verify Tauri bundled data files
-        run: |
-          test -s client/public/card-data.json
-          node - <<'NODE'
-          const fs = require("fs");
-          const files = JSON.parse(fs.readFileSync("data-files.json", "utf8"));
-          for (const file of files) {
-            const path = `client/public/${file}`;
-            const stat = fs.statSync(path);
-            if (stat.size === 0) throw new Error(`${path} is empty`);
-          }
-          NODE
-        shell: bash
-
-      - name: Build phase-server sidecar
-        run: |
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
-          else
-            cargo build --profile server-release --bin phase-server
-          fi
-          mkdir -p client/src-tauri/binaries
-        shell: bash
-
-      - name: Place sidecar binary (Unix)
-        if: matrix.os != 'windows'
-        run: |
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            cp target/x86_64-unknown-linux-musl/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
-          else
-            cp target/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
-          fi
-
-      - name: Place sidecar binary (Windows)
-        if: matrix.os == 'windows'
-        run: Copy-Item "target/server-release/phase-server.exe" "client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}.exe"
-        shell: pwsh
-
-      - name: Build WASM for Tauri
-        run: ./scripts/build-wasm.sh release
-        shell: bash
-
-      - name: Install frontend dependencies
-        run: cd client && pnpm install --frozen-lockfile
-
-      # Tauri selects its macOS signing path by the PRESENCE of these vars, not their
-      # value (tauri-bundler macos/sign.rs keys off `var_os("APPLE_CERTIFICATE")`), and a
-      # workflow `env:` key backed by an undefined secret is still DEFINED -- as "". So
-      # listing the Apple secrets directly on the build step made Tauri take the
-      # import-certificate branch and run `security import` on an empty certificate,
-      # failing the whole macOS bundle. $GITHUB_ENV only defines what it is handed, so
-      # export the signing vars only when a certificate actually exists. With no
-      # certificate, ad-hoc self-sign: identity "-" is passed straight to `codesign -s -`
-      # and needs no keychain (tauri-macos-sign Keychain::with_signing_identity).
-      - name: Configure macOS signing
-        if: matrix.os == 'macos'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
-            echo "No APPLE_CERTIFICATE secret; ad-hoc self-signing the macOS bundle."
-            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          echo "APPLE_CERTIFICATE found; signing with the Developer ID certificate."
-          {
-            echo "APPLE_CERTIFICATE<<__EOF__"
-            echo "$APPLE_CERTIFICATE"
-            echo "__EOF__"
-            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
-          } >> "$GITHUB_ENV"
-
-          # Each of these is independently optional: an identity is inferred from the
-          # certificate when unset, and notarization is skipped unless all three Apple ID
-          # vars are present. Only forward the ones that actually carry a value, so an
-          # empty secret never reaches Tauri as a defined-but-blank variable.
-          for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -n "${!var:-}" ]; then
-              echo "$var=${!var}" >> "$GITHUB_ENV"
-            fi
-          done
-
-      - name: Build Tauri
-        uses: tauri-apps/tauri-action@v0
-        env:
-          # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
-          # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
-          # desktop app too (it routes through openExternal → shell open).
-          RELEASE_BUILD: "true"
-          # Cloud-sync config reaches vite.config.ts via the same beforeBuildCommand
-          # path; without these the desktop build ships with cloud sync disabled.
-          # Anon key is client-safe (RLS gates access).
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          # Telemetry ingest define reaches vite.config.ts via the same
-          # beforeBuildCommand path as the Supabase vars above.
-          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # The APPLE_* signing vars are deliberately absent here -- listing them would
-          # define them as "" whenever the secret is unset, which is the failure the
-          # "Configure macOS signing" step above exists to avoid. That step exports them
-          # through $GITHUB_ENV only when they carry a value.
-        with:
-          projectPath: client
-
-      - name: Stage Tauri artifacts
-        run: |
-          mkdir -p staging
-          find client/src-tauri/target/release/bundle \
-            -maxdepth 2 \
-            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.AppImage.sig' \
-               -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \
-               -o -name '*.exe' -o -name '*.exe.sig' \) \
-            -exec cp {} staging/ \;
-          ls -la staging/
-        shell: bash
-
-      - name: Upload Tauri artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: staging/*
-          retention-days: 90
-
   deploy-server:
     name: Deploy Server (beebs, disabled)
     needs: [resolve-release-ref, build-server-image, release]
@@ -1084,25 +749,17 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [resolve-release-ref, build-wasm, build-server, build-server-image, build-tauri]
-    # CalVer production releases require full Tauri updater output so the
-    # stable desktop updater never points at a partial nightly. Legacy v0.*
-    # releases keep the older permissive behavior.
+    needs: [resolve-release-ref, build-wasm, build-server, build-server-image]
     if: >-
       always() &&
       needs.build-wasm.result == 'success' &&
       needs.build-server.result == 'success' &&
-      needs.build-server-image.result == 'success' &&
-      (
-        needs.build-tauri.result == 'success' ||
-        (needs.resolve-release-ref.outputs.is_calver != 'true' && needs.build-tauri.result == 'failure')
-      )
+      needs.build-server-image.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-      IS_CALVER: ${{ needs.resolve-release-ref.outputs.is_calver }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1114,84 +771,24 @@ jobs:
         with:
           path: artifacts
 
-      - name: Generate updater manifest
+      - name: Download shell updater migration bridge
+        id: shell-updater-bridge
         run: |
           set -euo pipefail
 
-          TAG="$RELEASE_TAG"
-          REPO="${GITHUB_REPOSITORY}"
-          shopt -s nullglob
-
-          first_match() {
-            local pattern="$1"
-            local match
-            match=$(compgen -G "$pattern" | sort | head -1 || true)
-            printf '%s' "$match"
-          }
-
-          artifact_url() {
-            local path="$1"
-            local name
-            name=$(basename "$path")
-            printf 'https://github.com/%s/releases/download/%s/%s' \
-              "$REPO" "$TAG" "$(jq -rn --arg value "$name" '$value | @uri')"
-          }
-
-          # Read signatures for available platforms (skip missing ones).
-          # Tauri v2 v3-compatible updater format: the raw installer is the
-          # updater payload (`.AppImage`, `-setup.exe`, `.app.tar.gz`); each
-          # has a sibling `.sig`. Set in tauri.conf.json: createUpdaterArtifacts: true.
-          LINUX_PAYLOAD=$(first_match "artifacts/phase-tauri-linux/*.AppImage")
-          MACOS_PAYLOAD=$(first_match "artifacts/phase-tauri-macos/*.app.tar.gz")
-          WINDOWS_PAYLOAD=$(first_match "artifacts/phase-tauri-windows/*-setup.exe")
-
-          LINUX_SIG=""
-          MACOS_SIG=""
-          WINDOWS_SIG=""
-          if [ -n "$LINUX_PAYLOAD" ] && [ -f "$LINUX_PAYLOAD.sig" ]; then LINUX_SIG=$(cat "$LINUX_PAYLOAD.sig"); fi
-          if [ -n "$MACOS_PAYLOAD" ] && [ -f "$MACOS_PAYLOAD.sig" ]; then MACOS_SIG=$(cat "$MACOS_PAYLOAD.sig"); fi
-          if [ -n "$WINDOWS_PAYLOAD" ] && [ -f "$WINDOWS_PAYLOAD.sig" ]; then WINDOWS_SIG=$(cat "$WINDOWS_PAYLOAD.sig"); fi
-
-          if [ "$IS_CALVER" = "true" ]; then
-            missing=0
-            if [ -z "$LINUX_PAYLOAD" ] || [ -z "$LINUX_SIG" ]; then echo "::error::Missing Linux updater payload/signature for CalVer release"; missing=1; fi
-            if [ -z "$MACOS_PAYLOAD" ] || [ -z "$MACOS_SIG" ]; then echo "::error::Missing macOS updater payload/signature for CalVer release"; missing=1; fi
-            if [ -z "$WINDOWS_PAYLOAD" ] || [ -z "$WINDOWS_SIG" ]; then echo "::error::Missing Windows updater payload/signature for CalVer release"; missing=1; fi
-            [ "$missing" = "0" ]
-          fi
-
-          # Build platforms object with only available platforms
-          PLATFORMS="{"
-          SEP=""
-          if [ -n "$LINUX_PAYLOAD" ] && [ -n "$LINUX_SIG" ]; then
-            LINUX_URL=$(artifact_url "$LINUX_PAYLOAD")
-            PLATFORMS="${PLATFORMS}${SEP}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"${LINUX_URL}\"}"
-            SEP=","
-          fi
-          if [ -n "$MACOS_PAYLOAD" ] && [ -n "$MACOS_SIG" ]; then
-            MACOS_URL=$(artifact_url "$MACOS_PAYLOAD")
-            PLATFORMS="${PLATFORMS}${SEP}\"darwin-aarch64\":{\"signature\":\"${MACOS_SIG}\",\"url\":\"${MACOS_URL}\"}"
-            SEP=","
-          fi
-          if [ -n "$WINDOWS_PAYLOAD" ] && [ -n "$WINDOWS_SIG" ]; then
-            WINDOWS_URL=$(artifact_url "$WINDOWS_PAYLOAD")
-            PLATFORMS="${PLATFORMS}${SEP}\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"${WINDOWS_URL}\"}"
-          fi
-          PLATFORMS="${PLATFORMS}}"
-
-          if [ "$PLATFORMS" = "{}" ]; then
-            echo "::warning::No signed updater artifacts found — skipping update.json"
+          bridge=$(mktemp)
+          status=$(curl -sS -L -o "$bridge" -w '%{http_code}' \
+            --connect-timeout 5 \
+            --max-time 30 \
+            https://data.phase-rs.dev/desktop/update.json || true)
+          if [ "$status" = "200" ]; then
+            mv "$bridge" artifacts/update.json
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Attached the current shell updater manifest for legacy desktop clients."
           else
-            # Tauri's plugin-updater parses `version` through Rust's `semver`
-            # crate, which rejects a leading `v`. Strip it (URL paths above
-            # already do this with `${TAG#v}`).
-            VERSION="${TAG#v}"
-            echo "{\"version\":\"${VERSION}\",\"notes\":\"Release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
-              | jq . > artifacts/update.json
-          fi
-
-          if [ "$IS_CALVER" = "true" ]; then
-            test -s artifacts/update.json
+            rm -f "$bridge"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Shell updater manifest unavailable (HTTP ${status:-curl failure}); publishing without the migration bridge."
           fi
 
       - name: Generate changelog
@@ -1229,7 +826,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
-          fail_on_unmatched_files: ${{ env.IS_CALVER == 'true' }}
+          fail_on_unmatched_files: true
           files: |
             artifacts/phase-server-linux-x86_64/*.tar.gz
             artifacts/phase-server-linux-x86_64/*.sha256
@@ -1237,9 +834,11 @@ jobs:
             artifacts/phase-server-macos-arm64/*.sha256
             artifacts/phase-server-windows-x86_64/*.zip
             artifacts/phase-server-windows-x86_64/*.sha256
-            artifacts/phase-tauri-linux/*.deb
-            artifacts/phase-tauri-linux/*.AppImage
-            artifacts/phase-tauri-macos/*.dmg
-            artifacts/phase-tauri-macos/*.app.tar.gz
-            artifacts/phase-tauri-windows/*.exe
-            artifacts/update.json
+
+      - name: Attach shell updater migration bridge
+        if: steps.shell-updater-bridge.outputs.available == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          fail_on_unmatched_files: true
+          files: artifacts/update.json

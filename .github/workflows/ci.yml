@@ -593,31 +593,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
 
-      - name: Stub frontend dist for tauri::generate_context!
+      - name: Stub bootstrap dist for tauri::generate_context!
         # phase-tauri's build.rs runs `tauri::generate_context!()` which
-        # requires `frontendDist` (../dist per tauri.conf.json) to exist.
-        # An empty stub is enough for type-checking — we don't bundle assets.
+        # requires `frontendDist` (../bootstrap/dist per tauri.conf.json) to
+        # exist. An empty stub is enough for type-checking — we don't bundle
+        # bootstrap assets here.
         run: |
-          mkdir -p client/dist
-          echo '<!doctype html><html></html>' > client/dist/index.html
-
-      - name: Stub phase-server sidecar + bundled resources for tauri-build
-        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and bundled data resources, so tauri-build requires those paths to
-        # exist at check time. The real sidecar / data files are built in the
-        # release matrix; for PR-time compile checks we only need the paths to
-        # exist.
-        run: |
-          mkdir -p client/src-tauri/binaries client/public
-          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
-          touch client/public/card-data.json
-          touch client/public/draft-pools.json
+          mkdir -p client/bootstrap/dist
+          echo '<!doctype html><html></html>' > client/bootstrap/dist/index.html
 
       - name: Tauri compile check
         # phase-tauri is excluded from the workspace clippy and nextest runs
         # above (no proptest support, no tests). Without this step, compile
-        # errors in the desktop crate only surface at release time during the
-        # 30-45min build-tauri matrix. Catches them on every PR in ~3 min.
+        # errors in the desktop crate only surface at shell release time.
+        # Catches them on every PR in ~3 min.
         # Driven via --manifest-path because client/src-tauri is excluded
         # from the root workspace, so `-p phase-tauri` cannot resolve it.
         run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
