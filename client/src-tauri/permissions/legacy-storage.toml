@@ -1,0 +1,19 @@
+[[permission]]
+identifier = "allow-stash-legacy-storage"
+description = "Allows the bundled bootstrap page to stage legacy storage."
+commands.allow = ["stash_legacy_storage"]
+
+[[permission]]
+identifier = "allow-take-legacy-storage"
+description = "Allows first-party remote content to read staged legacy storage."
+commands.allow = ["take_legacy_storage"]
+
+[[permission]]
+identifier = "allow-confirm-legacy-import"
+description = "Allows first-party remote content to confirm legacy storage import."
+commands.allow = ["confirm_legacy_import"]
+
+[[permission]]
+identifier = "allow-mark-remote-load-ok"
+description = "Allows first-party remote content to mark a successful remote load."
+commands.allow = ["mark_remote_load_ok"]

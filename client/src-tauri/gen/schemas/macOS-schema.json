@@ -387,6 +387,30 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows first-party remote content to confirm legacy storage import.",
+          "type": "string",
+          "const": "allow-confirm-legacy-import",
+          "markdownDescription": "Allows first-party remote content to confirm legacy storage import."
+        },
+        {
+          "description": "Allows first-party remote content to mark a successful remote load.",
+          "type": "string",
+          "const": "allow-mark-remote-load-ok",
+          "markdownDescription": "Allows first-party remote content to mark a successful remote load."
+        },
+        {
+          "description": "Allows the bundled bootstrap page to stage legacy storage.",
+          "type": "string",
+          "const": "allow-stash-legacy-storage",
+          "markdownDescription": "Allows the bundled bootstrap page to stage legacy storage."
+        },
+        {
+          "description": "Allows first-party remote content to read staged legacy storage.",
+          "type": "string",
+          "const": "allow-take-legacy-storage",
+          "markdownDescription": "Allows first-party remote content to read staged legacy storage."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

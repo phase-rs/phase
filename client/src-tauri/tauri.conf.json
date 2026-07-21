@@ -4,10 +4,10 @@
   "version": "0.31.0",
   "identifier": "rs.phase.app",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../bootstrap/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build"
+    "beforeBuildCommand": "pnpm build:bootstrap"
   },
   "app": {
     "windows": [
@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' https://*.scryfall.io https://data.phase-rs.dev; media-src 'self' https://data.phase-rs.dev; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* wss: https://*.scryfall.io https://data.phase-rs.dev; font-src 'self' data:; worker-src 'self' blob:"
+      "csp": "default-src 'self'; connect-src 'self' https://phase-rs.dev https://preview.phase-rs.dev"
     }
   },
   "bundle": {
@@ -35,17 +35,12 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": ["binaries/phase-server"],
-    "resources": {
-      "../public/card-data.json": "data/card-data.json",
-      "../public/draft-pools.json": "data/draft-pools.json"
-    },
     "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/phase-rs/phase/releases/latest/download/update.json"
+        "https://data.phase-rs.dev/desktop/update.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc4MzI0NUJGOEIyODNFNjIKUldSaVBpaUx2MFV5ZU4zNk9vWGtJQVN1eTRmc2Rvc3pDc2JvWWM4TTlua1dWQ1g3eGlFN1NQaFEK"
     }
