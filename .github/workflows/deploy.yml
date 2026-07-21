@@ -292,7 +292,10 @@ jobs:
           DRAFT_POOLS_SHA256: ${{ steps.card-data-hash.outputs.draft_pools_sha256 }}
           DRAFT_POOLS_HASH16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
         run: |
-          if ! gh workflow run preview-server.yml --ref "$DEPLOY_SHA" \
+          # Dispatch from main (workflow_dispatch refs must be a branch/tag,
+          # never a bare SHA — same pattern as nightly-release.yml); the exact
+          # source tree is pinned separately by the `commit` input below.
+          if ! gh workflow run preview-server.yml --ref main \
             -f "fingerprint=$FINGERPRINT" \
             -f "commit=$DEPLOY_SHA" \
             -f "card_data_sha256=$CARD_DATA_SHA256" \
@@ -515,7 +518,16 @@ jobs:
 
   # ── Server image push (needs binary) ────────────────────────────────────────
   # Pure packaging step: pulls the prebuilt musl binary, then BINARY_STAGE=prebuilt
-  # makes Docker just apt + COPY (no compile). Server data bootstraps at runtime.
+  # makes Docker just apt + COPY (no compile).
+  #
+  # NOTE: this binary is compiled WITHOUT a PHASE_CHANNEL identity (it builds in
+  # parallel with card-data, so the fingerprint cannot exist yet), which means
+  # the image cannot self-bootstrap its data: booting it against an empty
+  # PHASE_DATA_DIR is a clear fatal error. Any consumer must either
+  # pre-provision the data volume or set PHASE_DATA_MANIFEST_URL to a signed
+  # release-shaped data manifest. No in-repo deployment currently runs this
+  # image (beebs deploy-server is disabled); see GH #6287 for publishing a
+  # signed staging data manifest before re-enabling one.
   push-server-image:
     name: Build & push server image
     needs: [build-server-binary]
