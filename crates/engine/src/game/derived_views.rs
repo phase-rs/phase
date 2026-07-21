@@ -1493,17 +1493,46 @@ mod tests {
             &mut events,
         );
 
+        let merge_effect_id = state
+            .objects
+            .get(&host)
+            .and_then(|object| object.merge_layer_effect_id);
         assert!(
-            state
-                .objects
-                .get(&host)
-                .and_then(|object| object.merge_layer_effect_id)
-                .is_some(),
+            merge_effect_id.is_some(),
             "precondition: merge is represented by a CopyValues layer effect"
         );
         assert!(
             derive_views(&state, None).copied_permanents.is_empty(),
             "a merge representation must not produce a Copy badge"
+        );
+
+        // The exclusion is effect-scoped, not object-scoped: a merged
+        // permanent can still acquire an independent copy effect.
+        let values = crate::game::printed_cards::intrinsic_copiable_values(
+            state.objects.get(&host).unwrap(),
+        );
+        let independent_copy_effect_id = state.add_transient_continuous_effect(
+            host,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: host },
+            vec![ContinuousModification::CopyValues {
+                values: Box::new(values),
+                display_source: DisplaySource::Card,
+                printed_ref: None,
+                token_image_ref: None,
+            }],
+            None,
+        );
+        assert_ne!(
+            Some(independent_copy_effect_id),
+            merge_effect_id,
+            "precondition: the independent copy effect is distinct from merge's representation"
+        );
+        assert_eq!(
+            derive_views(&state, None).copied_permanents,
+            vec![host],
+            "a later independent copy effect on a merged permanent must still produce a badge"
         );
     }
 
