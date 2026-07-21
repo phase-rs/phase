@@ -89,6 +89,8 @@ The CLI models freshness using:
 - CI status as evidence only, not as a pre-review or merge-when-ready gate;
 - labels and merge-queue membership.
 
+**Redundant-review guard.** The converse of the freshness invariant: when the most recent comment or review on the PR was authored by a repository member (GitHub `authorAssociation` of `OWNER`, `MEMBER`, or `COLLABORATOR` — including the acting login), the ball is in the contributor's court and there is no unacknowledged follow-up to respond to. Do not dispatch a redundant review of the same head. This guard suppresses only redundancy: it never overrides the mandatory re-review triggers below (changed head, queue drop, stale approval, edited author activity), which act on state, not on who spoke last.
+
 **Freshness invariant.** Before accepting `held`, `blocked`, `queued`, or a previously approved no-action result, the sweep must compare the current `headRefOid` with the most recent locally recorded head. A different head is a mandatory re-review candidate (or `update_branch_for_handler` when it conflicts), never an inherited hold. Likewise, an author comment/review created **or edited** after the latest GitHub-visible maintainer comment/review is an unacknowledged follow-up even if a later local event recorded a hold. Local event timestamps are observations, not contributor responses. If the scanner cannot prove that it has the relevant recent comment history, it must surface the PR for review rather than preserve the state. Explicit capability-policy deferrals and self/standing skips remain policy decisions, not inherited review states.
 
 ## Maintainer-Caused Staleness

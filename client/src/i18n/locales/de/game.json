@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
     "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
-    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Aktuelle Phase: {{phase}}. Phasenstopp-Einstellungen öffnen.",
+    "sheetTitle": "Zugphasen",
+    "sheetSubtitle": "Tippe auf einen Schritt, um festzulegen, wann das automatische Passen dort stoppt.",
+    "scopeShortOff": "Aus",
+    "scopeShortAllTurns": "Alle Züge",
+    "scopeShortOwnTurn": "Deine Züge",
+    "scopeShortOpponentsTurns": "Gegnerzüge"
   },
   "phaseTracker": {
     "turn": "Zug {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}}-Marke\n{{description}}",
     "summary_other": "{{count}} {{label}}-Marken\n{{description}}",
+    "summaryUnbounded": "∞ {{label}}-Marken\n{{description}}",
     "descriptions": {
       "p1p1": "Jede +1/+1-Marke gibt der bleibenden Karte +1/+1.",
       "m1m1": "Jede -1/-1-Marke gibt der bleibenden Karte -1/-1.",
@@ -576,6 +584,15 @@
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo",
+    "loopCollapseTitleTokens": "Wähle, wie viele Spielsteine erzeugt werden",
+    "loopCollapseTitleCounters": "Wähle, wie oft Marken hinzugefügt werden",
+    "loopCollapseTitleLife": "Wähle, wie oft Leben dazugewonnen wird",
+    "loopCollapseTitleMixed": "Wähle, wie oft die Schleife wiederholt wird",
+    "loopCollapseAmountTokens_one": "{{count}} Spielstein erzeugen",
+    "loopCollapseAmountTokens_other": "{{count}} Spielsteine erzeugen",
+    "loopCollapseAmountCounters": "Marken hinzufügen {{value}}×",
+    "loopCollapseAmountLife": "Leben dazugewinnen {{value}}×",
+    "loopCollapseAmountMixed": "Schleife wiederholen {{value}}×",
     "manualMana": "Manuell",
     "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
     "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
@@ -1765,6 +1782,13 @@
     "variantBestow": "Mit Verleihen wirken",
     "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
+    "variantMutate": "Mit Mutate wirken",
+    "variantAwaken": "Mit Erwecken wirken",
+    "variantCleave": "Mit Abspalten wirken",
+    "variantImpending": "Mit Drohend wirken",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Mit Prototyp wirken",
+    "variantFaceDown": "Verdeckt wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
   "categoryChoice": {
@@ -2057,6 +2081,7 @@
     "fromSideboard": "Aus dem Sideboard"
   },
   "phaseName": {
+    "Untap": "Enttappen",
     "Upkeep": "Versorgung",
     "Draw": "Ziehen",
     "PreCombatMain": "Hauptphase 1",

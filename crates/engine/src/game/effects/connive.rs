@@ -1348,7 +1348,7 @@ mod tests {
     /// replacement reads "you draw a card, THEN that creature connives" — the
     /// "then" fixes the printed order, so the connive runs only AFTER the parked
     /// draw choice resolves. The applier defers the connive into the DEDICATED
-    /// `state.pending_connive_reentry` slot and returns `Prevented`; the
+    /// stack-owned Connive re-entry and returns `Prevented`; the
     /// post-replacement-choice epilogue
     /// (`engine_replacement::handle_replacement_choice`) drains that slot once the
     /// leading draw fully delivers (AFTER the Priority reset), so the resulting
@@ -1373,7 +1373,7 @@ mod tests {
     /// the continuation mid-draw, the connive's `ConniveDiscard` is then clobbered
     /// to `Priority` by the epilogue reset, so `waiting_for` is NOT
     /// `ConniveDiscard`. (2) Revert ONLY E2 (defer still writes the field, no
-    /// epilogue drain): post-resume `state.pending_connive_reentry` is stranded
+    /// epilogue drain): the stack-owned Connive re-entry is stranded
     /// `Some(..)` instead of `None`, and the connive never resumes
     /// (`waiting_for == Priority`). (3) Revert ONLY C (no field stashed, applier
     /// runs `Effect::Connive` synchronously): the pre-resume "0 counters" / "0
@@ -1427,9 +1427,9 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         // POST-FIX: the leading DRAW parked its replacement-ordering choice; the
-        // connive was DEFERRED into the dedicated slot, not run. (Pre-fix without
-        // STEP C: the connive ran early and clobbered this with ConniveDiscard, and
-        // the field was never stashed.)
+        // connive was DEFERRED into the stack-owned draw authority, not run.
+        // (Pre-fix without STEP C: the connive ran early and clobbered this with
+        // ConniveDiscard, and no re-entry was stashed.)
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
             "leading draw must park a ReplacementChoice (the draw's choice), got {:?}",
@@ -1437,11 +1437,11 @@ mod tests {
         );
         assert!(
             matches!(
-                state.pending_connive_reentry,
+                state.active_connive_reentry(),
                 Some(PendingConniveReentry { .. })
             ),
-            "the deferred connive must be stashed in pending_connive_reentry, got {:?}",
-            state.pending_connive_reentry
+            "the deferred connive must be stack-owned, got {:?}",
+            state.active_connive_reentry()
         );
         // The connive has NOT run yet: no +1/+1 counter, no Connive completion.
         assert_eq!(
@@ -1468,24 +1468,34 @@ mod tests {
             "the connive must not complete before the draw choice resolves"
         );
 
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("connive prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("connive prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
+
         // Resolve the draw's ordering choice through the REAL action pipeline.
         // The whole resume (apply both count-modifiers, complete the modified
-        // leading draw, then drain the deferred pending_connive_reentry) runs
+        // leading draw, then drain the deferred Connive re-entry) runs
         // within this one resume; fold its returned events in.
         let resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("draw replacement ordering choice");
         events.extend(resume.events.iter().cloned());
 
         // POST-FIX CRUX: the deferred connive resumed in printed order. The
-        // dedicated slot is drained to None, and the surviving plain connive now
+        // stack-owned re-entry is drained to None, and the surviving plain connive now
         // pauses on its own ConniveDiscard (the modified leading draw plus the
         // connive's own draw leave 2+ cards in hand). This ConniveDiscard surviving
-        // the epilogue's Priority reset is exactly what the dedicated-slot drain
+        // the epilogue's Priority reset is exactly what the dedicated re-entry drain
         // (run AFTER the reset) buys over the round-1 mid-draw DeliveryTail drain.
         assert!(
-            state.pending_connive_reentry.is_none(),
-            "pending_connive_reentry must be drained to None after the draw choice resolves, got {:?}",
-            state.pending_connive_reentry
+            state.active_connive_reentry().is_none(),
+            "the Connive re-entry must be drained after the draw choice resolves, got {:?}",
+            state.active_connive_reentry()
         );
         match state.waiting_for.clone() {
             WaitingFor::ConniveDiscard {
@@ -1594,7 +1604,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).expect("Leader connive resolves to the pause");
         assert!(
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
-                && matches!(state.pending_connive_reentry, Some(PendingConniveReentry { .. })),
+                && matches!(state.active_connive_reentry(), Some(PendingConniveReentry { .. })),
             "reach guard: Leader's deferred connive tail must be pending at the draw replacement choice"
         );
 
@@ -1664,7 +1674,7 @@ mod tests {
     /// Two applicable mandatory replacements on the leading `Draw 1` force a
     /// CR 616.1 ordering `ReplacementChoice` so the leading draw PARKS (a lone
     /// Prevent would auto-apply without a choice) and the connive DEFERS into
-    /// `pending_connive_reentry`. Choosing one Prevent fully prevents the leading
+    /// the stack-owned Connive re-entry. Choosing one Prevent fully prevents the leading
     /// draw -> `continue_replacement` returns `ReplacementResult::Prevented` ->
     /// the Prevented arm of `handle_replacement_choice`. The chosen Prevent is
     /// consumed (`consume_on_apply`); the OTHER Prevent survives. The drain added
@@ -1681,7 +1691,7 @@ mod tests {
     /// connive ran), and control returns to Priority. Pre-fix (Step 3 reverted),
     /// the Prevented arm never drains the slot: it stays STRANDED `Some(..)`, NO
     /// `EffectResolved { Connive }` is emitted, and waiting_for falls through to
-    /// Priority. So the `pending_connive_reentry.is_none()` AND the
+    /// Priority. So the Connive re-entry emptiness AND the
     /// `EffectResolved { Connive }` count == 1 assertions BOTH flip on revert.
     /// (Verified non-vacuous by neutering Step 3 and watching this test fail.)
     #[test]
@@ -1743,11 +1753,11 @@ mod tests {
         );
         assert!(
             matches!(
-                state.pending_connive_reentry,
+                state.active_connive_reentry(),
                 Some(PendingConniveReentry { .. })
             ),
-            "the deferred connive must be stashed before the draw choice resolves, got {:?}",
-            state.pending_connive_reentry
+            "the deferred connive must be stack-owned before the draw choice resolves, got {:?}",
+            state.active_connive_reentry()
         );
 
         // Resolve the leading draw's ordering choice (either index is a Prevent).
@@ -1764,9 +1774,9 @@ mod tests {
         // assertions are FALSE pre-fix (Step 3 reverted: the slot stays Some and no
         // EffectResolved { Connive } is emitted).
         assert!(
-            state.pending_connive_reentry.is_none(),
-            "pending_connive_reentry must be drained to None after the prevented draw, got {:?}",
-            state.pending_connive_reentry
+            state.active_connive_reentry().is_none(),
+            "the Connive re-entry must be drained after the prevented draw, got {:?}",
+            state.active_connive_reentry()
         );
         assert!(
             matches!(state.waiting_for, WaitingFor::Priority { .. }),

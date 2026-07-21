@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Para apenas nos seus turnos.",
     "scopeOpponentsTurns": "Para apenas nos turnos dos oponentes.",
     "tooltipCurrentPhase": "Fase atual.",
-    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase atual: {{phase}}. Abrir configurações de paradas de fase.",
+    "sheetTitle": "Fases do turno",
+    "sheetSubtitle": "Toque em uma etapa para mudar quando o passe automático para ali.",
+    "scopeShortOff": "Desativado",
+    "scopeShortAllTurns": "Todos os turnos",
+    "scopeShortOwnTurn": "Seus turnos",
+    "scopeShortOpponentsTurns": "Turnos dos oponentes"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 marcador {{label}}\n{{description}}",
     "summary_other": "{{count}} marcadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ marcadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada marcador +1/+1 dá +1/+1 à permanente.",
       "m1m1": "Cada marcador -1/-1 dá -1/-1 à permanente.",
@@ -576,6 +584,15 @@
     "resourceMana": "mana",
     "resourceCounters": "marcadores",
     "resourceSpeed": "velocidade",
+    "loopCollapseTitleTokens": "Escolha quantas fichas criar",
+    "loopCollapseTitleCounters": "Escolha quantas vezes adicionar marcadores",
+    "loopCollapseTitleLife": "Escolha quantas vezes ganhar vida",
+    "loopCollapseTitleMixed": "Escolha quantas vezes repetir o ciclo",
+    "loopCollapseAmountTokens_one": "Criar {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Criar {{count}} fichas",
+    "loopCollapseAmountCounters": "Adicionar marcadores {{value}}×",
+    "loopCollapseAmountLife": "Ganhar vida {{value}}×",
+    "loopCollapseAmountMixed": "Repetir o ciclo {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Mana manual — apenas esta partida. Vire suas próprias terras e mana para pagar.",
     "spendHint": "Clique no seu mana para gastá-lo neste custo",
@@ -1765,6 +1782,13 @@
     "variantBestow": "Conjurar com Conceder",
     "variantFreerunning": "Conjurar com Freerunning",
     "variantFuse": "Conjurar com Fusão",
+    "variantMutate": "Conjurar com Mutate",
+    "variantAwaken": "Conjurar com Despertar",
+    "variantCleave": "Conjurar com Remover",
+    "variantImpending": "Conjurar com Iminente",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Conjurar com Protótipo",
+    "variantFaceDown": "Conjurar Virada para Baixo",
     "variantFallback": "Conjurar com {{type}}"
   },
   "categoryChoice": {
@@ -2057,6 +2081,7 @@
     "fromSideboard": "Do sideboard"
   },
   "phaseName": {
+    "Untap": "Desvirar",
     "Upkeep": "Manutenção",
     "Draw": "Compra",
     "PreCombatMain": "Fase principal 1",

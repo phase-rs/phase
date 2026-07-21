@@ -28,6 +28,8 @@
     "logDefault": "Log Default",
     "spellPayment": "Spell Payment",
     "manualManaPayment": "Manual mana payment for spells",
+    "nativeEngine": "Native engine for AI games",
+    "nativeEngineDescription": "Use the downloaded native engine for local AI games. Falls back to the built-in engine automatically when unavailable.",
     "boardBackground": "Board Background",
     "boardBackgroundGroups": {
       "automatic": "Automatic",

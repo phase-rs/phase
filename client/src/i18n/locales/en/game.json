@@ -405,7 +405,14 @@
     "scopeOwnTurn": "Stops only on your turns.",
     "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
-    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Current phase: {{phase}}. Open phase stop settings.",
+    "sheetTitle": "Turn phases",
+    "sheetSubtitle": "Tap a step to change when auto-pass stops there.",
+    "scopeShortOff": "Off",
+    "scopeShortAllTurns": "All turns",
+    "scopeShortOwnTurn": "My turns",
+    "scopeShortOpponentsTurns": "Opponents' turns"
   },
   "phaseTracker": {
     "turn": "Turn {{number}}"
@@ -445,6 +452,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}} counter\n{{description}}",
     "summary_other": "{{count}} {{label}} counters\n{{description}}",
+    "summaryUnbounded": "∞ {{label}} counters\n{{description}}",
     "descriptions": {
       "p1p1": "Each +1/+1 counter gives the permanent +1/+1.",
       "m1m1": "Each -1/-1 counter gives the permanent -1/-1.",
@@ -608,6 +616,15 @@
     "resourceMana": "mana",
     "resourceCounters": "counters",
     "resourceSpeed": "speed",
+    "loopCollapseTitleTokens": "Choose how many tokens to create",
+    "loopCollapseTitleCounters": "Choose how many times to add counters",
+    "loopCollapseTitleLife": "Choose how many times to gain life",
+    "loopCollapseTitleMixed": "Choose how many times to repeat the loop",
+    "loopCollapseAmountTokens_one": "Create {{count}} token",
+    "loopCollapseAmountTokens_other": "Create {{count}} tokens",
+    "loopCollapseAmountCounters": "Add counters {{value}}×",
+    "loopCollapseAmountLife": "Gain life {{value}}×",
+    "loopCollapseAmountMixed": "Repeat loop {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
     "spendHint": "Click your mana to spend it on this cost",
@@ -1802,6 +1819,13 @@
     "variantBestow": "Cast with Bestow",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
+    "variantMutate": "Cast with Mutate",
+    "variantAwaken": "Cast with Awaken",
+    "variantCleave": "Cast with Cleave",
+    "variantImpending": "Cast with Impending",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Cast with Prototype",
+    "variantFaceDown": "Cast Face Down",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {
@@ -2094,6 +2118,7 @@
     "fromSideboard": "From sideboard"
   },
   "phaseName": {
+    "Untap": "Untap",
     "Upkeep": "Upkeep",
     "Draw": "Draw",
     "PreCombatMain": "Main Phase 1",

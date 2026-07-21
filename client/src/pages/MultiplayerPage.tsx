@@ -422,7 +422,7 @@ export function MultiplayerPage() {
           });
           useGameStore.setState({ gameId });
           navigate(
-            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}`,
+            `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${action.settings.formatConfig.format}&players=${action.settings.formatConfig.max_players}&match=${action.settings.matchType.toLowerCase()}&source=multiplayer`,
           );
           return true;
         }

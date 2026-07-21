@@ -19,7 +19,7 @@ use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use super::oracle_nom::condition::{
     parse_attached_subject_target_filter, parse_inner_condition,
-    parse_opponent_who_controls_at_least_as_many,
+    parse_opponent_who_controls_at_least_as_many, parse_you_cast_another_spell_filter_this_turn,
 };
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
@@ -34,13 +34,14 @@ use super::oracle_util::{
 use crate::types::ability::CastingPermission;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
-    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
+    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
+    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
+    PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -3853,6 +3854,13 @@ fn parse_enters_with_counters(
     // CR 702.33d: kicker condition gates the replacement effect.
     let (kicker_condition, work_text) = extract_kicker_enters_condition(norm_lower);
 
+    // CR 614.1c: Split any trailing " unless <game-state condition>" gate off
+    // the payload UP FRONT, so all payload parsing below (escape scan, "with "
+    // split, choice-of-counter, dynamic quantities, enters-tapped, distributive
+    // subject) operates on the unless-free text. Silently dropping this tail is
+    // the bug class being fixed (Hotheaded Giant / Steel Exemplar).
+    let (work_text, unless_outcome) = extract_enters_with_unless_suffix(work_text);
+
     // CR 702.138c: "escapes with" / plural-subject "escape with" is
     // semantically "enters with" gated on escape.
     let is_escape = nom_primitives::scan_contains(work_text, "escapes with")
@@ -3936,22 +3944,15 @@ fn parse_enters_with_counters(
                 .destination_zone(Zone::Battlefield)
                 .description(original_text.to_string());
 
-            // Reuse the existing condition tail (escape / kicker / cast-from-zone
-            // / raid / web-slinging / generic only-if).
-            if is_escape {
-                def = def.condition(ReplacementCondition::CastViaEscape);
-            } else if let Some(cond) = kicker_condition {
-                def = def.condition(cond);
-            } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
-                def = def.condition(ReplacementCondition::CastFromZone { zone });
-            } else if extract_you_attacked_this_turn_suffix(work_text) {
-                def = def.condition(ReplacementCondition::YouAttackedThisTurn);
-            } else if extract_cast_using_web_slinging_suffix(work_text) {
-                def = def.condition(ReplacementCondition::CastVariantPaid {
-                    variant: CastVariantPaid::WebSlinging,
-                });
-            } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
-                def = def.condition(condition);
+            // CR 614.1c: Attach the single applicable gate. The " unless " gate
+            // and the trailing conditional-suffix gate are mutually exclusive —
+            // one condition slot — so their co-occurrence fails closed.
+            let other_suffix =
+                enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
+            match resolve_enters_with_condition(&unless_outcome, other_suffix) {
+                None => return None,
+                Some(Some(cond)) => def = def.condition(cond),
+                Some(None) => {}
             }
 
             return Some(def);
@@ -4129,31 +4130,72 @@ fn parse_enters_with_counters(
         def = def.valid_card(filter);
     }
 
-    // Apply condition: escape, kicker, or cast-from-zone suffix.
-    // CR 603.4: Myojin-class "enters with [counter] on it if you cast it
-    // from your hand" — trailing zone gate on a self-ETB replacement.
-    if is_escape {
-        def = def.condition(ReplacementCondition::CastViaEscape);
-    } else if let Some(cond) = kicker_condition {
-        def = def.condition(cond);
-    } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
-        def = def.condition(ReplacementCondition::CastFromZone { zone });
-    } else if extract_you_attacked_this_turn_suffix(work_text) {
-        // CR 207.2c (Raid): "Raid — ~ enters with [counter] on it if you
-        // attacked this turn." (Cruel Administrator, Goblin Boarders, etc.)
-        def = def.condition(ReplacementCondition::YouAttackedThisTurn);
-    } else if extract_cast_using_web_slinging_suffix(work_text) {
-        // CR 702.188a: "If ~ was cast using web-slinging, ..." (Scarlet Spider).
-        def = def.condition(ReplacementCondition::CastVariantPaid {
-            variant: CastVariantPaid::WebSlinging,
-        });
-    } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
-        // CR 614.1c + CR 700.4: Generic suffix gates for ETB-counter
-        // replacements, e.g. Morbid's "if a creature died this turn".
-        def = def.condition(condition);
+    // Apply condition: escape, kicker, cast-from-zone/raid/web-slinging/only-if
+    // suffix, OR the up-front " unless " gate. CR 603.4: Myojin-class "enters
+    // with [counter] on it if you cast it from your hand". CR 614.1c: the
+    // " unless " gate and a trailing conditional-suffix gate share the single
+    // condition slot, so their co-occurrence fails closed (→ unimplemented)
+    // rather than silently dropping one gate.
+    let other_suffix = enters_with_condition_suffix(is_escape, &kicker_condition, work_text);
+    match resolve_enters_with_condition(&unless_outcome, other_suffix) {
+        None => return None,
+        Some(Some(cond)) => def = def.condition(cond),
+        Some(None) => {}
     }
 
     Some(def)
+}
+
+/// CR 614.1c: The trailing conditional-suffix gate shared by both the
+/// choice-of-counter branch and the main single-counter branch of
+/// `parse_enters_with_counters` — escape / kicker / cast-from-zone / raid /
+/// web-slinging / generic only-if, in that precedence order. Factored so the
+/// two branches cannot drift.
+fn enters_with_condition_suffix(
+    is_escape: bool,
+    kicker_condition: &Option<ReplacementCondition>,
+    work_text: &str,
+) -> Option<ReplacementCondition> {
+    if is_escape {
+        // CR 702.138c
+        Some(ReplacementCondition::CastViaEscape)
+    } else if let Some(cond) = kicker_condition {
+        // CR 702.33d
+        Some(cond.clone())
+    } else if let Some(zone) = extract_cast_from_zone_suffix(work_text) {
+        // CR 603.4
+        Some(ReplacementCondition::CastFromZone { zone })
+    } else if extract_you_attacked_this_turn_suffix(work_text) {
+        // CR 207.2c (Raid)
+        Some(ReplacementCondition::YouAttackedThisTurn)
+    } else if extract_cast_using_web_slinging_suffix(work_text) {
+        // CR 702.188a
+        Some(ReplacementCondition::CastVariantPaid {
+            variant: CastVariantPaid::WebSlinging,
+        })
+    } else {
+        // CR 614.1c + CR 700.4: generic only-if suffix, or no gate.
+        extract_enters_with_only_if_suffix(work_text)
+    }
+}
+
+/// CR 614.1c: Reconcile the up-front " unless " gate with the trailing
+/// conditional-suffix gate. `None` = fail closed (the caller returns `None` so
+/// the line falls through to `Effect::unimplemented`): either the unless clause
+/// was present-but-unparsed, or both gates co-occur and there is only one
+/// condition slot. `Some(None)` = no gate. `Some(Some(cond))` = the single
+/// applicable gate.
+fn resolve_enters_with_condition(
+    unless_outcome: &EntersWithUnlessOutcome,
+    other_suffix: Option<ReplacementCondition>,
+) -> Option<Option<ReplacementCondition>> {
+    match (unless_outcome, other_suffix) {
+        (EntersWithUnlessOutcome::Unparsed, _) => None,
+        (EntersWithUnlessOutcome::Parsed(_), Some(_)) => None,
+        (EntersWithUnlessOutcome::Parsed(cond), None) => Some(Some(cond.clone())),
+        (EntersWithUnlessOutcome::NoUnlessClause, Some(other)) => Some(Some(other)),
+        (EntersWithUnlessOutcome::NoUnlessClause, None) => Some(None),
+    }
 }
 
 fn has_enters_tapped_with_counter(text: &str) -> bool {
@@ -4213,6 +4255,108 @@ fn extract_enters_with_only_if_suffix(text: &str) -> Option<ReplacementCondition
     let (rest, condition) = parse_inner_condition(condition_text).ok()?;
     rest.trim().is_empty().then_some(())?;
     replacement_condition_from_static(condition)
+}
+
+/// Outcome of scanning an "enters with [counters]" clause for a trailing
+/// " unless <condition>" gate (CR 614.1c).
+#[derive(Debug, Clone)]
+enum EntersWithUnlessOutcome {
+    /// No " unless " clause present — the payload has no unless gate.
+    NoUnlessClause,
+    /// A recognized game-state condition; the replacement is suppressed while
+    /// the condition holds.
+    Parsed(ReplacementCondition),
+    /// A " unless " clause is present but its condition could not be parsed —
+    /// the caller MUST fail closed (never silently drop the gate, the bug class
+    /// this fixes) so the line falls through to `Effect::unimplemented`.
+    Unparsed,
+}
+
+/// CR 614.1c: Split a trailing " unless <game-state condition>" gate off an
+/// "enters with [counter payload] on it" clause and classify the condition.
+/// Returns the unless-free head plus the outcome. Routing order matters: the
+/// "you've cast another spell" route must precede the generic static-condition
+/// route, because the generic route would parse the same tail as a plain
+/// `SpellsCastThisTurn >= 2` WITHOUT the own-cast exclusion marker that
+/// "another" requires (per Gatherer ruling — a permanent's own cast does not
+/// count as "another spell").
+fn extract_enters_with_unless_suffix(text: &str) -> (&str, EntersWithUnlessOutcome) {
+    let (head, tail) = match nom_primitives::split_once_on(text, " unless ") {
+        Ok((_, (before, after))) => (before, after),
+        Err(_) => return (text, EntersWithUnlessOutcome::NoUnlessClause),
+    };
+    let unless_text = tail.trim().trim_end_matches('.');
+
+    // Route 1: "unless you('ve) cast another [<filter>] spell this turn".
+    // CR 614.1c classifies the "enters with …" clause as the replacement; the
+    // "another" exclusion basis is CR 109.1 (identity): the entering permanent's
+    // own cast must be excluded, so the filter carries the identity marker via
+    // `with_own_cast_exclusion` and the threshold is GE 1 (one OTHER matching
+    // spell).
+    if let Ok((rest, filter)) = parse_you_cast_another_spell_filter_this_turn(unless_text) {
+        if rest.trim().is_empty() {
+            return (
+                head,
+                EntersWithUnlessOutcome::Parsed(ReplacementCondition::UnlessQuantity {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: Some(TargetFilter::with_own_cast_exclusion(filter)),
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                    active_player_req: None,
+                }),
+            );
+        }
+    }
+
+    // Route 2: any other game-state condition recognized by the shared
+    // condition grammar (e.g. Steel Exemplar's "two or more colors of mana
+    // were spent to cast it").
+    if let Ok((rest, condition)) = parse_inner_condition(unless_text) {
+        if rest.trim().is_empty() {
+            if let Some(cond) = replacement_condition_from_static_unless(condition) {
+                return (head, EntersWithUnlessOutcome::Parsed(cond));
+            }
+        }
+    }
+
+    (head, EntersWithUnlessOutcome::Unparsed)
+}
+
+/// CR 614.1c + CR 614.1d: Map a parsed `StaticCondition` to the `unless`-polarity
+/// `ReplacementCondition`. Unlike `replacement_condition_from_static` (the
+/// only-if polarity used by "enters with ... if ..."), an "unless" clause
+/// suppresses the replacement while the condition holds, so the mapping is
+/// faithful (NO negation) — the runtime `UnlessQuantity` arm already inverts.
+fn replacement_condition_from_static_unless(
+    condition: StaticCondition,
+) -> Option<ReplacementCondition> {
+    match condition {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => Some(ReplacementCondition::UnlessQuantity {
+            lhs,
+            comparator,
+            rhs,
+            active_player_req: None,
+        }),
+        // "unless ~ is tapped" → replacement applies while the source is untapped.
+        StaticCondition::SourceIsTapped => {
+            Some(ReplacementCondition::SourceTappedState { tapped: false })
+        }
+        // "unless [not X]" is a double negative — the replacement applies while
+        // X holds, i.e. the only-if mapping of X. The polarity guard: never let
+        // an inner condition fold into an `UnlessPay`-style cost (see
+        // `parse_unless_pay_condition` in condition.rs) — `replacement_condition_from_static`
+        // cannot produce one, so delegation is safe.
+        StaticCondition::Not { condition } => replacement_condition_from_static(*condition),
+        _ => None,
+    }
 }
 
 fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
@@ -8872,10 +9016,22 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
         def = def.valid_card(valid_card);
     }
+    // CR 614.1a: Vorinclex/Halving Season count doublers-and-halvers scope by the
+    // player *putting* the counters (the actor), per the official Vorinclex ruling
+    // — distinct from prevention/affected-controller doublers (Doubling Season)
+    // that scope by the recipient and gate via `valid_card`. Mark these actor-scoped
+    // so the runtime compares `valid_player` against `CounterPlacement::actor`.
     if nom_primitives::scan_contains(lower, "an opponent would put")
         || nom_primitives::scan_contains(lower, "opponent would put")
     {
         def.valid_player = Some(ReplacementPlayerScope::Opponent);
+        def.counter_replacement_subject = CounterReplacementSubject::Actor;
+    } else if nom_primitives::scan_contains(lower, "a player would put") {
+        def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        def.counter_replacement_subject = CounterReplacementSubject::Actor;
+    } else if nom_primitives::scan_contains(lower, "you would put") {
+        def.valid_player = Some(ReplacementPlayerScope::You);
+        def.counter_replacement_subject = CounterReplacementSubject::Actor;
     }
 
     // CR 122.1a + CR 614.1a: When the Oracle text names a specific counter type
@@ -11662,6 +11818,197 @@ mod tests {
             matches!(&*execute.effect, Effect::PutCounter { .. }),
             "expected PutCounter, got {:?}",
             execute.effect
+        );
+    }
+
+    // --- "enters with [counters] on it unless [condition]" (CR 614.1c) ---
+
+    /// SHAPE (CR 614.1c + CR 614.1d): Hotheaded Giant's verbatim line lowers to a
+    /// Moved/Battlefield replacement whose PutCounter payload is two -1/-1
+    /// counters, gated by `UnlessQuantity` counting controller spells this turn
+    /// filtered to red WITH the own-cast exclusion marker (`FilterProp::Another`),
+    /// threshold GE 1. Asserting the marker via a semantic accessor
+    /// (`peel_own_cast_exclusion`), not a raw internal flag.
+    #[test]
+    fn hotheaded_giant_enters_with_unless_another_red_spell() {
+        use crate::types::ability::{Effect, FilterProp};
+        use crate::types::counter::CounterType;
+        use crate::types::mana::ManaColor;
+
+        let def = parse_replacement_line(
+            "This creature enters with two -1/-1 counters on it unless you've cast \
+             another red spell this turn.",
+            "Hotheaded Giant",
+        )
+        .expect("enters-with-counters-unless must parse");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+
+        let execute = def.execute.expect("PutCounter payload");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Minus1Minus1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+
+        match def.condition.expect("unless gate") {
+            ReplacementCondition::UnlessQuantity {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
+                                filter: Some(filter),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+                active_player_req: None,
+            } => {
+                // Marker present → peel yields the red-only filter for matching.
+                let peeled = filter
+                    .peel_own_cast_exclusion()
+                    .expect("own-cast exclusion marker must be present");
+                let red = peeled.expect("peeled filter is the red constraint");
+                assert!(
+                    matches!(
+                        &red,
+                        TargetFilter::Typed(t)
+                            if t.properties.contains(&FilterProp::HasColor { color: ManaColor::Red })
+                                && !t.properties.contains(&FilterProp::Another)
+                    ),
+                    "peeled filter must be red without the marker, got {red:?}"
+                );
+            }
+            other => panic!("expected UnlessQuantity red+Another GE 1, got {other:?}"),
+        }
+    }
+
+    /// SHAPE (CR 106.3 + CR 601.2h): Steel Exemplar's verbatim line gates the
+    /// +1/+1 payload on `UnlessQuantity` over the distinct colors of mana spent
+    /// to cast it, threshold GE 2.
+    #[test]
+    fn steel_exemplar_enters_with_unless_two_colors_spent() {
+        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric, Effect};
+        use crate::types::counter::CounterType;
+
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it unless two or more \
+             colors of mana were spent to cast it.",
+            "Steel Exemplar",
+        )
+        .expect("colors-of-mana unless must parse");
+
+        let execute = def.execute.expect("PutCounter payload");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+
+        match def.condition.expect("unless gate") {
+            ReplacementCondition::UnlessQuantity {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::SelfObject,
+                                metric: CastManaSpentMetric::DistinctColors,
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+                active_player_req: None,
+            } => {}
+            other => panic!("expected UnlessQuantity DistinctColors GE 2, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1c: an unrecognized " unless " condition must FAIL CLOSED (parse to
+    /// None → `Effect::unimplemented` upstream), never silently drop the gate and
+    /// apply the counters unconditionally (the bug class). Positive reach-guard:
+    /// the same payload with a parseable gate DOES parse (see
+    /// `hotheaded_giant_enters_with_unless_another_red_spell`).
+    #[test]
+    fn enters_with_unless_unparsed_condition_fails_closed() {
+        let def = parse_replacement_line(
+            "This creature enters with two -1/-1 counters on it unless the moon is full.",
+            "Fake Card",
+        );
+        assert!(
+            def.is_none(),
+            "unparsed unless clause must fail closed, got {def:?}"
+        );
+    }
+
+    /// CR 614.1c: the " unless " gate and a trailing conditional-suffix gate share
+    /// ONE condition slot, so their co-occurrence fails closed. Reach-guards: the
+    /// kicker-only and unless-only siblings each parse on their own.
+    #[test]
+    fn enters_with_kicker_and_unless_co_occurrence_fails_closed() {
+        let both = parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it \
+             unless you've cast another spell this turn.",
+            "Fake Kicker Card",
+        );
+        assert!(
+            both.is_none(),
+            "kicker + unless co-occurrence must fail closed, got {both:?}"
+        );
+
+        // Reach-guard 1: kicker-only path is live.
+        let kicker_only = parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it.",
+            "Fake Kicker Card",
+        );
+        assert!(kicker_only.is_some(), "kicker-only path must parse");
+
+        // Reach-guard 2: unless-only path is live.
+        let unless_only = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it unless you've cast \
+             another spell this turn.",
+            "Fake Unless Card",
+        );
+        assert!(unless_only.is_some(), "unless-only path must parse");
+    }
+
+    /// CR 614.12a + CR 614.1c: the shared condition-suffix helper guards BOTH the
+    /// single-counter branch and the choice-of-counter branch — the co-occurrence
+    /// fail-closed holds through the `your choice of` branch too.
+    #[test]
+    fn enters_with_choice_kicker_and_unless_co_occurrence_fails_closed() {
+        let both = parse_replacement_line(
+            "If this creature was kicked, it enters with your choice of a +1/+1 or a \
+             -1/-1 counter on it unless you've cast another spell this turn.",
+            "Fake Choice Card",
+        );
+        assert!(
+            both.is_none(),
+            "choice-branch kicker + unless co-occurrence must fail closed, got {both:?}"
+        );
+
+        // Reach-guard: the choice-branch unless-only path is live.
+        let unless_only = parse_replacement_line(
+            "This creature enters with your choice of a +1/+1 or a -1/-1 counter on it \
+             unless you've cast another spell this turn.",
+            "Fake Choice Card",
+        );
+        assert!(
+            unless_only.is_some(),
+            "choice-branch unless-only path must parse"
         );
     }
 
@@ -19841,6 +20188,73 @@ mod tests {
         assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
         assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
         assert_eq!(def.valid_card, None);
+    }
+
+    /// CR 614.1a: Vorinclex's "If you would put …" doubling clause scopes by the
+    /// player putting the counters (the actor), not the recipient — so the
+    /// parser must mark it `CounterReplacementSubject::Actor` with a `You`
+    /// player scope, per the official Vorinclex ruling.
+    #[test]
+    fn vorinclex_you_doubling_clause_is_actor_scoped() {
+        let def = parse_replacement_line(
+            "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .expect("Vorinclex doubling clause must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::You));
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Actor,
+            "\"you would put\" scopes by the counter actor, not the recipient"
+        );
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(def.valid_card, None);
+    }
+
+    /// CR 614.1a: Vorinclex's "If an opponent would put …" halving clause is
+    /// actor-scoped with an `Opponent` player scope.
+    #[test]
+    fn vorinclex_opponent_halving_clause_is_actor_scoped() {
+        let def = parse_replacement_line(
+            "If an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .expect("Vorinclex halving clause must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Actor,
+            "\"an opponent would put\" scopes by the counter actor"
+        );
+        assert_eq!(def.quantity_modification, Some(QuantityModification::Half));
+    }
+
+    /// CR 614.1a: Negative sibling — Doubling Season's "an effect would put …
+    /// on a permanent you control" gates through `valid_card`, so it must stay
+    /// `None` player-scope with the default `Recipient` subject. This proves the
+    /// new actor arms don't over-capture recipient-scoped doublers.
+    #[test]
+    fn doubling_season_you_control_stays_recipient_scoped() {
+        let def = parse_replacement_line(
+            "If an effect would put one or more counters on a permanent you control, it puts twice that many of those counters on that permanent instead.",
+            "Doubling Season",
+        )
+        .expect("Doubling Season must parse");
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.valid_player, None,
+            "\"a permanent you control\" is a valid_card gate, not a player scope"
+        );
+        assert_eq!(
+            def.counter_replacement_subject,
+            CounterReplacementSubject::Recipient,
+            "recipient-scoped doublers must not be marked actor-scoped"
+        );
     }
 
     #[test]

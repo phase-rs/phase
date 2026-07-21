@@ -1194,7 +1194,10 @@ fn fire_combat_prevention_riders(
             crate::types::ability::PostReplacementContinuation::Resolved(runtime),
         );
         if let Some(source) = event_source {
-            if let Some(drain) = state.post_replacement_drains.resident_mut() {
+            if let Some(drain) = state
+                .active_post_replacement_drains_mut()
+                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            {
                 drain.event_source = Some(source);
             }
         }

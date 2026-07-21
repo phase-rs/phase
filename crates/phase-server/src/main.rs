@@ -1,10 +1,12 @@
 mod admin;
+mod data_bootstrap;
 mod draft_pools;
 mod logging;
 mod persistence;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,7 +29,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::GameLogEntry;
-use http::HeaderValue;
+use http::{HeaderMap, HeaderValue};
 use lobby_broker::{
     check_build_commit, conn_holds_reservation, Broker, BrokerEnv, BuildCommitCheck, ConnState,
     Outbound, NOT_OWNED_RESERVATION,
@@ -67,7 +69,8 @@ use server_core::spectator_wire_guard::{
     guard_spectator_join,
 };
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::io::AsyncReadExt;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info, info_span, warn, Instrument};
 use url::Url;
@@ -478,9 +481,33 @@ struct Cli {
     #[arg(short, long, default_value = "9374", env = "PORT")]
     port: u16,
 
+    /// Address to bind. Defaults to all interfaces for LAN and tunnel hosting.
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: IpAddr,
+
+    /// Exit cleanly when stdin closes. Used by the desktop shell so an orphaned
+    /// native server terminates after its parent process dies.
+    #[arg(long)]
+    exit_on_stdin_close: bool,
+
+    /// Accept WebSocket handshakes only from this Origin when one is supplied.
+    /// Clients without an Origin header remain accepted for self-hosted tooling.
+    #[arg(long)]
+    allowed_origin: Option<String>,
+
     /// Path to card data directory (must contain card-data.json)
     #[arg(short, long, default_value = "data", env = "PHASE_DATA_DIR")]
-    data_dir: String,
+    data_dir: PathBuf,
+
+    /// Signed data-manifest URL for bootstrapping a missing PHASE_DATA_DIR.
+    /// This overrides the manifest resolved from the binary's embedded channel.
+    #[arg(long, env = "PHASE_DATA_MANIFEST_URL")]
+    data_manifest_url: Option<Url>,
+
+    /// Refuse to download missing startup data. Intended for air-gapped hosts
+    /// with a pre-provisioned PHASE_DATA_DIR.
+    #[arg(long)]
+    no_data_download: bool,
 
     /// Allowed CORS origin (use '*' for permissive, or a specific URL)
     #[arg(long, env = "PHASE_CORS_ORIGIN")]
@@ -511,6 +538,41 @@ struct Cli {
     /// `NGROK_AUTHTOKEN` is set, the live tunnel URL is used when this is unset.
     #[arg(long, env = "PUBLIC_URL")]
     public_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CardDataSource {
+    Export(PathBuf),
+    DevFixture(PathBuf),
+}
+
+fn dev_fixture_enabled() -> bool {
+    matches!(std::env::var("PHASE_DEV_FIXTURE"), Ok(value) if value == "1")
+}
+
+fn select_card_data_source(data_dir: &Path, dev_fixture: bool) -> Result<CardDataSource, String> {
+    let export_path = data_dir.join("card-data.json");
+    if export_path.is_file() {
+        return Ok(CardDataSource::Export(export_path));
+    }
+    if dev_fixture {
+        return Ok(CardDataSource::DevFixture(
+            data_dir.join("mtgjson/test_fixture.json"),
+        ));
+    }
+    Err(format!(
+        "card-data.json is missing from {}; startup data bootstrap did not provide it",
+        data_dir.display()
+    ))
+}
+
+fn bootstrap_required(data_dir: &Path, dev_fixture: bool) -> bool {
+    !dev_fixture || data_dir.join("card-data.json").is_file()
+}
+
+fn fatal_startup(message: impl std::fmt::Display) -> ! {
+    eprintln!("phase-server startup failed: {message}");
+    std::process::exit(1);
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
@@ -790,13 +852,40 @@ async fn main() {
         ServerMode::Full
     };
     info!(?mode, "server mode selected");
-    let data_path = Path::new(&cli.data_dir);
-    let export_path = data_path.join("card-data.json");
-    let card_db = if export_path.exists() {
-        CardDatabase::from_export(&export_path).expect("Failed to load card-data.json")
+    let data_path = cli.data_dir.as_path();
+    let dev_fixture = dev_fixture_enabled();
+    if bootstrap_required(data_path, dev_fixture) {
+        let identity = data_bootstrap::ChannelIdentity::embedded()
+            .unwrap_or_else(|error| fatal_startup(error));
+        let options = data_bootstrap::BootstrapOptions {
+            manifest_url_override: cli.data_manifest_url.clone(),
+            no_data_download: cli.no_data_download,
+        };
+        if let Err(error) =
+            data_bootstrap::bootstrap_missing_data(data_path, &options, identity.as_ref()).await
+        {
+            fatal_startup(error);
+        }
     } else {
-        CardDatabase::from_mtgjson(&data_path.join("mtgjson/test_fixture.json"))
-            .expect("Failed to load card database")
+        warn!(
+            path = %data_path.display(),
+            "using PHASE_DEV_FIXTURE=1 test fixture; startup data bootstrap is disabled"
+        );
+    }
+    let card_data_source = select_card_data_source(data_path, dev_fixture)
+        .unwrap_or_else(|message| fatal_startup(message));
+    let card_db = match card_data_source {
+        CardDataSource::Export(path) => CardDatabase::from_export(&path).unwrap_or_else(|error| {
+            fatal_startup(format!("failed to load {}: {error}", path.display()))
+        }),
+        CardDataSource::DevFixture(path) => {
+            CardDatabase::from_mtgjson(&path).unwrap_or_else(|error| {
+                fatal_startup(format!(
+                    "PHASE_DEV_FIXTURE=1 was set but failed to load {}: {error}",
+                    path.display()
+                ))
+            })
+        }
     };
     info!(cards = card_db.card_count(), "card database loaded");
     let db: SharedDb = Arc::new(card_db);
@@ -1188,14 +1277,15 @@ async fn main() {
         game_spectators,
         mode,
         public_url: advertised_public_url,
+        allowed_origin: cli.allowed_origin.clone(),
     });
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
+    let listener = tokio::net::TcpListener::bind((cli.bind, cli.port))
         .await
         .expect("failed to bind");
-    info!(port = %cli.port, "phase-server listening");
+    info!(bind = %cli.bind, port = %cli.port, "phase-server listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(cli.exit_on_stdin_close))
         .await
         .expect("server error");
 
@@ -1250,8 +1340,45 @@ async fn main() {
     }
 }
 
-async fn shutdown_signal() {
+fn stdin_close_watchdog(enabled: bool) -> Option<oneshot::Receiver<()>> {
+    enabled.then(|| {
+        let (sender, receiver) = oneshot::channel();
+        let _stdin_watchdog = tokio::spawn(async move {
+            let mut stdin = tokio::io::stdin();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                match stdin.read(&mut buffer).await {
+                    Ok(0) => {
+                        info!("stdin closed; shutting down");
+                        let _ = sender.send(());
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(error = %error, "stdin watchdog stopped without EOF");
+                        return;
+                    }
+                }
+            }
+        });
+        receiver
+    })
+}
+
+async fn wait_for_stdin_close(mut watchdog: Option<oneshot::Receiver<()>>) {
+    match watchdog.as_mut() {
+        Some(receiver) => {
+            if receiver.await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn shutdown_signal(exit_on_stdin_close: bool) {
     let ctrl_c = tokio::signal::ctrl_c();
+    let stdin_close = wait_for_stdin_close(stdin_close_watchdog(exit_on_stdin_close));
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1259,17 +1386,76 @@ async fn shutdown_signal() {
         tokio::select! {
             _ = ctrl_c => info!("received Ctrl+C, shutting down"),
             _ = sigterm.recv() => info!("received SIGTERM, shutting down"),
+            _ = stdin_close => info!("stdin-close watchdog requested shutdown"),
         }
     }
     #[cfg(not(unix))]
     {
-        ctrl_c.await.expect("failed to listen for Ctrl+C");
-        info!("received Ctrl+C, shutting down");
+        tokio::select! {
+            result = ctrl_c => {
+                result.expect("failed to listen for Ctrl+C");
+                info!("received Ctrl+C, shutting down");
+            }
+            _ = stdin_close => info!("stdin-close watchdog requested shutdown"),
+        }
     }
 }
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use axum::http::{header::ORIGIN, HeaderMap, HeaderValue};
+    use clap::Parser;
+
+    use super::{
+        bootstrap_required, origin_is_allowed, select_card_data_source, CardDataSource, Cli,
+    };
+
+    #[test]
+    fn bind_flag_defaults_to_lan_and_accepts_loopback() {
+        let default = Cli::try_parse_from(["phase-server"]).expect("default CLI parses");
+        assert_eq!(default.bind.to_string(), "0.0.0.0");
+
+        let loopback = Cli::try_parse_from(["phase-server", "--bind", "127.0.0.1"])
+            .expect("loopback bind parses");
+        assert_eq!(loopback.bind.to_string(), "127.0.0.1");
+    }
+
+    #[test]
+    fn allowed_origin_accepts_matching_and_originless_clients() {
+        let mut matching = HeaderMap::new();
+        matching.insert(ORIGIN, HeaderValue::from_static("https://phase-rs.dev"));
+        assert!(origin_is_allowed(&matching, Some("https://phase-rs.dev")));
+
+        let mut mismatched = HeaderMap::new();
+        mismatched.insert(ORIGIN, HeaderValue::from_static("https://attacker.example"));
+        assert!(!origin_is_allowed(
+            &mismatched,
+            Some("https://phase-rs.dev")
+        ));
+
+        assert!(origin_is_allowed(
+            &HeaderMap::new(),
+            Some("https://phase-rs.dev")
+        ));
+        assert!(origin_is_allowed(&mismatched, None));
+    }
+
+    #[test]
+    fn fixture_fallback_requires_the_explicit_dev_opt_in() {
+        let temp = tempfile::tempdir().expect("temp dir");
+
+        assert!(bootstrap_required(temp.path(), false));
+        assert!(select_card_data_source(temp.path(), false).is_err());
+        assert!(!bootstrap_required(temp.path(), true));
+        assert_eq!(
+            select_card_data_source(temp.path(), true).expect("explicit fixture source"),
+            CardDataSource::DevFixture(temp.path().join("mtgjson/test_fixture.json"))
+        );
+    }
 }
 
 /// Constant-time byte comparison so admin-token validation does not leak the
@@ -1417,9 +1603,34 @@ struct AppState {
     /// embedded ngrok tunnel), or `None` when the server has no reachable
     /// address to share. Cloned per connection at greet time only.
     public_url: Option<String>,
+    /// Origin allowed to upgrade WebSocket handshakes. `None` preserves the
+    /// self-hosted permissive behavior; origin-less non-browser clients are
+    /// always allowed.
+    allowed_origin: Option<String>,
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> impl IntoResponse {
+fn origin_is_allowed(headers: &HeaderMap, allowed_origin: Option<&str>) -> bool {
+    let Some(allowed_origin) = allowed_origin else {
+        return true;
+    };
+    match headers.get(http::header::ORIGIN) {
+        None => true,
+        Some(origin) => origin.to_str().is_ok_and(|origin| origin == allowed_origin),
+    }
+}
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(app_state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !origin_is_allowed(&headers, app_state.allowed_origin.as_deref()) {
+        warn!(
+            origin = ?headers.get(http::header::ORIGIN),
+            "rejecting WebSocket handshake from disallowed Origin"
+        );
+        return (http::StatusCode::FORBIDDEN, "WebSocket Origin not allowed").into_response();
+    }
     let current = app_state.player_count.load(Ordering::Relaxed);
     if current >= MAX_CONNECTIONS {
         warn!(
@@ -6551,6 +6762,7 @@ mod issue_4548_full_create_tests {
                 game_spectators: Arc::new(Mutex::new(HashMap::new())),
                 mode: ServerMode::Full,
                 public_url: None,
+                allowed_origin: None,
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -7349,6 +7561,7 @@ mod admin_auth_tests {
             game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
             mode: ServerMode::Full,
             public_url: None,
+            allowed_origin: None,
         }
     }
 
@@ -7514,6 +7727,7 @@ mod p2p_backup_delete_tests {
             game_spectators: Arc::new(Mutex::new(std::collections::HashMap::new())),
             mode: ServerMode::Full,
             public_url: None,
+            allowed_origin: None,
         }
     }
 

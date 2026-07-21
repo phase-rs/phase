@@ -653,8 +653,10 @@ mod tests {
         config.search.projection_min_budget_ms = 0;
 
         let mut ai_ctx = crate::context::AiContext::empty(&config.weights);
-        // Tight but not expired — 1ms remaining.
-        ai_ctx.deadline = engine::util::Deadline::after(1);
+        // Large budget keeps this deterministic under parallel test load —
+        // with floor=0 the remaining time is never read, so any non-expired
+        // deadline exercises the same branch.
+        ai_ctx.deadline = engine::util::Deadline::after(60_000);
 
         let ability = ResolvedAbility::new(
             Effect::Pump {
@@ -690,8 +692,9 @@ mod tests {
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
-        // With floor=0, even 1ms remaining allows projection. Only an
-        // already-expired deadline blocks.
+        // With floor=0, any non-expired deadline allows projection; only an
+        // already-expired one blocks (covered by
+        // `deadline_expired_gates_projection`).
         assert!(ctx.can_afford_projection());
     }
 }

@@ -369,7 +369,7 @@ fn stash_post_replacement_continuation(
     event_source: Option<ObjectId>,
     event_target: Option<TargetRef>,
 ) {
-    state.post_replacement_drains.install(
+    state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Ready(continuation),
             source: Some(source),
@@ -432,12 +432,11 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     // The drain owns its source / applied / event-source / event-target, so one
     // call abandons all four. This is precisely the hand-listing hazard the doc
     // above describes: those four could no longer be stranded individually.
-    state.post_replacement_drains.abandon_all();
+    state.abandon_active_replacement_tails();
     state.post_replacement_token_choice_applied = None;
     // CR 614.1a: the Moonlit-scoped "that many" copy count is single-authority
     // abandoned alongside the applied seed it rides with.
     state.post_replacement_token_substitution_count = None;
-    state.pending_connive_reentry = None;
     // CR 121.2 + CR 800.4a: draw frames are single-player-scoped (each tracks one
     // player's own in-flight instruction), so the whole stack is abandoned outright
     // here — unlike the deliberately-preserved multi-player queue fields nearby in
@@ -446,7 +445,6 @@ pub(crate) fn abandon_post_replacement_continuation(state: &mut GameState) {
     //
     // The frame-ID allocator deliberately does NOT rewind: a `DrawSequenceFrameId`
     // captured before the abandonment must never alias a frame allocated after it.
-    state.draw_sequences.abandon_all();
 }
 
 pub type ReplacementMatcher = fn(&ProposedEvent, ObjectId, &GameState) -> bool;
@@ -2523,7 +2521,7 @@ fn connive_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState)
 /// `Connive` link early — that would violate CR 701.50a's printed order and
 /// clobber the live draw choice. Instead it defers the remaining `Connive` link
 /// (always a single link for this chain) into the DEDICATED
-/// `state.pending_connive_reentry` slot (NOT `post_replacement_continuation`, so
+/// stack-owned Connive re-entry (NOT `post_replacement_continuation`, so
 /// the shared zone-delivery tail cannot drain it mid-draw) and returns
 /// `Prevented`; the post-replacement-choice epilogue
 /// (`engine_replacement::handle_replacement_choice`) resumes the connive in order
@@ -2641,7 +2639,7 @@ fn connive_applier(
                 // itself replaced) and its successor is the `then ... connives`
                 // link, the connive must NOT run now — CR 701.50a's "then" fixes
                 // the printed order. Defer the connive into the dedicated
-                // `state.pending_connive_reentry` slot (resumed by the
+                // stack-owned Connive re-entry (resumed by the
                 // post-replacement-choice epilogue once the parked draw choice
                 // resolves) and return `Prevented`.
                 //
@@ -2681,15 +2679,16 @@ fn connive_applier(
                             // the leading draw's DeliveryTail drain cannot consume it
                             // mid-draw; the post-replacement-choice epilogue drains
                             // it after the draw fully delivers (CR 701.50a order).
-                            if state.pending_connive_reentry.is_none() {
-                                state.pending_connive_reentry =
-                                    Some(crate::types::game_state::PendingConniveReentry {
+                            if state.active_connive_reentry().is_none() {
+                                state.push_connive_reentry(
+                                    crate::types::game_state::PendingConniveReentry {
                                         conniver: crate::types::game_state::ConniveSubject {
                                             snapshot: (*subject).clone(),
                                         },
                                         count: connive_count,
                                         applied: applied.clone(),
-                                    });
+                                    },
+                                );
                             }
                             return ApplyResult::Prevented;
                         }
@@ -5974,20 +5973,30 @@ fn object_replacement_candidate_applies(
         }
     }
     if let ProposedEvent::AddCounter { placement, .. } = event {
+        // CR 614.1a: `valid_player` is a *relative* scope; the subject axis selects
+        // whom it is relative to. Actor-scoped replacements (Vorinclex/Halving
+        // Season — "If you/an opponent would put …") compare against
+        // `CounterPlacement::actor` (who puts the counters), per the official
+        // Vorinclex ruling. Recipient-scoped replacements (the default) compare
+        // against the affected player / affected permanent's controller.
+        use crate::types::ability::CounterReplacementSubject;
         if placement.player_id().is_some() {
             // CR 614.1a: player-counter replacements require an explicit player scope.
             let Some(valid_player) = &repl_def.valid_player else {
                 return false;
             };
-            let affected_player = placement
-                .player_id()
-                .expect("CounterPlacement::player_id is Some for player counter events");
+            let scope_player = match repl_def.counter_replacement_subject {
+                CounterReplacementSubject::Actor => placement.actor(),
+                CounterReplacementSubject::Recipient => placement
+                    .player_id()
+                    .expect("CounterPlacement::player_id is Some for player counter events"),
+            };
             let player_ok = match valid_player {
                 crate::types::ability::ReplacementPlayerScope::Opponent => {
-                    affected_player != obj.controller
+                    scope_player != obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::You => {
-                    affected_player == obj.controller
+                    scope_player == obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
             };
@@ -5996,7 +6005,11 @@ fn object_replacement_candidate_applies(
             }
         } else if let Some(valid_player) = &repl_def.valid_player {
             // CR 614.1a: quantity-modifying counter replacements may scope by
-            // the affected permanent's controller.
+            // the affected permanent's controller (recipient) or, for
+            // actor-scoped replacements, by the player putting the counters.
+            // The quantity-mod guard is preserved verbatim: a prevention
+            // replacement (Solemnity — no `quantity_modification`) still returns
+            // false here, matching pre-existing behavior.
             if !matches!(
                 repl_def.quantity_modification,
                 Some(
@@ -6011,16 +6024,21 @@ fn object_replacement_candidate_applies(
             let Some(object_id) = placement.object_id() else {
                 return false;
             };
-            let Some(affected_controller) = state.objects.get(&object_id).map(|o| o.controller)
-            else {
-                return false;
+            let scope_player = match repl_def.counter_replacement_subject {
+                CounterReplacementSubject::Actor => placement.actor(),
+                CounterReplacementSubject::Recipient => {
+                    match state.objects.get(&object_id).map(|o| o.controller) {
+                        Some(c) => c,
+                        None => return false,
+                    }
+                }
             };
             let player_ok = match valid_player {
                 crate::types::ability::ReplacementPlayerScope::Opponent => {
-                    affected_controller != obj.controller
+                    scope_player != obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::You => {
-                    affected_controller == obj.controller
+                    scope_player == obj.controller
                 }
                 crate::types::ability::ReplacementPlayerScope::AnyPlayer => true,
             };
@@ -7435,7 +7453,7 @@ fn apply_single_replacement(
                 // choice resolves), executing the modified action twice. The applier
                 // is the single authority for this event, so suppress the generic
                 // stash. On its parking path the applier stashes its deferred connive
-                // into the DEDICATED `state.pending_connive_reentry` slot (only the
+                // into the dedicated stack-owned Connive re-entry (only the
                 // deferred connive link, not the whole chain), so suppressing this
                 // generic Template stash here does not drop the deferred connive.
                 let post_effect =
@@ -8675,7 +8693,7 @@ fn continue_replacement_impl(
         // The drain owns those fields, so replacing it clears them by construction.
         match post_effect {
             Some(def) => {
-                state.post_replacement_drains.install(
+                state.install_post_replacement_drain(
                     PostReplacementDrain {
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                         source: Some(rid.source),
@@ -8689,7 +8707,7 @@ fn continue_replacement_impl(
             // No post-effect: this branch produces no continuation, so any resident
             // one (and the `applied` set that rode with it) is dropped — exactly
             // what `continuation = None` + `applied.clear()` did before.
-            None => state.post_replacement_drains.abandon_all(),
+            None => state.abandon_active_post_replacement_drains(),
         }
 
         match apply_single_replacement_and_dirty(state, proposed, rid, branch, registry, events) {
@@ -11637,8 +11655,7 @@ mod tests {
         };
         assert_eq!(chooser, PlayerId(0));
         let parked = state
-            .draw_sequences
-            .active()
+            .active_draw_sequence()
             .expect("the paused instruction must stay on the draw-sequence stack");
         assert_eq!(
             (parked.player, parked.remaining, parked.accumulated),
@@ -11657,9 +11674,9 @@ mod tests {
         .expect("resume the dredge choice");
 
         assert!(
-            state.draw_sequences.is_empty(),
+            state.active_draw_sequence().is_none(),
             "the instruction must fully complete once both units resolve, got {:?}",
-            state.draw_sequences
+            state.active_multi_draw_frame()
         );
         assert!(
             state.players[0].hand.contains(&ObjectId(10)),
@@ -18484,3 +18501,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "enters_with_unless_runtime_tests.rs"]
+mod enters_with_unless_runtime_tests;

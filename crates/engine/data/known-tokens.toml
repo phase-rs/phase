@@ -9594,54 +9594,9 @@ colors = ["Green"]
 keywords = []
 
 [[token.source_card_refs]]
-card_name = "Tyvar Kell"
-scryfall_oracle_id = "14c8a590-88ec-4982-ad7b-36a219ff6de7"
-scryfall_id = "9a46a0f5-390c-4d5f-9d1f-38031b68aa25"
-
-[[token.source_card_refs]]
-card_name = "Sylvan Offering"
-scryfall_oracle_id = "732aaa4b-22ea-49e2-b09f-e6169f726537"
-scryfall_id = "8f171772-eb52-4cc2-b3cd-8ceb0f15732f"
-
-[[token.source_card_refs]]
-card_name = "Lys Alana Huntmaster"
-scryfall_oracle_id = "3f3439e1-75ce-482d-881f-836492dca6e9"
-scryfall_id = "c5fc9e54-8fc4-4de4-be74-e925a85187b4"
-
-[[token.source_card_refs]]
-card_name = "Lathril, Blade of the Elves"
-scryfall_oracle_id = "9b568c34-ba0a-44a7-a0ee-bee3a37b3396"
-scryfall_id = "f7f00791-de5e-4f10-9931-8694afcd580c"
-
-[[token.source_card_refs]]
-card_name = "Presence of Gond"
-scryfall_oracle_id = "ab42398c-f0a1-4b94-ac5f-b8768e1b4e05"
-scryfall_id = "74e28915-216d-45c1-a3fc-aa34120afddf"
-
-[[token.source_card_refs]]
-card_name = "Imperious Perfect"
-scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
-scryfall_id = "084d98ec-9978-4386-972a-4cbddde7109e"
-
-[[token.source_card_refs]]
-card_name = "Imperious Perfect"
-scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
-scryfall_id = "3b2e604b-5ca5-4b17-834c-9067f1605147"
-
-[[token.source_card_refs]]
-card_name = "Ambassador Oak"
-scryfall_oracle_id = "4045c24e-098f-4582-8c50-576a94c7b705"
-scryfall_id = "fb619508-67a2-426d-819b-57e21bf61d66"
-
-[[token.source_card_refs]]
 card_name = "Flourishing Defenses"
 scryfall_oracle_id = "f1b26eb1-6337-42d6-a475-53ad6427f00f"
 scryfall_id = "37a678b3-53ba-48c7-9846-6454f8b34127"
-
-[[token.source_card_refs]]
-card_name = "Elven Bow"
-scryfall_oracle_id = "43daed96-2216-4f17-82ce-3eccd5d69936"
-scryfall_id = "fd78af69-4b8e-4063-a3bb-48026054cbd2"
 
 [token.token_image_ref]
 scryfall_id = "29e9326a-a435-44c7-939a-8da6ed3c4510"
@@ -21542,6 +21497,188 @@ scryfall_id = "3ad9cb61-4072-449b-9b32-83e2192cb292"
 scryfall_id = "983253f0-fcf1-4c57-81eb-101f3495b6ae"
 scryfall_oracle_id = "1adf3c28-58c0-4239-ba4a-c53d345709b4"
 preset_id = "17b040e2-eee6-529d-8a17-bbbf94758adb"
+
+[[token]]
+id = "17c6893a-8119-5836-9b3d-bd0a5e30a264"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2548"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "d6fbb5c7-9cc4-4528-8fc5-ec7a9d19a92e"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "17c6893a-8119-5836-9b3d-bd0a5e30a264"
 
 [[token]]
 id = "1822997f-1ab6-5ff4-81ce-5d9fce80086e"
@@ -35544,6 +35681,188 @@ scryfall_oracle_id = "0e23b3a3-e210-439b-a4f1-3bc880b4b39e"
 preset_id = "2b48ec72-3a9d-5b4b-bd63-3e4266bd8848"
 
 [[token]]
+id = "2b6eb41a-8d18-51b9-8b6e-0ad3e5265209"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2808"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "eb838522-93e6-475a-8825-b65fe2e4f68b"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "2b6eb41a-8d18-51b9-8b6e-0ad3e5265209"
+
+[[token]]
 id = "2b7c9afc-3e4e-5ae4-b148-4e5e9dbd471b"
 category = "Creature"
 fidelity = "Full"
@@ -35574,6 +35893,188 @@ scryfall_id = "e6415bf5-ead8-45a6-8d9c-d160c44cb775"
 scryfall_id = "2d833298-a270-4b89-987c-5b6432bbc311"
 scryfall_oracle_id = "c16b3a1e-0e60-41f2-899e-d22bcf1144ae"
 preset_id = "2b7c9afc-3e4e-5ae4-b148-4e5e9dbd471b"
+
+[[token]]
+id = "2b906a79-0ace-51d8-9fff-291d395f35b9"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2546"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "e4a685df-00dd-434a-baef-d04541ab4b9a"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "2b906a79-0ace-51d8-9fff-291d395f35b9"
 
 [[token]]
 id = "2b955244-b333-5888-916c-7013fa64a011"
@@ -54026,6 +54527,110 @@ scryfall_oracle_id = "4465eff4-5851-4721-a248-866c686c2ab8"
 preset_id = "4409ab52-50e8-594e-b9ef-d22c1fa91121"
 
 [[token]]
+id = "440e66c4-448c-5f1a-83c9-61203e1cc929"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ambassador Oak",
+    "Battle for Bretagard",
+    "Dwynen's Elite",
+    "Elderleaf Mentor",
+    "Elfsworn Giant",
+    "Elven Ambush",
+    "Elven Bow",
+    "Elvish Promenade",
+    "Elvish Warmaster",
+    "Exquisite Huntmaster",
+    "Eyeblight Cullers",
+    "Flourishing Defenses",
+    "Galadhrim Ambush",
+    "Gilt-Leaf Ambush",
+    "Hunting Triad",
+    "Imperious Perfect",
+    "Lathril, Blade of the Elves",
+    "Lys Alana Huntmaster",
+    "Nadier, Agent of the Duskenel",
+    "Nath of the Gilt-Leaf",
+    "Presence of Gond",
+    "Prowess of the Fair",
+    "Return Upon the Tide",
+    "Skemfar Elderhall",
+    "Sylvan Offering",
+    "Thorn Lieutenant",
+    "Tyvar Kell",
+    "Windswift Slice",
+    "Wolverine Riders",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "7169"
+released_at = "2019-12-02"
+type_line = "Token Creature — Elf Warrior"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Tyvar Kell"
+scryfall_oracle_id = "14c8a590-88ec-4982-ad7b-36a219ff6de7"
+scryfall_id = "9a46a0f5-390c-4d5f-9d1f-38031b68aa25"
+
+[[token.source_card_refs]]
+card_name = "Sylvan Offering"
+scryfall_oracle_id = "732aaa4b-22ea-49e2-b09f-e6169f726537"
+scryfall_id = "8f171772-eb52-4cc2-b3cd-8ceb0f15732f"
+
+[[token.source_card_refs]]
+card_name = "Lys Alana Huntmaster"
+scryfall_oracle_id = "3f3439e1-75ce-482d-881f-836492dca6e9"
+scryfall_id = "c5fc9e54-8fc4-4de4-be74-e925a85187b4"
+
+[[token.source_card_refs]]
+card_name = "Lathril, Blade of the Elves"
+scryfall_oracle_id = "9b568c34-ba0a-44a7-a0ee-bee3a37b3396"
+scryfall_id = "f7f00791-de5e-4f10-9931-8694afcd580c"
+
+[[token.source_card_refs]]
+card_name = "Presence of Gond"
+scryfall_oracle_id = "ab42398c-f0a1-4b94-ac5f-b8768e1b4e05"
+scryfall_id = "74e28915-216d-45c1-a3fc-aa34120afddf"
+
+[[token.source_card_refs]]
+card_name = "Imperious Perfect"
+scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
+scryfall_id = "084d98ec-9978-4386-972a-4cbddde7109e"
+
+[[token.source_card_refs]]
+card_name = "Imperious Perfect"
+scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
+scryfall_id = "3b2e604b-5ca5-4b17-834c-9067f1605147"
+
+[[token.source_card_refs]]
+card_name = "Ambassador Oak"
+scryfall_oracle_id = "4045c24e-098f-4582-8c50-576a94c7b705"
+scryfall_id = "fb619508-67a2-426d-819b-57e21bf61d66"
+
+[[token.source_card_refs]]
+card_name = "Elven Bow"
+scryfall_oracle_id = "43daed96-2216-4f17-82ce-3eccd5d69936"
+scryfall_id = "fd78af69-4b8e-4063-a3bb-48026054cbd2"
+
+[token.token_image_ref]
+scryfall_id = "e9db3b46-a9cf-4221-830a-dbed7ad76ead"
+scryfall_oracle_id = "dac8a765-6845-4b57-bb79-4ec463436f92"
+preset_id = "440e66c4-448c-5f1a-83c9-61203e1cc929"
+
+[[token]]
 id = "4413b219-26dc-51cc-8f16-20bac10a1052"
 category = "Creature"
 fidelity = "Full"
@@ -64445,7 +65050,6 @@ source_card_names = [
     "Reckless Endeavor",
     "Reckless Lackey",
     "Reckless Ransacking",
-    "Reckoner Bankbuster",
     "Reckoner Bankbuster // Reckoner Bankbuster",
     "Redcap Thief",
     "Redrock Sentinel",
@@ -64515,6 +65119,7 @@ source_card_names = [
     "Tireless Provisioner",
     "Tivit, Seller of Secrets",
     "Tokka & Rahzar, Unsupervised",
+    "Treasure",
     "Treasure Chest",
     "Treasure Dredger",
     "Treasure Map // Treasure Cove",
@@ -64565,263 +65170,6 @@ subtypes = ["Treasure"]
 supertypes = []
 colors = []
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Descent into Avernus"
-scryfall_oracle_id = "1313da2f-92bb-4862-9153-373972cc1520"
-scryfall_id = "3e1003d5-f585-4194-a829-1bc342b26e0b"
-
-[[token.source_card_refs]]
-card_name = "Ziatora, the Incinerator"
-scryfall_oracle_id = "d46c3fb6-f1c7-4a96-ae42-5bce17fc7c1d"
-scryfall_id = "68cce7e2-8c4b-4c76-a38b-0fee85da3151"
-
-[[token.source_card_refs]]
-card_name = "Reckoner Bankbuster // Reckoner Bankbuster"
-face_name = "Reckoner Bankbuster"
-scryfall_oracle_id = "b6be94dc-7162-4887-b959-3bda709724eb"
-scryfall_id = "05fab477-5e35-4a47-a972-441bbddc3302"
-
-[[token.source_card_refs]]
-card_name = "Old Gnawbone"
-scryfall_oracle_id = "dff3f4c7-f792-4ca3-9b0a-0738e70664d9"
-scryfall_id = "2daa0737-e1a5-4112-afde-34a3375e23f7"
-
-[[token.source_card_refs]]
-card_name = "Shiny Impetus"
-scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
-scryfall_id = "71bcf8d7-cc70-4d52-9607-09ed7e08d61b"
-
-[[token.source_card_refs]]
-card_name = "Sonic the Hedgehog"
-scryfall_oracle_id = "b07a7b00-9394-48a9-a597-17f391495909"
-scryfall_id = "072a0e6f-e636-4ce1-a253-580ab956410e"
-
-[[token.source_card_refs]]
-card_name = "Monologue Tax"
-scryfall_oracle_id = "ace8e88e-ca6a-4bdf-8c6d-1b914fc00259"
-scryfall_id = "b2b1ab21-fee9-42c4-abae-4e0883d34801"
-
-[[token.source_card_refs]]
-card_name = "Big Score"
-scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
-scryfall_id = "c09bb44b-af66-4183-826d-867299dc1b3e"
-
-[[token.source_card_refs]]
-card_name = "Tireless Provisioner"
-scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
-scryfall_id = "7a832060-ecc6-406a-ab06-b371aa952e13"
-
-[[token.source_card_refs]]
-card_name = "Unexpected Windfall"
-scryfall_oracle_id = "498c10c9-253d-4b15-b48c-1509381b17e8"
-scryfall_id = "42076e0d-f6dd-403b-bb68-6e6250a40cdc"
-
-[[token.source_card_refs]]
-card_name = "Pitiless Plunderer"
-scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
-scryfall_id = "8cbd3935-f02e-4508-895e-4ca86b6f8723"
-
-[[token.source_card_refs]]
-card_name = "Captain Lannery Storm"
-scryfall_oracle_id = "235bf0ba-658c-463f-b112-7478ba27bd7b"
-scryfall_id = "0f67a2a1-2700-408e-b58c-34f3d2d75a98"
-
-[[token.source_card_refs]]
-card_name = "Goldspan Dragon"
-scryfall_oracle_id = "716b3ea2-45b7-4a8f-af72-de7f4e510eff"
-scryfall_id = "1183d4d7-094b-4024-ab1d-23c458cb7e71"
-
-[[token.source_card_refs]]
-card_name = "Master of Ceremonies"
-scryfall_oracle_id = "18ed0c8a-db8f-4247-87c4-544b833f01bd"
-scryfall_id = "ac736037-113f-4e4b-8b97-7b2300b0d276"
-
-[[token.source_card_refs]]
-card_name = "Magda, Brazen Outlaw"
-scryfall_oracle_id = "3d268e48-3004-4384-bf52-e63243fb5e02"
-scryfall_id = "35f229b2-5246-4399-8468-eb030842a17b"
-
-[[token.source_card_refs]]
-card_name = "Evin, Waterdeep Opportunist"
-scryfall_oracle_id = "f688f839-c7c2-45a9-8c60-9fdb030803e6"
-scryfall_id = "2091e863-30f3-475e-9a61-e76fc4cf1ce2"
-
-[[token.source_card_refs]]
-card_name = "Lara Croft, Tomb Raider"
-scryfall_oracle_id = "ddfd9dca-c886-4e13-b467-990469c31a61"
-scryfall_id = "098c976b-6096-4ac7-8d52-2f219ae21d1f"
-
-[[token.source_card_refs]]
-card_name = "Seize the Spotlight"
-scryfall_oracle_id = "3d1b09a3-f151-4218-974b-02bb6159247a"
-scryfall_id = "4156e1cc-ee40-4753-adf8-47b948cf7eb8"
-
-[[token.source_card_refs]]
-card_name = "Tireless Provisioner"
-scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
-scryfall_id = "6d2e2e8d-8382-4d98-9e25-2dff1b1d0ff8"
-
-[[token.source_card_refs]]
-card_name = "Prosper, Tome-Bound"
-scryfall_oracle_id = "1e9b0fd6-5aae-401a-8df5-d94ce6442696"
-scryfall_id = "8213f299-0f6e-499f-ba8e-7e297965d482"
-
-[[token.source_card_refs]]
-card_name = "The Reaver Cleaver"
-scryfall_oracle_id = "37a2a31d-51e6-4c07-b4c2-b206ad40eb42"
-scryfall_id = "be11af2c-ced6-4da7-a56c-60cef97b7fbb"
-
-[[token.source_card_refs]]
-card_name = "Blood Money"
-scryfall_oracle_id = "75f5d372-4ff9-430c-8302-72472439e0d2"
-scryfall_id = "65bd6ec3-7597-499b-8b69-fe7d50ece069"
-
-[[token.source_card_refs]]
-card_name = "Deadly Dispute"
-scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
-scryfall_id = "84c0dfa2-680e-47c5-987d-a02561d7e790"
-
-[[token.source_card_refs]]
-card_name = "Grim Hireling"
-scryfall_oracle_id = "89738595-dafb-400a-bfba-91a53a37e717"
-scryfall_id = "13faeba0-0536-4e29-ae56-d76c659e1e50"
-
-[[token.source_card_refs]]
-card_name = "Academy Manufactor"
-scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
-scryfall_id = "5f0d37b6-c092-439b-ba8e-e297ad35f155"
-
-[[token.source_card_refs]]
-card_name = "Captain Lannery Storm"
-scryfall_oracle_id = "235bf0ba-658c-463f-b112-7478ba27bd7b"
-scryfall_id = "f38944d0-710f-47d1-a117-ee4ede103b30"
-
-[[token.source_card_refs]]
-card_name = "Shiny Impetus"
-scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
-scryfall_id = "6c4b24f2-eaf6-47e6-8536-c769ef9cca7f"
-
-[[token.source_card_refs]]
-card_name = "Battle Angels of Tyr"
-scryfall_oracle_id = "c2bd0c24-3973-48bc-a591-3779e3640c5d"
-scryfall_id = "8b3c8050-6acb-4d53-ba46-646ca88d4eb6"
-
-[[token.source_card_refs]]
-card_name = "Storm-Kiln Artist"
-scryfall_oracle_id = "a145ff8c-5812-4bcb-bd16-9839dc25121d"
-scryfall_id = "9a6f8a6e-cc77-41d8-b753-bb3c5a5c4f48"
-
-[[token.source_card_refs]]
-card_name = "Professional Face-Breaker"
-scryfall_oracle_id = "04152e7a-969c-4858-841b-0a569a9fc1bf"
-scryfall_id = "7e7c8626-3c82-43f1-98a7-db165b30cf3b"
-
-[[token.source_card_refs]]
-card_name = "Reckoner Bankbuster // Reckoner Bankbuster"
-face_name = "Reckoner Bankbuster"
-scryfall_oracle_id = "b6be94dc-7162-4887-b959-3bda709724eb"
-scryfall_id = "05fab477-5e35-4a47-a972-441bbddc3302"
-
-[[token.source_card_refs]]
-card_name = "Iron Man, Titan of Innovation"
-scryfall_oracle_id = "67ab82de-1167-42f5-90bd-21c63edcc712"
-scryfall_id = "7542b1d1-e34d-46dc-af24-1b718034c0e4"
-
-[[token.source_card_refs]]
-card_name = "Academy Manufactor"
-scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
-scryfall_id = "c88eb33d-efba-4ad9-878f-f051079c9bce"
-
-[[token.source_card_refs]]
-card_name = "Revel in Riches"
-scryfall_oracle_id = "cc3fcd26-c088-4335-9a35-0e11019e3d5b"
-scryfall_id = "22ddde38-79e0-48f2-9920-b66f6399b077"
-
-[[token.source_card_refs]]
-card_name = "Smothering Tithe"
-scryfall_oracle_id = "153376c9-dffd-458c-8ce3-a4c8269bc4e9"
-scryfall_id = "7839cdc8-0cc9-4a17-9642-fb23f6e0be06"
-
-[[token.source_card_refs]]
-card_name = "Prosperous Innkeeper"
-scryfall_oracle_id = "da785227-cf8a-4d44-9e7c-fc909ea868f2"
-scryfall_id = "6ab26569-5e7a-410c-86d3-a7ab989f7a31"
-
-[[token.source_card_refs]]
-card_name = "Reckless Endeavor"
-scryfall_oracle_id = "928bf0d9-89be-462d-aeb7-74a65e95535c"
-scryfall_id = "a6470185-99f8-4b13-9bae-ef62c6d92d02"
-
-[[token.source_card_refs]]
-card_name = "Big Score"
-scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
-scryfall_id = "9d934412-6ac9-4605-8675-07f74ed106a0"
-
-[[token.source_card_refs]]
-card_name = "Deadly Dispute"
-scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
-scryfall_id = "7c58e69d-1cbd-4d67-8d34-bd66904983c4"
-
-[[token.source_card_refs]]
-card_name = "Breeches, Eager Pillager"
-scryfall_oracle_id = "15361770-c6dc-4db7-b745-aa03e4b866ea"
-scryfall_id = "480d639d-871d-4da3-9ae1-41bd5cef81db"
-
-[[token.source_card_refs]]
-card_name = "The Ghoul, Gunslinger"
-scryfall_oracle_id = "ddfa5c7d-bc47-43e0-9607-b3baa8e6a17d"
-scryfall_id = "e7ed7d2c-c49b-4786-86eb-125863e874a2"
-
-[[token.source_card_refs]]
-card_name = "Malik, Grim Manipulator"
-scryfall_oracle_id = "416608a1-89a4-44ce-8fd0-fab6b023d3d4"
-scryfall_id = "35d03f86-5219-4456-8136-802699ff26d3"
-
-[[token.source_card_refs]]
-card_name = "Knuckles the Echidna"
-scryfall_oracle_id = "71ae0fab-eb3e-4226-9fcc-29186f98a569"
-scryfall_id = "54b65cca-7844-4d3e-9d7f-ed1f49f94425"
-
-[[token.source_card_refs]]
-card_name = "Pinkie Pie"
-scryfall_oracle_id = "818f7024-bdce-4cf2-af64-00ae7864defb"
-scryfall_id = "c790770c-110d-4eb2-b9ae-3aa2bc745a9d"
-
-[[token.source_card_refs]]
-card_name = "Deadly Dispute"
-scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
-scryfall_id = "b6ae0d7b-8e9c-4251-8c8e-db4afdeb2c29"
-
-[[token.source_card_refs]]
-card_name = "Deadly Dispute"
-scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
-scryfall_id = "939e8322-e4be-48c4-9afc-90f8cc2ef802"
-
-[[token.source_card_refs]]
-card_name = "Nuka-Cola Vending Machine"
-scryfall_oracle_id = "6cfb03e5-aca6-4fe2-a3f1-93e1f0cbf9e1"
-scryfall_id = "bd5cc052-7175-4bb8-a52c-f1fb80cb731a"
-
-[[token.source_card_refs]]
-card_name = "Deadly Dispute"
-scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
-scryfall_id = "fa73365b-b626-4288-9587-d2f75d4aa6b8"
-
-[[token.source_card_refs]]
-card_name = "Big Score"
-scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
-scryfall_id = "e2b14a8c-2264-4908-8151-da6c8856350e"
-
-[[token.source_card_refs]]
-card_name = "Xorn"
-scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
-scryfall_id = "38d09b91-d4da-4e8f-a6ef-09482e09842d"
-
-[[token.source_card_refs]]
-card_name = "Xorn"
-scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
-scryfall_id = "09b82084-87c9-4131-b604-d595d38d045a"
 
 [token.token_image_ref]
 scryfall_id = "73f94f72-a689-41ca-b1af-6004e2a57e9c"
@@ -89449,6 +89797,188 @@ scryfall_oracle_id = "60fe4897-6760-4c5a-8074-c92bd64df52b"
 preset_id = "6ac36883-a7fc-58ec-a0dd-e7f2f5438363"
 
 [[token]]
+id = "6addc770-3c86-5bfc-97cc-d74177e1b3b6"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2547"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "d4a47380-3e51-4c1d-9ffa-472d4f97d36b"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "6addc770-3c86-5bfc-97cc-d74177e1b3b6"
+
+[[token]]
 id = "6ae55f03-ae8e-55dd-9147-40771507c8b5"
 category = "Creature"
 fidelity = "Full"
@@ -93541,6 +94071,232 @@ scryfall_oracle_id = "b43340e3-bb76-4501-8db2-040b7cae33b7"
 preset_id = "6e30de50-4851-5313-b1e3-eda8a0ef4027"
 
 [[token]]
+id = "6e328559-a559-57fb-bb2e-7526ae2a4d8d"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2551"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Gilded Goose"
+scryfall_oracle_id = "f2f09757-1931-47c0-a5f0-39280445489d"
+scryfall_id = "eb08b642-aff6-4c37-a952-f8ddcfc4767e"
+
+[[token.source_card_refs]]
+card_name = "Tireless Provisioner"
+scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
+scryfall_id = "7a832060-ecc6-406a-ab06-b371aa952e13"
+
+[[token.source_card_refs]]
+card_name = "Tippy-Toe, Terrific Partner"
+scryfall_oracle_id = "6a1bce89-0c11-4d8d-aacb-c0a5a5effffc"
+scryfall_id = "d3154e82-3497-47ad-99e5-369cb40ac869"
+
+[[token.source_card_refs]]
+card_name = "Tireless Provisioner"
+scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
+scryfall_id = "6d2e2e8d-8382-4d98-9e25-2dff1b1d0ff8"
+
+[[token.source_card_refs]]
+card_name = "Academy Manufactor"
+scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
+scryfall_id = "5f0d37b6-c092-439b-ba8e-e297ad35f155"
+
+[[token.source_card_refs]]
+card_name = "Academy Manufactor"
+scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
+scryfall_id = "c88eb33d-efba-4ad9-878f-f051079c9bce"
+
+[[token.source_card_refs]]
+card_name = "Witch's Oven"
+scryfall_oracle_id = "8fa0fe02-2452-4386-8e0c-165757b0f0a3"
+scryfall_id = "1546013b-89d7-46b8-bfcb-9d150a50499f"
+
+[[token.source_card_refs]]
+card_name = "Applejack"
+scryfall_oracle_id = "c81f22a3-b93a-4ea4-b2ae-557c12e07288"
+scryfall_id = "a8f02241-b268-43c8-b69e-bf10c8a9b9ca"
+
+[[token.source_card_refs]]
+card_name = "Nuka-Cola Vending Machine"
+scryfall_oracle_id = "6cfb03e5-aca6-4fe2-a3f1-93e1f0cbf9e1"
+scryfall_id = "bd5cc052-7175-4bb8-a52c-f1fb80cb731a"
+
+[token.token_image_ref]
+scryfall_id = "276dedb8-3d41-499c-8804-bb1471fcb06f"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "6e328559-a559-57fb-bb2e-7526ae2a4d8d"
+
+[[token]]
 id = "6e6c43c5-7306-5761-909d-397f62cc605c"
 category = "Creature"
 fidelity = "PartialMissingAbilities"
@@ -93661,6 +94417,188 @@ scryfall_id = "1ea40dc5-de1b-4d2b-ae0e-df8e52876647"
 scryfall_id = "d49e91df-0647-4c9f-9c3e-fb8c77c4886c"
 scryfall_oracle_id = "bb3da6d2-aed7-4057-b94b-6882fb45cc89"
 preset_id = "6e7758ec-e4bb-59fc-a314-6a52cc158724"
+
+[[token]]
+id = "6e82b19f-c508-557c-9fe6-287022e15c43"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2549"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "110f41a6-1ca5-463e-8a6d-fdf021842b43"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "6e82b19f-c508-557c-9fe6-287022e15c43"
 
 [[token]]
 id = "6e8cb570-6b9b-5a4e-b1a5-dcae91a6b8ad"
@@ -108557,6 +109495,188 @@ scryfall_oracle_id = "ac72867d-73f4-4067-8cd8-89a117ac88bf"
 preset_id = "7f4dc7cc-dad3-572a-9185-406ca1c9d075"
 
 [[token]]
+id = "7f7ceeba-5a60-537d-a6cd-c004e386a966"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2545"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "356e7a19-9dc5-4c39-ad88-8c355fbdca1a"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "7f7ceeba-5a60-537d-a6cd-c004e386a966"
+
+[[token]]
 id = "7f7ef390-9103-5a8b-a909-c3c2aaef29e9"
 category = "Creature"
 fidelity = "Full"
@@ -111440,6 +112560,34 @@ scryfall_id = "b9169431-a5b1-42ea-bcf4-6c750d2a2dbb"
 scryfall_id = "dfb61889-9bc6-426d-8ce5-7b1c0e6e959b"
 scryfall_oracle_id = "0045c5fa-3229-4050-b139-5712fa24b308"
 preset_id = "82c844d0-9918-52d5-8bf1-201e32ea2acb"
+
+[[token]]
+id = "831c4ca5-fd24-5d3d-8360-ae07040c64a3"
+category = "Creature"
+fidelity = "Full"
+set_code = "HOB"
+set_name = "The Hobbit"
+collector_number = "4"
+released_at = "2026-08-14"
+type_line = "Token Creature — Goblin Army"
+
+[token.body]
+display_name = "Goblin Army Token"
+power = 0
+toughness = 0
+core_types = ["Creature"]
+subtypes = [
+    "Goblin",
+    "Army",
+]
+supertypes = []
+colors = ["Black"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "0045408d-4ab9-48bf-84aa-c6d827682090"
+scryfall_oracle_id = "50592393-8998-4929-b6fb-eaaa6294d0a9"
+preset_id = "831c4ca5-fd24-5d3d-8360-ae07040c64a3"
 
 [[token]]
 id = "833da3ec-b15a-5c13-b47d-d62904008524"
@@ -132265,6 +133413,11 @@ card_name = "Mitotic Slime"
 scryfall_oracle_id = "1162c7ff-c0cb-469a-ad3c-322b0981ae1d"
 scryfall_id = "8aacf055-e36f-4428-8a3c-f73fa4b4307c"
 
+[[token.source_card_refs]]
+card_name = "Mitotic Slime"
+scryfall_oracle_id = "1162c7ff-c0cb-469a-ad3c-322b0981ae1d"
+scryfall_id = "883840b7-32db-4bda-8e02-0f6ba844fd34"
+
 [token.token_image_ref]
 scryfall_id = "26e205aa-6d29-4067-8b20-f3da72511b21"
 scryfall_oracle_id = "ee54f59e-a334-4f0d-8bc6-44fb97c948ac"
@@ -136543,6 +137696,7 @@ source_card_names = [
     "Fell the Pheasant",
     "Field-Tested Frying Pan",
     "Fierce Witchstalker",
+    "Food",
     "Food Coma",
     "Foreboding Fruit",
     "Fortifying Provisions",
@@ -136672,51 +137826,6 @@ subtypes = ["Food"]
 supertypes = []
 colors = []
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Gilded Goose"
-scryfall_oracle_id = "f2f09757-1931-47c0-a5f0-39280445489d"
-scryfall_id = "eb08b642-aff6-4c37-a952-f8ddcfc4767e"
-
-[[token.source_card_refs]]
-card_name = "Tireless Provisioner"
-scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
-scryfall_id = "7a832060-ecc6-406a-ab06-b371aa952e13"
-
-[[token.source_card_refs]]
-card_name = "Tippy-Toe, Terrific Partner"
-scryfall_oracle_id = "6a1bce89-0c11-4d8d-aacb-c0a5a5effffc"
-scryfall_id = "d3154e82-3497-47ad-99e5-369cb40ac869"
-
-[[token.source_card_refs]]
-card_name = "Tireless Provisioner"
-scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
-scryfall_id = "6d2e2e8d-8382-4d98-9e25-2dff1b1d0ff8"
-
-[[token.source_card_refs]]
-card_name = "Academy Manufactor"
-scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
-scryfall_id = "5f0d37b6-c092-439b-ba8e-e297ad35f155"
-
-[[token.source_card_refs]]
-card_name = "Academy Manufactor"
-scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
-scryfall_id = "c88eb33d-efba-4ad9-878f-f051079c9bce"
-
-[[token.source_card_refs]]
-card_name = "Witch's Oven"
-scryfall_oracle_id = "8fa0fe02-2452-4386-8e0c-165757b0f0a3"
-scryfall_id = "1546013b-89d7-46b8-bfcb-9d150a50499f"
-
-[[token.source_card_refs]]
-card_name = "Applejack"
-scryfall_oracle_id = "c81f22a3-b93a-4ea4-b2ae-557c12e07288"
-scryfall_id = "a8f02241-b268-43c8-b69e-bf10c8a9b9ca"
-
-[[token.source_card_refs]]
-card_name = "Nuka-Cola Vending Machine"
-scryfall_oracle_id = "6cfb03e5-aca6-4fe2-a3f1-93e1f0cbf9e1"
-scryfall_id = "bd5cc052-7175-4bb8-a52c-f1fb80cb731a"
 
 [token.token_image_ref]
 scryfall_id = "8e6b1c7b-ef76-446a-9d05-6a5fb34fa68b"
@@ -145757,6 +146866,664 @@ face_name = "Treasure"
 preset_id = "ab3b9c7d-b9fc-53c2-aba9-5859e8cfcdee"
 
 [[token]]
+id = "ab4fcb95-fd1f-522f-9ad6-7f7b7f12947d"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Alchemist's Talent",
+    "Alicia Masters, Skilled Sculptor",
+    "An Offer You Can't Refuse",
+    "Ancestors' Aid",
+    "Ancient Adamantoise",
+    "Ancient Copper Dragon",
+    "Ant-Man's Army",
+    "Ant-Man, Elusive Avenger",
+    "Ashling's Command",
+    "Atsushi, the Blazing Sky",
+    "Avengers: Under Siege",
+    "Axgard Artisan",
+    "Baeloth Barrityl, Entertainer",
+    "Bank Job",
+    "Battle Angels of Tyr",
+    "Beamtown Beatstick",
+    "Beza, the Bounding Spring",
+    "Big Score",
+    "Big Spender",
+    "Bilbo, Retired Burglar",
+    "Bill Ferny, Bree Swindler",
+    "Black Market Connections",
+    "Black Market Tycoon",
+    "Blood Money",
+    "Bloodroot Apothecary",
+    "Blooming Blast",
+    "Bonehoard Dracosaur",
+    "Boneyard Desecrator",
+    "Bootleggers' Stash",
+    "Bottle-Cap Blast",
+    "Boxing Ring",
+    "Brass's Bounty",
+    "Brazen Freebooter",
+    "Breeches, Eager Pillager",
+    "Bucknard's Everfull Purse",
+    "Burakos, Party Leader",
+    "Burdened Aerialist",
+    "Buy Your Silence",
+    "Captain Lannery Storm",
+    "Careening Mine Cart",
+    "Casey & Raph, Hotheads",
+    "Cataclysmic Prospecting",
+    "Cavern-Hoard Dragon",
+    "Centrifuge",
+    "Charming Scoundrel",
+    "City of Death",
+    "Cloud, Ex-SOLDIER",
+    "Coin of Mastery",
+    "Collector's Vault",
+    "Common Crook",
+    "Contested Game Ball",
+    "Contract Hero",
+    "Contract Killing",
+    "Corsair Captain",
+    "Covetous Elegy",
+    "Crack Open",
+    "Creative Outburst",
+    "Crossover Collaboration",
+    "Culmination of Studies",
+    "Currency Converter",
+    "Cutthroat Negotiator",
+    "Daily Bugle Newspaper",
+    "Deadeye Plunderers",
+    "Deadly Derision",
+    "Deadly Dispute",
+    "Death to Our Enemies",
+    "Decadent Dragon // Expensive Taste",
+    "Depths of Desire",
+    "Descent into Avernus",
+    "Diamond Pick-Axe",
+    "Dihada, Binder of Wills",
+    "Dire Fleet Hoarder",
+    "Discerning Financier",
+    "Dockside Extortionist",
+    "Don Andres, the Renegade",
+    "Done for the Day",
+    "Dungeon of the Mad Mage",
+    "Dungeoneer's Pack",
+    "Edward Kenway",
+    "Elemental Masterpiece",
+    "Emissary Green",
+    "Enterprising Scallywag",
+    "Erestor of the Council",
+    "Evin, Waterdeep Opportunist",
+    "Excavation Technique",
+    "Exhibition Magician",
+    "Exit Through the Grift Shop",
+    "Fable of the Mirror-Breaker // Reflection of Kiki-Jiki",
+    "Fae Offering",
+    "Fain, the Broker",
+    "Fake Your Own Death",
+    "Flamekin Gildweaver",
+    "Flick a Coin",
+    "Forging the Tyrite Sword",
+    "Forsworn Paladin",
+    "Fountainport",
+    "Furnace Reins",
+    "Gadrak, the Crown-Scourge",
+    "Gala Greeters",
+    "Galadriel, Gift-Giver",
+    "Galazeth Prismari",
+    "Ganax, Astral Hunter",
+    "Gemcutter Buccaneer",
+    "Generous Plunderer",
+    "Gilded Ghoda",
+    "Gilded Pinions",
+    "Gimli of the Glittering Caves",
+    "Gleaming Barrier",
+    "Glittermonger",
+    "Gluntch, the Bestower",
+    "Glóin, Dwarf Emissary",
+    "Goblin Airbrusher",
+    "Goblin Glasswright // Craft with Pride",
+    "Goblin Shaman",
+    "Gold Pan",
+    "Gold Rush",
+    "Goldlust Triad",
+    "Goldspan Dragon",
+    "Goldvein Hydra",
+    "Goldvein Pick",
+    "Gonti, Night Minister",
+    "Gorbag of Minas Morgul",
+    "Grabby Giant // That's Mine",
+    "Great Train Heist",
+    "Greedy Freebooter",
+    "Grim Bounty",
+    "Grim Hireling",
+    "Guild Artisan",
+    "Halo Scarab",
+    "Heap Gate",
+    "Heartless Pillage",
+    "Hell to Pay",
+    "Henry Wu, InGen Geneticist",
+    "Herald of Hadar",
+    "Heroes for Hire",
+    "Hit the Mother Lode",
+    "Hoard Hauler",
+    "Hoard Robber",
+    "Hoarding Ogre",
+    "Hornswoggle",
+    "Hullbreacher",
+    "Ignacio of Myra's Marvels",
+    "Impetuous Lootmonger",
+    "Improvised Weaponry",
+    "Impulsive Pilferer",
+    "Indulge // Excess",
+    "Ingenious Mastery",
+    "Inspired Tinkering",
+    "Instrument of the Bards",
+    "Invasion of Ergamon // Truga Cliffcharger",
+    "Involuntary Employment",
+    "Iron Man, Titan of Innovation",
+    "J. Jonah Jameson",
+    "Jan Jansen, Chaos Crafter",
+    "Jared Carthalion",
+    "Jewel Thief",
+    "Jewel-Eyed Cobra",
+    "Jolene, Plundering Pugilist",
+    "Jolene, the Plunder Queen",
+    "Kain, Traitorous Dragoon",
+    "Kalain, Reclusive Painter",
+    "Kamachal, Ship's Mascot",
+    "Kellogg, Dangerous Mind",
+    "Kerblam! Warehouse",
+    "Kheru Goldkeeper",
+    "Killmonger, Ruthless Usurper",
+    "Kingpin, Wilson Fisk",
+    "Knuckles the Echidna",
+    "Korvold and the Noble Thief",
+    "Lara Croft, Tomb Raider",
+    "Life Insurance",
+    "Lobelia Sackville-Baggins",
+    "Locke, Treasure Hunter",
+    "Loot Dispute",
+    "Lost Mine of Phandelver",
+    "Lotho, Corrupt Shirriff",
+    "Luck Bobblehead",
+    "Luke Cage, Hero for Hire",
+    "Luxurious Locomotive",
+    "Magda, Brazen Outlaw",
+    "Magda, the Hoardmaster",
+    "Magic Pot",
+    "Magma Opus",
+    "Magmatic Galleon",
+    "Mahadi, Emporium Master",
+    "Malcolm, Keen-Eyed Navigator",
+    "Malik, Grim Manipulator",
+    "Marching Duodrone",
+    "Mari, the Killing Quill",
+    "Marut",
+    "Mary Read and Anne Bonny",
+    "Master of Ceremonies",
+    "Mastermind Plum",
+    'Meet and Greet "Sisay"',
+    "Megaton's Fate",
+    "Meticulous Artisan",
+    "Mine Raider",
+    "Mines of Moria",
+    "Misfortune Teller",
+    "Monologue Tax",
+    "Monument to Endurance",
+    "Most Wanted",
+    "Mr. House, President and CEO",
+    "My Wealth Will Bury You",
+    "Namazu Trader",
+    "New New York",
+    "Noble's Purse",
+    "Noggle Robber",
+    "North Pole Research Base",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Ognis, the Dragon's Lash",
+    "Old Gnawbone",
+    "Old Rutstein",
+    "Olivia, Opulent Outlaw",
+    "Orochi Soul-Reaver",
+    "Pain Distributor",
+    "Patient Naturalist",
+    "Patron of the Arts",
+    "Petty Larceny",
+    "Pick-a-Beeble",
+    "Pictures of Spider-Man",
+    "Piggy Bank",
+    "Pinkie Pie",
+    "Pirate's Pillage",
+    "Pirate's Prize",
+    "Pitiless Plunderer",
+    "Plundering Barbarian",
+    "Plundering Pirate",
+    "Poetic Ingenuity",
+    "Prismari Command",
+    "Prized Statue",
+    "Prizefight",
+    "Professional Face-Breaker",
+    "Professional Wrestler",
+    "Prompto Argentum",
+    "Prosper, Tome-Bound",
+    "Prosperous Bandit",
+    "Prosperous Innkeeper",
+    "Prosperous Partnership",
+    "Prosperous Pirates",
+    "Prosperous Thief",
+    "Prying Blade",
+    "Puppet Master, String Puller",
+    "RMS Titanic",
+    "Racketeer Boss",
+    "Ragavan, Nimble Pilferer",
+    "Rain of Riches",
+    "Ramirez DePietro, Pillager",
+    "Rankle and Torbran",
+    "Rapacious Dragon",
+    "Rashmi and Ragavan",
+    "Reckless Endeavor",
+    "Reckless Lackey",
+    "Reckless Ransacking",
+    "Reckoner Bankbuster",
+    "Reckoner Bankbuster // Reckoner Bankbuster",
+    "Redcap Thief",
+    "Redrock Sentinel",
+    "Relic Retriever",
+    "Rev, Tithe Extractor",
+    "Revel in Riches",
+    "Riveteers Requisitioner",
+    "Rocketeer Boostbuggy",
+    "Rose Room Treasurer",
+    "Ruthless Knave",
+    "Ruthless Technomancer",
+    "Safana, Calimport Cutthroat",
+    "Sailor of Means",
+    "Sanar, Unfinished Genius // Wild Idea",
+    "Sarkhan, Dragon Ascendant",
+    "Scion of Opulence",
+    "Scuzzback Scrounger",
+    "Season of the Bold",
+    "Seize the Spoils",
+    "Seize the Spotlight",
+    "Setzer, Wandering Gambler",
+    "Shambling Ghast",
+    "Shiny Impetus",
+    "Sidequest: Hunt the Mark // Yiazmat, Ultimate Mark",
+    "Skullport Merchant",
+    "Smashing Success",
+    "Smaug",
+    "Smoke Blessing",
+    "Smoke Spirits' Aid",
+    "Smothering Tithe",
+    "Smuggler's Share",
+    "Song of Eärendil",
+    "Sonic the Hedgehog",
+    "Spectrox Mines",
+    "Spell Swindle",
+    "Spiked Pit Trap",
+    "Spiteful Banditry",
+    "Spiteful Repossession",
+    "Stark Industries Executive",
+    "Sticky Fingers",
+    "Stimulus Package",
+    "Storm the Vault // Vault of Catlacan",
+    "Storm-Kiln Artist",
+    "Strike It Rich",
+    "Sudden Breakthrough",
+    "Summon: Yojimbo",
+    "Surly Badgersaur",
+    "Swarming of Moria",
+    "Swashbuckler Extraordinaire",
+    "Sword of Wealth and Power",
+    "Tataru Taru",
+    "Tavern Scoundrel",
+    "Tempting Contract",
+    "Teval's Judgment",
+    "The Balrog of Moria",
+    "The Belligerent",
+    "The Ghoul, Gunslinger",
+    "The Gold Saucer",
+    "The Golden City of Orazca",
+    "The Matrix of Time",
+    "The Reaver Cleaver",
+    "The Third Doctor",
+    "The Western Cloud",
+    "There and Back Again",
+    "Thieves' Tools",
+    "Ticket Tortoise",
+    "Tireless Provisioner",
+    "Tivit, Seller of Secrets",
+    "Tokka & Rahzar, Unsupervised",
+    "Treasure Chest",
+    "Treasure Dredger",
+    "Treasure Map // Treasure Cove",
+    "Treasure Vault",
+    "Trove of Temptation",
+    "Typhoid Mary, Fractured",
+    "Ultimate Green Goblin",
+    "Undercity // The Initiative",
+    "Undercity Dire Rat",
+    "Undercity Scrounger",
+    "Unexpected Windfall",
+    "Urabrask // The Great Work",
+    "Vaan, Street Thief",
+    "Vault 21: House Gambit",
+    "Vault Robber",
+    "Vazi, Keen Negotiator",
+    "Village Pillagers",
+    "Visions of Ruin",
+    "Volatile Fault",
+    "Vraska, Relic Seeker",
+    "Wanted Scoundrels",
+    "Warren Soultrader",
+    "Widespread Thieving",
+    "Wily Goblin",
+    "Wish Good Luck",
+    "Xorn",
+    "You Find a Cursed Idol",
+    "You've Been Caught Stealing",
+    "Young Red Dragon // Bathe in Gold",
+    "Zhentarim Bandit",
+    "Ziatora, the Incinerator",
+    "Zidane, Tantalus Thief",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2820"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Treasure"
+rules_text = "{T}, Sacrifice this token: Add one mana of any color."
+
+[token.category.PredefinedArtifact]
+kind = "Treasure"
+
+[token.body]
+display_name = "Treasure"
+core_types = ["Artifact"]
+subtypes = ["Treasure"]
+supertypes = []
+colors = []
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Descent into Avernus"
+scryfall_oracle_id = "1313da2f-92bb-4862-9153-373972cc1520"
+scryfall_id = "3e1003d5-f585-4194-a829-1bc342b26e0b"
+
+[[token.source_card_refs]]
+card_name = "Ziatora, the Incinerator"
+scryfall_oracle_id = "d46c3fb6-f1c7-4a96-ae42-5bce17fc7c1d"
+scryfall_id = "68cce7e2-8c4b-4c76-a38b-0fee85da3151"
+
+[[token.source_card_refs]]
+card_name = "Reckoner Bankbuster // Reckoner Bankbuster"
+face_name = "Reckoner Bankbuster"
+scryfall_oracle_id = "b6be94dc-7162-4887-b959-3bda709724eb"
+scryfall_id = "05fab477-5e35-4a47-a972-441bbddc3302"
+
+[[token.source_card_refs]]
+card_name = "Old Gnawbone"
+scryfall_oracle_id = "dff3f4c7-f792-4ca3-9b0a-0738e70664d9"
+scryfall_id = "2daa0737-e1a5-4112-afde-34a3375e23f7"
+
+[[token.source_card_refs]]
+card_name = "Shiny Impetus"
+scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
+scryfall_id = "71bcf8d7-cc70-4d52-9607-09ed7e08d61b"
+
+[[token.source_card_refs]]
+card_name = "Sonic the Hedgehog"
+scryfall_oracle_id = "b07a7b00-9394-48a9-a597-17f391495909"
+scryfall_id = "072a0e6f-e636-4ce1-a253-580ab956410e"
+
+[[token.source_card_refs]]
+card_name = "Atsushi, the Blazing Sky"
+scryfall_oracle_id = "535f405d-94df-4f45-aedc-b331103720b7"
+scryfall_id = "045d1a10-dfc4-4b1a-a9f4-424d7ea0d216"
+
+[[token.source_card_refs]]
+card_name = "Monologue Tax"
+scryfall_oracle_id = "ace8e88e-ca6a-4bdf-8c6d-1b914fc00259"
+scryfall_id = "b2b1ab21-fee9-42c4-abae-4e0883d34801"
+
+[[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "c09bb44b-af66-4183-826d-867299dc1b3e"
+
+[[token.source_card_refs]]
+card_name = "Tireless Provisioner"
+scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
+scryfall_id = "7a832060-ecc6-406a-ab06-b371aa952e13"
+
+[[token.source_card_refs]]
+card_name = "Unexpected Windfall"
+scryfall_oracle_id = "498c10c9-253d-4b15-b48c-1509381b17e8"
+scryfall_id = "42076e0d-f6dd-403b-bb68-6e6250a40cdc"
+
+[[token.source_card_refs]]
+card_name = "Pitiless Plunderer"
+scryfall_oracle_id = "a784481f-eccb-4112-bb38-04a659319660"
+scryfall_id = "8cbd3935-f02e-4508-895e-4ca86b6f8723"
+
+[[token.source_card_refs]]
+card_name = "Captain Lannery Storm"
+scryfall_oracle_id = "235bf0ba-658c-463f-b112-7478ba27bd7b"
+scryfall_id = "0f67a2a1-2700-408e-b58c-34f3d2d75a98"
+
+[[token.source_card_refs]]
+card_name = "Goldspan Dragon"
+scryfall_oracle_id = "716b3ea2-45b7-4a8f-af72-de7f4e510eff"
+scryfall_id = "1183d4d7-094b-4024-ab1d-23c458cb7e71"
+
+[[token.source_card_refs]]
+card_name = "Master of Ceremonies"
+scryfall_oracle_id = "18ed0c8a-db8f-4247-87c4-544b833f01bd"
+scryfall_id = "ac736037-113f-4e4b-8b97-7b2300b0d276"
+
+[[token.source_card_refs]]
+card_name = "Magda, Brazen Outlaw"
+scryfall_oracle_id = "3d268e48-3004-4384-bf52-e63243fb5e02"
+scryfall_id = "35f229b2-5246-4399-8468-eb030842a17b"
+
+[[token.source_card_refs]]
+card_name = "Evin, Waterdeep Opportunist"
+scryfall_oracle_id = "f688f839-c7c2-45a9-8c60-9fdb030803e6"
+scryfall_id = "2091e863-30f3-475e-9a61-e76fc4cf1ce2"
+
+[[token.source_card_refs]]
+card_name = "Lara Croft, Tomb Raider"
+scryfall_oracle_id = "ddfd9dca-c886-4e13-b467-990469c31a61"
+scryfall_id = "098c976b-6096-4ac7-8d52-2f219ae21d1f"
+
+[[token.source_card_refs]]
+card_name = "Seize the Spotlight"
+scryfall_oracle_id = "3d1b09a3-f151-4218-974b-02bb6159247a"
+scryfall_id = "4156e1cc-ee40-4753-adf8-47b948cf7eb8"
+
+[[token.source_card_refs]]
+card_name = "Tireless Provisioner"
+scryfall_oracle_id = "ab8d5f5c-1976-4f77-8ed2-8d28ee666741"
+scryfall_id = "6d2e2e8d-8382-4d98-9e25-2dff1b1d0ff8"
+
+[[token.source_card_refs]]
+card_name = "Prosper, Tome-Bound"
+scryfall_oracle_id = "1e9b0fd6-5aae-401a-8df5-d94ce6442696"
+scryfall_id = "8213f299-0f6e-499f-ba8e-7e297965d482"
+
+[[token.source_card_refs]]
+card_name = "The Reaver Cleaver"
+scryfall_oracle_id = "37a2a31d-51e6-4c07-b4c2-b206ad40eb42"
+scryfall_id = "be11af2c-ced6-4da7-a56c-60cef97b7fbb"
+
+[[token.source_card_refs]]
+card_name = "Blood Money"
+scryfall_oracle_id = "75f5d372-4ff9-430c-8302-72472439e0d2"
+scryfall_id = "65bd6ec3-7597-499b-8b69-fe7d50ece069"
+
+[[token.source_card_refs]]
+card_name = "Deadly Dispute"
+scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
+scryfall_id = "84c0dfa2-680e-47c5-987d-a02561d7e790"
+
+[[token.source_card_refs]]
+card_name = "Grim Hireling"
+scryfall_oracle_id = "89738595-dafb-400a-bfba-91a53a37e717"
+scryfall_id = "13faeba0-0536-4e29-ae56-d76c659e1e50"
+
+[[token.source_card_refs]]
+card_name = "Academy Manufactor"
+scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
+scryfall_id = "5f0d37b6-c092-439b-ba8e-e297ad35f155"
+
+[[token.source_card_refs]]
+card_name = "Captain Lannery Storm"
+scryfall_oracle_id = "235bf0ba-658c-463f-b112-7478ba27bd7b"
+scryfall_id = "f38944d0-710f-47d1-a117-ee4ede103b30"
+
+[[token.source_card_refs]]
+card_name = "Shiny Impetus"
+scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
+scryfall_id = "6c4b24f2-eaf6-47e6-8536-c769ef9cca7f"
+
+[[token.source_card_refs]]
+card_name = "Battle Angels of Tyr"
+scryfall_oracle_id = "c2bd0c24-3973-48bc-a591-3779e3640c5d"
+scryfall_id = "8b3c8050-6acb-4d53-ba46-646ca88d4eb6"
+
+[[token.source_card_refs]]
+card_name = "Storm-Kiln Artist"
+scryfall_oracle_id = "a145ff8c-5812-4bcb-bd16-9839dc25121d"
+scryfall_id = "9a6f8a6e-cc77-41d8-b753-bb3c5a5c4f48"
+
+[[token.source_card_refs]]
+card_name = "Professional Face-Breaker"
+scryfall_oracle_id = "04152e7a-969c-4858-841b-0a569a9fc1bf"
+scryfall_id = "7e7c8626-3c82-43f1-98a7-db165b30cf3b"
+
+[[token.source_card_refs]]
+card_name = "Reckoner Bankbuster // Reckoner Bankbuster"
+face_name = "Reckoner Bankbuster"
+scryfall_oracle_id = "b6be94dc-7162-4887-b959-3bda709724eb"
+scryfall_id = "05fab477-5e35-4a47-a972-441bbddc3302"
+
+[[token.source_card_refs]]
+card_name = "Iron Man, Titan of Innovation"
+scryfall_oracle_id = "67ab82de-1167-42f5-90bd-21c63edcc712"
+scryfall_id = "7542b1d1-e34d-46dc-af24-1b718034c0e4"
+
+[[token.source_card_refs]]
+card_name = "Academy Manufactor"
+scryfall_oracle_id = "f36d1d8b-8303-44a9-ab56-531931641ea2"
+scryfall_id = "c88eb33d-efba-4ad9-878f-f051079c9bce"
+
+[[token.source_card_refs]]
+card_name = "Revel in Riches"
+scryfall_oracle_id = "cc3fcd26-c088-4335-9a35-0e11019e3d5b"
+scryfall_id = "22ddde38-79e0-48f2-9920-b66f6399b077"
+
+[[token.source_card_refs]]
+card_name = "Smothering Tithe"
+scryfall_oracle_id = "153376c9-dffd-458c-8ce3-a4c8269bc4e9"
+scryfall_id = "7839cdc8-0cc9-4a17-9642-fb23f6e0be06"
+
+[[token.source_card_refs]]
+card_name = "Prosperous Innkeeper"
+scryfall_oracle_id = "da785227-cf8a-4d44-9e7c-fc909ea868f2"
+scryfall_id = "6ab26569-5e7a-410c-86d3-a7ab989f7a31"
+
+[[token.source_card_refs]]
+card_name = "Reckless Endeavor"
+scryfall_oracle_id = "928bf0d9-89be-462d-aeb7-74a65e95535c"
+scryfall_id = "a6470185-99f8-4b13-9bae-ef62c6d92d02"
+
+[[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "9d934412-6ac9-4605-8675-07f74ed106a0"
+
+[[token.source_card_refs]]
+card_name = "Deadly Dispute"
+scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
+scryfall_id = "7c58e69d-1cbd-4d67-8d34-bd66904983c4"
+
+[[token.source_card_refs]]
+card_name = "Breeches, Eager Pillager"
+scryfall_oracle_id = "15361770-c6dc-4db7-b745-aa03e4b866ea"
+scryfall_id = "480d639d-871d-4da3-9ae1-41bd5cef81db"
+
+[[token.source_card_refs]]
+card_name = "The Ghoul, Gunslinger"
+scryfall_oracle_id = "ddfa5c7d-bc47-43e0-9607-b3baa8e6a17d"
+scryfall_id = "e7ed7d2c-c49b-4786-86eb-125863e874a2"
+
+[[token.source_card_refs]]
+card_name = "Malik, Grim Manipulator"
+scryfall_oracle_id = "416608a1-89a4-44ce-8fd0-fab6b023d3d4"
+scryfall_id = "35d03f86-5219-4456-8136-802699ff26d3"
+
+[[token.source_card_refs]]
+card_name = "Knuckles the Echidna"
+scryfall_oracle_id = "71ae0fab-eb3e-4226-9fcc-29186f98a569"
+scryfall_id = "54b65cca-7844-4d3e-9d7f-ed1f49f94425"
+
+[[token.source_card_refs]]
+card_name = "Pinkie Pie"
+scryfall_oracle_id = "818f7024-bdce-4cf2-af64-00ae7864defb"
+scryfall_id = "c790770c-110d-4eb2-b9ae-3aa2bc745a9d"
+
+[[token.source_card_refs]]
+card_name = "Deadly Dispute"
+scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
+scryfall_id = "b6ae0d7b-8e9c-4251-8c8e-db4afdeb2c29"
+
+[[token.source_card_refs]]
+card_name = "Fountainport"
+scryfall_oracle_id = "94e8b0a9-44a1-4dce-8d44-78681ae638a1"
+scryfall_id = "c823cedc-8532-4e82-bb92-2c98aa266808"
+
+[[token.source_card_refs]]
+card_name = "Deadly Dispute"
+scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
+scryfall_id = "939e8322-e4be-48c4-9afc-90f8cc2ef802"
+
+[[token.source_card_refs]]
+card_name = "Nuka-Cola Vending Machine"
+scryfall_oracle_id = "6cfb03e5-aca6-4fe2-a3f1-93e1f0cbf9e1"
+scryfall_id = "bd5cc052-7175-4bb8-a52c-f1fb80cb731a"
+
+[[token.source_card_refs]]
+card_name = "Deadly Dispute"
+scryfall_oracle_id = "457af74a-02b3-4659-846d-63e482667f34"
+scryfall_id = "fa73365b-b626-4288-9587-d2f75d4aa6b8"
+
+[[token.source_card_refs]]
+card_name = "Big Score"
+scryfall_oracle_id = "a5cbd257-c836-493e-bb1a-76242619dea2"
+scryfall_id = "e2b14a8c-2264-4908-8151-da6c8856350e"
+
+[[token.source_card_refs]]
+card_name = "Treasure Vault"
+scryfall_oracle_id = "3c43efd6-b1a8-452c-ae20-9a936c3340ab"
+scryfall_id = "e571614b-cef1-4e44-bfe4-0029db9694eb"
+
+[[token.source_card_refs]]
+card_name = "Xorn"
+scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
+scryfall_id = "38d09b91-d4da-4e8f-a6ef-09482e09842d"
+
+[[token.source_card_refs]]
+card_name = "Xorn"
+scryfall_oracle_id = "11d8fab8-93af-4291-80bd-cf9436e99f4b"
+scryfall_id = "09b82084-87c9-4131-b604-d595d38d045a"
+
+[token.token_image_ref]
+scryfall_id = "0bb11342-bc1d-4eea-b0b0-94799be2602a"
+scryfall_oracle_id = "3c549374-6c37-42e0-8d88-a8555d46732d"
+preset_id = "ab4fcb95-fd1f-522f-9ad6-7f7b7f12947d"
+
+[[token]]
 id = "ab6a49f3-7679-59c9-873b-d56dd6b6780a"
 category = "Creature"
 fidelity = "Full"
@@ -147743,6 +149510,11 @@ scryfall_id = "c2ff06c7-6731-45db-acf5-704634de825f"
 card_name = "Fishing Gear"
 scryfall_oracle_id = "7d309b18-8dc5-41ee-888c-e275761029e7"
 scryfall_id = "b2a1b5b3-8d7a-4614-b7f9-d13db5654d03"
+
+[[token.source_card_refs]]
+card_name = "Fountainport"
+scryfall_oracle_id = "94e8b0a9-44a1-4dce-8d44-78681ae638a1"
+scryfall_id = "c823cedc-8532-4e82-bb92-2c98aa266808"
 
 [[token.source_card_refs]]
 card_name = "Sazacap's Brew"
@@ -160077,6 +161849,188 @@ scryfall_id = "74d0bb76-075c-49d7-9afb-e5bcf5b654f7"
 scryfall_id = "28a7a9b0-d823-4b34-829f-ade81fc141e0"
 scryfall_oracle_id = "e1cab9f5-a094-4df4-9094-71bebf91956f"
 preset_id = "bbab9684-dcc4-5a3a-af74-b040cc9d3a09"
+
+[[token]]
+id = "bbd313f5-b31e-50c9-ae52-5befea38da5e"
+fidelity = "Full"
+source_card_names = [
+    "Academy Manufactor",
+    "Albiorix, Goose Tyrant // Wild Goose Chase",
+    "Ant-Man's Army",
+    "Apothecary White",
+    "Applejack",
+    "Astrid Peth",
+    "Bake into a Pie",
+    "Bakersbane Duo",
+    "Bartered Cow",
+    "Bill the Pony",
+    "Boar",
+    "Bosco, Just a Bear",
+    "Brandywine Farmer",
+    "Bristlebud Farmer",
+    "Bumbleflower's Sharepot",
+    "Bumi's Feast Lecture",
+    "Butterbur, Bree Innkeeper",
+    "Cache Grab",
+    "Campsite Cuisine",
+    "Canyon Crawler",
+    "Cat Collector",
+    "Cirith Ungol Patrol",
+    "City Pigeon",
+    "Concession Stand",
+    "Courier of Comestibles",
+    "Creeping Crystal Coating",
+    "Crumb and Get It",
+    "Curious Pair // Treats to Share",
+    "Devouring Sugarmaw // Have for Dinner",
+    "Eager Trufflesnout",
+    "Eastfarthing Farmer",
+    "Elanor Gardner",
+    "Elephant-Mandrill",
+    "Experimental Confectioner",
+    "Fae Offering",
+    "Farmer Cotton",
+    "Feasting Troll King",
+    "Featherbrained Filcher",
+    "Feed the Cauldron",
+    "Fell the Pheasant",
+    "Field-Tested Frying Pan",
+    "Fierce Witchstalker",
+    "Food",
+    "Food Coma",
+    "Foreboding Fruit",
+    "Fortifying Provisions",
+    "Galadriel, Gift-Giver",
+    "Generous Ent",
+    "Giant Opportunity",
+    "Giant's Skewer",
+    "Gift Shop",
+    "Gilded Goose",
+    "Gingerbread Cabin",
+    "Gingerbread Hunter // Puny Snack",
+    "Gluttonous Troll",
+    "Graham O'Brien",
+    "Greta, Sweettooth Scourge",
+    "Gumdrop Poisoner // Tempt with Treats",
+    "Gyome, Master Chef",
+    "Hazel's Brewmaster",
+    "Heroic Feast",
+    "Hollow Scavenger // Bakery Raid",
+    "Hot Dog Cart",
+    "Hurska Sweet-Tooth",
+    "Ignis Scientia",
+    "Insatiable Frugivore",
+    "Intrepid Trufflesnout // Go Hog Wild",
+    "Iroh, Tea Master",
+    "Killer Service",
+    "Late to Dinner",
+    "Leaves from the Vine",
+    "Lita, Little Orphan Amphibian",
+    "Lucky the Pizza Dog",
+    "Madame Vastra",
+    "Many Partings",
+    "Meriadoc Brandybuck",
+    "Michelangelo, the Heart",
+    "Midnight Snack",
+    "Mintstrosity",
+    "Momo, Playful Pet",
+    "Night of the Sweets' Revenge",
+    "Ninja Pizza",
+    "Nocturnal Hunger",
+    "Nuka-Cola Vending Machine",
+    "Oath of the Grey Host",
+    "Of Herbs and Stewed Rabbit",
+    "Oko, Thief of Crowns",
+    "Old Flitterfang",
+    "Orchard Strider",
+    "Overcooked",
+    "Overencumbered",
+    "Party Dude",
+    "Pawpatch Formation",
+    "Peregrin Took",
+    "Pippin, Warden of Isengard",
+    "Pizza Face, Gastromancer",
+    "Provisions Merchant",
+    "Questionable Cuisine",
+    "Rapacious Guest",
+    "Restless Cottage",
+    "Return from the Wilds",
+    "Revive the Shire",
+    "Rocco, Street Chef",
+    "Rosie Cotton of South Lane",
+    "Sam, Loyal Attendant",
+    "Samwise Gamgee",
+    "Savor",
+    "Savvy Hunter",
+    "Scavenger's Talent",
+    "Scream Puff",
+    "Second Breakfast",
+    "Shelob's Ambush",
+    "Sidequest: Catch a Fish // Cooking Campsite",
+    "Sierra, Nuka's Biggest Fan",
+    "Skybeast Tracker",
+    "Sophia, Dogged Detective",
+    "Sorin of House Markov // Sorin, Ravenous Neonate",
+    "Spectrox Mines",
+    "Spider Food",
+    "Spider-Ham, Peter Porker",
+    "Stew the Coneys",
+    "Survivor's Med Kit",
+    "Sweettooth Witch",
+    "Tainted Treats",
+    "Taste of Death",
+    "Tempting Witch",
+    "The Art of Tea",
+    "The Battle of Bywater",
+    "The Cabbage Merchant",
+    "The Dining Car",
+    "The Eleventh Hour",
+    "The Fourth Doctor",
+    "The Goose Mother",
+    "The Shire",
+    "The Third Doctor",
+    "The Underworld Cookbook",
+    "The Wilds",
+    "The Witch's Vanity",
+    "Tippy-Toe, Terrific Partner",
+    "Tireless Provisioner",
+    "Tough Cookie",
+    "Trail of Crumbs",
+    "Transmutation Font",
+    "Treebeard, Gracious Host",
+    "Turn into a Pumpkin",
+    "Unlucky Cabbage Merchant",
+    "Valley Rally",
+    "Vault 101: Birthday Party",
+    "Vinereap Mentor",
+    "Voracious Fell Beast",
+    "Welcome to Sweettooth",
+    "White Glove Gourmand",
+    "Wish Good Luck",
+    "Witch's Oven",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2550"
+released_at = "2019-12-02"
+type_line = "Token Artifact — Food"
+rules_text = "{2}, {T}, Sacrifice this token: You gain 3 life."
+
+[token.category.PredefinedArtifact]
+kind = "Food"
+
+[token.body]
+display_name = "Food"
+core_types = ["Artifact"]
+subtypes = ["Food"]
+supertypes = []
+colors = []
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "174eb62b-b02a-4533-8822-eacc9dcc0a20"
+scryfall_oracle_id = "a468338f-635e-4206-89d6-72d723071d45"
+preset_id = "bbd313f5-b31e-50c9-ae52-5befea38da5e"
 
 [[token]]
 id = "bbd9e6d6-1bdd-590a-8d07-e373496fd030"
@@ -172803,6 +174757,41 @@ scryfall_oracle_id = "03fc0cae-a6d3-4fae-995d-038eb32c48ac"
 preset_id = "ca683e8e-1ade-5b51-9694-52a73572c6ee"
 
 [[token]]
+id = "ca6b0791-35b2-5dcf-b912-189b7ffeec57"
+category = "Creature"
+fidelity = "PartialMissingAbilities"
+source_card_names = [
+    "Mitotic Slime",
+    "Ooze",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "2819"
+released_at = "2019-12-02"
+type_line = "Token Creature — Ooze"
+rules_text = "When this creature dies, create two 1/1 green Ooze creature tokens."
+
+[token.body]
+display_name = "Ooze"
+power = 2
+toughness = 2
+core_types = ["Creature"]
+subtypes = ["Ooze"]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Mitotic Slime"
+scryfall_oracle_id = "1162c7ff-c0cb-469a-ad3c-322b0981ae1d"
+scryfall_id = "883840b7-32db-4bda-8e02-0f6ba844fd34"
+
+[token.token_image_ref]
+scryfall_id = "21dfe90c-3383-4da5-9194-c6f7c2ba291c"
+scryfall_oracle_id = "8b3e81cb-d756-44e9-854c-715f51949ade"
+preset_id = "ca6b0791-35b2-5dcf-b912-189b7ffeec57"
+
+[[token]]
 id = "ca6d83fb-b49f-5c6a-9fb5-2a440611007e"
 category = "Creature"
 fidelity = "Full"
@@ -182549,6 +184538,66 @@ scryfall_id = "b9cc65b2-4b31-40d7-8ea9-5435b6f5d4b5"
 scryfall_id = "9cf66184-0df9-4a6b-bf4a-c5bd0d21b5b6"
 scryfall_oracle_id = "2069c2cb-3cb7-4f3b-be72-ae783de82c42"
 preset_id = "d5685814-ee19-5b04-b4ef-bb83165c7c7e"
+
+[[token]]
+id = "d582e994-dbf3-5de3-8281-aedf474cf15f"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ambassador Oak",
+    "Battle for Bretagard",
+    "Dwynen's Elite",
+    "Elderleaf Mentor",
+    "Elf Warrior",
+    "Elfsworn Giant",
+    "Elven Ambush",
+    "Elven Bow",
+    "Elvish Promenade",
+    "Elvish Warmaster",
+    "Exquisite Huntmaster",
+    "Eyeblight Cullers",
+    "Flourishing Defenses",
+    "Galadhrim Ambush",
+    "Gilt-Leaf Ambush",
+    "Hunting Triad",
+    "Imperious Perfect",
+    "Lathril, Blade of the Elves",
+    "Lys Alana Huntmaster",
+    "Nadier, Agent of the Duskenel",
+    "Nath of the Gilt-Leaf",
+    "Presence of Gond",
+    "Prowess of the Fair",
+    "Return Upon the Tide",
+    "Skemfar Elderhall",
+    "Sylvan Offering",
+    "Thorn Lieutenant",
+    "Tyvar Kell",
+    "Windswift Slice",
+    "Wolverine Riders",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "7168"
+released_at = "2019-12-02"
+type_line = "Token Creature — Elf Warrior"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[token.token_image_ref]
+scryfall_id = "120ecded-7968-4bb9-ab85-9cc5ad031e0e"
+scryfall_oracle_id = "dac8a765-6845-4b57-bb79-4ec463436f92"
+preset_id = "d582e994-dbf3-5de3-8281-aedf474cf15f"
 
 [[token]]
 id = "d597aedf-6bd9-5d51-a9f0-d59010988656"

@@ -586,7 +586,7 @@ mod tests {
             other => panic!("expected DigChoice from first explore, got {other:?}"),
         }
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "the second explore must be stashed while the first waits on DigChoice"
         );
 
@@ -883,7 +883,7 @@ mod tests {
             "the explore must not run until the scry choice resolves"
         );
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "the explore link must be stashed while the scry waits for a choice"
         );
 
@@ -1415,7 +1415,7 @@ mod tests {
             state.waiting_for
         );
         assert!(
-            state.pending_continuation.is_some(),
+            state.active_ability_continuation().is_some(),
             "second explore must be stashed while first explore waits for DigChoice"
         );
         assert_eq!(

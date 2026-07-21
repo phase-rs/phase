@@ -172,14 +172,26 @@ export function formatCounterTooltip(
   type: string,
   count: number,
   translate?: CounterTooltipTranslator,
+  isUnbounded?: boolean,
 ): string {
   const label = formatCounterType(type);
   if (translate) {
+    // CR 732.2a / CR 701.34a: an unbounded counter renders `∞` on the badge, so its
+    // tooltip summary must say "unbounded" rather than interpolate the finite count.
+    if (isUnbounded) {
+      return translate("counterTooltip.summaryUnbounded", {
+        label,
+        description: formatCounterDescription(type, translate),
+      });
+    }
     return translate("counterTooltip.summary", {
       count,
       label,
       description: formatCounterDescription(type, translate),
     });
+  }
+  if (isUnbounded) {
+    return `${label} counters: ∞`;
   }
   return `${label} counter${count !== 1 ? "s" : ""}: ${count}`;
 }

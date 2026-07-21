@@ -174,8 +174,7 @@ pub fn eliminate_players_simultaneously(
                     state.replacement_may_cost_paused = false;
                 }
                 if state
-                    .pending_batch_deliveries
-                    .as_ref()
+                    .active_batch_delivery()
                     .and_then(|pending| pending.completion.as_ref())
                     .is_some_and(|completion| {
                         matches!(
@@ -186,7 +185,9 @@ pub fn eliminate_players_simultaneously(
                         )
                     })
                 {
-                    state.pending_batch_deliveries = None;
+                    state
+                        .take_active_batch_delivery()
+                        .expect("eliminated search batch must own the active frame");
                 }
             }
             if let Err(error) =
@@ -501,7 +502,10 @@ fn abandon_pending_zone_change_member_for_player_left(
     leaving_player: PlayerId,
 ) {
     let mut canceled_pauses = Vec::new();
-    if let Some(pending) = state.pending_change_zone_iteration.as_mut() {
+    if let Some(pending) = state
+        .active_change_zone_frame_mut()
+        .and_then(|frame| frame.pending.as_mut())
+    {
         pending
             .logical_zone_change_group
             .record_abandoned_by_player_left(identity)
@@ -521,7 +525,7 @@ fn abandon_pending_zone_change_member_for_player_left(
             );
         }
     }
-    if let Some(pending) = state.pending_batch_deliveries.as_mut() {
+    if let Some(pending) = state.active_batch_delivery_mut() {
         pending
             .logical_zone_change_group
             .record_abandoned_by_player_left(identity)
@@ -710,7 +714,7 @@ fn do_eliminate(
                     },
             }),
         ..
-    }) = state.pending_batch_deliveries.as_mut()
+    }) = state.active_batch_delivery_mut()
     {
         search_keys.retain(|searcher| *searcher != player);
         grants.retain(|(_, grant)| grant.grantee != player && grant.controller != player);
@@ -777,7 +781,7 @@ fn do_eliminate(
     // relied upon.) Mirror the `pending_cast` teardown: clear `pending_replacement`
     // (the SBA-gating slot) plus the parked replacement's own tightly-coupled
     // continuation slots (`replacement_may_cost_paused`, `post_replacement_*`,
-    // `pending_connive_reentry`). The resume drain also touches OTHER resolution
+    // the stack-owned Connive re-entry). The resume drain also touches OTHER resolution
     // slots on a normal answer (e.g. `pending_phase_transition_progress`,
     // `pending_team_draw_step`, `pending_continuation`); those are intentionally
     // NOT cleared here. Stranding some of them is its own PRE-EXISTING soft-lock
@@ -797,8 +801,7 @@ fn do_eliminate(
     if state.pending_search_found_batch.is_some() && leaving_is_latched_chooser {
         state.pending_search_found_batch = None;
         if state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|pending| pending.completion.as_ref())
             .is_some_and(|completion| {
                 matches!(
@@ -807,7 +810,9 @@ fn do_eliminate(
                 )
             })
         {
-            state.pending_batch_deliveries = None;
+            state
+                .take_active_batch_delivery()
+                .expect("eliminated search batch must own the active frame");
         }
     }
     if state.pending_replacement.is_some() && leaving_is_latched_chooser {
@@ -823,11 +828,10 @@ fn do_eliminate(
     // `pending_cast` controller key above) so a living player's paused resolution
     // survives an opponent's departure.
     if state
-        .pending_spell_resolution
-        .as_ref()
+        .active_spell_resolution()
         .is_some_and(|psr| psr.controller == player)
     {
-        state.pending_spell_resolution = None;
+        let _ = state.take_active_spell_resolution();
     }
 
     // CR 800.4a: All objects the player owns leave the game (exiled). Route each
@@ -951,12 +955,15 @@ fn do_eliminate(
 /// left before any remaining member resumes; otherwise a pre-pause latch could
 /// fire from an object that no longer exists in the game.
 fn retire_pending_zone_change_contexts_owned_by(state: &mut GameState, player: PlayerId) {
-    if let Some(pending) = state.pending_change_zone_iteration.as_mut() {
+    if let Some(pending) = state
+        .active_change_zone_frame_mut()
+        .and_then(|frame| frame.pending.as_mut())
+    {
         pending
             .logical_zone_change_group
             .retire_contexts_owned_by(player);
     }
-    if let Some(pending) = state.pending_batch_deliveries.as_mut() {
+    if let Some(pending) = state.active_batch_delivery_mut() {
         pending
             .logical_zone_change_group
             .retire_contexts_owned_by(player);
@@ -998,7 +1005,9 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
         return;
     }
 
-    state.pending_continuation = None;
+    let _ = state
+        .clear_active_ability_continuation()
+        .expect("elimination cannot clear a buried ability continuation");
     state.resolving_stack_entry = None;
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
@@ -1013,16 +1022,22 @@ fn abandon_source_bound_resolution_prompt(state: &mut GameState, player: PlayerI
 /// together. `PendingBatchDeliveries` is intentionally not included: it is a
 /// shared per-object batch and retains the existing prune/resume rules.
 fn abandon_change_zone_family_for_controller(state: &mut GameState, player: PlayerId) {
-    if state
-        .pending_change_zone_iteration
-        .as_ref()
-        .is_none_or(|pending| pending.controller != player)
-    {
+    let Some(pending) = state
+        .active_change_zone_frame()
+        .and_then(|frame| frame.pending.as_ref())
+    else {
+        return;
+    };
+    if pending.controller != player {
         return;
     }
 
-    state.pending_change_zone_iteration = None;
-    state.pending_continuation = None;
+    let _ = state
+        .take_active_change_zone_frame()
+        .expect("elimination cannot consume a buried ChangeZone frame");
+    let _ = state
+        .clear_active_ability_continuation()
+        .expect("elimination cannot clear a buried ability continuation");
     state.resolving_stack_entry = None;
     state.resolution_source_relatch = None;
     state.deferred_entry_events.clear();
@@ -1328,7 +1343,7 @@ mod tests {
                 events: vec![crate::types::statics::SuppressedTriggerEvent::Dies],
             },
         );
-        state.pending_batch_deliveries = Some(crate::types::game_state::PendingBatchDeliveries {
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             logical_zone_change_group: group,
             paused_current: None,
             remaining: vec![leaving, surviving],
@@ -1380,8 +1395,7 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         let batch = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("the surviving member keeps the shared batch parked");
         assert_eq!(batch.remaining, vec![surviving]);
         assert_eq!(
@@ -1409,7 +1423,7 @@ mod tests {
         );
 
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
         assert_eq!(
@@ -1473,7 +1487,7 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        state.pending_batch_deliveries = Some(crate::types::game_state::PendingBatchDeliveries {
+        state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             logical_zone_change_group: group,
             paused_current: Some(paused),
             remaining: vec![surviving],
@@ -1494,8 +1508,7 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         let batch = state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .expect("surviving tail retains its shared batch owner");
         assert!(batch.paused_current.is_none());
         assert_eq!(batch.remaining, vec![surviving]);
@@ -1503,7 +1516,7 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut state, &mut events);
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
@@ -1539,7 +1552,7 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        state.pending_change_zone_iteration = Some(pending_change_zone_iteration(
+        state.push_change_zone_iteration(pending_change_zone_iteration(
             group,
             Some(paused),
             vec![surviving],
@@ -1551,8 +1564,8 @@ mod tests {
         eliminate_player(&mut state, PlayerId(1), &mut events);
 
         let iteration = state
-            .pending_change_zone_iteration
-            .as_ref()
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
             .expect("living controller keeps the change-zone family");
         assert!(iteration.paused_current.is_none());
         assert_eq!(iteration.remaining, vec![surviving]);
@@ -1560,7 +1573,7 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
         crate::game::effects::drain_pending_continuation(&mut state, &mut events);
-        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.active_change_zone_frame().is_none());
         assert_eq!(state.objects[&leaving].zone, Zone::Exile);
         assert_eq!(state.objects[&surviving].zone, Zone::Graveyard);
     }
@@ -1588,7 +1601,7 @@ mod tests {
             )),
             persist_player: None,
         };
-        state.pending_continuation = Some(pending_source_bound_continuation(
+        state.park_ability_continuation(pending_source_bound_continuation(
             &state,
             source,
             PlayerId(0),
@@ -1601,7 +1614,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
         assert!(state.resolution_source_relatch.is_none());
         assert!(matches!(
@@ -1624,7 +1637,7 @@ mod tests {
             source: None,
             persist_player: Some(PlayerId(1)),
         };
-        state.pending_continuation = Some(pending_source_bound_continuation(
+        state.park_ability_continuation(pending_source_bound_continuation(
             &state,
             ObjectId(700),
             PlayerId(0),
@@ -1632,7 +1645,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(matches!(
             state.waiting_for,
             WaitingFor::Priority {
@@ -1667,7 +1680,7 @@ mod tests {
             }),
             proposition_truth: Some(true),
         };
-        state.pending_continuation = Some(pending_source_bound_continuation(
+        state.park_ability_continuation(pending_source_bound_continuation(
             &state,
             source,
             PlayerId(0),
@@ -1675,7 +1688,7 @@ mod tests {
 
         eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.resolving_stack_entry.is_none());
         assert!(matches!(
             state.waiting_for,
@@ -1726,7 +1739,7 @@ mod tests {
         let mut events = Vec::new();
         crate::game::effects::search_library::resolve(&mut state, &search, &mut events)
             .expect("start opponent-library search");
-        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+        state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
             Box::new(shuffle),
             &state,
         ));
@@ -1743,7 +1756,7 @@ mod tests {
 
         assert!(state.active_library_searches.get(&PlayerId(0)).is_none());
         assert!(state.active_search_decision_controls.is_empty());
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.pending_search_found_batch.is_none());
         assert!(state.pending_replacement.is_none());
         assert!(events.iter().any(|event| matches!(
@@ -1873,7 +1886,7 @@ mod tests {
                 },
             },
         );
-        state.pending_batch_deliveries = Some(batch);
+        state.push_batch_delivery(batch);
 
         eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
 
@@ -1885,8 +1898,7 @@ mod tests {
         };
         assert_eq!(phase_keys, &vec![PlayerId(0), PlayerId(2)]);
         let resume_keys = match state
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|batch| batch.completion.as_ref())
             .unwrap()
         {
@@ -2261,18 +2273,18 @@ mod tests {
             ),
         )));
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .source = Some(o);
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .event_source = Some(o);
         state
-            .post_replacement_drains
-            .resident_mut()
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("a drain must be resident")
             .event_target = Some(TargetRef::Object(o));
         // Issue #4886 (review #6): a live Jinnie Fay-class token-choice applied
@@ -2282,35 +2294,28 @@ mod tests {
         state.post_replacement_token_choice_applied = Some(HashSet::from([
             crate::types::proposed_event::AppliedReplacementKey::object(o, 0),
         ]));
-        state.pending_connive_reentry = Some(PendingConniveReentry {
-            conniver: state
-                .capture_connive_subject(o)
-                .expect("fixture conniver exists"),
-            count: 1,
-            applied: HashSet::new(),
-        });
-        state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(2), o));
-        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(o));
-        // CR 121.2: a paused draw instruction owned by the LEAVING chooser (P2) —
-        // single-player-scoped, must clear alongside its siblings via
-        // `abandon_post_replacement_continuation` (replacement.rs).
-        state.draw_sequences.push(PlayerId(2), 1);
-        // Coupled spell-resolution ctx owned by the LEAVING chooser (P2) — must clear.
-        state.pending_spell_resolution = Some(PendingSpellResolution {
-            object_id: o,
-            controller: PlayerId(2),
-            casting_variant: CastingVariant::Normal,
-            cast_from_zone: None,
-            cast_controller: None,
-            cast_timing_permission: None,
-            spell_targets: vec![],
-            actual_mana_spent: 0,
-            kickers_paid: vec![],
-            additional_cost_payment_count: 0,
-            additional_cost_payments: vec![],
-            convoked_creatures: vec![],
-        });
-
+        // Make the real atomic paused-drain/draw pair.
+        // The dispatch handle proves that the parent is Paused, rather than the
+        // Ready-parent approximation that cannot exercise child-before-parent
+        // abandonment.
+        let (_, dispatch) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::begin_dispatch)
+            .expect("the resident continuation begins its exact dispatch");
+        assert!(state
+            .active_post_replacement_drains_mut()
+            .expect("the dispatch parent remains resident")
+            .pause_dispatch(dispatch));
+        let leaving_frame = state.push_draw_sequence_with_origin(
+            PlayerId(2),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        state
+            .resolution_stack
+            .validate(&state.waiting_for)
+            .expect("the paused parent and active child form the shipped pair");
         let mut events = Vec::new();
         // Real path: X (P1) and C (P2) leave in the SAME simultaneous SBA event
         // (losers sorted by id -> [P1, P2] -> do_eliminate(P1) then do_eliminate(P2)).
@@ -2335,28 +2340,74 @@ mod tests {
             "abandoning the parked chooser's continuation must also clear the token-choice \
              applied seed, not just its established siblings (issue #4886, review #6)"
         );
-        assert!(state.pending_connive_reentry.is_none());
         assert!(
-            state.pending_search_found_batch.is_none(),
-            "the eliminated chooser's outer found-card batch must be abandoned"
-        );
-        assert!(
-            state.pending_batch_deliveries.is_none(),
-            "the eliminated chooser's nested found-card zone completion must be abandoned"
-        );
-        assert!(
-            state.draw_sequences.is_empty(),
+            state.active_draw_sequence().is_none(),
             "CR 121.2: the leaving chooser's paused draw instruction must be \
              cleared via abandon_post_replacement_continuation, not stranded"
         );
         assert!(
-            state.pending_spell_resolution.is_none(),
-            "the leaving chooser's coupled spell-resolution ctx must be torn down"
+            state.resolution_stack.is_empty(),
+            "the active child must be abandoned before its paused parent can retire"
+        );
+        let later_frame = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            1,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        assert!(
+            later_frame > leaving_frame,
+            "abandoning the paired child must not rewind the draw-frame allocator"
         );
     }
 
     #[test]
-    fn elimination_clears_outer_search_found_batch_without_nested_zone_completion() {
+    fn elimination_clears_active_connive_reentry_for_leaving_chooser() {
+        let mut state = setup_three_player();
+        let conniver = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Conniver".into(),
+            Zone::Battlefield,
+        );
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+        };
+        state.push_connive_reentry(PendingConniveReentry {
+            conniver: state
+                .capture_connive_subject(conniver)
+                .expect("fixture conniver exists"),
+            count: 1,
+            applied: HashSet::new(),
+        });
+
+        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+
+        assert!(state.active_connive_reentry().is_none());
+    }
+
+    #[test]
+    fn elimination_clears_search_found_batch_with_nested_zone_completion() {
         let mut state = setup_three_player();
         let found = create_object(
             &mut state,
@@ -2390,17 +2441,18 @@ mod tests {
             candidate_count: 1,
             candidates: Vec::new(),
         };
-        assert!(state.pending_batch_deliveries.is_none());
+        state.push_batch_delivery(pending_search_found_zone_delivery(found));
+        assert!(state.active_batch_delivery().is_some());
 
         eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
 
         assert!(state.pending_replacement.is_none());
         assert!(state.pending_search_found_batch.is_none());
-        assert!(state.pending_batch_deliveries.is_none());
+        assert!(state.active_batch_delivery().is_none());
     }
 
     #[test]
-    fn opponent_leaving_preserves_living_choosers_replacement() {
+    fn opponent_leaving_preserves_living_choosers_search_found_replacement() {
         // CR 800.4a affects only the leaving player: a DIFFERENT player's departure
         // must NOT clear the living chooser's parked replacement (no over-clear).
         let mut state = setup_three_player();
@@ -2431,30 +2483,7 @@ mod tests {
         let parked_found = ObjectId(77);
         state.pending_search_found_batch =
             Some(pending_search_found_batch(PlayerId(0), parked_found));
-        state.pending_batch_deliveries = Some(pending_search_found_zone_delivery(parked_found));
-        // A coupled spell-resolution ctx owned by the LIVING chooser (P0).
-        state.pending_spell_resolution = Some(PendingSpellResolution {
-            object_id: create_object(&mut state, CardId(7), PlayerId(0), "S".into(), Zone::Stack),
-            controller: PlayerId(0),
-            casting_variant: CastingVariant::Normal,
-            cast_from_zone: None,
-            cast_controller: None,
-            cast_timing_permission: None,
-            spell_targets: vec![],
-            actual_mana_spent: 0,
-            kickers_paid: vec![],
-            additional_cost_payment_count: 0,
-            additional_cost_payments: vec![],
-            convoked_creatures: vec![],
-        });
-        // CR 121.2: a paused draw instruction owned by the LIVING chooser (P0)
-        // must survive a different player's departure — no over-clear.
-        let living_frame = state.draw_sequences.push(PlayerId(0), 2);
-        state
-            .draw_sequences
-            .active_if(living_frame)
-            .expect("the frame just pushed is active")
-            .accumulated = 1;
+        state.push_batch_delivery(pending_search_found_zone_delivery(parked_found));
 
         let mut events = Vec::new();
         eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut events);
@@ -2470,35 +2499,18 @@ mod tests {
             "an opponent leaving must not clear the living chooser's outer found-card batch"
         );
         assert!(
-            state
-                .pending_batch_deliveries
-                .as_ref()
-                .is_some_and(|pending| {
-                    matches!(
-                        pending.completion,
-                        Some(
-                            crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
-                                object_id,
-                                grant: None,
-                            }
-                        ) if object_id == parked_found
-                    )
-                }),
+            state.active_batch_delivery().is_some_and(|pending| {
+                matches!(
+                    pending.completion,
+                    Some(
+                        crate::types::game_state::BatchCompletion::SearchFoundZoneDelivery {
+                            object_id,
+                            grant: None,
+                        }
+                    ) if object_id == parked_found
+                )
+            }),
             "an opponent leaving must preserve the living chooser's nested found-card completion"
-        );
-        assert!(
-            state.pending_spell_resolution.is_some(),
-            "an opponent leaving must not tear down the living player's spell-resolution ctx"
-        );
-        let survivor = state
-            .draw_sequences
-            .active()
-            .expect("an opponent leaving must not clear the living chooser's paused instruction");
-        assert_eq!(
-            (survivor.player, survivor.remaining, survivor.accumulated),
-            (PlayerId(0), 2, 1),
-            "the living chooser's paused draw instruction must survive intact — owed units and \
-             already-delivered count both preserved"
         );
         assert!(
             matches!(
@@ -2509,6 +2521,131 @@ mod tests {
                 }
             ),
             "the living chooser's ReplacementChoice park must be preserved"
+        );
+    }
+
+    #[test]
+    fn opponent_leaving_preserves_living_choosers_draw_replacement() {
+        let mut state = setup_three_player();
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+        state.waiting_for = WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: 1,
+            candidates: Vec::new(),
+        };
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Paused draw replacement".into(),
+            Zone::Battlefield,
+        );
+        state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0)),
+        )));
+        let (_, dispatch) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::begin_dispatch)
+            .expect("the resident continuation begins its exact dispatch");
+        assert!(state
+            .active_post_replacement_drains_mut()
+            .expect("the dispatch parent remains resident")
+            .pause_dispatch(dispatch));
+        let living_frame = state.push_draw_sequence_with_origin(
+            PlayerId(0),
+            2,
+            HashSet::new(),
+            crate::types::game_state::DrawSequenceOrigin::Plain,
+        );
+        state
+            .draw_sequence_frame_mut(living_frame)
+            .expect("the frame just pushed is active")
+            .accumulated = 1;
+        state
+            .resolution_stack
+            .validate(&state.waiting_for)
+            .expect("the living chooser owns a valid paused parent/draw pair");
+        let paired_stack_before = serde_json::to_value(&state.resolution_stack)
+            .expect("the paired resolution stack serializes");
+
+        eliminate_players_simultaneously(&mut state, &[PlayerId(1)], &mut Vec::new());
+
+        assert!(state.pending_replacement.is_some());
+        let survivor = state
+            .active_draw_sequence()
+            .expect("an opponent leaving must not clear the living chooser's paused instruction");
+        assert_eq!(
+            (survivor.player, survivor.remaining, survivor.accumulated),
+            (PlayerId(0), 2, 1),
+            "the living chooser's paused draw instruction must survive intact — owed units and \
+             already-delivered count both preserved"
+        );
+        assert_eq!(
+            serde_json::to_value(&state.resolution_stack)
+                .expect("the surviving paired resolution stack serializes"),
+            paired_stack_before,
+            "an unrelated departure must preserve the paired parent, child, status, refs, and allocator byte-for-byte"
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn elimination_clears_only_the_leaving_players_active_spell_resolution() {
+        let mut state = setup_three_player();
+        let spell = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Paused permanent".into(),
+            Zone::Stack,
+        );
+        state.push_spell_resolution(PendingSpellResolution {
+            object_id: spell,
+            controller: PlayerId(0),
+            casting_variant: CastingVariant::Normal,
+            cast_from_zone: None,
+            cast_controller: None,
+            cast_timing_permission: None,
+            spell_targets: vec![],
+            actual_mana_spent: 0,
+            kickers_paid: vec![],
+            additional_cost_payment_count: 0,
+            additional_cost_payments: vec![],
+            convoked_creatures: vec![],
+        });
+
+        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        assert!(
+            state.active_spell_resolution().is_some(),
+            "an opponent leaving must not tear down the living player's active spell frame"
+        );
+
+        eliminate_player(&mut state, PlayerId(0), &mut Vec::new());
+        assert!(
+            state.active_spell_resolution().is_none(),
+            "the leaving controller's active spell frame must be torn down"
         );
     }
 

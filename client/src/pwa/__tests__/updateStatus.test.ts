@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { getDownloadProgress, setDownloadProgress } from "../updateStatus";
+import {
+  claimUpdateStatus,
+  getDownloadProgress,
+  releaseUpdateStatus,
+  setDownloadProgress,
+} from "../updateStatus";
 
 describe("setDownloadProgress", () => {
   it("clamps values into the 0–100 range and rounds", () => {
@@ -31,5 +36,17 @@ describe("setDownloadProgress", () => {
 
     expect(Number.isNaN(getDownloadProgress())).toBe(false);
     expect(getDownloadProgress()).toBe(42);
+  });
+});
+
+describe("update status ownership", () => {
+  it("keeps a concurrent updater from claiming the shared badge", () => {
+    expect(claimUpdateStatus("serviceWorker")).toBe(true);
+    expect(claimUpdateStatus("tauri")).toBe(false);
+
+    releaseUpdateStatus("serviceWorker");
+
+    expect(claimUpdateStatus("tauri")).toBe(true);
+    releaseUpdateStatus("tauri");
   });
 });

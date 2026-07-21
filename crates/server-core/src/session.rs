@@ -1318,7 +1318,11 @@ impl SessionManager {
                     .accepts_freeform_counter_removal());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
-            if !legal_actions.contains(&action) {
+            // CR 601.2g: candidates are enumerated with the canonical `Auto`
+            // payment mode, so the player's `Manual` payment preference must
+            // be erased before membership matching (GH #6275). The action
+            // applied below keeps the submitted mode.
+            if !legal_actions.contains(action.with_canonical_payment_mode().as_ref()) {
                 warn!(game = %game_code, player = ?player, reason = "illegal_action", "action rejected");
                 return Err(format!("Illegal action: {:?}", action));
             }
@@ -2140,6 +2144,57 @@ mod tests {
             hand,
             vec![id_a, id_b],
             "Hand should be unchanged after invalid reorder"
+        );
+    }
+
+    /// GH #6275: candidates are enumerated with `CastPaymentMode::Auto`, so
+    /// the legality gate must erase a submitted `Manual` payment preference
+    /// before membership matching — otherwise every manual-mana cast in a
+    /// Full-mode game is rejected as illegal.
+    #[test]
+    fn legality_gate_accepts_manual_payment_mode_casts() {
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Gate Probe", false, "Draw a card.")
+            .id();
+        let runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.state = runner.state().clone();
+
+        // Reach guard: the Auto twin must be an enumerated candidate, so the
+        // Manual acceptance below flows through payment-mode canonicalization
+        // rather than any legality bypass.
+        let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
+        let auto_twin = GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(
+            legal_actions.contains(&auto_twin),
+            "scenario must make the cast an enumerated candidate; got {legal_actions:?}"
+        );
+
+        let result = mgr.handle_action(
+            &code,
+            &token0,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "Manual-mode cast must pass the legality gate: {:?}",
+            result.err()
         );
     }
 

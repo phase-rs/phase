@@ -66,6 +66,10 @@ DASHBOARD_DEFAULT_TERMINAL_LIMIT = 200
 SUCCESS_STATES = {"accepted", "merged"}
 BLOCK_STATES = {"blocked", "changes_requested"}
 HOLD_STATES = {"held", "held_ci"}
+# GitHub authorAssociation values that identify a repository member. The
+# redundant-review guard treats a comment/review from any of these as "the ball
+# is in the contributor's court" — see the pr-review-loop SKILL.md guard doc.
+MEMBER_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 # Local events that mean "this head is blocked". Single authority for both the
 # routing decision and the requested-changes expiry anchor — two copies would drift.
 LOCAL_BLOCK_EVENT_TYPES = {"review_blocked", "changes_requested", "blocked"}
@@ -2523,6 +2527,34 @@ def latest_maintainer_activity_timestamp(pr: dict[str, Any], acting_login: str |
     )
 
 
+def member_commented_last(pr: dict[str, Any]) -> bool:
+    """Whether the most recent comment or review on the PR is from a repo member.
+
+    The redundant-review guard (see pr-review-loop SKILL.md): when a repository
+    member (GitHub ``authorAssociation`` of OWNER/MEMBER/COLLABORATOR, including
+    the acting maintainer) authored the latest activity, the ball is in the
+    contributor's court and re-reviewing the same head is redundant. Activity
+    whose authorAssociation is absent (bots, older cached payloads) counts as
+    non-member, so the guard never suppresses on missing data.
+    """
+    activities = [
+        (activity_timestamp(comment, "createdAt", "updatedAt"), comment)
+        for comment in pr.get("comments", [])
+    ] + [
+        (activity_timestamp(review, "submittedAt"), review)
+        for review in pr.get("reviews", [])
+    ]
+    dated = [
+        (parsed, activity)
+        for timestamp, activity in activities
+        if (parsed := parse_event_datetime(timestamp)) is not None
+    ]
+    if not dated:
+        return False
+    _, latest = max(dated, key=lambda pair: pair[0])
+    return latest.get("authorAssociation") in MEMBER_AUTHOR_ASSOCIATIONS
+
+
 def review_freshness(
     pr: dict[str, Any],
     acting_login: str | None,
@@ -2548,6 +2580,7 @@ def review_freshness(
         "author_followup_after_maintainer_activity": author_followup_after_maintainer_activity,
         "author_followup_after_local_event": author_activity_after(pr, local_timestamp),
         "comment_history_incomplete": pr.get("commentsComplete") is False,
+        "member_activity_is_latest": member_commented_last(pr),
     }
 
 
@@ -2691,6 +2724,10 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     )
     head_changed_since_local_event = freshness.get("head_changed_since_local_event", False)
     comment_history_incomplete = freshness.get("comment_history_incomplete", False)
+    member_activity_is_latest = freshness.get(
+        "member_activity_is_latest",
+        member_commented_last(pr),
+    )
     parse_diff = packet.get("parse_diff") or {}
     parse_diff_after_local_event = timestamp_after(
         parse_diff.get("updated_at"), local_event_timestamp
@@ -2749,6 +2786,12 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         reason = "local_hold_current_head"
     elif local_hold and conflicts_with_base:
         action = "blocked"
+        reason = "local_hold_current_head"
+    elif local_hold and parse_diff_after_local_event:
+        action = "review"
+        reason = "parse_diff_after_local_hold"
+    elif local_hold:
+        action = "hold"
         reason = "local_hold_current_head"
     elif local_block and author_followup_after_maintainer_activity and conflicts_with_base:
         action = "update_branch_for_handler"
@@ -2838,6 +2881,14 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
     elif review_decision == "APPROVED":
         action = "approve_ready_for_handler"
         reason = "approved_needs_live_queue_check"
+    elif member_activity_is_latest:
+        # Redundant-review guard: reaching this branch means no state-based
+        # trigger fired above (head unchanged, no author follow-up, not
+        # queue-stale, no pending decision). If a repository member spoke last,
+        # the ball is in the contributor's court, so re-reviewing the same head
+        # would be redundant. State triggers above always take precedence.
+        action = "hold"
+        reason = "redundant_review_member_commented_last"
     else:
         action = "review"
         reason = "needs_review"
@@ -3154,7 +3205,7 @@ def pr_node_fields(
     review_body = " body" if include_review_body else ""
     comment_body = " body" if include_comment_body else ""
     full_reviews = (
-        f"reviews(first:50){{nodes{{author{{login}} state submittedAt commit{{oid}}{review_body}}}}} "
+        f"reviews(first:50){{nodes{{author{{login}} authorAssociation state submittedAt commit{{oid}}{review_body}}}}} "
         if include_full_reviews
         else ""
     )
@@ -3173,7 +3224,7 @@ def pr_node_fields(
     )
     comments = (
         f"comments(last:{comments_last})"
-        + "{totalCount pageInfo{hasNextPage endCursor} nodes{author{login} createdAt updatedAt"
+        + "{totalCount pageInfo{hasNextPage endCursor} nodes{author{login} authorAssociation createdAt updatedAt"
         + comment_body
         + "}} "
     )
@@ -3186,7 +3237,7 @@ def pr_node_fields(
         "assignees(first:10){nodes{login}} "
         "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt} "
         "files(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{path}} "
-        f"latestReviews(first:20){{nodes{{author{{login}} state submittedAt commit{{oid}}{review_body}}}}} "
+        f"latestReviews(first:20){{nodes{{author{{login}} authorAssociation state submittedAt commit{{oid}}{review_body}}}}} "
         f"{full_reviews}"
         f"{comments}"
         f"{status_rollup}"
@@ -3333,6 +3384,7 @@ def graphql_reviews(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "author": {"login": (review.get("author") or {}).get("login")},
+            "authorAssociation": review.get("authorAssociation"),
             "state": review.get("state"),
             "submittedAt": review.get("submittedAt"),
             "commit": review.get("commit"),
@@ -3419,6 +3471,7 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
         "comments": [
             {
                 "author": {"login": (c.get("author") or {}).get("login")},
+                "authorAssociation": c.get("authorAssociation"),
                 "createdAt": c.get("createdAt"),
                 "updatedAt": c.get("updatedAt"),
                 "body": c.get("body"),

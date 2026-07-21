@@ -45,6 +45,37 @@ export function manaCostToShards(cost: ManaCost): string[] {
   return shards;
 }
 
+/**
+ * Decide which mana cost to overlay on a castable card and whether to flag it
+ * as cost-reduced. The engine is the sole authority on the effective cost
+ * (`spellCosts[id]`, from `display_spell_cost`); this only chooses the DISPLAY
+ * value and its styling.
+ *
+ * A card with no printed mana cost (token, Ancestral Vision) is naturally free
+ * and is never flagged reduced. A real printed `Cost` that the engine lowered —
+ * to a smaller `Cost`, or all the way to `NoCost` via a "cast without paying its
+ * mana cost" permission (Omniscience, CR 118.9) — IS reduced, so `ManaCostPips`
+ * forces a green-ringed {0} rather than rendering nothing.
+ */
+export function spellCostDisplay(
+  effectiveCost: ManaCost | undefined,
+  printedCost: ManaCost,
+): { displayCost: ManaCost; isReduced: boolean } {
+  const displayCost = effectiveCost ?? printedCost;
+  const printedIsRealCost = printedCost.type === "Cost";
+  const reducedToSmaller =
+    effectiveCost?.type === "Cost" &&
+    printedIsRealCost &&
+    (effectiveCost.generic < printedCost.generic ||
+      effectiveCost.shards.length < printedCost.shards.length);
+  // CR 118.9: "cast without paying its mana cost" (Omniscience) is an
+  // alternative cost, reported here as NoCost. CR 118.9c: it doesn't change the
+  // printed mana cost, so against a real printed cost this is a reduction to
+  // {0}, not a naturally-free card.
+  const reducedToFree = effectiveCost?.type === "NoCost" && printedIsRealCost;
+  return { displayCost, isReduced: reducedToSmaller || reducedToFree };
+}
+
 /** Extract the mana component of an activation/additional ability cost for payment UI. */
 export function abilityCostToManaShards(cost: SerializedAbilityCost | undefined): string[] | null {
   if (!cost) return null;

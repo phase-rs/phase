@@ -5,11 +5,12 @@ use crate::types::counter::{
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
-    GameState, PendingCounterAddition, PendingEffectResolved, PendingProliferateActions, WaitingFor,
+    GameState, PendingCounterAddition, PendingEffectResolved, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolution::PendingProliferateActions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlayerCounterSource {
@@ -40,8 +41,8 @@ fn proliferatable_player_counters(player: &Player) -> Vec<PlayerCounterSource> {
 pub(crate) enum ProliferateThroughReplacementOutcome {
     /// All proliferate actions completed synchronously (no target choice needed).
     Completed,
-    /// A `ProliferateChoice` prompt is open; remaining actions may be queued in
-    /// `pending_proliferate_actions`.
+    /// A `ProliferateChoice` prompt is open; remaining actions are parked in
+    /// the typed proliferate frame.
     PausedForChoice,
     /// CR 614.6: the proliferate event was fully replaced away.
     Prevented,
@@ -93,13 +94,13 @@ fn drive_single_proliferate_action(
     }
 
     if remaining_after_this > 0 {
-        state.pending_proliferate_actions = Some(PendingProliferateActions {
+        state.push_proliferate_frame(PendingProliferateActions {
             actor,
             source_id,
             remaining: remaining_after_this,
         });
     } else {
-        state.pending_proliferate_actions = Some(PendingProliferateActions {
+        state.push_proliferate_frame(PendingProliferateActions {
             actor,
             source_id,
             remaining: 0,
@@ -155,15 +156,13 @@ pub fn apply_proliferate_after_replacement(
     let _ = drive_proliferate_actions(state, player_id, ObjectId(0), count, events);
 }
 
-/// CR 701.34a + CR 614.1a: Resume proliferate actions stashed while waiting for
-/// a `ProliferateChoice`. Returns `true` when all remaining actions completed.
-pub fn resume_pending_proliferate_actions(
+/// CR 701.34a + CR 614.1a: Resume a proliferate frame after its
+/// `ProliferateChoice`. Returns `true` when all remaining actions completed.
+pub fn resume_proliferate_actions(
     state: &mut GameState,
+    pending: PendingProliferateActions,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    let Some(pending) = state.pending_proliferate_actions.take() else {
-        return true;
-    };
     drive_proliferate_actions(
         state,
         pending.actor,
@@ -769,8 +768,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining proliferate additions should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(

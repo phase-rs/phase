@@ -838,9 +838,11 @@ function StackLabel({ stack, t, hoverProps }: StackLabelProps) {
         <span className="truncate text-sm font-medium text-gray-100">
           {stack.name || t("attackTargetPicker.creatureFallback", { id: stack.ids[0] })}
         </span>
-        {stack.count > 1 && (
+        {/* CR 732.2a: ∞ badge is count-independent — a single-member pile still
+            reads `∞` (mirrors the main board, GroupedPermanent.tsx). */}
+        {(stack.isUnboundedPile || stack.count > 1) && (
           <span className="shrink-0 rounded bg-gray-700 px-1 text-[10px] font-bold text-gray-100">
-            ×{stack.count}
+            {stack.isUnboundedPile ? "∞" : `×${stack.count}`}
           </span>
         )}
         {ptLabel && (

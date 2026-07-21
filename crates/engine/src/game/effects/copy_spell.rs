@@ -304,9 +304,7 @@ fn apply_spell_copy_modifications(
             // Stamp base + live (mirroring blitz's dies-trigger seeding) so the
             // trigger persists once the copy becomes a token permanent.
             ContinuousModification::GrantTrigger { trigger } => {
-                std::sync::Arc::make_mut(&mut copy_obj.base_trigger_definitions)
-                    .push((**trigger).clone());
-                copy_obj.trigger_definitions.push((**trigger).clone());
+                copy_obj.push_printed_trigger((**trigger).clone());
             }
             _ => {}
         }
@@ -1237,7 +1235,7 @@ mod tests {
             "declining Demonstrate must not put either copy onto the stack"
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "declining Demonstrate must not leave the opponent copy queued"
         );
         assert!(

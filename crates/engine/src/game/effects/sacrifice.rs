@@ -244,9 +244,8 @@ pub fn resolve(
                 // object an earlier co-entering devourer already sacrificed is excluded by
                 // the live basis, and the devourers themselves by the snapshot.)
                 state
-                    .devour_eligible_snapshot
-                    .as_ref()
-                    .is_none_or(|s| s.contains(id))
+                    .active_devour_eligible_snapshot()
+                    .is_none_or(|snapshot| snapshot.contains(id))
                     && state.objects.get(id).is_some_and(|obj| {
                         obj.controller == chooser
                             && !obj.is_emblem

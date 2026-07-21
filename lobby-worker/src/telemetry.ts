@@ -60,6 +60,11 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
       "game_mode",
       "unimplemented_oracle_ids",
       "pending_trigger_abandons",
+      // `engine_mode` and `native_fallback_reason` appended 2026-07: selected
+      // local AI engine and native-engine fallback code; "" from clients
+      // predating the fields.
+      "engine_mode",
+      "native_fallback_reason",
     ],
     doubles: ["turn_count"],
   },
@@ -70,7 +75,13 @@ export const EVENT_SCHEMAS: Record<string, { blobs: string[]; doubles: string[] 
   session_start: { blobs: ["route"], doubles: [] },
   // `format` appended 2026-07: the engine `GameFormat` variant name (e.g.
   // "Commander", "HistoricBrawl"); "" from clients predating the field.
-  game_start: { blobs: ["game_mode", "format"], doubles: ["player_count", "ai_count"] },
+  // `engine_mode` and `native_fallback_reason` appended 2026-07: selected
+  // local AI engine and native-engine fallback code; "" from clients
+  // predating the fields.
+  game_start: {
+    blobs: ["game_mode", "format", "engine_mode", "native_fallback_reason"],
+    doubles: ["player_count", "ai_count"],
+  },
   route_view: { blobs: ["route"], doubles: [] },
 };
 

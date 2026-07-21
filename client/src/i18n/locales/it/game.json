@@ -373,7 +373,14 @@
     "scopeOwnTurn": "Si ferma solo nei tuoi turni.",
     "scopeOpponentsTurns": "Si ferma solo nei turni degli avversari.",
     "tooltipCurrentPhase": "Fase corrente.",
-    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Stop di fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase attuale: {{phase}}. Apri le impostazioni degli stop di fase.",
+    "sheetTitle": "Fasi del turno",
+    "sheetSubtitle": "Tocca un passo per cambiare quando il passaggio automatico si ferma lì.",
+    "scopeShortOff": "Disattivato",
+    "scopeShortAllTurns": "Tutti i turni",
+    "scopeShortOwnTurn": "I tuoi turni",
+    "scopeShortOpponentsTurns": "Turni avversari"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -413,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 segnalino {{label}}\n{{description}}",
     "summary_other": "{{count}} segnalini {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ segnalini {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Ogni segnalino +1/+1 dà +1/+1 al permanente.",
       "m1m1": "Ogni segnalino -1/-1 dà -1/-1 al permanente.",
@@ -576,6 +584,15 @@
     "resourceMana": "mana",
     "resourceCounters": "segnalini",
     "resourceSpeed": "velocità",
+    "loopCollapseTitleTokens": "Scegli quante pedine creare",
+    "loopCollapseTitleCounters": "Scegli quante volte aggiungere segnalini",
+    "loopCollapseTitleLife": "Scegli quante volte guadagnare punti vita",
+    "loopCollapseTitleMixed": "Scegli quante volte ripetere il ciclo",
+    "loopCollapseAmountTokens_one": "Crea {{count}} pedina",
+    "loopCollapseAmountTokens_other": "Crea {{count}} pedine",
+    "loopCollapseAmountCounters": "Aggiungi segnalini {{value}}×",
+    "loopCollapseAmountLife": "Guadagna punti vita {{value}}×",
+    "loopCollapseAmountMixed": "Ripeti il ciclo {{value}}×",
     "manualMana": "Manuale",
     "manualManaTooltip": "Mana manuale — solo questa partita. TAPpa le tue terre e il tuo mana per pagare.",
     "spendHint": "Clicca sul tuo mana per spenderlo per questo costo",
@@ -1765,6 +1782,13 @@
     "variantBestow": "Lancia con Conferire",
     "variantFreerunning": "Lancia con Freerunning",
     "variantFuse": "Lancia con Fusione",
+    "variantMutate": "Lancia con Mutate",
+    "variantAwaken": "Lancia con Risveglio",
+    "variantCleave": "Lancia con Fendere",
+    "variantImpending": "Lancia con Incombere",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lancia con Prototipo",
+    "variantFaceDown": "Lancia a faccia in giù",
     "variantFallback": "Lancia con {{type}}"
   },
   "categoryChoice": {
@@ -2057,6 +2081,7 @@
     "fromSideboard": "Dalla sideboard"
   },
   "phaseName": {
+    "Untap": "STAP",
     "Upkeep": "Mantenimento",
     "Draw": "Pesca",
     "PreCombatMain": "Fase principale 1",

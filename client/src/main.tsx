@@ -17,15 +17,28 @@ import { registerServiceWorker } from "./pwa/registerServiceWorker";
 import { registerTauriUpdater } from "./pwa/tauriUpdater";
 import { installChunkReloadHandler } from "./pwa/chunkReloadHandler";
 import { installTauriExternalLinkHandler } from "./services/externalLinks";
+import { importLegacyStorage, markRemoteLoadOk } from "./services/legacyMigration";
 import { installTelemetry } from "./services/telemetryEvents";
 
-// StrictMode is scoped inside App.tsx instead of wrapping the root. P2P game
-// sessions own PeerJS resources whose cleanup is intentionally destructive, so
-// those routes opt out of dev-only StrictMode double-mounting.
-createRoot(document.getElementById("root")!).render(<App />);
+async function bootstrap(): Promise<void> {
+  // Cloud-sync restores its Supabase session from an App effect, so migration
+  // must finish before React mounts and that effect can observe localStorage.
+  await importLegacyStorage();
 
-registerServiceWorker();
-registerTauriUpdater();
-installChunkReloadHandler();
-installTauriExternalLinkHandler();
-installTelemetry();
+  // StrictMode is scoped inside App.tsx instead of wrapping the root. P2P game
+  // sessions own PeerJS resources whose cleanup is intentionally destructive, so
+  // those routes opt out of dev-only StrictMode double-mounting.
+  createRoot(document.getElementById("root")!).render(<App />);
+
+  registerServiceWorker();
+  registerTauriUpdater();
+  installChunkReloadHandler();
+  installTauriExternalLinkHandler();
+  installTelemetry();
+
+  // Wait for the initial app-shell render before unlocking offline navigation
+  // from the bundled bootstrap page on subsequent launches.
+  window.requestAnimationFrame(markRemoteLoadOk);
+}
+
+void bootstrap();

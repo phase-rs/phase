@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
 export type UpdateStatus = "idle" | "checking" | "downloading" | "activating" | "deferred";
+export type UpdateStatusOwner = "chunk" | "serviceWorker" | "tauri";
 type DebugLevel = "info" | "warn" | "error";
 
 interface UpdateDebugEvent {
@@ -10,7 +11,20 @@ interface UpdateDebugEvent {
 }
 
 let status: UpdateStatus = "idle";
+let statusOwner: UpdateStatusOwner | null = null;
 const listeners = new Set<() => void>();
+
+/** Claim the shared badge while an updater is presenting a lifecycle. */
+export function claimUpdateStatus(owner: UpdateStatusOwner): boolean {
+  if (statusOwner !== null && statusOwner !== owner) return false;
+  statusOwner = owner;
+  return true;
+}
+
+/** Release the badge after an updater has finished presenting its lifecycle. */
+export function releaseUpdateStatus(owner: UpdateStatusOwner): void {
+  if (statusOwner === owner) statusOwner = null;
+}
 
 let updateError: string | null = null;
 let debugEvents: UpdateDebugEvent[] = [];

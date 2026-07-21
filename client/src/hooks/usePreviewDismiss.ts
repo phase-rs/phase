@@ -18,6 +18,7 @@ import { useUiStore } from "../stores/uiStore.ts";
 export function usePreviewDismiss() {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const previewSticky = useUiStore((s) => s.previewSticky);
+  const altHeld = useUiStore((s) => s.altHeld);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
   const hoverObject = useUiStore((s) => s.hoverObject);
   const pointerRef = useRef({ x: 0, y: 0 });
@@ -36,10 +37,13 @@ export function usePreviewDismiss() {
     return () => document.removeEventListener("pointermove", onMove);
   }, [inspectedObjectId]);
 
-  // Mouse: periodically verify the pointer is still over a card-hover element
-  // Skipped when preview is sticky (touch-initiated)
+  // Mouse: periodically verify the pointer is still over a card-hover element.
+  // Skipped when the preview is sticky (touch-initiated) or Alt-pinned (frozen
+  // for reading): a pinned preview must not vanish while the user moves off the
+  // card to click "Report a Problem" or scroll rulings. Alt-off or a click
+  // outside (the pointerdown-outside effect below) still dismisses it.
   useEffect(() => {
-    if (inspectedObjectId == null || previewSticky) return;
+    if (inspectedObjectId == null || previewSticky || altHeld) return;
 
     let skipFirst = true;
 
@@ -62,7 +66,7 @@ export function usePreviewDismiss() {
     }, 300);
 
     return () => clearInterval(id);
-  }, [inspectedObjectId, previewSticky, dismissPreview, hoverObject]);
+  }, [inspectedObjectId, previewSticky, altHeld, dismissPreview, hoverObject]);
 
   // Any later pointer interaction outside a card or the preview dismisses it.
   // Registering after the current event lets the long-press/click that opened

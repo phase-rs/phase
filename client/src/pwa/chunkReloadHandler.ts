@@ -1,5 +1,11 @@
 import { isMultiplayerGameLive, whenMultiplayerGameEnds } from "./multiplayerGuard";
-import { pushUpdateDebug, setUpdateError, setUpdateStatus } from "./updateStatus";
+import {
+  claimUpdateStatus,
+  pushUpdateDebug,
+  releaseUpdateStatus,
+  setUpdateError,
+  setUpdateStatus,
+} from "./updateStatus";
 import { flushNow, trackEvent } from "../services/telemetry";
 
 /**
@@ -177,7 +183,9 @@ export function installChunkReloadHandler(): void {
         "Chunk preload failed during multiplayer game; deferring reload until game ends.",
         "warn",
       );
-      setUpdateStatus("deferred");
+      if (claimUpdateStatus("chunk")) {
+        setUpdateStatus("deferred");
+      }
       // First-failure-wins: if a second chunk fails before the game ends,
       // we already have a reload queued — replacing it changes nothing.
       if (deferredReload) return;
@@ -200,6 +208,7 @@ export function installChunkReloadHandler(): void {
       deferredReloadUnsub?.();
       deferredReloadUnsub = null;
       deferredReload = null;
+      releaseUpdateStatus("chunk");
     },
     { once: true },
   );

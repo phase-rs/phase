@@ -744,8 +744,8 @@ fn pending_optional_is_chain_copy(
     expected_chain_source: ObjectId,
 ) -> bool {
     state
-        .pending_optional_effect
-        .as_deref()
+        .active_optional_effect_frame()
+        .map(|frame| frame.ability.as_ref())
         .is_some_and(|ability| {
             ability.controller == offer.caster
                 && ability.source_id == expected_chain_source

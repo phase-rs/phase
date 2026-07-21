@@ -51,10 +51,11 @@ use lower::{
     strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
     strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
     strip_leading_return_destination_ext, strip_leading_sequence_connector,
-    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
-    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
-    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
-    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
+    strip_repeat_count_suffix, strip_return_destination_ext,
+    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
+    try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -95,21 +96,22 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    BounceSelection, CardPlayMode, CastPermissionConstraint, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard, ConjureSource,
-    ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission,
-    CopyScale, DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
-    DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope, FilterProp, GameRestriction,
-    GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint, LibraryPosition,
-    ManaProduction, ManaSpendPermission, MultiTargetSpec, NumberDistinctness, ObjectProperty,
-    ObjectScope, OriginConstraint, PlayPermissionInvalidation, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PtValue, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
-    SharedQualityRelation, SkipScope, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetSelectionMode, ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+    BounceSelection, CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, CastingPermission,
+    ChoiceType, ChooseFromZoneConstraint, Chooser, CombatDamageScope, Comparator, ConjureCard,
+    ConjureSource, ContinuousModification, ControlWindow, ControllerRef, CopyChooseScope,
+    CopyRetargetPermission, CopyScale, DamageModification, DamageSource, DelayedTriggerCondition,
+    DelayedTriggerLifetime, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
+    KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PlayPermissionInvalidation,
+    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
+    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
+    RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
+    SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier, UntilCondition, ZoneOwner,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -14644,7 +14646,12 @@ fn try_parse_verb_and_target<'a>(
         let all = alt((tag::<_, _, OracleError<'_>>("all "), tag("each ")))
             .parse(rest_lower.as_str())
             .is_ok();
-        let (target_text, _) = strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: preserve "up to N target …" here too — this compound/rider
+        // path (saga chapters carrying a trailing duration, e.g. The Super Hero
+        // Civil War) is the second `gain control of` entry point, and dropping
+        // the count here left issue #6205 half-fixed. Mirrors the `fight ` arm
+        // directly above.
+        let (target_text, multi_target) = strip_optional_target_prefix(rest);
         let (target, rem) = parse_target_with_ctx(target_text, ctx);
         let rem_lower = rem.to_ascii_lowercase();
         if tag::<_, _, OracleError<'_>>(" during that player's next turn")
@@ -14676,7 +14683,14 @@ fn try_parse_verb_and_target<'a>(
                 rem,
             ));
         }
-        return Some((TargetedImperativeAst::GainControl { target, all }, rem));
+        return Some((
+            TargetedImperativeAst::GainControl {
+                target,
+                all,
+                multi_target,
+            },
+            rem,
+        ));
     }
     // Earthbend: "earthbend [N] [target <type>]"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("earthbend ").parse(lower) {
@@ -19968,40 +19982,6 @@ fn strip_balanced_outer_quotes(s: &str) -> &str {
     s
 }
 
-/// An emblem grants its ability one quote-nesting level deep, so a granted
-/// ability is single-quoted (Koth of the Hammer: `Mountains you control have
-/// '{T}: ~ deals 1 damage to any target.'`). Every downstream grant parser
-/// (`parse_static_line`, `parse_quoted_ability_modifications`) recognises only
-/// double-quoted ability bodies — single quotes are ambiguous with
-/// apostrophes — so promote the nested pair to double quotes. The opening
-/// quote is anchored on a grant verb
-/// (`have '` / `has '` / `gain '` / `gains '`) so a possessive apostrophe in
-/// the subject phrase is never mistaken for the delimiter; the closing quote is
-/// the final `'` in the body. Bodies without a nested single-quoted ability are
-/// returned unchanged.
-fn promote_nested_ability_quotes(body: &str) -> String {
-    const OPEN_ANCHORS: [&str; 4] = [" have '", " has '", " gain '", " gains '"];
-    // Grant verbs are mid-sentence and therefore lowercase in Oracle text, so
-    // they can be matched against `body` directly without lowercasing.
-    let open_quote = OPEN_ANCHORS
-        .iter()
-        .filter_map(|anchor| body.find(anchor).map(|pos| pos + anchor.len() - 1))
-        .min();
-    let (Some(open_quote), Some(close_quote)) = (open_quote, body.rfind('\'')) else {
-        return body.to_string();
-    };
-    if close_quote <= open_quote {
-        return body.to_string();
-    }
-    let mut promoted = String::with_capacity(body.len());
-    promoted.push_str(&body[..open_quote]);
-    promoted.push('"');
-    promoted.push_str(&body[open_quote + 1..close_quote]);
-    promoted.push('"');
-    promoted.push_str(&body[close_quote + 1..]);
-    promoted
-}
-
 /// CR 114.1: Parse emblem creation from Oracle text.
 /// Handles both full form "you get an emblem with \"[text]\"" and
 /// subject-stripped form "get an emblem with \"[text]\"".
@@ -20020,7 +20000,7 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
     // parsers recognise it (Koth of the Hammer's "Mountains you control have
     // '{T}: ~ deals 1 damage to any target.'").
     let body = strip_balanced_outer_quotes(rest);
-    let promoted = promote_nested_ability_quotes(body);
+    let promoted = crate::parser::oracle_static::promote_nested_ability_quotes(body);
     let inner = promoted.trim().trim_end_matches('.').trim();
 
     if inner.is_empty() {
@@ -20929,6 +20909,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
                 });
             }
         }
+        // CR 608.2g: a self-library peek ("look at the top N of your library,
+        // you may cast one from among them without paying its mana cost") is a
+        // genuine during-resolution cast of ONE, not an exile-and-grant. Route
+        // it to the one-shot DuringResolution driver; every other bare "from
+        // among them" anaphor keeps the LingeringPermission exile path.
+        let driver = if mode == CardPlayMode::Cast
+            && without_paying
+            && ctx.chain_prior_self_library_peek
+            && !ctx.chain_has_prior_exile_producer
+        {
+            CastFromZoneDriver::DuringResolution
+        } else {
+            CastFromZoneDriver::LingeringPermission
+        };
         return Some(Effect::CastFromZone {
             target: TargetFilter::ExiledBySource,
             without_paying_mana_cost: without_paying,
@@ -20937,7 +20931,7 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             alt_ability_cost: None,
             constraint,
             duration: None,
-            driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
+            driver,
             mana_spend_permission: None,
         });
     }
@@ -21263,7 +21257,35 @@ fn parse_cast_permission_constraint(lower: &str) -> Option<CastPermissionConstra
     // "with mana value <comparator> <quantity>" pre-value prefix used by Cosmic
     // Cube. They cannot share a comparator combinator (suffix vs. prefix), so
     // dispatch over two sub-combinators.
-    parse_beseech_mv_constraint(lower).or_else(|| parse_with_mana_value_constraint(lower))
+    parse_beseech_mv_constraint(lower)
+        .or_else(|| parse_with_mana_value_constraint(lower))
+        .or_else(|| parse_dig_peek_suffix_mv_constraint(lower))
+}
+
+/// Dig-peek-family constraint: `... from among them ... with mana value N or less`.
+/// CR 202.3: mana value is the comparison subject. CR 601.2e: the suffix gates
+/// cast legality. The `from among them` guard excludes unrelated mana-value
+/// suffixes, including total-mana-value caps.
+fn parse_dig_peek_suffix_mv_constraint(lower: &str) -> Option<CastPermissionConstraint> {
+    type E<'a> = OracleError<'a>;
+    if !nom_primitives::scan_contains(lower, "from among them") {
+        return None;
+    }
+    let (after_anchor, _) = many_till(anychar, tag::<_, _, E>("with mana value "))
+        .parse(lower)
+        .ok()?;
+    let (after_value, quantity) = nom_quantity::parse_quantity_expr_number(after_anchor).ok()?;
+    let after_value = after_value.trim_start();
+    let (_, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, E>("or less")),
+        value(Comparator::GE, tag("or greater")),
+    ))
+    .parse(after_value)
+    .ok()?;
+    Some(CastPermissionConstraint::ManaValue {
+        comparator,
+        value: quantity,
+    })
 }
 
 /// Beseech-family constraint: `... if that spell's mana value is N or less`.
@@ -23051,6 +23073,41 @@ fn clause_ir_is_exile_producer(clause: &ClauseIr) -> bool {
     chain_clause_is_exile_producer(&clause.parsed.effect)
         || continuation_is_exile_producer(clause.disposition.followup())
         || continuation_is_exile_producer(clause.disposition.intrinsic())
+}
+
+/// CR 701.20e + CR 608.2c: the RAW "look at the top N cards" shape a private
+/// peek carries BEFORE the assembly pure-peek lowering stamps `keep_count =
+/// Some(0)`. Single authority shared by the assembly lowering match and the
+/// `ClauseIr` seed predicate so the two sites cannot drift on which `Dig` shape
+/// counts as a bare peek.
+pub(super) fn effect_is_bare_private_peek(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Dig {
+            reveal: false,
+            keep_count: None,
+            keep_count_expr: None,
+            filter: TargetFilter::Any,
+            destination: None,
+            rest_destination: None,
+            ..
+        }
+    )
+}
+
+/// A "look at the top N cards of your library" peek: a RAW `Dig` that reveals
+/// nothing, keeps nothing, moves nothing, and reads the controller's own
+/// library. CR 701.20e — looking leaves the cards in the library.
+fn clause_ir_is_self_library_peek(clause: &ClauseIr) -> bool {
+    effect_is_bare_private_peek(&clause.parsed.effect)
+        && matches!(
+            &clause.parsed.effect,
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                source,
+                ..
+            } if source.is_library()
+        )
 }
 
 /// CR 400.1/400.2 + CR 608.2c: If this clause is an `Effect::RevealHand`
@@ -24993,7 +25050,7 @@ fn try_parse_repeat_until_stop_conditions(
 /// Distinguishes the three back-reference forms so the chunk loop can both
 /// CONSUME the directive (it never produces an independent effect) and apply the
 /// right chain-level `repeat_until`:
-/// - `Continuation(c)` — a loop predicate was recognized; set `pending_repeat_until`.
+/// - `Continuation(c)` — a loop predicate was recognized; set `repeat_until`.
 /// - `FixedCount(q)` — a pure "<q> more time[s]" count was recognized (Another
 ///   Round: "repeat this process X more times"). `q` is the TOTAL iteration count
 ///   (`Offset(inner, +1)` = "once + q more"), stamped onto the root clause's
@@ -27872,6 +27929,13 @@ pub(crate) fn parse_effect_chain_ir(
             || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
         {
             (None, text, None)
+        } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
+            // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
+            // loop (`finish_until_lose`) already runs the win effect once per win,
+            // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
+            // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
+            // fallback (#5966).
+            (None, stripped, None)
         } else {
             let reference_target = for_each_clause_target_controller_filter(&text);
             let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
@@ -28289,6 +28353,10 @@ pub(crate) fn parse_effect_chain_ir(
                 .clauses()
                 .iter()
                 .any(clause_ir_is_exile_producer),
+            chain_prior_self_library_peek: builder
+                .clauses()
+                .iter()
+                .any(clause_ir_is_self_library_peek),
             // CR 400.1/400.2 + CR 608.2c: most-recent earlier same-chain
             // `RevealHand` target, so a later "cast a spell from among those
             // cards" anaphor (Silent-Blade Oni) binds to that player's hand

@@ -293,4 +293,93 @@ describe("ArtCropCard", () => {
     expect(screen.getByRole("img", { name: "4" })).toHaveStyle({ position: "absolute", bottom: "-5px", left: "-5px" });
     expect(screen.getByText("/")).toBeInTheDocument();
   });
+
+  // CR 732.2a / CR 701.34a: art-crop is a SECOND battlefield display mode; the ∞-counter
+  // render must live here too or an accepted counter-growth loop silently shows its finite
+  // count in this mode (the exact missed-render-site bug this pair guards). Matched pair:
+  // marked ⇒ ∞ (not the count); unmarked ⇒ the count (not ∞) — reverting the render flip fails (1).
+  function pentadWithCharge(): GameObject {
+    return {
+      ...transformedPermanent(),
+      id: 101,
+      name: "Pentad Prism",
+      transformed: false,
+      back_face: null,
+      counters: { charge: 2 },
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: { supertypes: [], core_types: ["Artifact"], subtypes: [] },
+    };
+  }
+
+  it("renders ∞ for a counter the engine marks unbounded (CR 732.2a art-crop mode)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("∞")).toBeInTheDocument();
+    // display-only: the real finite count is NOT shown when the loop is accepted.
+    expect(screen.queryByText("2")).not.toBeInTheDocument();
+  });
+
+  it("renders the finite count when the counter is NOT marked unbounded (discriminator)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: {} },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.queryByText("∞")).not.toBeInTheDocument();
+  });
+
+  // LOW-4 (CR 732.2a / CR 701.34a): the ∞ pill and its TOOLTIP must agree. Before the fix the
+  // badge showed ∞ while the tooltip interpolated the raw finite count ("… : 2"), contradicting
+  // the pill. The tooltip summary must say ∞, not leak the count.
+  it("tooltip renders ∞ and hides the finite count when the counter is unbounded", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    // The tooltip summary line reads "∞ <label> counters", never the finite "2 <label> counters".
+    expect(screen.getByText(/∞ \S+ counters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/2 \S+ counters/i)).not.toBeInTheDocument();
+  });
+
+  it("tooltip shows the finite count when the counter is NOT unbounded (matched pair)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: {} },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText(/2 \S+ counters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/∞ \S+ counters/i)).not.toBeInTheDocument();
+  });
 });

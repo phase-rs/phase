@@ -53,9 +53,10 @@ fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
 
 /// CR 702.171b: The runtime filter matching the saddled designation. Shared by
 /// the affirmative and negated `SourceIsSaddled` bridges in
-/// `static_condition_to_ability_condition` so both compose the same
-/// `SourceMatchesFilter { Typed([IsSaddled]) }` shape.
-fn source_saddled_filter() -> TargetFilter {
+/// `static_condition_to_ability_condition`, and by the `SourceIsSaddled` arm of
+/// `static_condition_to_trigger_condition` (oracle_trigger.rs), so all three
+/// compose the same `SourceMatchesFilter { Typed([IsSaddled]) }` shape.
+pub(crate) fn source_saddled_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter {
         properties: vec![FilterProp::IsSaddled],
         ..Default::default()

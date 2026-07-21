@@ -28,6 +28,8 @@
     "logDefault": "Registro predefinito",
     "spellPayment": "Pagamento magie",
     "manualManaPayment": "Pagamento manuale del mana per le magie",
+    "nativeEngine": "Motore nativo per le partite contro l'IA",
+    "nativeEngineDescription": "Usa il motore nativo scaricato per le partite locali contro l'IA. Passa automaticamente al motore integrato quando non è disponibile.",
     "boardBackground": "Sfondo del campo",
     "boardBackgroundGroups": {
       "automatic": "Automatico",

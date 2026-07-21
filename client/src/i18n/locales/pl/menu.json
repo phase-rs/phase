@@ -50,7 +50,9 @@
     },
     "preview": {
       "cta": "Wypróbuj wersję zapowiadającą",
-      "tooltip": "Zagraj w najnowszą wersję zapowiadającą — nowe karty i poprawki trafiają tu przed każdym wydaniem."
+      "tooltip": "Zagraj w najnowszą wersję zapowiadającą — nowe karty i poprawki trafiają tu przed każdym wydaniem.",
+      "backCta": "Wróć do wersji stabilnej",
+      "backTooltip": "Wróć do aktualnej wersji wydania."
     },
     "coverage": {
       "title": "Otwórz panel obsługi kart",
