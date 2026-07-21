@@ -2304,33 +2304,6 @@ impl ResolutionStack {
 
     /// Validate stack-local structural and prompt coherence invariants.
     pub fn validate(&self, waiting_for: &WaitingFor) -> Result<(), ResolutionStackError> {
-        if self
-            .frames
-            .iter()
-            .filter(|frame| matches!(frame.gate(), FrameGate::DirectChoice(_)))
-            .nth(1)
-            .is_some()
-        {
-            return Err(ResolutionStackError::MultipleDirectChoiceOwners);
-        }
-
-        // A frame whose direct gate matches the current prompt is its sole
-        // action owner within `GameState::resolution_stack`. The v2 wire may
-        // follow it with a legacy-resident parent, but no stack-resident frame
-        // may bury it before its action handler consumes the prompt.
-        if let Some((index, frame)) = self.frames.iter().enumerate().find(|(_, frame)| {
-            matches!(frame.gate(), FrameGate::DirectChoice(gate) if gate.matches(waiting_for))
-        }) {
-            if self.frames.iter().skip(index + 1).any(|frame| {
-                frame.is_runtime_stack_resident()
-            }) {
-                return Err(ResolutionStackError::InvalidPayload {
-                    frame: frame.kind(),
-                    message: "the direct-choice owner for the current prompt is buried below a runtime stack frame".to_string(),
-                });
-            }
-        }
-
         let multi_draw_count = self
             .frames
             .iter()
@@ -2343,7 +2316,15 @@ impl ResolutionStack {
             });
         }
         let has_multi_draw = multi_draw_count == 1;
+        let mut direct_choice_count = 0;
+        let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
+                direct_choice_count += 1;
+                if index + 1 != self.frames.len() {
+                    buried_direct_choice = Some(frame.kind());
+                }
+            }
             if let ResolutionFrame::MultiDraw(draw) = frame {
                 draw.draw_sequences.validate().map_err(|message| {
                     ResolutionStackError::InvalidPayload {
@@ -2382,6 +2363,17 @@ impl ResolutionStack {
                     ));
                 }
             }
+        }
+
+        if direct_choice_count > 1 {
+            return Err(ResolutionStackError::MultipleDirectChoiceOwners);
+        }
+        if let Some(frame) = buried_direct_choice {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame,
+                message: "a direct-choice owner is buried below another resolution frame"
+                    .to_string(),
+            });
         }
 
         let Some(top) = self.frames.last() else {
@@ -4129,6 +4121,23 @@ mod tests {
                 remaining: Vec::new(),
             })
             .expect("optional-effect frame owns an opponent-may prompt");
+        optional_effect.push_inner(continuation_frame(7));
+        assert_eq!(
+            optional_effect.validate(&WaitingFor::OpponentMayChoice {
+                player: PlayerId(1),
+                source_id: ObjectId(6),
+                description: None,
+                remaining: Vec::new(),
+            }),
+            Err(ResolutionStackError::InvalidPayload {
+                frame: FrameKind::OptionalEffect,
+                message: "a direct-choice owner is buried below another resolution frame"
+                    .to_string(),
+            })
+        );
+        optional_effect
+            .pop_expected(FrameKind::AbilityContinuation)
+            .expect("test continuation restores the direct-choice top");
         optional_effect.push_inner(ResolutionFrame::CoinFlip(PendingCoinFlip {
             source_id: ObjectId(6),
             controller: PlayerId(0),
