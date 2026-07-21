@@ -7,10 +7,10 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
-    DamageModification, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope, Effect,
-    EffectScope, FilterProp, ManaReplacementScope, QuantityExpr, QuantityModification, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, RestrictionExpiry,
-    TapStateChange, TargetFilter, TypedFilter,
+    CounterReplacementSubject, DamageModification, DamageTargetFilter, DamageTargetPlayerScope,
+    DrawReplacementScope, Effect, EffectScope, FilterProp, ManaReplacementScope, QuantityExpr,
+    QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, RestrictionExpiry, TapStateChange, TargetFilter, TypedFilter,
 };
 use engine::types::card_type::Supertype;
 use engine::types::counter::{parse_counter_type, CounterType as EngineCounterType};
@@ -101,6 +101,7 @@ pub fn convert_as_enters(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -185,6 +186,7 @@ pub fn convert_replace_would_enter(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -252,6 +254,7 @@ pub fn convert_replace_would_deal_damage(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -642,6 +645,7 @@ pub fn convert_replace_would_draw(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -769,6 +773,7 @@ pub fn convert_replace_would_put_into_graveyard(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1021,6 +1026,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1113,6 +1119,7 @@ pub fn convert_replace_would_put_counters(
             counter_match: counter_match.clone(),
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1299,6 +1306,7 @@ pub fn convert_replace_would_gain_life(
             counter_match: None,
             enters_under: None,
             source_controller: None,
+            counter_replacement_subject: CounterReplacementSubject::Recipient,
         });
     }
     Ok(out)
@@ -1422,6 +1430,7 @@ fn try_build_may_cost_pair(
         counter_match: None,
         enters_under: None,
         source_controller: None,
+        counter_replacement_subject: CounterReplacementSubject::Recipient,
     }))
 }
 
