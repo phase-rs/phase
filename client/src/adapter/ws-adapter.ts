@@ -40,7 +40,8 @@ export interface DeckData {
  * adds, removes, renames, or changes the type of a protocol variant field.
  *
  * 19 — Connive exact subject snapshots and resident paused post-replacement
- *      drains changed the serialized full-game state.
+ *      drains changed the serialized full-game state. Phase 4 later pinned
+ *      the existing v2 resolution wire shape without another protocol change.
  * 17 — Dedicated companion deck slot and typed companion-reveal choices.
  * 16 — Meld pair/attacking-entry choices after the mana-payment preview variants.
  * 15 — Mana-payment preview request/response variants.

@@ -32,7 +32,9 @@ use serde::{Deserialize, Serialize};
 /// both the old and new variants coexist, then bump and remove the old.
 ///
 /// 19 — Connive's exact `EventObjectSnapshot` subject and resident paused
-///      post-replacement drains changed serialized full-game state.
+///      post-replacement drains changed serialized full-game state. Phase 4
+///      later pinned the existing v2 resolution wire shape; it did not add a
+///      second protocol change.
 /// 18 — Serialized GameState trigger provenance and paused logical zone-change
 ///      owners are now wire-visible.
 /// 16 — Meld pair/attacking-entry choices after mana-payment preview variants.

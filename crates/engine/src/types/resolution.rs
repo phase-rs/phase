@@ -2399,9 +2399,16 @@ impl ResolutionStack {
     }
 }
 
-/// The full-state resolution wire protocol version that carries only typed
-/// [`ResolutionStack`] frames for paused resolution work.
+/// The full-state resolution wire version for typed [`ResolutionStack`] frames.
+///
+/// Version 2 is the compatibility boundary for protocol-19 clients. Phase 4
+/// hardening changes neither this serialized shape nor the version.
 pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 2;
+
+/// Historical full-state resolution wire version accepted only for migration.
+///
+/// The reader accepts v1 saves and converts them to v2 frames; the writer
+/// never emits v1 resolution fields.
 const LEGACY_RESOLUTION_STATE_WIRE_VERSION: u64 = 1;
 
 /// Versioned wire adapter for full game-state persistence and transport.
@@ -2451,6 +2458,10 @@ impl ResolutionStateWire {
         Ok(value)
     }
 
+    /// Decodes persisted full-game state at the resolution compatibility boundary.
+    ///
+    /// Version 1 is read only through the legacy migration path below. Version
+    /// 2 is the only shape this adapter writes for protocol-19 clients.
     fn from_value(value: Value) -> Result<Self, String> {
         let object = value
             .as_object()
@@ -2463,6 +2474,8 @@ impl ResolutionStateWire {
             })?;
 
         match version {
+            // V1 reader compatibility path: historical keys are consumed here
+            // and projected into typed frames before runtime state is restored.
             LEGACY_RESOLUTION_STATE_WIRE_VERSION => {
                 if object.contains_key("resolution_frames") {
                     return Err("v1 resolution state must not contain resolution_frames".to_string());
@@ -4263,6 +4276,18 @@ mod tests {
             restored.into_game_state().active_coin_flip_frame(),
             Some(&pending)
         );
+    }
+
+    #[test]
+    fn resolution_wire_contract_pins_v2_and_the_v1_reader() {
+        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 2);
+        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
+
+        let mut v1 =
+            serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
+        v1["resolution_state_version"] = Value::from(1_u64);
+        serde_json::from_value::<ResolutionStateWire>(v1)
+            .expect("the v1 reader remains available for historical saves");
     }
 
     #[test]
