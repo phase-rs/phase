@@ -3197,6 +3197,21 @@ fn def_is_last_created_rider(def: &AbilityDefinition) -> bool {
     effect_targets_last_created(&def.effect)
 }
 
+/// Append consecutive `LastCreated` riders after `defs[index]` to `head` so a
+/// coin resolver runs the complete token-producing chain once per won flip.
+fn absorb_last_created_riders(
+    defs: &mut Vec<AbilityDefinition>,
+    index: usize,
+    head: &mut AbilityDefinition,
+) {
+    while index + 1 < defs.len() && def_is_last_created_rider(&defs[index + 1]) {
+        let mut rider = defs.remove(index + 1);
+        rider.kind = AbilityKind::Spell;
+        rider.sub_link = SubAbilityLink::SequentialSibling;
+        super::append_to_deepest_sub_ability(head, Some(Box::new(rider)));
+    }
+}
+
 /// True when `effect` (directly or through a `CreateDelayedTrigger` wrapper)
 /// targets `TargetFilter::LastCreated`. The `GenericEffect` arm inspects both
 /// the effect-level `target` and each static grant's `affected` recipient, since
@@ -3289,12 +3304,7 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
         // over-absorbing an unrelated following clause.
         if matches!(&*defs[i].effect, Effect::FlipCoinUntilLose { .. }) && i + 1 < defs.len() {
             let mut head = defs.remove(i + 1);
-            while i + 1 < defs.len() && def_is_last_created_rider(&defs[i + 1]) {
-                let mut rider = defs.remove(i + 1);
-                rider.kind = AbilityKind::Spell;
-                rider.sub_link = SubAbilityLink::SequentialSibling;
-                super::append_to_deepest_sub_ability(&mut head, Some(Box::new(rider)));
-            }
+            absorb_last_created_riders(defs, i, &mut head);
             *defs[i].effect = Effect::FlipCoinUntilLose {
                 win_effect: Box::new(head),
             };
@@ -3302,10 +3312,9 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
 
         // CR 705: Consolidate FlipCoins with its following effect clause — the
         // "for each heads …" / "skips their next X turns where X is the number of
-        // coins that came up heads" sentence. The next def is attached as the
-        // win_effect (runs once per heads). Only consolidates when the parent
-        // `FlipCoins` has no branches already set (i.e., came straight from the
-        // imperative lowering, not from a prior consolidation pass).
+        // coins that came up heads" sentence. Like FlipCoinUntilLose, trailing
+        // `LastCreated` riders must join the per-head chain, rather than apply
+        // only to the final token created by the loop.
         if let Effect::FlipCoins {
             win_effect: None,
             lose_effect: None,
@@ -3316,7 +3325,8 @@ pub(super) fn consolidate_die_and_coin_defs(defs: &mut Vec<AbilityDefinition>, _
             if i + 1 < defs.len() {
                 let count = count.clone();
                 let flipper = flipper.clone();
-                let next = defs.remove(i + 1);
+                let mut next = defs.remove(i + 1);
+                absorb_last_created_riders(defs, i, &mut next);
                 *defs[i].effect = Effect::FlipCoins {
                     count,
                     win_effect: Some(Box::new(next)),
@@ -3453,7 +3463,9 @@ pub(crate) fn strip_redundant_flip_win_quantifier(text: &str) -> Option<String> 
     let lower = text.to_lowercase();
     let ((), rest) = nom_on_lower(text, &lower, |i| {
         let (i, _) = tag::<_, _, OracleError<'_>>("for each ").parse(i)?;
-        let (i, _) = alt((tag("flips you won"), tag("flip you won"))).parse(i)?;
+        let (i, _) = alt((tag("flips"), tag("flip"))).parse(i)?;
+        let (i, _) = tag(" you ").parse(i)?;
+        let (i, _) = alt((tag("won"), tag("win"))).parse(i)?;
         let (i, _) = tag(", ").parse(i)?;
         Ok((i, ()))
     })?;
@@ -9880,9 +9892,9 @@ mod tests {
     use super::{
         match_create_of_those_tokens, nest_whenever_this_turn_token_cleanup_delayed_trigger,
         parse_where_x_quantity_expression, patch_choose_from_zone_counter_continuation_target,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-        strip_trailing_duration, strip_trailing_where_x,
-        value_quantity_clause_owns_this_turn_suffix,
+        strip_redundant_flip_win_quantifier, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_trailing_duration,
+        strip_trailing_where_x, value_quantity_clause_owns_this_turn_suffix,
     };
     use crate::parser::oracle_util::TextPair;
     use crate::types::ability::{
@@ -9894,6 +9906,22 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn strip_redundant_flip_win_quantifier_accepts_number_and_tense_variants() {
+        for prefix in [
+            "For each flip you won, ",
+            "For each flips you won, ",
+            "For each flip you win, ",
+            "For each flips you win, ",
+        ] {
+            assert_eq!(
+                strip_redundant_flip_win_quantifier(&format!("{prefix}draw a card.")),
+                Some("draw a card.".to_string()),
+                "must strip {prefix:?}"
+            );
+        }
+    }
 
     /// CR 608.2c: a `ChooseFromZone` head with a `RemoveCounter`/`PutCounter`
     /// `sub_ability` whose `target` is the `SelfRef` "it" anaphor (Amy Pond's

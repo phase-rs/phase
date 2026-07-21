@@ -5816,13 +5816,18 @@ fn etb_token_copier_exile_anaphor_binds_created_token() {
         }
 }
 
-/// Walk an ability chain, descending through `FlipCoinUntilLose.win_effect`,
+/// Walk an ability chain, descending through coin-flip `win_effect`s,
 /// `CreateDelayedTrigger.effect`, and `sub_ability`. Used to prove the folded
-/// per-win `win_effect` shape of Mirror March.
+/// per-win/per-head token-rider shape.
 fn collect_through_flip<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
     out.push(&def.effect);
-    if let Effect::FlipCoinUntilLose { win_effect } = &*def.effect {
-        collect_through_flip(win_effect, out);
+    match &*def.effect {
+        Effect::FlipCoinUntilLose { win_effect } => collect_through_flip(win_effect, out),
+        Effect::FlipCoins {
+            win_effect: Some(win_effect),
+            ..
+        } => collect_through_flip(win_effect, out),
+        _ => {}
     }
     if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
         collect_through_flip(inner, out);
@@ -5922,6 +5927,48 @@ fn mirror_march_flip_win_effect_folds_copy_haste_exile_on_last_created() {
             .iter()
             .any(|e| matches!(e, Effect::Unimplemented { .. })),
         "no clause may lower to Unimplemented, got {effs:?}"
+    );
+}
+
+/// CR 705.2 + CR 603.7c: the fixed-count sibling has the same per-win rider
+/// boundary as Mirror March. The present-tense form is used by cards such as
+/// Yusri, Fortune's Flame; once lowered, the copied token's haste/exile riders
+/// must be part of `FlipCoins.win_effect`, not post-loop siblings.
+#[test]
+fn flip_coins_present_tense_win_effect_folds_last_created_riders() {
+    let text = "Whenever a nontoken creature you control enters, flip two coins. \
+        For each flip you win, create a token that's a copy of that creature. Those tokens gain haste. \
+        Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Fixed-count copy coins");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+
+    assert!(
+        matches!(&*exec.effect, Effect::FlipCoins { .. }),
+        "top-level effect must be FlipCoins"
+    );
+    assert!(
+        exec.sub_ability.is_none(),
+        "haste/exile must fold into FlipCoins.win_effect, not remain post-loop siblings"
+    );
+
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+    assert!(
+        effs.iter()
+            .any(|effect| matches!(effect, Effect::CopyTokenOf { .. })),
+        "the present-tense quantifier must reach CopyTokenOf"
+    );
+    assert_eq!(grant_affected(&effs), Some(TargetFilter::LastCreated));
+    assert_eq!(
+        effs.iter().find_map(|effect| match effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => Some(target.clone()),
+            _ => None,
+        }),
+        Some(TargetFilter::LastCreated)
     );
 }
 
