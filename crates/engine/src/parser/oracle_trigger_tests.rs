@@ -214,6 +214,34 @@ fn glory_of_battle_trigger_gates_on_creature_recipient() {
     }
 }
 
+#[test]
+fn damage_done_recipient_gates_on_blocking_creature() {
+    // CR 509.1g + CR 120.3 (issue #5951): "Whenever equipped creature deals
+    // damage to a blocking creature, ..." (Kusari-Gama) must set a typed
+    // `valid_target` carrying `FilterProp::Blocking` so the trigger fires ONLY
+    // when the damaged object is a blocker — not when the equipped creature
+    // deals combat damage to a player. A bare combat-status adjective on the
+    // recipient is the class fixed here, so exercise the building block
+    // ("a blocking creature") rather than the single card.
+    let def = parse_trigger_line(
+        "Whenever equipped creature deals damage to a blocking creature, \
+         this Equipment deals that much damage to each other creature defending player controls.",
+        "Kusari-Gama",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    match &def.valid_target {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert!(
+                tf.properties.contains(&FilterProp::Blocking),
+                "recipient must be gated on the blocking combat status, got {:?}",
+                tf.properties,
+            );
+        }
+        other => panic!("expected a blocking-creature valid_target, got {other:?}"),
+    }
+}
+
 fn blocking_source_beyond_first_expr() -> QuantityExpr {
     let count_minus_one = QuantityExpr::Offset {
         inner: Box::new(QuantityExpr::Ref {

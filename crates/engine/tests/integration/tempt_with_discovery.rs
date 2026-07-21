@@ -602,8 +602,8 @@ fn tempt_with_discovery_step_4_fires_once_per_accepting_opponent_two_accept() {
 
     // No pending iteration — the loop completed.
     assert!(
-        state.pending_repeat_iteration.is_none(),
-        "loop must clear pending_repeat_iteration after final iteration completes"
+        state.active_repeat_for().is_none(),
+        "loop must clear its typed repeat-for frame after final iteration completes"
     );
 }
 
@@ -642,7 +642,7 @@ fn tempt_with_discovery_step_4_does_not_fire_when_no_opponents_accept() {
              when zero opponents took the offer"
         );
     }
-    assert!(state.pending_repeat_iteration.is_none());
+    assert!(state.active_repeat_for().is_none());
 }
 
 /// CR 608.2c + CR 109.5: Boundary case — all opponents accept. With 3
@@ -711,5 +711,5 @@ fn tempt_with_discovery_step_4_fires_n_times_when_n_opponents_accept() {
         "fourth land must remain in P0's library — only 3 iterations \
          should run (one per accepting opponent)"
     );
-    assert!(state.pending_repeat_iteration.is_none());
+    assert!(state.active_repeat_for().is_none());
 }

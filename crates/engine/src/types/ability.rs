@@ -5993,9 +5993,9 @@ pub enum QuantityRef {
     /// CR 603.12a: Number of times the controller paid the repeated optional
     /// cost during THIS ability's resolution ("you may pay {C} up to N times").
     /// Resolution-local and transient: read from
-    /// `GameState::optional_cost_payments_this_resolution`, which is cleared at
-    /// the `depth == 0` prelude of `resolve_ability_chain` and incremented once
-    /// per successful payment. Distinct from the cast-time `CostXPaid` /
+    /// the active repeated-optional-payment frame, which is incremented once
+    /// per successful payment and released after its reflexive modal prompt.
+    /// Distinct from the cast-time `CostXPaid` /
     /// `KickerCount` / `AdditionalCostPaymentCount` tallies, which are read from
     /// the source spell/object at announcement (CR 601.2 / 702.33 / 702.51).
     /// Used to size a reflexive "choose up to that many" modal (CR 700.2d).
@@ -9053,8 +9053,8 @@ impl LegacyUnlessCost {
 ///   populate, so the multiplier is unrecoverable here. Mapping the base alone
 ///   would silently undercharge (CR 118.1): a pre-Phase-4 save captured at a
 ///   `ChooseObjectsSelection` prompt persists the stashed
-///   `PayCost { ScaledMana }` sub-ability inside
-///   `GameState::pending_continuation` (Magnetic Mountain–class, ~2 cards).
+///   `PayCost { ScaledMana }` sub-ability inside an
+///   `AbilityContinuationFrame` (Magnetic Mountain–class, ~2 cards).
 ///   Mapping to `Unimplemented` makes the authority fail the payment, so the
 ///   CR 118.12 didn't-pay branch applies — rules-safer than charging `base`
 ///   for an N-object effect. `card-data.json` is regenerated with the modern
@@ -12165,7 +12165,7 @@ pub enum Effect {
     /// walks the scoped player set itself and seeds
     /// `WaitingFor::EachPlayerCopyChosenSelection` per player. The inner copy and
     /// counter steps may pause on a CR 616.1 replacement choice; resumption is
-    /// threaded through `GameState::pending_each_player_copy_chosen` (see
+    /// threaded through the `EachPlayerCopyChosen` resolution frame (see
     /// `game/effects/each_player_copy_chosen.rs`).
     ///
     /// Real consumers (WHO phenomena): Human—Time Lord Meta-Crisis
@@ -16687,7 +16687,7 @@ impl SubAbilityLink {
 /// the game-state-predicate form ("[if condition,] repeat this process
 /// [once]", `WhileCondition`). The optional-put pause semantics that the
 /// `WhileCondition` loop depends on are shared with `UntilStopConditions` via
-/// the `pending_repeat_until` resume path.
+/// the repeat-until frame resume path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RepeatContinuation {

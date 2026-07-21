@@ -457,8 +457,7 @@ mod tests {
             crate::types::game_state::WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining double-counter additions should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(

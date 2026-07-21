@@ -3670,14 +3670,15 @@ fn resolve_ref(
             })
             .unwrap_or(0),
         // CR 603.12a: Number of times the controller paid the repeated optional
-        // cost during THIS resolution. Resolution-local transient on the
-        // GameState (cleared at the depth==0 prelude of resolve_ability_chain,
-        // incremented once per successful payment); never read from an object,
-        // never snapshotted. Sizes the reflexive "choose up to that many" modal
-        // cap (CR 700.2d clamps it to mode_count).
-        QuantityRef::TimesCostPaidThisResolution => {
-            u32_to_i32_saturating(state.optional_cost_payments_this_resolution)
-        }
+        // cost during THIS resolution. The active repeated-payment frame keeps
+        // it through the reflexive prompt; it is never read from an object.
+        // Sizes the reflexive "choose up to that many" modal cap (CR 700.2d
+        // clamps it to mode_count).
+        QuantityRef::TimesCostPaidThisResolution => u32_to_i32_saturating(
+            state
+                .active_repeated_optional_payment_frame()
+                .map_or(0, |frame| frame.optional_cost_payments_this_resolution),
+        ),
         // CR 603.10a + CR 603.6e: Count attachments present on the leaving object
         // at zone-change time (look-back). Reads the `attachments` snapshot on
         // the `ZoneChanged` event in `current_trigger_event`, filtered by kind

@@ -18,7 +18,6 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
-use crate::types::resolution::canonicalize_legacy_resolution_state;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
 use crate::types::statics::StaticMode;
@@ -1842,9 +1841,8 @@ fn drive_loop_action_iteration(
             // keeps an opponent's counters/poison out of the growth ⇒ no loss axis introduced.
             WaitingFor::ProliferateChoice { .. } => {
                 let prolif_source = clone
-                    .pending_proliferate_actions
-                    .as_ref()
-                    .map(|p| p.source_id)
+                    .active_proliferate_frame()
+                    .map(|pending| pending.source_id)
                     .ok_or(RecastAbort)?;
                 let targets = pinned_targets_for_source(template, iteration, clone, prolif_source)?;
                 let target_refs: Vec<crate::types::ability::TargetRef> = targets
@@ -3032,9 +3030,7 @@ pub(super) fn resume_pending_continuation_if_priority(
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         effects::drain_pending_continuation(state, events);
         if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            let frames =
-                canonicalize_legacy_resolution_state(state).map_err(EngineError::InvalidAction)?;
-            effects::resume_resolution_frames(state, &frames, events);
+            effects::resume_resolution_frames(state, events);
         }
         // CR 605.3b + CR 616.1: A post-replacement prompt reaches this common
         // boundary only after ordinary continuations drain. The shared typed
@@ -6644,8 +6640,9 @@ fn apply_action(
                             old_target,
                         });
                     }
-                    let resumes_change_zone_iteration =
-                        state.pending_change_zone_iteration.is_some();
+                    let resumes_change_zone_iteration = state
+                        .active_change_zone_frame()
+                        .is_some_and(|frame| frame.pending.is_some());
                     if !resumes_change_zone_iteration {
                         events.push(crate::types::events::GameEvent::EffectResolved {
                             kind: crate::types::ability::EffectKind::ChangeZone,
@@ -6662,7 +6659,7 @@ fn apply_action(
                     // here — the replacement-choice resume path drains it for the
                     // CR 616.1 case, but the aura-host resume is the ONLY drain
                     // site for an `NeedsAuraAttachmentChoice` pause.
-                    if state.pending_batch_deliveries.is_some() {
+                    if state.active_batch_delivery().is_some() {
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
@@ -6700,7 +6697,7 @@ fn apply_action(
             state.priority_player = active_player;
             // CR 603.10a + CR 616.1: drain a deferred batch completion parked
             // behind this aura-attachment pause (see the sibling path above).
-            if state.pending_batch_deliveries.is_some() {
+            if state.active_batch_delivery().is_some() {
                 super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
             }
             resume_pending_continuation_if_priority(state, &mut events)?;
@@ -7509,11 +7506,13 @@ fn apply_action(
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
             });
-            let completion_source = state
-                .pending_proliferate_actions
-                .as_ref()
-                .map(|pending| pending.source_id)
-                .unwrap_or(ObjectId(0));
+            let pending = state
+                .take_active_proliferate_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No active proliferate frame to resume".to_string())
+                })?;
+            let completion_source = pending.source_id;
             // FIX-1 (CR 701.34a): record the proliferate-target choice on the current loop-period
             // step so the object-growth detection drive replays the EXACT permanent(s) grown
             // (Pentad's charge) — never "all eligible", which could grow an opponent's
@@ -7546,7 +7545,7 @@ fn apply_action(
                     );
                 }
             }
-            if !effects::proliferate::resume_pending_proliferate_actions(state, &mut events) {
+            if !effects::proliferate::resume_proliferate_actions(state, pending, &mut events) {
                 return Ok(ActionResult {
                     events,
                     waiting_for: state.waiting_for.clone(),
@@ -7675,7 +7674,10 @@ fn apply_action(
             let previous_trigger_event = state.current_trigger_event.clone();
             let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
+            state.current_trigger_match_count = state
+                .active_ability_continuation()
+                .and_then(|continuation| continuation.trigger_context.as_ref())
+                .and_then(|context| context.match_count);
             resume_pending_continuation_if_priority(state, &mut events)?;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_match_count = previous_trigger_match_count;

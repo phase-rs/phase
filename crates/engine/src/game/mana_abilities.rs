@@ -2916,7 +2916,7 @@ fn mill_for_mana_cost(
     match super::replacement::replace_event(state, proposed, events) {
         super::replacement::ReplacementResult::Execute(event) => {
             // CR 616.1: a per-card `Moved` ordering choice parks the prompt
-            // (`state.waiting_for` left set, tail in `pending_batch_deliveries`);
+            // (`state.waiting_for` left set, tail in the active BatchDelivery frame);
             // bail like `mill::resolve` does so the surfaced prompt is not
             // clobbered. The parked activation resumes the remaining cost
             // components and mana production.

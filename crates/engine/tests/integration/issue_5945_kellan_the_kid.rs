@@ -458,7 +458,7 @@ fn subless_hand_cast_decline_is_a_clean_no_op() {
         .expect("decline the cast (empty selection)");
 
     assert!(
-        runner.state().pending_continuation.is_none(),
+        runner.state().active_ability_continuation().is_none(),
         "no continuation lingers after a subless decline"
     );
     assert!(matches!(

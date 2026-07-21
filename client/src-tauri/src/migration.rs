@@ -179,18 +179,24 @@ pub fn mark_remote_load_ok(app: AppHandle) -> Result<(), String> {
 mod tests {
     use std::{
         fs,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
 
     fn test_files() -> MigrationFiles {
-        let unique = SystemTime::now()
+        // Nanos alone can collide across parallel test threads on coarse clocks;
+        // the per-process counter makes each directory unique.
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         MigrationFiles {
-            directory: std::env::temp_dir().join(format!("phase-tauri-migration-{unique}")),
+            directory: std::env::temp_dir()
+                .join(format!("phase-tauri-migration-{nanos}-{sequence}")),
         }
     }
 

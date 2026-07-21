@@ -187,8 +187,11 @@ static PRESETS: LazyLock<Vec<TokenPreset>> = LazyLock::new(|| {
     parsed.token
 });
 
-/// Returns the full set of debug-spawnable token presets, sorted by category
-/// then id for stable display order.
+/// Returns the full set of debug-spawnable token presets, in catalog order:
+/// ascending id, which is what `tokens-gen` emits so that a regen produces a
+/// minimal diff (asserted by `catalog_is_ordered_and_self_consistent`). Ids are
+/// MTGJSON uuids, so this is not a display order — consumers impose their own
+/// (the debug UI groups by category and sorts by power/toughness/name).
 pub fn known_token_presets() -> &'static [TokenPreset] {
     &PRESETS
 }
@@ -564,6 +567,57 @@ mod tests {
     fn catalog_loads_and_validates() {
         let presets = known_token_presets();
         assert!(!presets.is_empty(), "catalog must contain entries");
+    }
+
+    /// Structural properties of `tokens-gen` output, checked against the
+    /// committed catalog. Both are per-entry properties with no pinned totals,
+    /// so a weekly refresh that only adds tokens stays green.
+    ///
+    /// Scope, stated precisely because it is narrow: these catch entries
+    /// *reordered* relative to generator output, and an image ref pointing at a
+    /// different preset. They do NOT catch a body-only rewrite (nothing here
+    /// ties `body`/`fidelity`/`source_card_refs` to an identity) nor a deleted
+    /// entry (removing from the middle keeps the sequence ascending) — a
+    /// deletion is the count floors' job, in
+    /// `analyze_token_coverage_treats_source_defined_pt_as_represented`.
+    ///
+    /// And none of it establishes provenance — that the catalog is tokens-gen's
+    /// output for its declared vintage — which needs the gitignored generator
+    /// input, absent at test time. See the comment on that coverage test for
+    /// the by-hand `tokens-gen`/`cmp` recipe.
+    #[test]
+    fn catalog_is_ordered_and_self_consistent() {
+        let presets = known_token_presets();
+
+        // `tokens_gen.rs` emits `presets.sort_by(|a, b| a.id.cmp(&b.id))`, so a
+        // strictly ascending id sequence is a property of every generated
+        // catalog. Strict (not `<=`) also re-states the LazyLock's duplicate-id
+        // guard at the ordering level.
+        for pair in presets.windows(2) {
+            assert!(
+                pair[0].id < pair[1].id,
+                "known-tokens.toml is not strictly id-ascending: `{}` precedes `{}`",
+                pair[0].id,
+                pair[1].id
+            );
+        }
+
+        // The generator builds each preset's image ref from the same MTGJSON
+        // uuid it uses for `TokenPreset::id`, so a ref pointing at a different
+        // preset means the entry was assembled by something other than
+        // tokens-gen. Consistency is asserted only where a ref exists: a token
+        // with no Scryfall image is legal upstream data, and requiring one
+        // would re-introduce a weekly false-red.
+        for preset in presets {
+            let Some(image_ref) = &preset.token_image_ref else {
+                continue;
+            };
+            assert_eq!(
+                image_ref.preset_id, preset.id,
+                "preset `{}` carries an image ref for `{}`",
+                preset.id, image_ref.preset_id
+            );
+        }
     }
 
     /// Every `PredefinedArtifact { kind }` preset must carry the matching

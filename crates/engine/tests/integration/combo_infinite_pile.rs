@@ -2155,7 +2155,7 @@ fn med_tokens_boundary_mint_pause_preserves_replacement_choice() {
     // replacement matched the synthetic mint; a non-matching / auto-resolving construction leaves
     // this None and fails the test loudly).
     assert!(
-        state.pending_copy_token_resolution.is_some(),
+        state.active_copy_token().is_some(),
         "reach-guard: the boundary Tokens mint paused on the optional replacement \
          (pending_copy_token_resolution set)"
     );
@@ -2292,7 +2292,7 @@ fn med_mixed_counter_tokens_pause_commits_finite_counter_and_keeps_only_tokens_u
     // (1) Reach-guard: the Tokens mint actually paused (proves the submit ran past the
     //     Counters axis and into the Tokens axis, not a fizzled/auto-resolved mint).
     assert!(
-        state.pending_copy_token_resolution.is_some(),
+        state.active_copy_token().is_some(),
         "reach-guard: the boundary Tokens mint paused on the optional replacement"
     );
     assert!(

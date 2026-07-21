@@ -796,7 +796,7 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
             final_count,
             events,
         );
-        if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+        if let Some(pending) = state.active_copy_token_mut() {
             pending.created_ids.extend(status.created_ids);
         } else {
             state.last_created_token_ids = status.created_ids;
@@ -1168,14 +1168,15 @@ fn continue_liminal_copy_token_batch(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-        pending.created_ids = state.last_created_token_ids.clone();
+    let created_ids = state.last_created_token_ids.clone();
+    if let Some(pending) = state.active_copy_token_mut() {
+        pending.created_ids = created_ids;
     }
     let Some(continuation) = continuation else {
-        if state.pending_copy_token_resolution.is_some() {
+        if state.active_copy_token().is_some() {
             super::token_copy::drain_pending_copy_token_resolution(state, events);
         }
-        return !state.pending_copy_token_resolution.is_some()
+        return !state.active_copy_token().is_some()
             || matches!(state.waiting_for, WaitingFor::Priority { .. });
     };
     if continuation.remaining_count > 0 {
@@ -1198,14 +1199,14 @@ fn continue_liminal_copy_token_batch(
             return false;
         }
     }
-    if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-        pending.created_ids = state.last_created_token_ids.clone();
+    let created_ids = state.last_created_token_ids.clone();
+    if let Some(pending) = state.active_copy_token_mut() {
+        pending.created_ids = created_ids;
     }
-    if state.pending_copy_token_resolution.is_some() {
+    if state.active_copy_token().is_some() {
         super::token_copy::drain_pending_copy_token_resolution(state, events);
     }
-    !state.pending_copy_token_resolution.is_some()
-        || matches!(state.waiting_for, WaitingFor::Priority { .. })
+    !state.active_copy_token().is_some() || matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
 fn liminal_copy_token_continuation_post_action(

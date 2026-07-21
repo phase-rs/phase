@@ -453,8 +453,7 @@ fn finish_search_found_batch(
             let split = split.clone();
             let survivors = live_search_found_ids(state, &batch.survivors);
             let source_id = state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .map(|continuation| continuation.chain.source_id)
                 .or_else(|| survivors.first().copied())
                 .unwrap_or(ObjectId(0));
@@ -625,7 +624,7 @@ fn park_search_observer_triggers(
     }
     // The parent spell already left the stack; clear the stashed resolving entry
     // so the next priority pass can drain `deferred_triggers`.
-    if state.pending_continuation.is_none()
+    if state.active_ability_continuation().is_none()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         state.resolving_stack_entry = None;
@@ -901,8 +900,12 @@ fn finalize_standard_search_selection(
     // found-set exile continuation. SearchFound replacements removed from the
     // survivor set are intentionally excluded.
     let continuation_exiles_set = state
-        .pending_continuation
-        .as_ref()
+        .active_ability_continuation()
+        .or_else(|| {
+            state
+                .outer_ability_continuation_of_active_post_replacement_draw()
+                .map(|continuation| &continuation.pending)
+        })
         .is_some_and(|cont| continuation_exiles_found_set(&cont.chain));
     if continuation_exiles_set {
         let hand_exiles = chosen
@@ -919,23 +922,45 @@ fn finalize_standard_search_selection(
             .saturating_add(hand_exiles);
     }
     let mut has_delivery = false;
-    if let Some(mut continuation) = state.pending_continuation.take() {
-        has_delivery = matches!(continuation.chain.effect, Effect::ChangeZone { .. });
-        continuation.search_attach_host =
+    if state.active_ability_continuation().is_some() {
+        let mut frame = state
+            .take_active_ability_continuation()
+            .expect("checked active continuation must be consumable")
+            .expect("checked active continuation must exist");
+        has_delivery = matches!(frame.pending.chain.effect, Effect::ChangeZone { .. });
+        frame.pending.search_attach_host =
             effects::change_zone::resolve_search_continuation_attach_host(
                 state,
-                &continuation.chain,
+                &frame.pending.chain,
             );
-        state.search_continuation_attach_host = continuation.search_attach_host;
+        state.resolving_continuation_attach_host = frame.pending.search_attach_host;
         let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
         // CR 701.23a + CR 701.24a: propagate the semantic searcher for
         // library-owner-sensitive shuffle and tail instructions.
-        if player != continuation.chain.controller {
+        if player != frame.pending.chain.controller {
             targets.push(TargetRef::Player(player));
         }
-        continuation.chain.targets = targets.clone();
-        propagate_targets_through_search_shuffle(&mut continuation.chain, &targets);
-        state.pending_continuation = Some(continuation);
+        frame.pending.chain.targets = targets.clone();
+        propagate_targets_through_search_shuffle(&mut frame.pending.chain, &targets);
+        state.push_ability_continuation(frame);
+    } else if let Some(continuation) =
+        state.outer_ability_continuation_of_active_post_replacement_draw()
+    {
+        has_delivery = matches!(continuation.pending.chain.effect, Effect::ChangeZone { .. });
+        let search_attach_host = effects::change_zone::resolve_search_continuation_attach_host(
+            state,
+            &continuation.pending.chain,
+        );
+        let mut targets: Vec<_> = chosen.iter().copied().map(TargetRef::Object).collect();
+        if player != continuation.pending.chain.controller {
+            targets.push(TargetRef::Player(player));
+        }
+        let continuation = state
+            .outer_ability_continuation_of_active_post_replacement_draw_mut()
+            .expect("checked paired continuation must remain resident while the draw is active");
+        continuation.pending.search_attach_host = search_attach_host;
+        continuation.pending.chain.targets = targets.clone();
+        propagate_targets_through_search_shuffle(&mut continuation.pending.chain, &targets);
     }
     if has_delivery {
         state.pending_library_search_delivery = Some(
@@ -967,8 +992,7 @@ pub(crate) fn settle_search_after_zone_owner_elimination(
     state.active_search_decision_controls.remove(&player);
     if let Some(split) = split {
         let source_id = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .map(|continuation| continuation.chain.source_id)
             .unwrap_or(ObjectId(0));
         match apply_search_partition(state, &[], &[], &split, source_id, player, events)? {
@@ -1342,9 +1366,12 @@ pub(super) fn handle_resolution_choice(
                 }
             }
             let kept: Vec<bool> = keep_indices.iter().map(|&index| results[index]).collect();
-            let pending = state.pending_coin_flip.take().ok_or_else(|| {
-                EngineError::InvalidAction("No pending coin flip to resume".to_string())
-            })?;
+            let pending = state
+                .take_active_coin_flip_frame()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .ok_or_else(|| {
+                    EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
+                })?;
             let next =
                 crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
                     .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
@@ -1763,7 +1790,7 @@ pub(super) fn handle_resolution_choice(
                 // `repeat_until: Some(ControllerChoice)`, so this hits the
                 // `repeat_until` dispatch, runs `resolve_chain_body` once, and
                 // re-sets `WaitingFor::RepeatDecision` (or, on an inner choice,
-                // pauses and stashes `pending_repeat_until`). depth = 1: each
+                // pauses and parks its repeat-until frame). depth = 1: each
                 // accept is a fresh top-level `apply()`, so depth never
                 // accumulates across prompts and the `depth > 20` guard never
                 // applies — CR 107.1c permits looping a whole library.
@@ -2034,11 +2061,13 @@ pub(super) fn handle_resolution_choice(
                             player,
                         );
                         debug_assert!(
-                            state.pending_continuation.is_none(),
-                            "Learn rummage overwriting pending_continuation"
+                            state.active_ability_continuation().is_none(),
+                            "Learn rummage overwriting active ability continuation"
                         );
-                        state.pending_continuation =
-                            Some(PendingContinuation::new(Box::new(draw), state));
+                        state.park_ability_continuation(PendingContinuation::new(
+                            Box::new(draw),
+                            state,
+                        ));
                         events.push(GameEvent::EffectResolved {
                             kind: EffectKind::Learn,
                             source_id: ObjectId(0),
@@ -2258,7 +2287,7 @@ pub(super) fn handle_resolution_choice(
                                 // leaves the ∞ axes for manual play; game totals stay correct because
                                 // the ∞ marks are not cleared). No `debug_assert!` — the defensive
                                 // test deliberately drives this pause, which a debug_assert would panic.
-                                if state.pending_copy_token_resolution.is_some() {
+                                if state.active_copy_token().is_some() {
                                     // CR 732.2a pause-safe transaction: cash out the axes already
                                     // applied THIS pass (a mixed stash, Edit 1 puts Tokens last) so
                                     // no finite-applied Counters/Life axis is left with a stale ∞
@@ -2427,12 +2456,11 @@ pub(super) fn handle_resolution_choice(
             let total = accumulated.saturating_add(amount);
             state.last_effect_count = Some(total as i32);
             let pending_starts_with_pay_amount = state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
             if !pending_starts_with_pay_amount {
-                if let Some(cont) = state.pending_continuation.as_mut() {
-                    cont.chain.set_chosen_x_recursive(total);
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame.pending.chain.set_chosen_x_recursive(total);
                 }
             }
             let mut waiting_for = finish_with_continuation(state, player, events);
@@ -2496,8 +2524,11 @@ pub(super) fn handle_resolution_choice(
             // fires. On the optional Sarkhan path this re-affirms the accept-time
             // clobber (`resolve_optional_effect_decision`); for a mandatory
             // behold-class card it is the sole hook that fires the rider.
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.set_optional_effect_performed_recursive(true);
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame
+                    .pending
+                    .chain
+                    .set_optional_effect_performed_recursive(true);
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -2974,7 +3005,7 @@ pub(super) fn handle_resolution_choice(
                     // run before every kept card has settled.
                     let publish_set = if kept.is_empty() {
                         Vec::new()
-                    } else if state.pending_continuation.as_ref().is_some_and(|cont| {
+                    } else if state.active_ability_continuation().is_some_and(|cont| {
                         dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                     }) {
                         unkept.clone()
@@ -2982,7 +3013,7 @@ pub(super) fn handle_resolution_choice(
                         kept.clone()
                     };
                     let defer_rest_routing =
-                        state.pending_continuation.as_ref().is_some_and(|cont| {
+                        state.active_ability_continuation().is_some_and(|cont| {
                             dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                         });
                     let reqs = kept
@@ -3091,18 +3122,18 @@ pub(super) fn handle_resolution_choice(
             // the kept subset; Expressive Iteration's bottom/exile tail binds the
             // unkept looked-at pile when its continuation chains
             // `PutAtLibraryPosition { TrackedSet }`.
-            let publish_set =
-                if kept.is_empty() {
-                    Vec::new()
-                } else if state.pending_continuation.as_ref().is_some_and(|cont| {
-                    dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
-                }) {
-                    // Expressive Iteration-style bottom/exile tail: downstream
-                    // `TrackedSet` steps address the unkept looked-at pile only.
-                    unkept.clone()
-                } else {
-                    kept.clone()
-                };
+            let publish_set = if kept.is_empty() {
+                Vec::new()
+            } else if state
+                .active_ability_continuation()
+                .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain))
+            {
+                // Expressive Iteration-style bottom/exile tail: downstream
+                // `TrackedSet` steps address the unkept looked-at pile only.
+                unkept.clone()
+            } else {
+                kept.clone()
+            };
             // None => Graveyard; map to a concrete zone so the rest mover
             // (shared with the search-split partition) has a single Zone.
             // When a continuation owns the unkept pile (Expressive Iteration
@@ -3111,8 +3142,7 @@ pub(super) fn handle_resolution_choice(
             // continuation wiring stay below the result match: neither may see
             // a pre-redirect rest pile.
             let defer_rest_routing = state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
             if !defer_rest_routing {
                 match route_rest_partition(
@@ -3147,12 +3177,13 @@ pub(super) fn handle_resolution_choice(
                 }
             }
             effects::publish_fresh_tracked_set(state, publish_set);
-            if let Some(cont) = state.pending_continuation.as_mut() {
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 // CR 608.2c: ParentTarget continuations (Hideaway conceal, dig
                 // conditionals on the kept card) bind to the kept selection.
                 // Hand/bottom/exile tails route via TrackedSetFiltered instead.
-                cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
-                cont.chain.context.optional_effect_performed = !kept.is_empty();
+                frame.pending.chain.targets =
+                    kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -3232,7 +3263,9 @@ pub(super) fn handle_resolution_choice(
                     super::engine::resume_pending_continuation_if_priority(state, events)
                         .expect("a settled reveal choice must resume its continuation");
                 } else {
-                    state.pending_continuation = None;
+                    let _ = state
+                        .clear_active_ability_continuation()
+                        .expect("declined reveal cannot clear a buried continuation");
                 }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
@@ -3276,11 +3309,13 @@ pub(super) fn handle_resolution_choice(
             // chain targets into the continuation so the follow-up effect operates
             // on the revealed card (e.g., Thoughtseize's exile).
             if optional && decline_runs_continuation {
-                state.pending_continuation = None;
-            } else if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.targets = vec![TargetRef::Object(chosen_id)];
+                let _ = state
+                    .clear_active_ability_continuation()
+                    .expect("accepted reveal cannot clear a buried continuation");
+            } else if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame.pending.chain.targets = vec![TargetRef::Object(chosen_id)];
                 if optional {
-                    cont.chain.context.optional_effect_performed = true;
+                    frame.pending.chain.context.optional_effect_performed = true;
                 }
             }
             super::engine::resume_pending_continuation_if_priority(state, events)
@@ -3383,8 +3418,7 @@ pub(super) fn handle_resolution_choice(
                 // first chosen card's id only in the degenerate no-continuation
                 // case (used solely as an event source label).
                 let source_id = state
-                    .pending_continuation
-                    .as_ref()
+                    .active_ability_continuation()
                     .map(|cont| cont.chain.source_id)
                     .or_else(|| chosen.first().copied())
                     .unwrap_or(ObjectId(0));
@@ -3644,8 +3678,9 @@ pub(super) fn handle_resolution_choice(
                 state.last_revealed_ids.clear();
             }
 
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.targets = chosen_ids.iter().map(|&id| TargetRef::Object(id)).collect();
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame.pending.chain.targets =
+                    chosen_ids.iter().map(|&id| TargetRef::Object(id)).collect();
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
@@ -3696,20 +3731,19 @@ pub(super) fn handle_resolution_choice(
                 .copied()
                 .collect();
             let priority_player = state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .map(|cont| cont.chain.controller)
                 .unwrap_or(player);
             set_priority(state, priority_player);
             // CR 101.4 + CR 608.2c: A per-player `ChooseFromZone { EachPlayer }`
             // iteration does NOT partition this player's pick into the
             // continuation's target slots — each pick is accumulated into the
-            // chain's tracked set by `drain_pending_per_player_zone_choice`, and
+            // chain's tracked set by `drain_active_per_player_zone_choice`, and
             // the continuation ("put those cards onto the battlefield") reads
             // that tracked set. Hand the choice straight to the drain so it can
             // accumulate and prompt the next player (Breach the Multiverse).
-            if state.pending_per_player_zone_choice.is_some() {
-                effects::choose_from_zone::drain_pending_per_player_zone_choice(
+            if state.active_per_player_zone_choice().is_some() {
+                effects::choose_from_zone::drain_active_per_player_zone_choice(
                     state, &chosen, events,
                 );
                 // Only after every player has been prompted (the drain leaves no
@@ -3726,8 +3760,8 @@ pub(super) fn handle_resolution_choice(
             // the chain's tracked set and prompts the next member, exactly like
             // the per-player path (Sanar, Portent of Calamity). The continuation
             // ("from among them" / "put the rest …") reads that tracked set.
-            if state.pending_per_category_zone_choice.is_some() {
-                match effects::choose_from_zone::drain_pending_per_category_zone_choice(
+            if state.active_per_category_zone_choice().is_some() {
+                match effects::choose_from_zone::drain_active_per_category_zone_choice(
                     state, &chosen, events,
                 ) {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
@@ -3757,13 +3791,13 @@ pub(super) fn handle_resolution_choice(
             // referencing a tracked set so non-consuming continuations
             // (partition sub-abilities reading `ParentTarget`) are unaffected.
             let continuation_consumes_tracked_set = state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .is_some_and(|cont| effects::chain_references_tracked_set(&cont.chain));
             if continuation_consumes_tracked_set {
                 effects::publish_fresh_tracked_set(state, chosen.clone());
             }
-            if let Some(cont) = state.pending_continuation.as_mut() {
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                let cont = &mut frame.pending;
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
                 // to the sub-ability ONLY for the zone-partition pattern
@@ -3811,11 +3845,14 @@ pub(super) fn handle_resolution_choice(
             // the `prev` values are restored after the inner drain, leaving no
             // stale leak past the action boundary. Mirrors
             // `WaitingFor::ChooseObjectsSelection` and the
-            // `pending_optional_trigger_event` round-trip.
+            // optional-effect frame trigger-context round-trip.
             let prev_trigger_event = state.current_trigger_event.clone();
             let prev_trigger_match_count = state.current_trigger_match_count;
             let prev_die_result = state.die_result_this_resolution;
-            if let Some(ctx) = state.pending_choose_zone_trigger_context.take() {
+            if let Some(ctx) = state
+                .active_ability_continuation_frame_mut()
+                .and_then(|frame| frame.choose_zone_trigger_context.take())
+            {
                 state.current_trigger_event = ctx.event;
                 state.current_trigger_match_count = ctx.match_count;
                 state.die_result_this_resolution = ctx.die_result;
@@ -3886,7 +3923,7 @@ pub(super) fn handle_resolution_choice(
             // CR 608.2c + CR 122.1: advance any paused resolution chain after the
             // branch resolves. This is the standard post-resolution step every
             // sibling choice handler runs. It no-ops when no `pending_continuation`
-            // / `pending_repeat_iteration` exists (each drain block is guarded by
+            // / a repeat-for frame exists (each drain block is guarded by
             // `if let Some(..) = ..take()`), so it is safe for existing `ChooseOneOf`
             // consumers and for the deferred-entry replay above (mutually exclusive
             // slots). Required so a `repeat_for: DistinctCounterKindsAmong` loop
@@ -4113,8 +4150,11 @@ pub(super) fn handle_resolution_choice(
             // evaluates true when at least one card was actually discarded.
             // Mirrors the recursive AutoMayChoice::Accept path in effects/mod.rs.
             if !chosen.is_empty() {
-                if let Some(cont) = state.pending_continuation.as_mut() {
-                    cont.chain.set_optional_effect_performed_recursive(true);
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame
+                        .pending
+                        .chain
+                        .set_optional_effect_performed_recursive(true);
                 }
             }
 
@@ -4130,8 +4170,11 @@ pub(super) fn handle_resolution_choice(
             if let Some(snapshot) =
                 effects::parent_referent_context_from_events(state, &events[events_before_effect..])
             {
-                if let Some(cont) = state.pending_continuation.as_mut() {
-                    cont.chain.set_effect_context_object_recursive(snapshot);
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame
+                        .pending
+                        .chain
+                        .set_effect_context_object_recursive(snapshot);
                 }
             }
 
@@ -4245,7 +4288,7 @@ pub(super) fn handle_resolution_choice(
                 && !up_to
                 && min_count == 1
                 && count == 1
-                && state.pending_continuation.as_ref().is_some_and(|cont| {
+                && state.active_ability_continuation().is_some_and(|cont| {
                     cont.chain.targeting_is_optional()
                         && matches!(&cont.chain.effect, Effect::Attach { .. })
                 });
@@ -4314,10 +4357,14 @@ pub(super) fn handle_resolution_choice(
             // never over-clears a live mass snapshot. No-op when no Devour is in
             // flight (`snapshot == None`).
             if matches!(effect_kind, EffectKind::Sacrifice)
-                && state.devour_eligible_snapshot.is_some()
-                && state.pending_change_zone_iteration.is_none()
+                && state.active_devour_eligible_snapshot().is_some()
+                && state
+                    .active_change_zone_frame()
+                    .is_some_and(|frame| frame.pending.is_none())
             {
-                let _ = state.devour_eligible_snapshot.take();
+                let _ = state
+                    .take_active_change_zone_frame()
+                    .expect("completed single Devour entry owns the active ChangeZone frame");
             }
 
             if matches!(effect_kind, EffectKind::Sacrifice)
@@ -4345,6 +4392,14 @@ pub(super) fn handle_resolution_choice(
                         events_before_sacrifice,
                         events_after_sacrifice,
                     } => {
+                        // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
+                        // complete body of a paused post-replacement dispatch
+                        // (Devour). Retire that exact resident before its outer
+                        // ChangeZone iteration resumes; a chained ability
+                        // continuation remains its owner.
+                        if state.active_ability_continuation().is_none() {
+                            state.finish_active_paused_post_replacement_dispatch();
+                        }
                         set_priority(state, player);
                         resume_with_error_propagation(state, events)?;
                         if let Some(outcome) = batch_or_drain_observer_triggers(
@@ -4371,12 +4426,16 @@ pub(super) fn handle_resolution_choice(
                 // you don't, put a land onto the battlefield"): re-stash it with
                 // the performed flag reset and drain it via resume, rather than
                 // discarding the continuation (issue #5945).
-                // `stash_declined_cast_fallback` takes the sub only when it is a
-                // genuine decline branch, so a subless Electrodominance-style
-                // decline (helper returns false) still falls through to the
+                // The typed accessor consumes only the active continuation frame;
+                // `stash_declined_cast_fallback` parks its fallback through the
+                // same typed continuation authority. A subless Electrodominance-
+                // style decline (helper returns false) falls through to the
                 // consume-and-no-op path below.
-                if let Some(cont) = state.pending_continuation.take() {
-                    let ability = *cont.chain;
+                if let Some(frame) = state
+                    .take_active_ability_continuation()
+                    .expect("declined cast cannot consume a buried continuation")
+                {
+                    let ability = *frame.pending.chain;
                     if effects::cast_from_zone::stash_declined_cast_fallback(state, &ability) {
                         state.last_effect_count = Some(0);
                         events.push(GameEvent::EffectResolved {
@@ -4387,9 +4446,8 @@ pub(super) fn handle_resolution_choice(
                         set_priority(state, player);
                         // CR 608.2c: drain the re-stashed land-drop fallback.
                         // `resume_with_error_propagation` only drains under
-                        // `WaitingFor::Priority` (set just above) and reads
-                        // `state.pending_continuation`, so ordering `set_priority`
-                        // before resume is required and correct.
+                        // `WaitingFor::Priority` (set just above), so ordering
+                        // `set_priority` before resume is required and correct.
                         resume_with_error_propagation(state, events)?;
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             state.waiting_for.clone(),
@@ -4398,6 +4456,26 @@ pub(super) fn handle_resolution_choice(
                     // No decline fallback: the taken continuation is discarded —
                     // the subless decline consumes it without granting a
                     // permission (below).
+                    if zone == Zone::Library {
+                        // CR 401.4: declining the one-shot self-library peek
+                        // cast bottoms every looked-at card in a random order.
+                        // `library_position: None` is guaranteed by the sole
+                        // `open_private_zone_cast_selection` producer.
+                        let looked_at = effects::cast_from_zone::looked_at_controller_library_cards(
+                            state,
+                            ability.controller,
+                        );
+                        if matches!(
+                            effects::cascade::shuffle_to_bottom(
+                                state, &looked_at, source_id, None, events,
+                            ),
+                            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+                        ) {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                    }
                 }
                 // CR 609.1 / CR 601.2a: Declining an optional Electrodominance-
                 // style hand cast consumes the stashed CastFromZone continuation
@@ -4417,7 +4495,9 @@ pub(super) fn handle_resolution_choice(
             }
 
             if chosen.is_empty() && matches!(effect_kind, EffectKind::Attach) {
-                state.pending_continuation.take();
+                let _ = state
+                    .clear_active_ability_continuation()
+                    .expect("empty attach choice cannot clear a buried continuation");
                 state.last_effect_count = Some(0);
                 set_priority(state, player);
                 resume_with_error_propagation(state, events)?;
@@ -4448,7 +4528,7 @@ pub(super) fn handle_resolution_choice(
                 EffectKind::Sacrifice => {
                     let completion = PendingPlayerScopeSacrificeCompletion {
                         effect_kind: Some(EffectKind::Sacrifice),
-                        publish_fresh_tracked_set: state.pending_continuation.is_some(),
+                        publish_fresh_tracked_set: state.active_ability_continuation().is_some(),
                         propagate_parent_context: true,
                         ..Default::default()
                     };
@@ -4474,6 +4554,13 @@ pub(super) fn handle_resolution_choice(
                             events_before_sacrifice,
                             events_after_sacrifice,
                         } => {
+                            // CR 614.12a + CR 614.13a: see the matching player-scope
+                            // sacrifice completion above. This EffectZoneChoice
+                            // path can complete a Devour drain without an
+                            // ability continuation.
+                            if state.active_ability_continuation().is_none() {
+                                state.finish_active_paused_post_replacement_dispatch();
+                            }
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(
@@ -4576,8 +4663,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -4613,7 +4700,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 return Ok(action_result_outcome(
                                     events,
                                     state.waiting_for.clone(),
@@ -4631,8 +4719,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -4675,7 +4763,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
                                         choice_player,
@@ -4819,14 +4908,17 @@ pub(super) fn handle_resolution_choice(
                 // CR 608.2d + CR 301.5b: Resolution-time Equipment pick for
                 // deferred optional attach (Nahiri, the Lithomancer +2).
                 EffectKind::Attach => {
-                    let Some(cont) = state.pending_continuation.take() else {
+                    let Some(frame) = state
+                        .take_active_ability_continuation()
+                        .expect("attach choice cannot consume a buried continuation")
+                    else {
                         return Err(EngineError::InvalidAction(
                             "Attach EffectZoneChoice missing stashed ability".to_string(),
                         ));
                     };
                     effects::attach::complete_resolution_attachment_choice(
                         &mut *state,
-                        *cont.chain,
+                        *frame.pending.chain,
                         &chosen,
                         events,
                     )
@@ -4840,12 +4932,15 @@ pub(super) fn handle_resolution_choice(
                 // CR 601.2c + CR 115.1: Resolution-time hand pick for
                 // `CastFromZone` (Electrodominance, Baral's Expertise).
                 EffectKind::CastFromZone => {
-                    let Some(cont) = state.pending_continuation.take() else {
+                    let Some(frame) = state
+                        .take_active_ability_continuation()
+                        .expect("cast choice cannot consume a buried continuation")
+                    else {
                         return Err(EngineError::InvalidAction(
                             "CastFromZone EffectZoneChoice missing stashed ability".to_string(),
                         ));
                     };
-                    let ability = *cont.chain;
+                    let ability = *frame.pending.chain;
                     if chosen.len() == 1 {
                         let used_during_resolution =
                             effects::cast_from_zone::complete_hand_pick_cast_from_zone(
@@ -4897,8 +4992,11 @@ pub(super) fn handle_resolution_choice(
                             object_id: blighted,
                             lki: obj.snapshot_for_mana_spent(),
                         };
-                        if let Some(cont) = state.pending_continuation.as_mut() {
-                            cont.chain.set_effect_context_object_recursive(snapshot);
+                        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                            frame
+                                .pending
+                                .chain
+                                .set_effect_context_object_recursive(snapshot);
                         }
                     }
                     if count_param > 0
@@ -4987,8 +5085,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
                                             boundary
@@ -5018,7 +5116,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
                                         player, state,
@@ -5035,8 +5134,8 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.pending_change_zone_iteration =
-                                    Some(crate::types::game_state::PendingChangeZoneIteration {
+                                state.push_change_zone_iteration(
+                                    crate::types::game_state::PendingChangeZoneIteration {
                                         logical_zone_change_group,
                                         paused_current: Some(
                                             state
@@ -5073,7 +5172,8 @@ pub(super) fn handle_resolution_choice(
                                         enters_modified_if: ctx.enters_modified_if.clone(),
                                         enter_attached_to: None,
                                         effect_kind,
-                                    });
+                                    },
+                                );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
                                         choice_player,
@@ -5128,8 +5228,11 @@ pub(super) fn handle_resolution_choice(
             if let Some(snapshot) =
                 effects::parent_referent_context_from_events(state, &events[events_before_effect..])
             {
-                if let Some(cont) = state.pending_continuation.as_mut() {
-                    cont.chain.set_effect_context_object_recursive(snapshot);
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame
+                        .pending
+                        .chain
+                        .set_effect_context_object_recursive(snapshot);
                 }
             }
             if matches!(
@@ -5141,7 +5244,7 @@ pub(super) fn handle_resolution_choice(
                     | EffectKind::Untap
                     | EffectKind::PutAtLibraryPosition
                     | EffectKind::CastFromZone
-            ) && state.pending_continuation.is_some()
+            ) && state.active_ability_continuation().is_some()
             {
                 let tracked = if matches!(effect_kind, EffectKind::Sacrifice) {
                     events[events_before_effect..]
@@ -5153,7 +5256,7 @@ pub(super) fn handle_resolution_choice(
                         .collect()
                 } else if matches!(effect_kind, EffectKind::PutAtLibraryPosition)
                     && matches!(library_position, Some(LibraryPosition::Bottom))
-                    && state.pending_continuation.is_some()
+                    && state.active_ability_continuation().is_some()
                 {
                     // CR 608.2c: Expressive Iteration's bottom pick narrows the
                     // tracked set to the remaining looked-at library cards so the
@@ -5325,8 +5428,10 @@ pub(super) fn handle_resolution_choice(
                 persist_player,
             );
             if let Some(context) = updated_context {
-                if let Some(cont) = state.pending_continuation.as_mut() {
-                    cont.chain
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame
+                        .pending
+                        .chain
                         .update_trigger_source_context_in_resolution_segment(context);
                 }
             }
@@ -5351,10 +5456,10 @@ pub(super) fn handle_resolution_choice(
                 ChoiceType::Player | ChoiceType::Opponent { .. }
             ) {
                 if let Ok(pid) = choice.parse::<u8>() {
-                    if let Some(cont) = state.pending_continuation.as_mut() {
-                        let mut chosen = cont.chain.chosen_players.clone();
+                    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                        let mut chosen = frame.pending.chain.chosen_players.clone();
                         chosen.push(crate::types::player::PlayerId(pid));
-                        cont.chain.set_chosen_players_recursive(&chosen);
+                        frame.pending.chain.set_chosen_players_recursive(&chosen);
                     }
                 }
             }
@@ -5508,9 +5613,15 @@ pub(super) fn handle_resolution_choice(
             // Also expose the guesser as a front player target so a "they lose
             // life ..." `ParentTarget` anaphor in a branch resolves to them
             // (CR 608.2d — the guesser is the player the branch acts on).
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.set_guess_outcome_recursive(Some(outcome));
-                cont.chain.push_front_player_target_recursive(guesser);
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame
+                    .pending
+                    .chain
+                    .set_guess_outcome_recursive(Some(outcome));
+                frame
+                    .pending
+                    .chain
+                    .push_front_player_target_recursive(guesser);
             }
 
             // (e) Priority to the source CONTROLLER (the player resolving this
@@ -6604,7 +6715,7 @@ fn finish_effect_zone_put_at_library_position(
         &library_position,
         events,
     );
-    if state.pending_continuation.is_some() {
+    if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state
                 .chain_tracked_set_id
@@ -6898,12 +7009,13 @@ pub(crate) fn run_batch_completion(
                 }
             }
             effects::publish_fresh_tracked_set(state, publish_tracked_set);
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.targets = continuation_targets
+            if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                frame.pending.chain.targets = continuation_targets
                     .iter()
                     .map(|&id| TargetRef::Object(id))
                     .collect();
-                cont.chain.context.optional_effect_performed = !continuation_targets.is_empty();
+                frame.pending.chain.context.optional_effect_performed =
+                    !continuation_targets.is_empty();
             }
             finish_with_continuation(state, player, events);
             crate::game::zone_pipeline::BatchMoveResult::Done
@@ -7021,9 +7133,10 @@ pub(crate) fn run_batch_completion(
             }
             if let Some(kept) = publish_tracked_set {
                 effects::publish_fresh_tracked_set(state, kept.clone());
-                if let Some(cont) = state.pending_continuation.as_mut() {
-                    cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
-                    cont.chain.context.optional_effect_performed = !kept.is_empty();
+                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                    frame.pending.chain.targets =
+                        kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                    frame.pending.chain.context.optional_effect_performed = !kept.is_empty();
                 }
             }
             if let Some(source_id) = emit_reveal_until_resolved {
@@ -7134,8 +7247,9 @@ pub(crate) fn run_batch_completion(
         // CR 701.51 + CR 616.1: the paused Attraction's entry resolved — finish
         // its open bookkeeping, then run the remaining opens of the same
         // instruction (which may themselves pause and re-defer through this
-        // same completion; `drain_pending_batch_deliveries` took the old record
-        // before calling here, so a fresh park is preserved).
+        // same completion; `drain_pending_batch_deliveries` settles and pops
+        // the old BatchDelivery frame before calling here, so a fresh park is
+        // preserved).
         BatchCompletion::AttractionOpenRemainder {
             player,
             object_id,
@@ -7578,7 +7692,7 @@ mod tests {
             source,
             player,
         );
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(delivery), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(delivery), &state));
         (state, found)
     }
 
@@ -8422,7 +8536,7 @@ mod tests {
             source,
             PlayerId(0),
         );
-        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+        state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
             Box::new(printed_destination),
             &state,
         ));
@@ -8455,7 +8569,7 @@ mod tests {
         .expect("accepting the redirect resumes the printed search continuation");
 
         assert_eq!(state.objects[&found].zone, Zone::Exile);
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(state.pending_search_found_batch.is_none());
     }
 
@@ -9135,7 +9249,7 @@ mod tests {
             WaitingFor::ArrangePlanarDeckTopChoice { .. }
         ));
         assert!(matches!(
-            state.pending_continuation.as_ref().unwrap().chain.effect,
+            state.active_ability_continuation().unwrap().chain.effect,
             Effect::Planeswalk
         ));
 

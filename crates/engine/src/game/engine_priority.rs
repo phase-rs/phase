@@ -70,7 +70,10 @@ pub(crate) fn run_post_action_pipeline_from(
         // not rediscover those records through the generic post-action scan;
         // its batched definitions remain reserved for final settlement.
         let mut retained_logical_zone_events = Vec::new();
-        if let Some(pending) = state.pending_change_zone_iteration.as_ref() {
+        if let Some(pending) = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+        {
             retained_logical_zone_events.extend(
                 pending
                     .logical_zone_change_group
@@ -82,7 +85,7 @@ pub(crate) fn run_post_action_pipeline_from(
                 retained_logical_zone_events.extend(&paused_current.delivery_events);
             }
         }
-        if let Some(pending) = state.pending_batch_deliveries.as_ref() {
+        if let Some(pending) = state.active_batch_delivery() {
             retained_logical_zone_events.extend(
                 pending
                     .logical_zone_change_group

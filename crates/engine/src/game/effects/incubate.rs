@@ -332,7 +332,7 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
             "ZoneChanged must not fire before the paused counter replacement resolves"
         );
-        assert!(state.pending_counter_additions.is_some());
+        assert!(state.active_counter_additions().is_some());
 
         // Resolve the player's replacement-ordering choice for the paused AddCounter.
         let result = continue_replacement(&mut state, 0, &mut events);

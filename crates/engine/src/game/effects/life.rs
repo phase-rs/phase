@@ -362,7 +362,7 @@ pub fn apply_life_totals_assignment(
             // CR 616.1: a competing replacement required a player choice; the
             // helper installed the WaitingFor and the resume path completes the
             // remaining assignments.
-            state.pending_life_total_assignment = Some(PendingLifeTotalAssignment {
+            state.push_life_total_assignment(PendingLifeTotalAssignment {
                 completion_player,
                 remaining: deltas[index + 1..].to_vec(),
                 completion: completion.clone(),
@@ -377,7 +377,7 @@ pub(crate) fn drain_pending_life_total_assignment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
-    while let Some(mut pending) = state.pending_life_total_assignment.take() {
+    while let Some(mut pending) = state.take_active_life_total_assignment() {
         state.waiting_for = WaitingFor::Priority {
             player: pending.completion_player,
         };
@@ -391,7 +391,7 @@ pub(crate) fn drain_pending_life_total_assignment(
         };
 
         pending.remaining.remove(0);
-        state.pending_life_total_assignment = Some(pending);
+        state.push_life_total_assignment(pending);
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
@@ -1109,6 +1109,15 @@ mod tests {
         let WaitingFor::ReplacementChoice { player, .. } = state.waiting_for.clone() else {
             panic!("expected replacement choice");
         };
+        let serialized = serde_json::to_string(
+            &crate::types::resolution::ResolutionStateWire::from_game_state(state),
+        )
+        .expect("life-total assignment prompt serializes as v2 frames");
+        let mut state =
+            serde_json::from_str::<crate::types::resolution::ResolutionStateWire>(&serialized)
+                .expect("life-total assignment prompt restores from v2 frames")
+                .into_game_state();
+        state.rehydrate_rng();
         state.active_player = player;
         state.priority_player = player;
 
@@ -1117,7 +1126,7 @@ mod tests {
 
         assert_eq!(state.players[0].life, 5);
         assert_eq!(state.players[1].life, 20);
-        assert!(state.pending_life_total_assignment.is_none());
+        assert!(state.active_life_total_assignment().is_none());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(result.events.iter().any(|event| matches!(
             event,

@@ -305,6 +305,7 @@ export function GamePage() {
               : rawMode === "ai"
                 ? "ai"
                 : "local";
+  const isOnlineMode = mode === "online" || mode === "spectate";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -490,6 +491,11 @@ export function GamePage() {
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
+        // Native engine sockets emit an error before close; the provider disposes
+        // that terminal adapter, so no reconnectFailed event follows.
+        if (!isOnlineMode) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "deckRejected":
         navigate("/multiplayer", {
@@ -501,7 +507,7 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode, t]);
+  }, [gameId, navigate, joinCode, isOnlineMode, t]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -695,7 +701,7 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
+      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
       }
@@ -711,7 +717,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
-        isOnlineMode={mode === "online" || mode === "spectate"}
+        isOnlineMode={isOnlineMode}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}

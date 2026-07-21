@@ -9980,10 +9980,10 @@ fn auto_tap_mana_sources_inner(
     // `resolve_triggered_mana_ability_inline` can thread the correct color into the
     // aura's triggered mana ability when `resolve_tap_mana_triggers_inline` fires.
     for option in to_tap {
-        for (aura_id, override_val) in &option.taps_for_mana_overrides {
+        for (trigger_ref, override_val) in &option.taps_for_mana_overrides {
             state
                 .pending_taps_for_mana_overrides
-                .insert(*aura_id, override_val.clone());
+                .insert(trigger_ref.clone(), override_val.clone());
         }
         if let Some(idx) = option.ability_index {
             let ability_def = state

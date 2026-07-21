@@ -372,7 +372,7 @@ mod tests {
             }
             other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
         }
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
         assert!(events.is_empty());
     }
 

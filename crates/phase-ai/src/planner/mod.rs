@@ -178,8 +178,18 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
     // Delayed triggers (pending future effects)
     state.delayed_triggers.len().hash(&mut hasher);
 
-    // Pending state (continuations, replacements, triggers affect game flow)
-    state.pending_continuation.is_some().hash(&mut hasher);
+    // Pending state (resolution frames, replacements, triggers affect game
+    // flow). The typed stack may retain an ability continuation below its
+    // active prompt, so nonempty stacks hash their full ordered wire shape
+    // rather than inspecting a non-top frame. The overwhelmingly common empty
+    // stack stays allocation-free on this hot cache-key path.
+    let has_resolution_frames = !state.resolution_stack.is_empty();
+    has_resolution_frames.hash(&mut hasher);
+    if has_resolution_frames {
+        let resolution_stack = serde_json::to_value(&state.resolution_stack)
+            .expect("resolution stack serializes for the planner cache key");
+        hash_json_value(&resolution_stack, &mut hasher);
+    }
     state.pending_replacement.is_some().hash(&mut hasher);
     state.pending_trigger.is_some().hash(&mut hasher);
 
@@ -1387,7 +1397,9 @@ mod tests {
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
-    use engine::types::game_state::{CommanderDamageEntry, StackEntry, StackEntryKind, WaitingFor};
+    use engine::types::game_state::{
+        CommanderDamageEntry, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
+    };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::WardCost;
     use engine::types::mana::ManaColor;
@@ -1808,6 +1820,26 @@ mod tests {
 
         assert_eq!(quick_state_hash(&absent), quick_state_hash(&stale));
         assert_ne!(quick_state_hash(&absent), quick_state_hash(&positive));
+    }
+
+    #[test]
+    fn quick_state_hash_distinguishes_typed_resolution_stack() {
+        let state = make_state();
+        let mut suspended = state.clone();
+        let continuation = PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(0),
+                PlayerId(0),
+            )),
+            &suspended,
+        );
+        suspended.park_ability_continuation(continuation);
+
+        // Revert-failing: omitting the ordered typed frame stack aliases an
+        // active resolution with an otherwise identical priority state.
+        assert_ne!(quick_state_hash(&state), quick_state_hash(&suspended));
     }
 
     #[test]

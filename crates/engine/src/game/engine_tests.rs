@@ -15,7 +15,7 @@ use crate::types::card_type::CardType;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::format::FormatConfig;
-use crate::types::game_state::{CastPaymentMode, CastingVariant};
+use crate::types::game_state::{CastPaymentMode, CastingVariant, ProductionOverride};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use crate::types::statics::{CastFrequency, StaticMode};
@@ -4554,24 +4554,25 @@ fn attach_fertile_ground(state: &mut GameState, land_id: ObjectId, owner: Player
     obj.card_types.subtypes.push("Aura".to_string());
     obj.attached_to = Some(land_id.into());
     obj.entered_battlefield_turn = Some(1);
-    obj.trigger_definitions.push(
-        TriggerDefinition::new(TriggerMode::TapsForMana)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Database,
-                Effect::Mana {
-                    produced: ManaProduction::AnyOneColor {
-                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-                        color_options: crate::types::mana::ManaColor::ALL.to_vec(),
-                        contribution: ManaContribution::Additional,
-                    },
-                    restrictions: vec![],
-                    grants: vec![],
-                    expiry: None,
-                    target: None,
-                },
-            ))
-            .valid_card(TargetFilter::AttachedTo),
-    );
+    obj.install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+        TriggerMode::TapsForMana,
+    )
+    .execute(AbilityDefinition::new(
+        AbilityKind::Database,
+        Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                color_options: crate::types::mana::ManaColor::ALL.to_vec(),
+                contribution: ManaContribution::Additional,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    ))
+    .valid_card(TargetFilter::AttachedTo)]))
+        .expect("Fertile Ground's base trigger must materialize");
     aura
 }
 
@@ -4640,6 +4641,317 @@ fn fertile_ground_auto_tap_threads_non_first_color_to_resolver() {
         blue, 1,
         "Fertile Ground's TapsForMana trigger must produce {{U}} — not the \
              first listed color ({{W}}) — when the planner chose Blue"
+    );
+}
+
+/// CR 605.4a: Inline triggered mana abilities resolve without a stack entry,
+/// and each live trigger occurrence retains its independently planned color.
+#[test]
+fn inline_taps_for_mana_overrides_bind_each_live_trigger_occurrence() {
+    let mut state = setup_game_at_main_phase();
+    let forest = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Forest".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&forest).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.card_types.subtypes.push("Forest".to_string());
+        object.entered_battlefield_turn = Some(1);
+    }
+    let other_forest = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Other Forest".to_string(),
+        Zone::Battlefield,
+    );
+
+    let any_color_trigger = TriggerDefinition::new(TriggerMode::TapsForMana)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Additional,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        ))
+        .valid_card(TargetFilter::AttachedTo);
+    let duplicate_source = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "Duplicate Fertile Ground".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&duplicate_source).unwrap();
+        object.attached_to = Some(forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![
+                any_color_trigger.clone(),
+                any_color_trigger,
+            ]))
+            .expect("two printed trigger slots must materialize");
+    }
+    let duplicate_triggers = crate::game::functioning_abilities::active_trigger_definitions(
+        &state,
+        &state.objects[&duplicate_source],
+    )
+    .collect::<Vec<_>>();
+    assert_eq!(
+        duplicate_triggers.len(),
+        2,
+        "both live occurrences must be active"
+    );
+    assert_eq!(
+        duplicate_triggers[0].definition, duplicate_triggers[1].definition,
+        "the hostile pair must have byte-identical payloads"
+    );
+    assert_ne!(
+        duplicate_triggers[0].definition_ref, duplicate_triggers[1].definition_ref,
+        "two printed slots must keep distinct live identities"
+    );
+
+    let fixed_mana_trigger = |color, valid_card: Option<TargetFilter>, valid_target| {
+        let mut trigger =
+            TriggerDefinition::new(TriggerMode::TapsForMana).execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                        contribution: ManaContribution::Additional,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            ));
+        if let Some(filter) = valid_card {
+            trigger = trigger.valid_card(filter);
+        }
+        if let Some(filter) = valid_target {
+            trigger = trigger.valid_target(filter);
+        }
+        trigger
+    };
+
+    let second_source = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(0),
+        "Wild Growth".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&second_source).unwrap();
+        object.attached_to = Some(forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+                ManaColor::Green,
+                Some(TargetFilter::AttachedTo),
+                None,
+            )]))
+            .expect("second source trigger slot must materialize");
+    }
+
+    let source_mismatch = create_object(
+        &mut state,
+        CardId(5),
+        PlayerId(0),
+        "Source Mismatch".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source_mismatch)
+        .unwrap()
+        .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+            ManaColor::White,
+            None,
+            None,
+        )]))
+        .expect("source mismatch trigger slot must materialize");
+
+    let controller_mismatch = create_object(
+        &mut state,
+        CardId(6),
+        PlayerId(1),
+        "Controller Mismatch".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&controller_mismatch).unwrap();
+        object.attached_to = Some(forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+                ManaColor::White,
+                Some(TargetFilter::AttachedTo),
+                Some(TargetFilter::Controller),
+            )]))
+            .expect("controller mismatch trigger slot must materialize");
+    }
+
+    let attachment_mismatch = create_object(
+        &mut state,
+        CardId(7),
+        PlayerId(0),
+        "Attachment Mismatch".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let object = state.objects.get_mut(&attachment_mismatch).unwrap();
+        object.attached_to = Some(other_forest.into());
+        object
+            .install_trigger_base_definitions(Arc::new(vec![fixed_mana_trigger(
+                ManaColor::White,
+                Some(TargetFilter::AttachedTo),
+                None,
+            )]))
+            .expect("attachment mismatch trigger slot must materialize");
+    }
+    for sibling in [source_mismatch, controller_mismatch, attachment_mismatch] {
+        assert_eq!(
+            crate::game::functioning_abilities::active_trigger_definitions(
+                &state,
+                &state.objects[&sibling],
+            )
+            .count(),
+            1,
+            "the {sibling:?} mismatch sibling must reach the live trigger scan"
+        );
+    }
+
+    let cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Green,
+            ManaCostShard::Green,
+            ManaCostShard::Blue,
+            ManaCostShard::Black,
+        ],
+        generic: 0,
+    };
+    let mut events = Vec::new();
+    let events_before = events.len();
+    casting_costs::auto_tap_mana_sources(&mut state, PlayerId(0), &cost, &mut events, None);
+
+    assert_eq!(
+        state.pending_taps_for_mana_overrides.len(),
+        3,
+        "the plan must retain one override per qualifying live occurrence"
+    );
+    let planned_colors = state
+        .pending_taps_for_mana_overrides
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Green)));
+    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Blue)));
+    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Black)));
+    assert!(
+        state
+            .pending_taps_for_mana_overrides
+            .keys()
+            .filter(|definition_ref| definition_ref.source.object_id == duplicate_source)
+            .count()
+            == 2,
+        "the two byte-identical duplicate-source occurrences must retain separate overrides"
+    );
+
+    let stack_before = state.stack.len();
+    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
+
+    assert_eq!(state.players[0].mana_pool.total(), 4);
+    assert_eq!(
+        state.players[0].mana_pool.count_color(ManaType::Green),
+        2,
+        "the land and second source each contribute exactly one green mana"
+    );
+    assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
+    assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 1);
+    assert_eq!(
+        state.players[0].mana_pool.count_color(ManaType::White),
+        0,
+        "source, controller, and attachment mismatch siblings must remain excluded"
+    );
+    assert_eq!(
+        state.stack.len(),
+        stack_before,
+        "triggered mana abilities must not create a stack entry"
+    );
+    assert!(
+        state.pending_taps_for_mana_overrides.is_empty(),
+        "the synchronous inline-resolution tail must clear transient overrides"
+    );
+}
+
+#[test]
+fn inline_taps_for_mana_overrides_clear_when_no_trigger_matches() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(8),
+        PlayerId(0),
+        "Unmatched Trigger Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+            TriggerMode::TapsForMana,
+        )]))
+        .expect("unmatched trigger slot must materialize");
+    let definition_ref = crate::game::functioning_abilities::active_trigger_definitions(
+        &state,
+        &state.objects[&source],
+    )
+    .next()
+    .expect("the test trigger is active")
+    .definition_ref;
+    state.pending_taps_for_mana_overrides.insert(
+        definition_ref,
+        ProductionOverride::SingleColor(ManaType::Blue),
+    );
+    let serialized_with_override =
+        serde_json::to_value(&state).expect("game state with a transient override serializes");
+    let mut without_override = state.clone();
+    without_override.pending_taps_for_mana_overrides.clear();
+    assert_eq!(
+        serialized_with_override,
+        serde_json::to_value(&without_override)
+            .expect("game state without a transient override serializes"),
+        "the serde-skipped transient override map must not change the serialized game state"
+    );
+    let restored: GameState = serde_json::from_value(serialized_with_override)
+        .expect("serialized game state with transient overrides restores");
+    assert!(
+        restored.pending_taps_for_mana_overrides.is_empty(),
+        "a restored game state must not retain transient overrides"
+    );
+
+    let mut events = vec![GameEvent::TappedForMana {
+        player_id: PlayerId(0),
+        source_id: ObjectId(99_999),
+        produced: vec![ManaType::Green],
+        tap_state: ManaTapState::FromTap,
+    }];
+    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, 0);
+
+    assert!(
+        state.pending_taps_for_mana_overrides.is_empty(),
+        "the transient override map must clear even when the event has zero matches"
     );
 }
 
@@ -8738,7 +9050,7 @@ fn learn_rummage_stashes_draw_continuation() {
     );
 
     // Pre-set pending_continuation to verify it's consumed normally
-    state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -8765,7 +9077,7 @@ fn learn_rummage_stashes_draw_continuation() {
     assert_eq!(state.players[0].hand.len(), 1);
     assert!(state.players[0].graveyard.contains(&hand_card));
     // The stashed continuation (GainLife) should have been consumed
-    assert!(state.pending_continuation.is_none());
+    assert!(state.active_ability_continuation().is_none());
     // Life should have increased by 1 (from the continuation)
     assert_eq!(state.players[0].life, 21);
     assert!(result.events.iter().any(|e| matches!(

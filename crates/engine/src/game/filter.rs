@@ -8704,14 +8704,13 @@ mod tests {
                 .expect("pass priority to optional mana");
         }
 
-        let pending = runner
+        let optional_frame = runner
             .state()
-            .pending_optional_effect
-            .as_ref()
-            .expect("optional mana must stash pending ability");
-        let pending_event = runner
-            .state()
-            .pending_optional_trigger_event
+            .active_optional_effect_frame()
+            .expect("optional mana must stash its frame");
+        let pending = &optional_frame.ability;
+        let pending_event = optional_frame
+            .trigger_event
             .clone()
             .expect("optional mana must stash trigger event");
 

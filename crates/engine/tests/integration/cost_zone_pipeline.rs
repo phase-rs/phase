@@ -125,8 +125,7 @@ fn dig_rest_pile_library_redirect_pauses_before_tracked_set_publish() {
     ));
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the second rest card is parked behind the first replacement choice")
         .remaining
         .clone();
@@ -259,8 +258,7 @@ fn dig_mass_put_all_nonbattlefield_redirect_publishes_only_delivered_set() {
     ));
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the second selected card is batch-owned behind the first redirect")
         .remaining
         .clone();
@@ -407,7 +405,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
         dig_completed.waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert!(dig_runner.state().pending_batch_deliveries.is_none());
+    assert!(dig_runner.state().active_batch_delivery().is_none());
     assert_eq!(dig_runner.state().objects[&rest_a].zone, Zone::Library);
     assert_eq!(dig_runner.state().objects[&rest_b].zone, Zone::Library);
     let dig_tracked = dig_runner
@@ -460,7 +458,7 @@ fn uninterrupted_dig_rest_and_mass_put_all_complete_synchronously() {
         mass_runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert!(mass_runner.state().pending_batch_deliveries.is_none());
+    assert!(mass_runner.state().active_batch_delivery().is_none());
     assert_eq!(mass_runner.state().objects[&selected_a].zone, Zone::Hand);
     assert_eq!(mass_runner.state().objects[&selected_b].zone, Zone::Hand);
     let mass_tracked = mass_runner
@@ -551,8 +549,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     assert!(matches!(
         runner
             .state()
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|pending| pending.completion.as_ref()),
         Some(BatchCompletion::RevealRestPile { .. })
     ));
@@ -566,8 +563,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     ));
     let first_rest_park = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the second rest placement is parked behind the first redirect");
     assert_eq!(first_rest_park.remaining.len(), 1);
     assert!(matches!(
@@ -586,8 +582,7 @@ fn dig_deferred_reveal_rest_pile_repauses_and_completes_once() {
     assert!(matches!(
         runner
             .state()
-            .pending_batch_deliveries
-            .as_ref()
+            .active_batch_delivery()
             .and_then(|pending| pending.completion.as_ref()),
         Some(BatchCompletion::RevealRestPile { .. })
     ));
@@ -2726,11 +2721,16 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     ));
     assert!(
         state
-            .pending_spell_resolution
-            .as_ref()
+            .active_spell_resolution()
             .is_some_and(|ctx| ctx.object_id == mimeoplasm),
         "the outer permanent-spell resolution must survive the inner cost prompt"
     );
+
+    let serialized = serde_json::to_string(runner.state())
+        .expect("the nested SpellResolution replacement prompt serializes as v2");
+    let restored: GameState = serde_json::from_str(&serialized)
+        .expect("the nested SpellResolution replacement prompt restores from v2");
+    let mut runner = GameRunner::from_state(restored);
 
     for prompt in 0..2 {
         assert!(
@@ -2755,8 +2755,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
             assert!(
                 runner
                     .state()
-                    .pending_spell_resolution
-                    .as_ref()
+                    .active_spell_resolution()
                     .is_some_and(|ctx| ctx.object_id == mimeoplasm),
                 "an inner cost redirect must not consume the outer spell-resolution context"
             );
@@ -2787,7 +2786,7 @@ fn mimeoplasm_forced_exile_cost_resumes_after_redirects_and_tracks_delivered_exi
     );
     assert_eq!(state.objects[&mimeoplasm].zone, Zone::Battlefield);
     assert!(
-        state.pending_spell_resolution.is_none(),
+        state.active_spell_resolution().is_none(),
         "the outer context is consumed only when Mimeoplasm's own entry completes"
     );
 }
@@ -3696,7 +3695,7 @@ fn effect_pay_cost_rider_waits_for_scry_post_effect_before_typed_root_settles() 
             if matches!(pending.resume, ManaAbilityResume::EffectPayCost { .. })
     ));
     assert!(
-        runner.state().pending_continuation.is_none(),
+        runner.state().active_ability_continuation().is_none(),
         "only replacement post-effect work may drain before the typed Effect::PayCost root"
     );
     assert_eq!(runner.state().players[P0.0 as usize].life, life_before);
@@ -7129,8 +7128,7 @@ fn cascade_bottom_batch_pauses_for_library_redirect_before_completion() {
     );
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the remaining randomized cascade suffix must be batch-owned")
         .remaining
         .clone();
@@ -7622,13 +7620,12 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
         "the first top placement must surface its competing Moved redirects"
     );
     assert!(
-        redirected.state().pending_batch_deliveries.is_some(),
+        redirected.state().active_batch_delivery().is_some(),
         "the remaining placement must be carried by the batch across the pause"
     );
     let parked_order = redirected
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the remaining top placement is batch-owned")
         .remaining
         .clone();
@@ -7811,8 +7808,7 @@ fn discover_bottom_batch_pauses_before_its_hit_and_continuation_complete() {
     assert_eq!(runner.state().players[P0.0 as usize].life, 20);
     let parked_order = runner
         .state()
-        .pending_batch_deliveries
-        .as_ref()
+        .active_batch_delivery()
         .expect("the remaining randomized discover misses are batch-owned")
         .remaining
         .clone();

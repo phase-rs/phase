@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PROTOCOL_VERSION, WebSocketAdapter } from "../ws-adapter";
+import {
+  NativeEngineVersionMismatchError,
+  PROTOCOL_VERSION,
+  WebSocketAdapter,
+} from "../ws-adapter";
 import type { GameState } from "../types";
+import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
 // `MockWebSocket.last` so tests can grab it synchronously — the adapter
@@ -120,6 +125,114 @@ describe("WebSocketAdapter", () => {
       }),
     );
     await initPromise;
+  });
+
+  describe("native AI transport", () => {
+    const nativeAiOptions = (socketFactory: () => PhaseSocketTransport) => ({
+      nativeAi: {
+        socketFactory,
+        aiSeats: [{
+          seatIndex: 1,
+          difficulty: "Hard",
+          deck: { main_deck: ["Lightning Bolt"], sideboard: [] },
+        }],
+        playerCount: 2,
+      },
+    });
+
+    it("uses the bridge factory with the full camelCase AI seat wire shape", async () => {
+      MockWebSocket.last = null;
+      const socketFactory = vi.fn(
+        () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+      );
+      const nativeAdapter = new WebSocketAdapter(
+        "not-a-websocket-url",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(socketFactory),
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      expect(socketFactory).toHaveBeenCalledWith("not-a-websocket-url");
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        JSON.stringify({
+          type: "CreateGameWithSettings",
+          data: {
+            deck: { main_deck: [], sideboard: [] },
+            display_name: "Player",
+            public: false,
+            password: null,
+            timer_seconds: null,
+            player_count: 2,
+            match_config: { match_type: "Bo1" },
+            ai_seats: [{
+              seatIndex: 1,
+              difficulty: "Hard",
+              deckName: null,
+              deck: {
+                type: "DeckList",
+                data: { main_deck: ["Lightning Bolt"], sideboard: [] },
+              },
+            }],
+            format_config: null,
+            room_name: null,
+            start_when_full: true,
+            ranked: false,
+          },
+        }),
+      );
+      const calls = nativeSocket.send.mock.calls;
+      const sentFrame = calls[calls.length - 1]?.[0];
+      expect(sentFrame).toContain('"seatIndex"');
+      expect(sentFrame).toContain('"deckName"');
+      expect(sentFrame).not.toContain('"seat_index"');
+      expect(sentFrame).not.toContain('"deck_name"');
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+    });
+
+    it("rejects a release version mismatch before creating a game", async () => {
+      MockWebSocket.last = null;
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        {
+          nativeAi: {
+            ...nativeAiOptions(
+              () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            ).nativeAi,
+            expectedServerVersion: "1.2.3",
+          },
+        },
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      await Promise.resolve();
+      const nativeSocket = MockWebSocket.last!;
+      nativeSocket.dispatchSynthetic("message", SERVER_HELLO);
+
+      await expect(initPromise).rejects.toBeInstanceOf(NativeEngineVersionMismatchError);
+      expect(nativeSocket.close).toHaveBeenCalledOnce();
+      expect(nativeSocket.send).not.toHaveBeenCalledWith(
+        expect.stringContaining("CreateGameWithSettings"),
+      );
+    });
   });
 
   describe("Bug C: stateChanged emission", () => {

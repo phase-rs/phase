@@ -82,6 +82,11 @@ jobs:
           fi
           ./scripts/check-engine-authorities.sh "$BASE"
 
+      - name: Resolution-frame boundary guard
+        # Full-tree guard: legacy resolution keys are reader/fixture-only, and
+        # ResolutionStack mutation remains top-only or adjacent-pair scoped.
+        run: ./scripts/check-resolution-frame-boundaries.sh
+
       - name: Test card-data load gate
         # Diff-based gate: new test code must not reparse the full ~90 MB
         # client/public/card-data.json (tens of seconds/test under nextest, and

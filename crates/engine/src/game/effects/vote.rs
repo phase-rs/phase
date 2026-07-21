@@ -243,7 +243,7 @@ pub fn resolve(
     // `resolve_tally`, then drains this continuation to run any post-Vote
     // chained effects. Mirrors clash::stash_sub.
     if let Some(sub) = ability.sub_ability.as_ref() {
-        state.pending_continuation = Some(PendingContinuation::new(sub.clone(), state));
+        state.park_ability_continuation(PendingContinuation::new(sub.clone(), state));
     }
 
     Ok(())
@@ -486,6 +486,7 @@ pub fn resolve_tally(
             // If a ballot parks an interactive choice (e.g. ChooseFromZoneChoice),
             // stash remaining voters and return early; the drain function resumes.
             let initial_waiting_for = state.waiting_for.clone();
+            let stack_depth_before_ballot = state.resolution_stack.len();
             let mut remaining_voters: Vec<PlayerId> = choice_ballots.clone();
 
             while let Some(voter) = remaining_voters.first().copied() {
@@ -496,12 +497,16 @@ pub fn resolve_tally(
 
                 // If the inner effect parked an interactive choice, suspend.
                 if state.waiting_for != initial_waiting_for {
-                    state.pending_vote_ballot_iteration = Some(PendingVoteBallotIteration {
-                        ability_template: Box::new(per_choice_effect[idx].as_ref().clone()),
-                        remaining_voters,
-                        source_id,
-                        controller,
-                    });
+                    park_vote_ballot_after_current_ballot(
+                        state,
+                        PendingVoteBallotIteration {
+                            ability_template: Box::new(per_choice_effect[idx].as_ref().clone()),
+                            remaining_voters,
+                            source_id,
+                            controller,
+                        },
+                        stack_depth_before_ballot,
+                    );
                     return Ok(());
                 }
             }
@@ -808,11 +813,11 @@ fn build_per_ballot_ability(
 /// CR 701.38d: Resume per-ballot vote iteration after an interactive choice
 /// resolves. Processes the next voter's ballot; if it pauses again, re-stashes
 /// remaining voters. When all voters are processed, emits `EffectResolved`.
-pub(crate) fn drain_pending_vote_ballot_iteration(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) {
-    let pending = match state.pending_vote_ballot_iteration.take() {
+pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let pending = match state
+        .take_active_vote_ballot()
+        .expect("vote-ballot drain may consume only the active vote-ballot frame")
+    {
         Some(p) => p,
         None => return,
     };
@@ -822,6 +827,7 @@ pub(crate) fn drain_pending_vote_ballot_iteration(
     let source_id = pending.source_id;
     let controller = pending.controller;
     let template = pending.ability_template;
+    let stack_depth_before_ballot = state.resolution_stack.len();
 
     while let Some(voter) = remaining_voters.first().copied() {
         remaining_voters.remove(0);
@@ -833,12 +839,16 @@ pub(crate) fn drain_pending_vote_ballot_iteration(
 
         if state.waiting_for != initial_waiting_for {
             // Re-stash remaining voters for the next drain cycle.
-            state.pending_vote_ballot_iteration = Some(PendingVoteBallotIteration {
-                ability_template: template,
-                remaining_voters,
-                source_id,
-                controller,
-            });
+            park_vote_ballot_after_current_ballot(
+                state,
+                PendingVoteBallotIteration {
+                    ability_template: template,
+                    remaining_voters,
+                    source_id,
+                    controller,
+                },
+                stack_depth_before_ballot,
+            );
             return;
         }
     }
@@ -851,11 +861,35 @@ pub(crate) fn drain_pending_vote_ballot_iteration(
     });
 }
 
+/// Park the remaining ballot work either above its existing parent or below the
+/// complete child stack raised by the current ballot. This preserves nested
+/// ownership without allowing a vote consumer to search the resolution stack.
+fn park_vote_ballot_after_current_ballot(
+    state: &mut GameState,
+    pending: PendingVoteBallotIteration,
+    stack_depth_before_ballot: usize,
+) {
+    match state.resolution_stack.len().cmp(&stack_depth_before_ballot) {
+        std::cmp::Ordering::Less => {
+            panic!("vote ballot removed a parent frame before it could be re-parked")
+        }
+        std::cmp::Ordering::Equal => state.push_vote_ballot(pending),
+        std::cmp::Ordering::Greater => state
+            .insert_vote_ballot_parent_at_child_boundary(pending, stack_depth_before_ballot)
+            .expect("vote-ballot parent must be inserted below its complete child stack"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, VoteVisibility};
-    use crate::types::identifiers::ObjectId;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        AbilityKind, CardSelectionMode, Chooser, TargetFilter, VoteVisibility, ZoneOwner,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::resolution::{FrameKind, ResolutionFrame};
     use crate::types::zones::Zone;
 
     /// CR 701.38a + CR 101.4: Initiating a Vote sets `WaitingFor::VoteChoice`
@@ -1206,6 +1240,100 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn per_ballot_resume_parks_below_complete_per_player_choice_child_stack() {
+        // CR 701.38d + CR 608.2c + CR 101.4: a per-ballot body that pauses on
+        // an each-player choice owns its continuation and active prompt as one
+        // child stack. The remaining-ballot owner must sit below both frames.
+        let mut state = GameState::new_two_player(71);
+        let controller = state.players[0].id;
+        let opponent = state.players[1].id;
+        let first = create_object(
+            &mut state,
+            CardId(71),
+            controller,
+            "First ballot choice".to_string(),
+            Zone::Graveyard,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(72),
+            opponent,
+            "Second ballot choice".to_string(),
+            Zone::Graveyard,
+        );
+        let source = ObjectId(710);
+        let per_choice_effect = vec![Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Graveyard,
+                    additional_zones: Vec::new(),
+                    zone_owner: ZoneOwner::EachPlayer,
+                    filter: None,
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    constraint: None,
+                    selection: CardSelectionMode::Chosen,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            )),
+        )];
+        let options = vec!["choice".to_string()];
+        let ballots = crate::im::Vector::from(vec![(controller, 0), (opponent, 0)]);
+        let mut events = Vec::new();
+
+        resolve_tally(
+            &mut state,
+            source,
+            controller,
+            &options,
+            &per_choice_effect,
+            &[2],
+            &ballots,
+            VoteTally::PerVote,
+            &[],
+            None,
+            &mut events,
+        )
+        .expect("first ballot pauses on the first player choice");
+        assert_eq!(
+            state
+                .resolution_stack
+                .iter()
+                .map(ResolutionFrame::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                FrameKind::VoteBallot,
+                FrameKind::AbilityContinuation,
+                FrameKind::PerPlayerZoneChoice,
+            ],
+            "the remaining ballot owner must be below its complete child stack"
+        );
+
+        for expected in [first, second, first, second] {
+            crate::game::engine::apply(
+                &mut state,
+                controller,
+                GameAction::SelectCards {
+                    cards: vec![expected],
+                },
+            )
+            .expect("each production choice action advances the per-ballot body");
+        }
+
+        assert_eq!(state.players[0].life, 22, "one tail per resolved ballot");
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
     }
 
     // --- ControllerLabels (Battlebond friend-or-foe) ---
@@ -1661,7 +1789,7 @@ mod tests {
     /// build the Vote effect from Expropriate's real Oracle text. With two
     /// opponents both choosing money, the first ballot pauses at
     /// `ChooseFromZoneChoice`, remaining voters are stashed in
-    /// `pending_vote_ballot_iteration`, and `EffectResolved { Vote }` is NOT
+    /// the vote-ballot frame, and `EffectResolved { Vote }` is NOT
     /// emitted until all ballots resolve.
     #[test]
     fn expropriate_money_votes_suspend_and_resume_per_ballot() {
@@ -1802,18 +1930,22 @@ mod tests {
             ),
         }
 
-        // Remaining voters should be stashed.
+        // The vote is the direct parent of the nested choice continuation.
+        let pending = state.active_vote_ballot().or_else(|| {
+            state
+                .resolution_stack
+                .active_predecessor()
+                .and_then(|frame| match frame {
+                    crate::types::resolution::ResolutionFrame::VoteBallot(pending) => Some(pending),
+                    _ => None,
+                })
+        });
         assert!(
-            state.pending_vote_ballot_iteration.is_some(),
-            "remaining voters must be stashed in pending_vote_ballot_iteration"
+            pending.is_some(),
+            "remaining voters must be parked in the vote-ballot frame"
         );
         assert_eq!(
-            state
-                .pending_vote_ballot_iteration
-                .as_ref()
-                .unwrap()
-                .remaining_voters
-                .len(),
+            pending.unwrap().remaining_voters.len(),
             2,
             "two voters (opp1 + opp2) remain after controller's ballot"
         );

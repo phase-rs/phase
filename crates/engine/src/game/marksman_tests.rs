@@ -22,6 +22,7 @@ use crate::types::actions::GameAction;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::mana::{ManaType, ManaUnit};
 use crate::types::player::PlayerId;
+use crate::types::resolution::ResolutionStateWire;
 use crate::types::triggers::TriggerMode;
 
 const HAWKEYE_ORACLE: &str = "First strike, reach\n\
@@ -211,7 +212,15 @@ fn decide(runner: &mut crate::game::scenario::GameRunner, accept: bool) {
 }
 
 fn k_count(state: &GameState) -> u32 {
-    state.optional_cost_payments_this_resolution
+    state
+        .active_repeated_optional_payment_frame()
+        .map_or(0, |frame| frame.optional_cost_payments_this_resolution)
+}
+
+fn repeated_payment_driver_is_pending(state: &GameState) -> bool {
+    state
+        .active_repeated_optional_payment_frame()
+        .is_some_and(|frame| frame.pending.is_some())
 }
 
 fn modal_cap(state: &GameState) -> Option<(usize, usize)> {
@@ -252,6 +261,13 @@ fn pay_three_times_caps_modal_at_three_and_offers_reflexive_once() {
         modal_cap(runner.state()),
         Some((0, 3)),
         "reflexive modal offered once, capped at min(K, 3) with min 0"
+    );
+    assert!(
+        runner
+            .state()
+            .active_repeated_optional_payment_frame()
+            .is_some_and(|frame| frame.pending.is_none()),
+        "the completed payment frame retains K through its reflexive modal prompt"
     );
     // CR 118.3a: the three {1} payments drained the mana pool.
     let pool_left: usize = runner
@@ -294,7 +310,7 @@ fn decline_immediately_skips_reflexive_at_k_zero() {
         runner.state().waiting_for
     );
     assert!(
-        runner.state().pending_repeated_optional_payment.is_none(),
+        !repeated_payment_driver_is_pending(runner.state()),
         "the repeated-payment continuation is cleared"
     );
 }
@@ -311,7 +327,7 @@ fn decline_immediately_skips_reflexive_at_k_zero() {
 /// the failed payment, yielding K=2 and a cap of 2; (b) the pre-fix behavior of
 /// offering another prompt after a failed payment (the `if remaining > 0` branch
 /// running regardless of `cost_payment_failed_flag`) leaves
-/// `pending_repeated_optional_payment` Some with no modal offered, failing the
+/// payment driver still pending with no modal offered, failing the
 /// termination + cap assertions below.
 #[test]
 fn failed_payment_ends_sequence_and_offers_reflexive_once() {
@@ -325,7 +341,7 @@ fn failed_payment_ends_sequence_and_offers_reflexive_once() {
         "only the funded payment counts toward K"
     );
     assert!(
-        runner.state().pending_repeated_optional_payment.is_none(),
+        !repeated_payment_driver_is_pending(runner.state()),
         "a failed payment terminates the repeated-payment sequence — no further \
          payment prompt is offered: {:?}",
         runner.state().waiting_for
@@ -373,6 +389,18 @@ fn boomerang_mode_resolves_once_through_apply() {
         hand_before,
         "Boomerang discards one then draws one (net 0)"
     );
+    assert!(
+        runner
+            .state()
+            .active_repeated_optional_payment_frame()
+            .is_none(),
+        "the completed payment frame is released once its reflexive resolves: {:?}",
+        runner.state().active_repeated_optional_payment_frame()
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 /// CR 700.2b + CR 120.3: choosing a TARGETED reflexive mode (Explosive — "Hawkeye
@@ -436,9 +464,9 @@ fn explosive_targeted_mode_resolves_once_through_apply() {
 }
 
 /// Fix 1 (HIGH) — CR 603.12a + CR 700.2d: at the per-iteration
-/// `OptionalEffectChoice` pause, K (`optional_cost_payments_this_resolution`) is
-/// already nonzero and the paired `pending_repeated_optional_payment` continuation
-/// is `Some`. That pause spans separate `apply()` calls and is a serde boundary
+/// `OptionalEffectChoice` pause, K is already nonzero and the paired
+/// `RepeatedOptionalPaymentFrame` driver is `Some`. That pause spans separate
+/// `apply()` calls and is a serde boundary
 /// (server crash/restart via `to_persisted`/`from_persisted`, single-player
 /// save/load, multiplayer host-resume). K must survive it — a roundtrip restoring
 /// K = 0 collapses the reflexive modal cap below the payments actually made,
@@ -456,21 +484,26 @@ fn k_counter_survives_serde_roundtrip_mid_payment_loop() {
     decide(&mut runner, true);
     // Paused at the third payment prompt: K = 2, continuation pending.
     assert_eq!(k_count(runner.state()), 2);
-    assert!(runner.state().pending_repeated_optional_payment.is_some());
+    assert!(repeated_payment_driver_is_pending(runner.state()));
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
     ));
 
     // Serialize across the pause (the persistence boundary) and restore.
-    let json = serde_json::to_string(runner.state()).expect("serialize paused state");
-    let restored: GameState = serde_json::from_str(&json).expect("deserialize paused state");
+    let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+        .expect("real repeated-payment prompt serializes as v2");
+    assert_eq!(v2["resolution_state_version"], 2);
+    let restored: GameState = serde_json::from_value::<ResolutionStateWire>(v2)
+        .expect("real repeated-payment prompt round-trips through the v2 wire")
+        .into_game_state();
     assert_eq!(
-        restored.optional_cost_payments_this_resolution, 2,
+        k_count(&restored),
+        2,
         "K must survive the mid-payment-loop serde boundary"
     );
     assert!(
-        restored.pending_repeated_optional_payment.is_some(),
+        repeated_payment_driver_is_pending(&restored),
         "the paired continuation also survives"
     );
     // K is eq-INCLUDED: a state differing only in K is no longer equal. Revert
@@ -478,7 +511,10 @@ fn k_counter_survives_serde_roundtrip_mid_payment_loop() {
     // AI-search dedup or save-equality check would treat two different payment
     // counts as identical.
     let mut k_perturbed = restored.clone();
-    k_perturbed.optional_cost_payments_this_resolution = 99;
+    k_perturbed
+        .active_repeated_optional_payment_frame_mut()
+        .expect("repeated-payment frame remains active at its prompt")
+        .optional_cost_payments_this_resolution = 99;
     assert_ne!(
         k_perturbed, restored,
         "K participates in PartialEq (states differing only in K are unequal)"

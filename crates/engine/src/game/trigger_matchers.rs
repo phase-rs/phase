@@ -8430,6 +8430,95 @@ mod tests {
         ));
     }
 
+    /// CR 509.1g + CR 120.3: a parsed blocking-creature recipient is enforced
+    /// by the production damage matcher. This must reject player damage while
+    /// continuing to accept damage dealt to a creature currently blocking.
+    #[test]
+    fn parsed_blocking_creature_recipient_gates_damage_matcher() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Damage Source".to_string(),
+            Zone::Battlefield,
+        );
+        let blocker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Blocking Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let nonblocking_creature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Nonblocking Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, blocker, attacker, nonblocking_creature] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            blocker_to_attacker: HashMap::from([(blocker, vec![attacker])]),
+            ..Default::default()
+        });
+
+        let trigger = parse_trigger_line(
+            "Whenever a creature deals damage to a blocking creature, draw a card.",
+            "Blocking Recipient Test",
+        );
+        let context = test_trigger_source_context(&state, source);
+        let player_damage = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+        let blocker_damage = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(blocker),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+        let nonblocking_creature_damage = GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Object(nonblocking_creature),
+            amount: 1,
+            is_combat: true,
+            excess: 0,
+        };
+
+        assert!(
+            !match_damage_done(&player_damage, &trigger, &context, &state),
+            "a blocking-creature recipient must reject player damage"
+        );
+        assert!(
+            match_damage_done(&blocker_damage, &trigger, &context, &state),
+            "a blocking creature must satisfy the parsed recipient filter"
+        );
+        assert!(
+            !match_damage_done(&nonblocking_creature_damage, &trigger, &context, &state),
+            "a nonblocking creature must not satisfy the parsed recipient filter"
+        );
+    }
+
     #[test]
     fn damage_done_once_by_controller_matches_aggregated_combat_damage_event() {
         let mut state = setup();

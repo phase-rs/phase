@@ -5,6 +5,8 @@ import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { CARD_BACK_URL } from "../../../services/scryfall.ts";
 import { CardImage } from "../CardImage.tsx";
 
+const mockUseEngineCardData = vi.hoisted(() => vi.fn(() => null));
+
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn(() => ({
     src: null,
@@ -18,7 +20,7 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
 // the component's own Oracle-text lookup returns nothing; tests pass Oracle text
 // explicitly via the prop when they want to exercise that branch.
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
-  useEngineCardData: () => null,
+  useEngineCardData: mockUseEngineCardData,
 }));
 
 const mockUseCardImage = vi.mocked(useCardImage);
@@ -39,6 +41,7 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     render(<CardImage cardName="Banana" isToken />);
 
+    expect(mockUseEngineCardData).toHaveBeenCalledWith(null);
     // Positive guard first: the pulse element must actually be in the document.
     // Without this the two negative assertions below would also pass if the
     // loading branch rendered nothing at all, or threw.
@@ -60,6 +63,7 @@ describe("CardImage art fallback (issue #6156)", () => {
 
     render(<CardImage cardName="Banana" isToken />);
 
+    expect(mockUseEngineCardData).toHaveBeenCalledWith("Banana");
     const tile = screen.getByRole("img", { name: "Banana" });
     expect(tile).toBeInTheDocument();
     expect(screen.getByText("Banana")).toBeInTheDocument();
