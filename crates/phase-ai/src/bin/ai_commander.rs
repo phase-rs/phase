@@ -341,6 +341,7 @@ fn run(cli: CliArgs) -> i32 {
     match batch_games {
         None => {
             let outcome = play_one_game(
+                &db,
                 &payload,
                 seed,
                 difficulty,
@@ -362,6 +363,7 @@ fn run(cli: CliArgs) -> i32 {
                 |&(seed, seat_diff)| {
                     println!("--- GAME seed={seed} difficulty={seat_diff:?} ---");
                     play_one_game(
+                        &db,
                         &payload,
                         seed,
                         seat_diff,
@@ -398,6 +400,7 @@ fn run(cli: CliArgs) -> i32 {
 /// mode — the SAME function drives both, so batching can never change what one
 /// game's play-through does or prints.
 fn play_one_game(
+    db: &CardDatabase,
     payload: &DeckPayload,
     seed: u64,
     difficulty: AiDifficulty,
@@ -406,8 +409,7 @@ fn play_one_game(
     dump_log_path: Option<&str>,
     dump_actions_path: Option<&str>,
 ) -> RunOutcome {
-    let mut state = GameState::new(FormatConfig::commander(), 4, seed);
-    load_deck_into_state(&mut state, payload);
+    let mut state = build_game_state(db, payload, seed);
 
     engine::game::engine::start_game(&mut state);
     println!();
@@ -852,9 +854,31 @@ fn classify_run_outcome(aborted: bool, waiting_for: &WaitingFor) -> RunOutcome {
     }
 }
 
+/// Builds the 4-player commander `GameState` this driver plays, from a
+/// resolved deck payload. Single authority for this bin's setup sequence —
+/// `main()` and the setup regression test below both call this, so the two
+/// can never drift apart.
+///
+/// Populates `state.all_card_names` (a `#[serde(skip)]` field, so it is never
+/// restored by deserialization) right after deck loading, mirroring every
+/// other game-construction site (`engine-wasm/src/lib.rs`, `replay.rs`,
+/// `server-core/src/session.rs`). Without it, `NamedChoice { choice_type:
+/// CardName, .. }` candidate generation (`ai_support::candidate_actions` ->
+/// `card_name_choice_candidates`) sees an empty `all_card_names` and returns
+/// zero legal actions — a permanent AI stall the first time an opponent's
+/// card triggers a "name a card" choice.
+fn build_game_state(db: &CardDatabase, payload: &DeckPayload, seed: u64) -> GameState {
+    let mut state = GameState::new(FormatConfig::commander(), 4, seed);
+    load_deck_into_state(&mut state, payload);
+    state.all_card_names = db.card_names().into();
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::ai_support::candidate_actions;
+    use engine::types::ability::ChoiceType;
     use std::sync::{Arc, Mutex};
 
     struct TempFileGuard(PathBuf);
@@ -871,6 +895,99 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    /// Minimal two-card fixture (one legendary creature, one basic land) so the
+    /// setup-path regression test below doesn't depend on the full card-data.json
+    /// corpus. Mirrors the schema used by `deck_loading`'s own `snow_basics_db`
+    /// test fixture.
+    fn fixture_db() -> CardDatabase {
+        let json = serde_json::json!({
+            "test commander": {
+                "name": "Test Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Legendary"],
+                    "core_types": ["Creature"],
+                    "subtypes": ["Human"]
+                },
+                "power": { "type": "Fixed", "value": 2 },
+                "toughness": { "type": "Fixed", "value": 2 },
+                "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            },
+            "test land": {
+                "name": "Test Land",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"],
+                    "core_types": ["Land"],
+                    "subtypes": ["Plains"]
+                },
+                "power": null, "toughness": null, "loyalty": null, "defense": null,
+                "oracle_text": null, "non_ability_text": null, "flavor_name": null,
+                "keywords": [], "abilities": [], "triggers": [],
+                "static_abilities": [], "replacements": [],
+                "color_override": null, "scryfall_oracle_id": null
+            }
+        })
+        .to_string();
+        CardDatabase::from_json_str(&json).expect("ai_commander test fixture parses")
+    }
+
+    /// Regression test for the gap fixed alongside this test: `build_game_state`
+    /// (called by `main()`) builds a 4-player commander `GameState` from a
+    /// resolved deck payload and must set `state.all_card_names`, the
+    /// `#[serde(skip)]` field `NamedChoice { choice_type: CardName, .. }`
+    /// candidate generation reads (see
+    /// `ai_support::candidates::card_name_choice_candidates`, which returns an
+    /// empty candidate list — a permanent AI stall — whenever `all_card_names`
+    /// is empty). This calls the bin's actual setup function (not a duplicated
+    /// copy of it) and asserts a `NamedChoice{CardName}` prompt yields a
+    /// non-empty candidate set afterward, mirroring `candidates.rs`'s
+    /// `named_card_choice_uses_bounded_in_game_names` test and the restore-path
+    /// guard in `printed_cards.rs`.
+    #[test]
+    fn setup_populates_all_card_names_for_named_choice_candidates() {
+        let db = fixture_db();
+        let seat = PlayerDeckList {
+            main_deck: vec!["Test Land".to_string(); 10],
+            commander: vec!["Test Commander".to_string()],
+            ..Default::default()
+        };
+        let deck_list = DeckList {
+            player: seat.clone(),
+            opponent: seat.clone(),
+            ai_decks: vec![seat.clone(), seat],
+            ..Default::default()
+        };
+        let payload: DeckPayload = resolve_deck_list(&db, &deck_list);
+
+        // Calls the same setup function `main()` uses — if the
+        // `all_card_names` assignment is ever removed from `build_game_state`,
+        // this test fails instead of silently passing against a duplicated copy.
+        let mut state = build_game_state(&db, &payload, 42);
+
+        assert!(
+            !state.all_card_names.is_empty(),
+            "setup must populate all_card_names right after deck loading"
+        );
+
+        state.waiting_for = WaitingFor::NamedChoice {
+            player: PlayerId(1),
+            choice_type: ChoiceType::CardName,
+            options: Vec::new(),
+            source: None,
+            persist_player: None,
+        };
+        let actions = candidate_actions(&state);
+        assert!(
+            !actions.is_empty(),
+            "NamedChoice{{CardName}} must yield candidates once all_card_names is populated"
+        );
     }
 
     #[test]
