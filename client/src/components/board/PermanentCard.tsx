@@ -261,6 +261,13 @@ export const PermanentCard = memo(function PermanentCard({
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
   );
+  // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
+  // copiable values. Engine-classified because a copy of a permanent lives in a
+  // Layer 1a continuous effect, not on the object — and the copy overrides
+  // `printed_ref` too, so a copy is pixel-identical to its source here.
+  const isCopiedPermanent = useGameStore((s) =>
+    (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
+  );
   // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
   // counter-growth loop) for this object. Values match the object's `counters` map keys
   // (e.g. "charge"); the pill renders ∞ instead of ×N for any type in this set.
@@ -552,7 +559,16 @@ export const PermanentCard = memo(function PermanentCard({
   // CR 708.2: a face-down permanent has no characteristics other than those
   // its face-down rule grants, so never surface "Copy" on it — that would leak
   // that it's a token-copy (matches the `!face_down` guard on the keyword strip).
-  const isCopy = obj.is_token === true && obj.display_source !== "Token" && !obj.face_down;
+  // Two independent ways a permanent is a copy, unioned so the badge covers the
+  // whole class rather than only the token half (issue #5932):
+  //   - a token minted as a copy (`is_token` + card art), and
+  //   - a real card under a live copy effect (`copied_permanents`) — Clone,
+  //     Phantasmal Image, Vesuvan Doppelganger. These were previously missed
+  //     entirely, so two Reveillarks were indistinguishable on the board.
+  // Both stay subject to the same face-down guard below.
+  const isCopy =
+    (obj.is_token === true && obj.display_source !== "Token" && !obj.face_down)
+    || (isCopiedPermanent && !obj.face_down);
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");

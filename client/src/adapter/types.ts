@@ -2574,6 +2574,14 @@ export interface DerivedViews {
    * matters on the battlefield. Keyed by ObjectId-as-string.
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
+  /**
+   * CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
+   * currently supplied by a copy effect (Clone, Phantasmal Image, Vesuvan
+   * Doppelganger). Such a permanent renders identically to what it copied, so
+   * the engine classifies it here rather than leaving the client to guess.
+   * Face-down permanents are excluded per CR 708.2. Absent when empty.
+   */
+  copied_permanents?: ObjectId[];
   /** Keyed by attacking commander's current controller (PlayerId as string). */
   commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
   /**
