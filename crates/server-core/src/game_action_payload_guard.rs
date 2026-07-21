@@ -326,6 +326,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
                         | PinnedDecision::Mode { .. }
                         | PinnedDecision::MayChoice { .. }
                         | PinnedDecision::UnlessBreak { .. }
+                        // CR 608.2d: a mana-color pin carries a fixed enum, no unbounded payload.
+                        | PinnedDecision::ManaColor { .. }
                         | PinnedDecision::ConvokeTaps { .. } => {}
                     }
                 }

@@ -9,7 +9,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, CastOfferKind, ChosenDamageSource, CopyChosenSelection, GameState,
     OutsideGameChoiceSource, PayableResource, PendingContinuation,
-    PendingPlayerScopeSacrificeCompletion, WaitingFor,
+    PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
@@ -2152,6 +2152,146 @@ pub(super) fn handle_resolution_choice(
                 return Ok(ResolutionChoiceOutcome::WaitingFor(waiting_for));
             }
             match resource {
+                PayableResource::LoopCollapse { .. } => {
+                    // CR 732.2a: an accepted unbounded loop shortcut deferred its finite
+                    // count to this phase/step boundary; the controller has now named N.
+                    // Apply each stashed persistent-axis materialization, cash out the
+                    // collapsed ∞ axes, and re-enter the boundary drain so Priority is
+                    // restored in this same action.
+                    //
+                    // This arm deducts NO resource and MUST early-return: the shared
+                    // pay-then-continue tail below is for chained real-resource payments,
+                    // not a boundary collapse. Mirrors the `pending_mana_ability`
+                    // early-return above. `take_` removes the whole stash even on the
+                    // error path so the boundary fixpoint terminates rather than
+                    // re-prompting forever.
+                    let Some(items) = state.take_pending_materialization(player) else {
+                        return Err(EngineError::InvalidAction(format!(
+                            "LoopCollapse pay-amount for {player:?} has no pending materialization stash"
+                        )));
+                    };
+                    // FINDING #4 (accept→boundary observer-drift): the observed-growth
+                    // firewall ran at ACCEPT, but the controller held priority between
+                    // accept and this boundary and could have cast an observer (Heliod /
+                    // Corpsejack) of the growing class. The batched δ single-application is
+                    // sound only while the class stays UNOBSERVED — `apply_life_gain` fires
+                    // a life observer ONCE not N×, and `apply_counter_addition` bypasses the
+                    // doubler pipeline. Re-check NOW (the firewall scans the board/stack, not
+                    // the stash, so it needs no sequence): if an observer appeared, DECLINE
+                    // the batched `Counters`/`Life` apply and leave those ∞ axes marked for
+                    // manual play (CR 732.2a / CR 732.2b never force a shortcut) —
+                    // unambiguously sound (never a wrong count). `Tokens` (N real ETB events)
+                    // and `DriveSequence` (N-cycle real replay) honor observers regardless
+                    // and always proceed. Only the ACTUALLY-applied items are cleared, so a
+                    // declined axis stays ∞.
+                    // AXIS-SPECIFIC re-check: an observer of the counter class must not veto a
+                    // batched LIFE gain and vice-versa. Each axis re-runs its own firewall.
+                    let counter_observed_now =
+                        crate::analysis::resource::counter_growth_is_observed(state);
+                    let life_observed_now =
+                        crate::analysis::resource::life_growth_is_observed(state);
+                    let mut collapsed: Vec<PersistentAxisMaterialization> = Vec::new();
+                    for item in &items {
+                        match item {
+                            PersistentAxisMaterialization::Tokens(profile) => {
+                                // CR 707.2 (+ CR 111.10): mint N tapped copy-tokens of the
+                                // fodder profile — a source-less mint, so route through
+                                // `drive_copy_token_batches` (`ObjectId(0)` sentinel source).
+                                let batch = crate::types::game_state::PendingCopyTokenBatch {
+                                    owner: player,
+                                    count: amount,
+                                    copy: Box::new(crate::types::proposed_event::CopyTokenSpec {
+                                        values: profile.clone(),
+                                        display_source:
+                                            crate::game::game_object::DisplaySource::Token,
+                                        printed_ref: None,
+                                        token_image_ref: None,
+                                        extra_keywords: vec![],
+                                        additional_modifications: vec![],
+                                        tapped: true,
+                                        enters_attacking: false,
+                                        sacrifice_at: None,
+                                        source_id: ObjectId(0),
+                                        controller: player,
+                                    }),
+                                };
+                                crate::game::effects::token_copy::drive_copy_token_batches(
+                                    state,
+                                    std::collections::VecDeque::from([batch]),
+                                    EffectKind::CopyTokenOf,
+                                    ObjectId(0),
+                                    events,
+                                );
+                                collapsed.push(item.clone());
+                            }
+                            PersistentAxisMaterialization::Counters(growths) => {
+                                if counter_observed_now {
+                                    continue; // decline (finding #4): leave the ∞ axis for manual play
+                                }
+                                for g in growths {
+                                    // CR 400.7: a permanent that left the battlefield
+                                    // accept→boundary is skipped (its object id is stale).
+                                    if !state.battlefield.contains(&g.object) {
+                                        continue;
+                                    }
+                                    // CR 122.1 single counter authority; the direct `+=` (no
+                                    // doubler re-run) is EXACT N×δ because the firewall
+                                    // rejected any counter-placement replacement at accept.
+                                    crate::game::effects::counters::apply_counter_addition(
+                                        state,
+                                        player,
+                                        g.object,
+                                        g.counter.clone(),
+                                        g.per_cycle_delta.saturating_mul(amount),
+                                        events,
+                                    );
+                                }
+                                collapsed.push(item.clone());
+                            }
+                            PersistentAxisMaterialization::Life {
+                                player: p,
+                                per_cycle_delta,
+                            } => {
+                                if life_observed_now {
+                                    continue; // decline (finding #4): leave the ∞ axis for manual play
+                                }
+                                // CR 119.3 single life authority; SOUND only because the
+                                // firewall rejected any life-gain replacement/observer
+                                // (`apply_life_gain` re-runs the replacement pipeline, so a
+                                // lump gain would fire an observer ONCE not N×).
+                                let _ = crate::game::effects::life::apply_life_gain(
+                                    state,
+                                    *p,
+                                    per_cycle_delta.saturating_mul(amount),
+                                    events,
+                                );
+                                collapsed.push(item.clone());
+                            }
+                            PersistentAxisMaterialization::DriveSequence {
+                                sequence,
+                                collapsed_axes: _,
+                            } => {
+                                // CR 732.2a: replay N real cycles; observers fire each cycle;
+                                // no re-offer (the drive holds the simulation guard).
+                                crate::game::engine::drive_persistent_axis_collapse(
+                                    state, sequence, amount,
+                                );
+                                collapsed.push(item.clone());
+                            }
+                        }
+                    }
+                    // CR 732.2a: cash out ONLY the axes actually collapsed (axis-scoped) —
+                    // end their ∞ status + stash + pile, PRESERVING any coexisting axis (a
+                    // debug infinite-mana capability, or a finding-#4-declined axis). The ∞
+                    // display collapses to an ordinary ×N for the collapsed axes (§9).
+                    state.clear_collapsed_materializations(player, &collapsed);
+                    // Continue the boundary fixpoint (§7): re-draining either prompts the
+                    // next APNAP player with a stash or restores Priority now.
+                    crate::game::turns::drain_pending_phase_transition_progress(state, events);
+                    return Ok(ResolutionChoiceOutcome::WaitingFor(
+                        state.waiting_for.clone(),
+                    ));
+                }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {

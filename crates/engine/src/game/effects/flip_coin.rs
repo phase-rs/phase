@@ -250,7 +250,6 @@ pub fn resolve_flip_coins(
     // CR 705.1 + CR 614.1a: Flip each coin through the replacement pipeline (so
     // Krark's Thumb can double it), routing each outcome through the appropriate
     // branch exactly as the single-flip resolver does.
-    let prior_waiting_for = state.waiting_for.clone();
     for i in 0..n {
         let won = match flip_through_replacement(state, flipper, events) {
             CoinFlipOutcome::Resolved(won) => won,
@@ -282,15 +281,16 @@ pub fn resolve_flip_coins(
             &ability.targets,
             events,
         )?;
-        // CR 608.2c: a branch may suspend for an optional choice; stop flipping
-        // until the player resolves it.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only for an interactive resolution choice. A token
+        // branch hands priority back without suspending, and must not truncate
+        // the remaining coin flips.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if a branch suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only when the branch suspended.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoins,
             source_id: ability.source_id,
@@ -394,7 +394,6 @@ fn finish_until_lose(
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let prior_waiting_for = state.waiting_for.clone();
     for _ in 0..win_count {
         run_flip_branch(
             state,
@@ -404,14 +403,21 @@ fn finish_until_lose(
             targets,
             events,
         )?;
-        // CR 608.2c: a win effect may suspend for an optional choice.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only if the win effect suspended for an INTERACTIVE
+        // player choice (an optional "you may", scry, etc.). A win effect that
+        // merely creates permanents hands priority back to the active player
+        // (Priority{opponent} -> Priority{controller}), which is NOT a
+        // suspension — gating on `waits_for_resolution_choice` rather than any
+        // `waiting_for` change lets a multi-win token creator (Mirror March,
+        // #5966) run the win effect for every win instead of stopping after one.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if the win effect suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only if the win effect actually
+    // suspended for a player choice; otherwise the effect has fully resolved.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoinUntilLose,
             source_id,
@@ -810,6 +816,53 @@ mod tests {
             .filter(|e| matches!(e, GameEvent::CoinFlipped { won: true, .. }))
             .count() as i32;
         assert_eq!(state.players[0].life - initial_life, heads);
+    }
+
+    #[test]
+    fn flip_coins_continues_after_token_branch_returns_priority() {
+        let mut state = GameState::new_two_player(42);
+        let win_effect = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Coin Token".to_string(),
+                power: crate::types::ability::PtValue::Fixed(1),
+                toughness: crate::types::ability::PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: crate::types::ability::TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        ));
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 8 },
+                win_effect: Some(win_effect),
+                lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_flip_coins(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CoinFlipped { .. }))
+                .count(),
+            8,
+            "a token branch returns priority but must not stop the flip loop"
+        );
     }
 
     // --- Issue #432: Ral, Monsoon Mage coin-flip transform ---------------------

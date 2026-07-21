@@ -2191,11 +2191,18 @@ export type ShardChoice =
   | { type: "PayMana" }
   | { type: "PayLife" };
 
+// CR 732.2a: which persistent-growth axis an accepted object-growth loop collapses
+// into — a display-only label so the prompt names the correct axis.
+export type LoopCollapseAxis = "Tokens" | "Counters" | "Life" | "Mixed";
+
 export type PayableResource =
   | { type: "Energy" }
   | { type: "ManaGeneric"; data: { per_x: number } }
   | { type: "Counters" }
-  | { type: "Speed" };
+  | { type: "Speed" }
+  // CR 732.2a: not a resource payment — the finite count an accepted
+  // object-growth loop shortcut collapses into (display-only; the engine mints).
+  | { type: "LoopCollapse"; data: { axis: LoopCollapseAxis } };
 
 export type ShardOptions =
   | { type: "ManaOrLife" }
@@ -2504,6 +2511,7 @@ export type DecisionPointKind =
   | { Targets: { legal_targets: TargetRef[] } }
   | { ConvokeTaps: { tappable: ObjectId[] } }
   | { Mode: { available_modes: number[] } }
+  | { ManaColor: { color: ManaColor } }
   | "MayChoice"
   | "UnlessBreak";
 
@@ -2629,6 +2637,25 @@ export interface DerivedViews {
    * Mirrors `engine::game::derived_views::DerivedViews::unbounded_resources`.
    */
   unbounded_resources?: UnboundedResourceView[];
+  /**
+   * CR 732.2a / CR 110.1: battlefield object IDs forming an accepted object-growth
+   * loop's "∞ pile" (the winning controller's tapped fodder-class members). Engine-
+   * authored membership — the FE renders `∞` (not `×N`) on any battlefield group
+   * whose members are all in this set, and never re-derives which objects are the pile.
+   * Mirrors `engine::game::derived_views::DerivedViews::unbounded_pile`.
+   */
+  unbounded_pile?: ObjectId[];
+  /**
+   * CR 732.2a / CR 701.34a: per-object `∞` counter channel — for each battlefield
+   * object (keyed by ObjectId-as-string), the counter-type keys whose preserved
+   * `Generic` counters an accepted counter-growth loop (proliferate charge, burden)
+   * pumps unboundedly. Each value string matches the object's `counters` map key
+   * (e.g. `"charge"`). The FE renders `∞` (not `×N`) on any counter pill whose type
+   * is in this set, and never re-derives which counters are unbounded. Empty/omitted
+   * when no counter-growth loop is active. Mirrors
+   * `engine::game::derived_views::DerivedViews::unbounded_counters`.
+   */
+  unbounded_counters?: Record<string, string[]>;
 }
 
 /** Mirrors `engine::types::game_state::NextSpellModifier` (serde tag="type"). */

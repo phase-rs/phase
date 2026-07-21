@@ -152,6 +152,15 @@ pub fn resolve(
     // After this call, the delayed ability chain holds no parent context refs.
     snapshot_parent_dependent_quantities_in_ability_chain(&mut delayed_ability, state, ability);
 
+    // CR 603.7c: freeze a `LastCreated` reference to the tokens just snapshotted
+    // into `targets`, so a per-win loop that overwrites `last_created_token_ids`
+    // (Mirror March #5966) does not make every per-win delayed exile re-resolve
+    // to only the final win's token at end-step. Must run while the effect still
+    // reads `LastCreated` and before `targets` is consumed downstream.
+    if !snapshot_targets.is_empty() && effect_references_last_created(&delayed_ability.effect) {
+        rebind_last_created_to_parent_target(&mut delayed_ability.effect);
+    }
+
     delayed_ability.targets = snapshot_targets;
     // CR 603.7c: A delayed triggered ability that refers to information from
     // its creation event keeps that creation-time binding for later resolution.
@@ -276,6 +285,41 @@ fn stamp_triggering_source_origins_in_definition_chain(
     }
     if let Some(else_ability) = ability.else_ability.as_deref_mut() {
         stamp_triggering_source_origins_in_definition_chain(else_ability, expected);
+    }
+}
+
+/// CR 603.7c: Rebind a delayed effect's `TargetFilter::LastCreated` target to
+/// `ParentTarget`, freezing it to the tokens snapshotted into the delayed
+/// ability's `targets` at creation time (this is called only after those
+/// `targets` are populated from `last_created_token_ids`). `LastCreated`
+/// resolves live against `state.last_created_token_ids` when the trigger fires
+/// (targeting.rs), which is wrong for a per-win loop (Mirror March #5966) that
+/// overwrites that vector every win — at end-step every per-win delayed exile
+/// would re-resolve to only the final win's token. `ParentTarget` instead reads
+/// the delayed ability's own snapshotted `targets`, so each delayed exile binds
+/// to the token created in its own iteration. Recurses into nested
+/// `CreateDelayedTrigger` definition chains.
+fn rebind_last_created_to_parent_target(effect: &mut Effect) {
+    match effect {
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
+            if matches!(target, TargetFilter::LastCreated) =>
+        {
+            *target = TargetFilter::ParentTarget;
+        }
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            rebind_last_created_to_parent_target_in_chain(effect);
+        }
+        _ => {}
+    }
+}
+
+fn rebind_last_created_to_parent_target_in_chain(ability: &mut AbilityDefinition) {
+    rebind_last_created_to_parent_target(&mut ability.effect);
+    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
+        rebind_last_created_to_parent_target_in_chain(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
+        rebind_last_created_to_parent_target_in_chain(else_ability);
     }
 }
 

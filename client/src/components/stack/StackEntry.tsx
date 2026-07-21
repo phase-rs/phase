@@ -248,10 +248,17 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             onError={() => setArtError(true)}
           />
         )}
-        {isSpell && displayManaCost && (
-          <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
-        )}
       </div>
+      {/* @container overlay sized to the card (sibling of the overflow-hidden
+          image wrapper, so the pip backdrop isn't clipped at the card edge).
+          absolute inset-0 takes its width from the relative outer wrapper, so
+          container-type can't collapse it; pips scale in cqi with the stack
+          card's width instead of a fixed px size. */}
+      {isSpell && displayManaCost && (
+        <div className="pointer-events-none absolute inset-0 @container">
+          <ManaCostPips cost={displayManaCost} size="fluid" className="absolute right-[5%] top-[2.5%]" />
+        </div>
+      )}
 
       {/* Badge: unimplemented-mechanics warning (issue #4711). Hand and
           battlefield cards already surface this through CardImage; a spell is

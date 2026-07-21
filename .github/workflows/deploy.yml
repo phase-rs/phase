@@ -304,6 +304,13 @@ jobs:
       - name: Add binaryen to PATH
         run: echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
 
+      # build-wasm.sh's assert_wasm_stack guard parses the shipped wasm's memory
+      # section with node; declare the dependency explicitly (release.yml already
+      # sets up node for its build-wasm job).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 

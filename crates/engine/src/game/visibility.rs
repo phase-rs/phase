@@ -665,6 +665,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                         },
                         DecisionPointKind::MayChoice => DecisionPointKind::MayChoice,
                         DecisionPointKind::UnlessBreak => DecisionPointKind::UnlessBreak,
+                        // CR 608.2d: a fixed mana color is public (not hidden info) — clone through.
+                        DecisionPointKind::ManaColor { color } => {
+                            DecisionPointKind::ManaColor { color: *color }
+                        }
                     };
                     DecisionPoint {
                         slot: point.slot.clone(),

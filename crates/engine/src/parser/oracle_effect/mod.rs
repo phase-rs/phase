@@ -51,10 +51,11 @@ use lower::{
     strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
     strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
     strip_leading_return_destination_ext, strip_leading_sequence_connector,
-    strip_optional_effect_prefix, strip_player_scope_subject, strip_repeat_count_suffix,
-    strip_return_destination_ext, strip_return_destination_ext_with_remainder,
-    strip_temporal_prefix, strip_temporal_suffix, trim_dangling_target_word, try_parse_damage,
-    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
+    strip_repeat_count_suffix, strip_return_destination_ext,
+    strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
+    try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -27850,6 +27851,13 @@ pub(crate) fn parse_effect_chain_ir(
             || try_parse_for_each_counter_kind_adjust_target(&text).is_some()
         {
             (None, text, None)
+        } else if let Some(stripped) = strip_redundant_flip_win_quantifier(&text) {
+            // CR 705.2: "for each flip you won, <effect>" (Mirror March) — the flip
+            // loop (`finish_until_lose`) already runs the win effect once per win,
+            // so the quantifier is redundant. Drop it (no `repeat_for`) so the bare
+            // copy clause reaches `CopyTokenOf` instead of an `Unimplemented` "for"
+            // fallback (#5966).
+            (None, stripped, None)
         } else {
             let reference_target = for_each_clause_target_controller_filter(&text);
             let (repeat_for, text) = super::clause_shell::peel_for_each_prefix(&text);
