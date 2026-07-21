@@ -25,13 +25,37 @@ describe("telemetry game event tracking", () => {
     trackEvent.mockClear();
   });
 
-  it("reports the store's engine mode and fallback reason when a game ends", () => {
+  it("reports native mode when it is committed before the first game snapshot", () => {
     useGameStore.setState({
       gameId: "engine-mode-telemetry",
+      gameMode: "ai",
+      engineMode: "native",
+      aiSeatIds: [1],
+    });
+    useGameStore.setState({
+      gameState: buildGameState({
+        format_config: buildFormatConfig({ format: "Commander" }),
+        turn_number: 12,
+      }),
+    });
+
+    expect(trackEvent).toHaveBeenCalledWith(
+      "game_start",
+      expect.objectContaining({
+        engine_mode: "native",
+      }),
+    );
+  });
+
+  it("reports the store's engine mode and fallback reason when a game ends", () => {
+    useGameStore.setState({
+      gameId: "engine-mode-telemetry-fallback",
       gameMode: "ai",
       engineMode: "wasm",
       nativeEngineFallbackReason: "native_engine_unavailable",
       aiSeatIds: [1],
+    });
+    useGameStore.setState({
       gameState: buildGameState({
         format_config: buildFormatConfig({ format: "Commander" }),
         turn_number: 12,

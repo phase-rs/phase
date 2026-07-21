@@ -1529,6 +1529,7 @@ export function GameProvider({
             }
           });
 
+          setEngineMode("native");
           await initGame(
             gameId,
             nativeAdapter,
@@ -1543,7 +1544,6 @@ export function GameProvider({
           }
 
           setGameMode("native-ai");
-          setEngineMode("native");
           controller = createGameLoopController({ mode: "online" });
           controller.start();
           audioManager.setContext("battlefield");
