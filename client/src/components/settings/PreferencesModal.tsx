@@ -44,6 +44,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
+import { isTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
@@ -191,6 +192,8 @@ export function PreferencesModal({
   const setSfxVolume = usePreferencesStore((s) => s.setSfxVolume);
   const setMusicVolume = usePreferencesStore((s) => s.setMusicVolume);
   const setAnimationSpeedMultiplier = usePreferencesStore((s) => s.setAnimationSpeedMultiplier);
+  const nativeEngineEnabled = usePreferencesStore((s) => s.nativeEngineEnabled);
+  const setNativeEngineEnabled = usePreferencesStore((s) => s.setNativeEngineEnabled);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
   const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover) ?? true;
@@ -433,6 +436,23 @@ export function PreferencesModal({
                       <span className="text-sm text-slate-200">{t("gameplay.manualManaPayment")}</span>
                     </label>
                   </SettingGroup>
+
+                  {isTauri() && (
+                    <label className="mt-1 flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={nativeEngineEnabled}
+                        onChange={(e) => setNativeEngineEnabled(e.target.checked)}
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("gameplay.nativeEngine")}
+                        <span className="mt-0.5 block text-xs text-slate-400">
+                          {t("gameplay.nativeEngineDescription")}
+                        </span>
+                      </span>
+                    </label>
+                  )}
 
                   <div
                     ref={boardBackgroundRef}
