@@ -919,7 +919,12 @@ export const PermanentCard = memo(function PermanentCard({
               // counter unboundedly — render ∞ instead of the (still-finite) real count.
               const isUnbounded = unboundedCounterTypes.includes(type);
               return (
-                <CounterTooltip key={type} type={type} count={count}>
+                <CounterTooltip
+                  key={type}
+                  type={type}
+                  count={count}
+                  isUnbounded={isUnbounded}
+                >
                   <span
                     className={`flex items-center gap-0.5 rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                   >

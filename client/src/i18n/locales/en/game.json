@@ -445,6 +445,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}} counter\n{{description}}",
     "summary_other": "{{count}} {{label}} counters\n{{description}}",
+    "summaryUnbounded": "∞ {{label}} counters\n{{description}}",
     "descriptions": {
       "p1p1": "Each +1/+1 counter gives the permanent +1/+1.",
       "m1m1": "Each -1/-1 counter gives the permanent -1/-1.",
@@ -612,7 +613,8 @@
     "loopCollapseTitleCounters": "Choose how many times to add counters",
     "loopCollapseTitleLife": "Choose how many times to gain life",
     "loopCollapseTitleMixed": "Choose how many times to repeat the loop",
-    "loopCollapseAmountTokens": "Create {{value}} tokens",
+    "loopCollapseAmountTokens_one": "Create {{count}} token",
+    "loopCollapseAmountTokens_other": "Create {{count}} tokens",
     "loopCollapseAmountCounters": "Add counters {{value}}×",
     "loopCollapseAmountLife": "Gain life {{value}}×",
     "loopCollapseAmountMixed": "Repeat loop {{value}}×",

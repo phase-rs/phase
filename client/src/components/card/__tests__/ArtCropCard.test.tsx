@@ -346,4 +346,40 @@ describe("ArtCropCard", () => {
     expect(screen.getByText("2")).toBeInTheDocument();
     expect(screen.queryByText("∞")).not.toBeInTheDocument();
   });
+
+  // LOW-4 (CR 732.2a / CR 701.34a): the ∞ pill and its TOOLTIP must agree. Before the fix the
+  // badge showed ∞ while the tooltip interpolated the raw finite count ("… : 2"), contradicting
+  // the pill. The tooltip summary must say ∞, not leak the count.
+  it("tooltip renders ∞ and hides the finite count when the counter is unbounded", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: { [permanent.id]: ["charge"] } },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    // The tooltip summary line reads "∞ <label> counters", never the finite "2 <label> counters".
+    expect(screen.getByText(/∞ \S+ counters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/2 \S+ counters/i)).not.toBeInTheDocument();
+  });
+
+  it("tooltip shows the finite count when the counter is NOT unbounded (matched pair)", () => {
+    mockUseCardImage.mockReturnValue({ src: "card.png", isLoading: false, isRotated: false, isFlip: false });
+    const permanent = pentadWithCharge();
+    useGameStore.setState({
+      gameState: {
+        objects: { [permanent.id]: permanent },
+        derived: { unbounded_counters: {} },
+      } as never,
+    });
+
+    render(<ArtCropCard objectId={101} />);
+
+    expect(screen.getByText(/2 \S+ counters/i)).toBeInTheDocument();
+    expect(screen.queryByText(/∞ \S+ counters/i)).not.toBeInTheDocument();
+  });
 });

@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 contador {{label}}\n{{description}}",
     "summary_other": "{{count}} contadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ contadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada contador +1/+1 da +1/+1 al permanente.",
       "m1m1": "Cada contador -1/-1 da -1/-1 al permanente.",
@@ -580,7 +581,8 @@
     "loopCollapseTitleCounters": "Elige cuántas veces añadir contadores",
     "loopCollapseTitleLife": "Elige cuántas veces ganar vida",
     "loopCollapseTitleMixed": "Elige cuántas veces repetir el bucle",
-    "loopCollapseAmountTokens": "Crear {{value}} fichas",
+    "loopCollapseAmountTokens_one": "Crear {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Crear {{count}} fichas",
     "loopCollapseAmountCounters": "Añadir contadores {{value}}×",
     "loopCollapseAmountLife": "Ganar vida {{value}}×",
     "loopCollapseAmountMixed": "Repetir el bucle {{value}}×",

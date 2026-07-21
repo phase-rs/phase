@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}}-Marke\n{{description}}",
     "summary_other": "{{count}} {{label}}-Marken\n{{description}}",
+    "summaryUnbounded": "∞ {{label}}-Marken\n{{description}}",
     "descriptions": {
       "p1p1": "Jede +1/+1-Marke gibt der bleibenden Karte +1/+1.",
       "m1m1": "Jede -1/-1-Marke gibt der bleibenden Karte -1/-1.",
@@ -580,7 +581,8 @@
     "loopCollapseTitleCounters": "Wähle, wie oft Marken hinzugefügt werden",
     "loopCollapseTitleLife": "Wähle, wie oft Leben dazugewonnen wird",
     "loopCollapseTitleMixed": "Wähle, wie oft die Schleife wiederholt wird",
-    "loopCollapseAmountTokens": "{{value}} Spielsteine erzeugen",
+    "loopCollapseAmountTokens_one": "{{count}} Spielstein erzeugen",
+    "loopCollapseAmountTokens_other": "{{count}} Spielsteine erzeugen",
     "loopCollapseAmountCounters": "Marken hinzufügen {{value}}×",
     "loopCollapseAmountLife": "Leben dazugewinnen {{value}}×",
     "loopCollapseAmountMixed": "Schleife wiederholen {{value}}×",

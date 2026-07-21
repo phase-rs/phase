@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 marcador {{label}}\n{{description}}",
     "summary_other": "{{count}} marcadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ marcadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada marcador +1/+1 dá +1/+1 à permanente.",
       "m1m1": "Cada marcador -1/-1 dá -1/-1 à permanente.",
@@ -580,7 +581,8 @@
     "loopCollapseTitleCounters": "Escolha quantas vezes adicionar marcadores",
     "loopCollapseTitleLife": "Escolha quantas vezes ganhar vida",
     "loopCollapseTitleMixed": "Escolha quantas vezes repetir o ciclo",
-    "loopCollapseAmountTokens": "Criar {{value}} fichas",
+    "loopCollapseAmountTokens_one": "Criar {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Criar {{count}} fichas",
     "loopCollapseAmountCounters": "Adicionar marcadores {{value}}×",
     "loopCollapseAmountLife": "Ganhar vida {{value}}×",
     "loopCollapseAmountMixed": "Repetir o ciclo {{value}}×",

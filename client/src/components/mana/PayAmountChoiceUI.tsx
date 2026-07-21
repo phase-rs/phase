@@ -107,7 +107,13 @@ export function PayAmountChoiceUI() {
               className={gameButtonClass({ tone: "emerald", size: "md" })}
             >
               {loopCollapseAxis
-                ? t(`mana.loopCollapseAmount${loopCollapseAxis}`, { value })
+                ? // `count` drives i18next pluralization for the Tokens axis
+                  // (loopCollapseAmountTokens_one/_other); the ×N-framed
+                  // Counters/Life/Mixed keys keep reading `value`.
+                  t(`mana.loopCollapseAmount${loopCollapseAxis}`, {
+                    value,
+                    count: value,
+                  })
                 : t("mana.payAmount", { value, resource: resourceLabel })}
             </button>
           </div>

@@ -1,7 +1,7 @@
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    AbilityCost, CastingPermission, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    SpellStackToGraveyardReplacement, TargetFilter, TargetRef,
+    AbilityCost, CastingPermission, Duration, Effect, EffectError, EffectKind, QuantityExpr,
+    ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
@@ -26,30 +26,24 @@ fn extract_controller_ref(filter: &TargetFilter) -> Option<&crate::types::abilit
     }
 }
 
-/// CR 115.1 + CR 601.2c: "You may cast a spell ... from your hand without paying
-/// its mana cost" (Electrodominance, Baral's Expertise) has no "target" word —
-/// the spell is chosen at resolution from the granting player's hand via
-/// `EffectZoneChoice`, not stack-time targeting.
-fn open_private_zone_cast_selection(
-    state: &mut GameState,
+/// CR 400.1/400.2 + CR 109.4: Eligible hand-pick pool for a private-zone
+/// `CastFromZone` — the cards in `source_zone` belonging to the filter-scoped
+/// player (Buster-Sword-class "your hand" filters keep the caster; Silent-Blade
+/// Oni's `ControllerRef::TriggeringPlayer` scopes a different hand, issue #5240)
+/// that satisfy the cast filter. Single authority shared by the selection opener
+/// (`open_private_zone_cast_selection`) and the feasibility predicate
+/// (`hand_pick_eligible_is_empty`) so the "which cards can be cast" logic never
+/// diverges between "open the prompt" and "is the prompt possible". Recurses
+/// through `Not`/`And`/`Or` (`extract_controller_ref`) so a composed filter isn't
+/// silently treated as caster-scoped. A missing scoped player yields an empty
+/// pool (the opener's empty branch and the predicate both handle that).
+fn compute_hand_pick_eligible(
+    state: &GameState,
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     source_zone: Zone,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Vec<ObjectId> {
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    // CR 400.1/400.2 + CR 109.4: A hand-scoped cast filter's own `controller`
-    // axis names WHOSE hand is the candidate pool. Buster-Sword-class filters
-    // ("cast a spell from your hand") carry no controller (or `You`) and keep
-    // scanning the caster's own hand. Silent-Blade Oni's "cast a spell from
-    // among those cards" (bound to the damaged player's hand via
-    // `ControllerRef::TriggeringPlayer`, issue #5240) needs a DIFFERENT
-    // player's hand as the pool — `ability.controller` alone can't express
-    // that, so resolve the filter's own controller axis through the single
-    // `ControllerRef` authority instead of hardcoding the caster. Recurses
-    // through `Not`/`And`/`Or` (extract_controller_ref) so a composed filter
-    // (e.g. a future card combining a type restriction with a player axis via
-    // `And`) isn't silently treated as caster-scoped.
     let hand_owner = extract_controller_ref(target_filter)
         .and_then(|cref| {
             crate::game::filter::controller_ref_player(
@@ -62,16 +56,121 @@ fn open_private_zone_cast_selection(
         })
         .unwrap_or(ability.controller);
     let Some(player) = state.players.iter().find(|p| p.id == hand_owner) else {
-        return Err(EffectError::PlayerNotFound);
+        return Vec::new();
     };
     let cards_iter = match source_zone {
         Zone::Hand => player.hand.iter(),
         _ => unreachable!("private CastFromZone selection is currently hand-only"),
     };
-    let eligible: Vec<_> = cards_iter
+    // CR 601.2 vs CR 305.1: a land is never *cast* — it is played. A "cast a
+    // permanent spell from your hand" pick (Kellan, the Kid) carries a broad
+    // `Permanent` type filter that a land in hand would otherwise satisfy, so the
+    // Cast-mode pool must exclude lands. `Play` mode (a "play a card" grant) keeps
+    // them, since a land played that way is legal.
+    let cast_mode_excludes_lands = matches!(
+        &ability.effect,
+        Effect::CastFromZone {
+            mode: crate::types::ability::CardPlayMode::Cast,
+            ..
+        }
+    );
+    cards_iter
         .copied()
-        .filter(|id| crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx))
-        .collect();
+        .filter(|id| {
+            if cast_mode_excludes_lands
+                && state.objects.get(id).is_some_and(|obj| {
+                    obj.card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                })
+            {
+                return false;
+            }
+            crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
+        })
+        .collect()
+}
+
+/// CR 608.2d: A player can't choose an impossible option. When an optional
+/// hand-pick `CastFromZone` ("you may cast a permanent spell … from your hand")
+/// has no eligible card, the cast can't happen, so the outer optional must be
+/// treated as declined — routing any `Not(OptionalEffectPerformed)` fallback
+/// (Kellan, the Kid's "If you don't, put a land") through the decline authority
+/// with the performed flag false — rather than prompting for a choice that can
+/// select nothing. Returns `Some(is_empty)` for a hand-scoped pick with no
+/// pre-bound object targets; `None` when this ability is not such a pick (the
+/// caller keeps its existing whole-ability dry-run for graveyard/exile/
+/// `LastRevealed` classes).
+pub(crate) fn hand_pick_eligible_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<bool> {
+    let Effect::CastFromZone { target, .. } = &ability.effect else {
+        return None;
+    };
+    if ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Object(_)))
+    {
+        return None;
+    }
+    let source_zone = target.extract_in_zone().filter(|z| *z == Zone::Hand)?;
+    Some(compute_hand_pick_eligible(state, ability, target, source_zone).is_empty())
+}
+
+/// CR 608.2c: An empty selection at a hand-pick `CastFromZone`'s
+/// `EffectZoneChoice` means the player did not cast ("If you don't, …"). Re-stash
+/// the granting ability's decline-branch `sub_ability` as the pending
+/// continuation so the resume tail's `set_priority` +
+/// `resume_with_error_propagation` drains it, and reset `optional_effect_performed`
+/// to false so its `Not(OptionalEffectPerformed)` gate evaluates against *this*
+/// (declined) decision — the outer `Accept` had latched the flag true via
+/// `set_optional_effect_performed_recursive(true)`. Returns true when a fallback
+/// was stashed. Riders (graveyard-redirect / enters-with-counter — `condition:
+/// None`) are excluded by the shared decline-branch authority
+/// (`should_resolve_subability_on_optional_decline`), so a subless or
+/// rider-only hand cast falls through to the caller's consume-and-no-op path.
+/// (issue #5945)
+pub(crate) fn stash_declined_cast_fallback(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Some(sub) = ability.sub_ability.as_deref() else {
+        return false;
+    };
+    if !super::should_resolve_subability_on_optional_decline(sub) {
+        return false;
+    }
+    let mut fallback = sub.clone();
+    if fallback.targets.is_empty() && !ability.targets.is_empty() {
+        fallback.targets = ability.targets.clone();
+    }
+    super::apply_parent_chain_context(&mut fallback, ability, None, state);
+    // Reset AFTER apply_parent_chain_context (which copies the parent's context,
+    // carrying the Accept-latched `optional_effect_performed = true`).
+    fallback.set_optional_effect_performed_recursive(false);
+    // CR 608.2c: The land-drop's `Not(OptionalEffectPerformed)` gate has served
+    // its purpose (we only reach here because the cast was declined). It is
+    // itself optional ("you may put a land"); leaving the gate on would make its
+    // own accept latch the flag and re-trip the gate, dropping the land drop.
+    super::strip_consumed_decline_performed_gate(&mut fallback);
+    crate::game::effects::append_to_pending_continuation(state, Some(Box::new(fallback)));
+    true
+}
+
+/// CR 115.1 + CR 601.2c: "You may cast a spell ... from your hand without paying
+/// its mana cost" (Electrodominance, Baral's Expertise) has no "target" word —
+/// the spell is chosen at resolution from the granting player's hand via
+/// `EffectZoneChoice`, not stack-time targeting.
+fn open_private_zone_cast_selection(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    source_zone: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let eligible = compute_hand_pick_eligible(state, ability, target_filter, source_zone);
 
     if eligible.is_empty() {
         events.push(GameEvent::EffectResolved {
@@ -84,6 +183,15 @@ fn open_private_zone_cast_selection(
 
     let mut stash = ability.clone();
     stash.targets.clear();
+    // CR 202.3 + CR 608.2h: The "equal or lesser mana value" gate (Kellan, the
+    // Kid) references the triggering spell's mana value via a dynamic
+    // `QuantityExpr` whose referent (the trigger-event source) is only in scope
+    // WHILE THIS ABILITY RESOLVES. The pick is completed at a later
+    // `EffectZoneChoice` resume, by which point `current_trigger_event` is
+    // cleared and the reference would read 0 and reject every cast. Freeze the
+    // gate to a `Fixed` on the stashed ability now, while the trigger context is
+    // live, so the resume's finalize-time re-evaluation is correct.
+    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
         player: ability.controller,
@@ -507,11 +615,18 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
             }
             _ => None,
         };
+        // CR 202.3 + CR 608.2h: The mana-value gate was frozen to a `Fixed` on
+        // this ability's `CastFromZone` effect when the hand pick was opened
+        // (`snapshot_cast_from_zone_constraint_into_effect`), while the trigger
+        // event was still live. Read it back here (via the effect's `constraint`
+        // field, falling back to the target-filter Cmc form for direct-target
+        // during-resolution casts that never opened a hand pick).
+        let constraint = constraint.or_else(|| effective_cast_from_zone_constraint(ability));
         cast_single_target_during_resolution(
             state,
             ability,
             card,
-            constraint.or_else(|| effective_cast_from_zone_constraint(ability)),
+            constraint,
             cast_transformed,
             alt_mana_cost,
             events,
@@ -523,6 +638,46 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
         grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?,
         LingeringPermissionGrantResult::NeedsChoice
     ))
+}
+
+/// CR 608.2h: Freeze the effective mana-value gate of a hand-pick `CastFromZone`
+/// to a concrete `Fixed` on the stashed ability's effect, resolving any dynamic
+/// `QuantityExpr` (the triggering spell's mana value for Kellan, the Kid) against
+/// the still-live trigger context. The gate lives either on the effect's own
+/// `constraint` field or on the target-filter Cmc form; whichever is present is
+/// resolved and written back to `stash`'s `Effect::CastFromZone.constraint` so
+/// the later `EffectZoneChoice` resume — where `current_trigger_event` is gone —
+/// reads a value that no longer needs the trigger context. A constraint already
+/// `Fixed`, or absent, leaves the stash untouched.
+fn snapshot_cast_from_zone_constraint_into_effect(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    stash: &mut ResolvedAbility,
+) {
+    let effective = match &ability.effect {
+        Effect::CastFromZone {
+            constraint: Some(c),
+            ..
+        } => Some(c.clone()),
+        _ => effective_cast_from_zone_constraint(ability),
+    };
+    let Some(crate::types::ability::CastPermissionConstraint::ManaValue { comparator, value }) =
+        effective
+    else {
+        return;
+    };
+    if matches!(value, QuantityExpr::Fixed { .. }) {
+        return;
+    }
+    let resolved = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
+    if let Effect::CastFromZone { constraint, .. } = &mut stash.effect {
+        *constraint = Some(crate::types::ability::CastPermissionConstraint::ManaValue {
+            comparator,
+            value: QuantityExpr::Fixed {
+                value: resolved.max(0),
+            },
+        });
+    }
 }
 
 fn effective_cast_from_zone_constraint(

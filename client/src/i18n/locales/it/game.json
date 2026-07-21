@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 segnalino {{label}}\n{{description}}",
     "summary_other": "{{count}} segnalini {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ segnalini {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Ogni segnalino +1/+1 dà +1/+1 al permanente.",
       "m1m1": "Ogni segnalino -1/-1 dà -1/-1 al permanente.",
@@ -580,7 +581,8 @@
     "loopCollapseTitleCounters": "Scegli quante volte aggiungere segnalini",
     "loopCollapseTitleLife": "Scegli quante volte guadagnare punti vita",
     "loopCollapseTitleMixed": "Scegli quante volte ripetere il ciclo",
-    "loopCollapseAmountTokens": "Crea {{value}} pedine",
+    "loopCollapseAmountTokens_one": "Crea {{count}} pedina",
+    "loopCollapseAmountTokens_other": "Crea {{count}} pedine",
     "loopCollapseAmountCounters": "Aggiungi segnalini {{value}}×",
     "loopCollapseAmountLife": "Guadagna punti vita {{value}}×",
     "loopCollapseAmountMixed": "Ripeti il ciclo {{value}}×",

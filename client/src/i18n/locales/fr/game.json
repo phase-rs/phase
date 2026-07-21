@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 marqueur {{label}}\n{{description}}",
     "summary_other": "{{count}} marqueurs {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ marqueurs {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Chaque marqueur +1/+1 donne +1/+1 au permanent.",
       "m1m1": "Chaque marqueur -1/-1 donne -1/-1 au permanent.",
@@ -580,7 +581,8 @@
     "loopCollapseTitleCounters": "Choisissez combien de fois ajouter des marqueurs",
     "loopCollapseTitleLife": "Choisissez combien de fois gagner des points de vie",
     "loopCollapseTitleMixed": "Choisissez combien de fois répéter la boucle",
-    "loopCollapseAmountTokens": "Créer {{value}} jetons",
+    "loopCollapseAmountTokens_one": "Créer {{count}} jeton",
+    "loopCollapseAmountTokens_other": "Créer {{count}} jetons",
     "loopCollapseAmountCounters": "Ajouter des marqueurs {{value}}×",
     "loopCollapseAmountLife": "Gagner des points de vie {{value}}×",
     "loopCollapseAmountMixed": "Répéter la boucle {{value}}×",

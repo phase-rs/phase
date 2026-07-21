@@ -1306,8 +1306,11 @@ pub struct ZoneChangeRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trigger_definitions: Vec<TriggerEntry>,
     /// The complete source projection captured at the same authority as this
-    /// record. Legacy hand-built records intentionally leave this absent; only
-    /// a real zone-change snapshot may supply an LKI source context.
+    /// record. Real records own the exact pre-change source authority. Legacy
+    /// hand-built or deserialized records may leave this absent; only
+    /// `TriggerCondition::HadCounters` may then consult the lower-fidelity
+    /// ObjectId-keyed LKI cache for compatibility. A present context whose
+    /// identity disagrees with the record is malformed, not absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_source_context: Option<TriggerSourceContext>,
     /// CR 208.1: Power as of the zone change.
@@ -1418,7 +1421,10 @@ pub struct ZoneChangeRecord {
 impl ZoneChangeRecord {
     /// Returns the owned source context captured with this exact event record.
     /// Callers must not reconstruct a source from a current object or from an
-    /// ObjectId-keyed LKI cache when this is absent.
+    /// ObjectId-keyed LKI cache when this is absent. The sole compatibility
+    /// exception is `TriggerCondition::HadCounters`, which may use the cache
+    /// only for a legacy/defaulted record with no context; present incoherence
+    /// must fail closed.
     pub fn trigger_source_context(&self) -> Option<&TriggerSourceContext> {
         self.trigger_source_context.as_ref()
     }
@@ -3379,7 +3385,13 @@ pub struct PendingCopyTokenBatch {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PersistentAxisMaterialization {
     /// CR 707.2 + CR 111.1: mint N tapped copy-tokens of this fodder profile
-    /// (the `TokensCreated` axis).
+    /// (the `TokensCreated` axis). Carries NO per-cycle count because the per-cycle
+    /// fodder count k is STRUCTURALLY ≡ 1: this stash is only registered when
+    /// `materialize_object_growth_shortcut`'s `derived_fodder_class`
+    /// (engine.rs:1991-2005) found EXACTLY one new battlefield object per period
+    /// (a two+-object period returns `None` ⇒ no `Tokens` stash), so the boundary
+    /// mint of `count: amount` == k·amount is EXACT. (Contrast `Counters`/`Life`,
+    /// which carry a measured `per_cycle_delta` to handle k>1.)
     Tokens(Box<CopiableValues>),
     /// CR 122.1 / CR 701.34a: apply `per_cycle_delta × N` counters to each captured
     /// target (the beneficial-growable counter axis: Generic / +1/+1 / loyalty / defense).

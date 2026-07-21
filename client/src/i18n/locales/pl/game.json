@@ -413,6 +413,7 @@
   "counterTooltip": {
     "summary_one": "1 znacznik {{label}}\n{{description}}",
     "summary_other": "{{count}} znaczników {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ znaczników {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Każdy znacznik +1/+1 daje permanentowi +1/+1.",
       "m1m1": "Każdy znacznik -1/-1 daje permanentowi -1/-1.",
@@ -580,7 +581,8 @@
     "loopCollapseTitleCounters": "Wybierz, ile razy dodać liczniki",
     "loopCollapseTitleLife": "Wybierz, ile razy zyskać życie",
     "loopCollapseTitleMixed": "Wybierz, ile razy powtórzyć pętlę",
-    "loopCollapseAmountTokens": "Stwórz {{value}} żetonów",
+    "loopCollapseAmountTokens_one": "Stwórz {{count}} żeton",
+    "loopCollapseAmountTokens_other": "Stwórz {{count}} żetonów",
     "loopCollapseAmountCounters": "Dodaj liczniki {{value}}×",
     "loopCollapseAmountLife": "Zyskaj życie {{value}}×",
     "loopCollapseAmountMixed": "Powtórz pętlę {{value}}×",

@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-20T00:00:00Z",
+  "updated": "2026-07-21T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -329,10 +329,6 @@
           "name": "Monastery Swiftspear"
         },
         {
-          "count": 1,
-          "name": "Experimental Synthesizer"
-        },
-        {
           "count": 4,
           "name": "Flow State"
         },
@@ -389,7 +385,7 @@
           "name": "Mountain"
         },
         {
-          "count": 1,
+          "count": 2,
           "name": "Monstrous Rage"
         }
       ],
@@ -1077,32 +1073,32 @@
           "name": "Consider"
         },
         {
-          "count": 4,
-          "name": "Fiery Impulse"
+          "count": 3,
+          "name": "Demilich"
         },
         {
-          "count": 2,
-          "name": "Flashback"
+          "count": 3,
+          "name": "Fiery Impulse"
         },
         {
           "count": 3,
           "name": "Into the Flood Maw"
         },
         {
-          "count": 3,
-          "name": "Lightning Axe"
-        },
-        {
-          "count": 4,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
           "count": 1,
-          "name": "Otawara, Soaring City"
+          "name": "Jwari Disruption"
+        },
+        {
+          "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
+          "name": "Opt"
+        },
+        {
+          "count": 3,
+          "name": "Island"
         },
         {
           "count": 4,
@@ -1110,15 +1106,23 @@
         },
         {
           "count": 1,
-          "name": "Prismari Command"
-        },
-        {
-          "count": 1,
           "name": "Proft's Eidetic Memory"
         },
         {
+          "count": 4,
+          "name": "Riverglide Pathway"
+        },
+        {
+          "count": 2,
+          "name": "Shivan Reef"
+        },
+        {
           "count": 1,
-          "name": "Stormcarved Coast"
+          "name": "Hall of Storm Giants"
+        },
+        {
+          "count": 3,
+          "name": "Lightning Axe"
         },
         {
           "count": 4,
@@ -1126,15 +1130,7 @@
         },
         {
           "count": 4,
-          "name": "Opt"
-        },
-        {
-          "count": 4,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
+          "name": "Spirebluff Canal"
         },
         {
           "count": 4,
@@ -1148,27 +1144,47 @@
         },
         {
           "count": 1,
-          "name": "Brazen Borrower"
+          "name": "Brotherhood's End"
+        },
+        {
+          "count": 1,
+          "name": "Chandra's Defeat"
+        },
+        {
+          "count": 1,
+          "name": "Into the Flood Maw"
+        },
+        {
+          "count": 1,
+          "name": "Jace, Wielder of Mysteries"
         },
         {
           "count": 2,
-          "name": "Disdainful Stroke"
-        },
-        {
-          "count": 4,
-          "name": "Ledger Shredder"
-        },
-        {
-          "count": 3,
           "name": "Mystical Dispute"
         },
         {
-          "count": 3,
-          "name": "Redcap Melee"
+          "count": 2,
+          "name": "Annul"
         },
         {
           "count": 1,
           "name": "Rending Volley"
+        },
+        {
+          "count": 2,
+          "name": "Spell Pierce"
+        },
+        {
+          "count": 1,
+          "name": "Thassa's Oracle"
+        },
+        {
+          "count": 1,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 1,
+          "name": "Fiery Impulse"
         }
       ]
     },
