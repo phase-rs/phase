@@ -17,12 +17,14 @@ import { MemoryRouter, Route, Routes } from "react-router";
 
 import { GamePage } from "../GamePage";
 import type { FormatConfig } from "../../adapter/types";
+import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
 // Capture `onNoDeck` from GameProvider so tests can fire it.
 let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | undefined;
 let capturedFormatConfig: FormatConfig | undefined;
+let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 
 const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
@@ -61,13 +63,16 @@ vi.mock("../../providers/GameProvider", () => ({
   GameProvider: ({
     children,
     onNoDeck,
+    onWsEvent,
     formatConfig,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
+    onWsEvent?: (event: WsAdapterEvent) => void;
     formatConfig?: FormatConfig;
   }) => {
     capturedOnNoDeck = onNoDeck;
+    capturedOnWsEvent = onWsEvent;
     capturedFormatConfig = formatConfig;
     return <>{children}</>;
   },
@@ -232,6 +237,7 @@ function renderGamePage(initialEntry = "/game/test-game-123?mode=ai") {
 beforeEach(() => {
   capturedOnNoDeck = undefined;
   capturedFormatConfig = undefined;
+  capturedOnWsEvent = undefined;
   vi.clearAllMocks();
 });
 
@@ -240,6 +246,20 @@ afterEach(() => {
 });
 
 describe("GamePage — cEDH bracket-violation blocking modal", () => {
+  it("renders the connection-lost banner when a native engine error arrives before close", () => {
+    renderGamePage();
+
+    // NativeEngineSocket emits error before close. GameProvider disposes on the
+    // error, so close cannot emit the reconnectFailed event the banner normally
+    // consumes. This drives the pre-close adapter event directly.
+    act(() => {
+      capturedOnWsEvent?.({ type: "error", message: "WebSocket connection failed" });
+    });
+
+    expect(screen.getByText("Connection lost")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
+  });
+
   it("passes Two-Headed Giant to GameProvider for a direct local URL", () => {
     renderGamePage("/game/test-game-123?format=TwoHeadedGiant&players=4");
 
