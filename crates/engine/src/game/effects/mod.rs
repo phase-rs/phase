@@ -782,15 +782,16 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
     {
         drain_active_repeat_until(state);
     }
+    clear_post_replacement_token_choice_seed_if_resolution_drained(state);
+}
+
+/// Clears replacement-scoped token facts only after the authoritative stack drains.
+fn clear_post_replacement_token_choice_seed_if_resolution_drained(state: &mut GameState) {
     // CR 614.12a + issue #4886 (review #4): the originating token-choice
-    // applied seed must outlive EVERY drain in this function — including
-    // `drain_active_repeat_until`, which re-enters `resolve_ability_chain`
-    // (lines 721 / 744) and can emit further token proposals. Clearing before
-    // that drain (the previous bug) wiped the seed before a repeated token
-    // proposal, reopening the self-replacement loop. Clear ONLY at true
-    // full-drain: back at priority with no resident resolution frame. By this
-    // point no ability is still resolving, so no token proposal can still need
-    // the seed.
+    // applied seed must outlive every resolution drain, including
+    // `drain_active_repeat_until`, which can re-enter `resolve_ability_chain`
+    // and emit further token proposals. A dispatcher can retire the final frame
+    // after this function returns, so both it and this drain call this authority.
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.resolution_stack.is_empty()
     {
         state.post_replacement_token_choice_applied = None;
@@ -933,6 +934,8 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             }
         }
     }
+
+    clear_post_replacement_token_choice_seed_if_resolution_drained(state);
 }
 
 /// CR 608.2c + CR 107.1c: Resume a "repeat this process" loop that paused when
