@@ -477,6 +477,11 @@ fn pending_payment_remaining(state: &GameState, viewer: PlayerId) -> Option<Mana
 /// `SpecificObject` filter copy effects usually carry) keeps the projection
 /// correct for any filter shape a future copy effect might use.
 fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
+    let merge_layer_effect_id = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.merge_layer_effect_id);
+
     state.transient_continuous_effects.iter().any(|effect| {
         // A lapsed effect stays stored until it is swept, so "is it in the list"
         // is not the same question as "is it applying". Zygon Infiltrator's copy
@@ -485,6 +490,11 @@ fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
         // stopped applying. Gated on the layer engine's own predicate so the two
         // cannot drift apart.
         crate::game::layers::transient_effect_is_live(state, effect)
+            // CR 730.2a: merge uses a private Layer 1 `CopyValues` effect to
+            // represent its top component, but a merged permanent is not a
+            // copy. Exclude only that recorded representation: a merged object
+            // may still acquire an independent copy effect.
+            && Some(effect.id) != merge_layer_effect_id
             && effect
                 .modifications
                 .iter()
@@ -1450,6 +1460,50 @@ mod tests {
         assert!(
             derive_views(&state, None).copied_permanents.is_empty(),
             "a lapsed copy must not keep the badge (CR 611.2b)"
+        );
+    }
+
+    #[test]
+    fn derive_views_does_not_flag_a_merged_permanent_as_a_copy() {
+        // CR 730.2a: merge represents the top component with a private
+        // `CopyValues` Layer-1 effect, but the resulting permanent is merged,
+        // not a copy. The projection must exclude that exact effect while
+        // continuing to admit independent copy effects on the same object.
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let host = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Host".into(),
+            Zone::Battlefield,
+        );
+        let rider = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Rider".into(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        crate::game::merge::merge_object_onto(
+            &mut state,
+            rider,
+            host,
+            crate::game::merge::MergeSide::Top,
+            &mut events,
+        );
+
+        assert!(
+            state
+                .objects
+                .get(&host)
+                .and_then(|object| object.merge_layer_effect_id)
+                .is_some(),
+            "precondition: merge is represented by a CopyValues layer effect"
+        );
+        assert!(
+            derive_views(&state, None).copied_permanents.is_empty(),
+            "a merge representation must not produce a Copy badge"
         );
     }
 
