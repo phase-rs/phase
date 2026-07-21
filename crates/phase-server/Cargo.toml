@@ -20,7 +20,7 @@ axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive", "env"] }
 http = "1"
 minisign-verify = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["brotli", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["brotli", "rustls-tls-webpki-roots"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }

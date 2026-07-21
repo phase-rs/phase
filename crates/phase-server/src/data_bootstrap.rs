@@ -1,18 +1,21 @@
 use std::fmt;
 use std::io::Write;
 use std::path::{Component, Path};
+use std::time::Duration;
 
 use minisign_verify::{PublicKey, Signature};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tracing::warn;
 use url::Url;
 
 pub const PINNED_DATA_MANIFEST_PUBLIC_KEY: &str =
     "RWRDZxG2otNoKLblrgD00kM0a8U0CRZUGHpNCr3W+3ik1E84XHcB6hZe";
 const RELEASE_MANIFEST_BASE_URL: &str = "https://data.phase-rs.dev/desktop";
 const PREVIEW_MANIFEST_URL: &str = "https://data.phase-rs.dev/desktop/preview-server.json";
-const REQUIRED_DATA_FILES: [&str; 2] = ["card-data.json", "draft-pools.json"];
+const REQUIRED_DATA_FILES: [&str; 1] = ["card-data.json"];
+const BEST_EFFORT_DATA_FILES: [&str; 1] = ["draft-pools.json"];
 
 #[derive(Debug)]
 pub struct BootstrapError(String);
@@ -111,6 +114,11 @@ fn resolve_manifest(
     identity: Option<&ChannelIdentity>,
 ) -> Result<ManifestResolution, BootstrapError> {
     if let Some(url) = manifest_url_override {
+        if url.scheme() != "https" {
+            return Err(BootstrapError::new(format!(
+                "data manifest URL must use HTTPS, got {url}"
+            )));
+        }
         return Ok(ManifestResolution::Override(url));
     }
 
@@ -127,7 +135,7 @@ fn resolve_manifest(
             Url::parse(PREVIEW_MANIFEST_URL).expect("preview manifest URL is a valid constant"),
         )),
         None => Err(BootstrapError::new(
-            "card-data.json or draft-pools.json is missing and this binary has no PHASE_CHANNEL identity; pre-provision PHASE_DATA_DIR or pass --data-manifest-url <url>",
+            "card-data.json is missing and this binary has no PHASE_CHANNEL identity; pre-provision PHASE_DATA_DIR or pass --data-manifest-url <url>",
         )),
     }
 }
@@ -249,9 +257,15 @@ fn validate_manifest_data(data: &[DataFile]) -> Result<(), BootstrapError> {
                 file.name, file.sha256
             )));
         }
-        if let Err(error) = Url::parse(&file.url) {
-            return Err(BootstrapError::new(format!(
+        let url = Url::parse(&file.url).map_err(|error| {
+            BootstrapError::new(format!(
                 "data manifest has invalid URL for {}: {} ({error})",
+                file.name, file.url
+            ))
+        })?;
+        if url.scheme() != "https" {
+            return Err(BootstrapError::new(format!(
+                "data manifest URL for {} must use HTTPS, got {}",
                 file.name, file.url
             )));
         }
@@ -276,9 +290,10 @@ fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn missing_required_data_files(data_dir: &Path) -> Vec<&'static str> {
-    REQUIRED_DATA_FILES
-        .into_iter()
+fn missing_data_files(data_dir: &Path, names: &[&'static str]) -> Vec<&'static str> {
+    names
+        .iter()
+        .copied()
         .filter(|name| !data_dir.join(name).is_file())
         .collect()
 }
@@ -298,21 +313,45 @@ async fn bootstrap_missing_data_with_key(
     identity: Option<&ChannelIdentity>,
     public_key: &str,
 ) -> Result<(), BootstrapError> {
-    let missing = missing_required_data_files(data_dir);
-    if missing.is_empty() {
+    let missing_required = missing_data_files(data_dir, &REQUIRED_DATA_FILES);
+    let missing_best_effort = missing_data_files(data_dir, &BEST_EFFORT_DATA_FILES);
+    if missing_required.is_empty() && missing_best_effort.is_empty() {
         return Ok(());
     }
 
-    let resolution = resolve_manifest(options.manifest_url_override.clone(), identity)?;
     if options.no_data_download {
+        if missing_required.is_empty() {
+            warn!(
+                files = ?missing_best_effort,
+                "optional data files are missing; server-hosted drafts will remain disabled"
+            );
+            return Ok(());
+        }
+
+        let resolution = resolve_manifest(options.manifest_url_override.clone(), identity)?;
         return Err(BootstrapError::new(format!(
             "missing data files {}; --no-data-download prevents fetching them. Pre-provision PHASE_DATA_DIR or retry without --no-data-download (manifest: {})",
-            missing.join(", "),
+            missing_required.join(", "),
             resolution.url()
         )));
     }
 
+    let resolution = match resolve_manifest(options.manifest_url_override.clone(), identity) {
+        Ok(resolution) => resolution,
+        Err(error) if missing_required.is_empty() => {
+            warn!(
+                files = ?missing_best_effort,
+                error = %error,
+                "optional data files are missing but no manifest is available; server-hosted drafts will remain disabled"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+
     let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| BootstrapError::new(format!("failed to build HTTP client: {error}")))?;
     let manifest_url = resolution.url();
@@ -326,22 +365,24 @@ async fn bootstrap_missing_data_with_key(
     verify_manifest_signature(&manifest_bytes, &signature_bytes, public_key)?;
 
     let data = parse_manifest_data(&manifest_bytes, identity)?;
-    for file in data
-        .iter()
-        .filter(|file| missing.iter().any(|name| *name == file.name))
-    {
-        let url = Url::parse(&file.url).map_err(|error| {
-            BootstrapError::new(format!(
-                "data manifest has invalid URL for {}: {} ({error})",
-                file.name, file.url
-            ))
-        })?;
-        let bytes = fetch_bytes(&client, &url, &format!("data file {}", file.name)).await?;
-        verify_sha256(&bytes, &file.sha256, &file.name, &url)?;
-        write_verified_data_file(data_dir, &file.name, &bytes).await?;
+    for file in data.iter().filter(|file| {
+        missing_required.iter().any(|name| *name == file.name)
+            || missing_best_effort.iter().any(|name| *name == file.name)
+    }) {
+        if BEST_EFFORT_DATA_FILES.contains(&file.name.as_str()) {
+            if let Err(error) = download_data_file(&client, data_dir, file).await {
+                warn!(
+                    file = %file.name,
+                    error = %error,
+                    "optional data file could not be bootstrapped; server-hosted drafts will remain disabled"
+                );
+            }
+        } else {
+            download_data_file(&client, data_dir, file).await?;
+        }
     }
 
-    let still_missing = missing_required_data_files(data_dir);
+    let still_missing = missing_data_files(data_dir, &REQUIRED_DATA_FILES);
     if !still_missing.is_empty() {
         return Err(BootstrapError::new(format!(
             "data bootstrap did not create required files {} from manifest {}",
@@ -350,6 +391,22 @@ async fn bootstrap_missing_data_with_key(
         )));
     }
     Ok(())
+}
+
+async fn download_data_file(
+    client: &Client,
+    data_dir: &Path,
+    file: &DataFile,
+) -> Result<(), BootstrapError> {
+    let url = Url::parse(&file.url).map_err(|error| {
+        BootstrapError::new(format!(
+            "data manifest has invalid URL for {}: {} ({error})",
+            file.name, file.url
+        ))
+    })?;
+    let bytes = fetch_bytes(client, &url, &format!("data file {}", file.name)).await?;
+    verify_sha256(&bytes, &file.sha256, &file.name, &url)?;
+    write_verified_data_file(data_dir, &file.name, &bytes).await
 }
 
 async fn fetch_bytes(
@@ -474,8 +531,8 @@ fn write_verified_data_file_blocking(
 mod tests {
     use super::{
         bootstrap_missing_data_with_key, identity_from_markers, parse_manifest_data,
-        verify_manifest_signature, verify_sha256, write_verified_data_file, BootstrapOptions,
-        ChannelIdentity,
+        resolve_manifest, verify_manifest_signature, verify_sha256, write_verified_data_file,
+        BootstrapOptions, ChannelIdentity,
     };
     use sha2::{Digest, Sha256};
     use url::Url;
@@ -546,6 +603,47 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_https_manifest_data_urls() {
+        let manifest = br#"{
+            "schema": 1,
+            "channel": "release",
+            "version": "test",
+            "data": [
+                {"name": "card-data.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "url": "http://example.test/card-data.json"}
+            ]
+        }"#;
+
+        let error = parse_manifest_data(manifest, None).expect_err("HTTP data URL must fail");
+
+        assert!(error.to_string().contains("must use HTTPS"));
+    }
+
+    #[test]
+    fn release_manifest_allows_missing_optional_draft_pools() {
+        let manifest = br#"{
+            "schema": 1,
+            "channel": "release",
+            "version": "test",
+            "data": [
+                {"name": "card-data.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "url": "https://example.test/card-data.json"}
+            ]
+        }"#;
+
+        parse_manifest_data(manifest, None).expect("draft pools are optional manifest data");
+    }
+
+    #[test]
+    fn rejects_non_https_manifest_override() {
+        let error = resolve_manifest(
+            Some(Url::parse("http://example.test/manifest.json").expect("URL")),
+            None,
+        )
+        .expect_err("HTTP manifest override must fail");
+
+        assert!(error.to_string().contains("must use HTTPS"));
+    }
+
+    #[test]
     fn signature_verification_accepts_signed_fixture_and_rejects_tampering() {
         verify_manifest_signature(
             SIGNED_TEST_MANIFEST,
@@ -602,9 +700,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_missing_draft_pools_without_identity_is_best_effort() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("card-data.json"), "self-hosted data")
+            .expect("write card data");
+        let options = BootstrapOptions {
+            manifest_url_override: None,
+            no_data_download: false,
+        };
+
+        bootstrap_missing_data_with_key(temp.path(), &options, None, TEST_PUBLIC_KEY)
+            .await
+            .expect("missing optional draft pools must not prevent startup");
+    }
+
+    #[tokio::test]
+    async fn only_missing_draft_pools_with_no_data_download_is_best_effort() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("card-data.json"), "self-hosted data")
+            .expect("write card data");
+        let options = BootstrapOptions {
+            manifest_url_override: None,
+            no_data_download: true,
+        };
+
+        bootstrap_missing_data_with_key(temp.path(), &options, None, TEST_PUBLIC_KEY)
+            .await
+            .expect("--no-data-download must not prevent startup for optional draft pools");
+    }
+
+    #[tokio::test]
     async fn no_data_download_fails_before_network_access() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let manifest_url = Url::parse("http://127.0.0.1:1/manifest.json").expect("URL");
+        std::fs::write(temp.path().join("draft-pools.json"), "self-hosted data")
+            .expect("write draft pools");
+        let manifest_url = Url::parse("https://127.0.0.1:1/manifest.json").expect("URL");
         let options = BootstrapOptions {
             manifest_url_override: Some(manifest_url.clone()),
             no_data_download: true,
@@ -614,10 +744,29 @@ mod tests {
             .await
             .expect_err("missing data must fail without a download");
 
-        assert!(error
+        assert!(error.to_string().contains("card-data.json"));
+        assert!(!error
             .to_string()
             .contains("card-data.json, draft-pools.json"));
         assert!(error.to_string().contains(manifest_url.as_str()));
+    }
+
+    #[tokio::test]
+    async fn missing_card_data_without_identity_remains_fatal() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("draft-pools.json"), "self-hosted data")
+            .expect("write draft pools");
+        let options = BootstrapOptions {
+            manifest_url_override: None,
+            no_data_download: false,
+        };
+
+        let error = bootstrap_missing_data_with_key(temp.path(), &options, None, TEST_PUBLIC_KEY)
+            .await
+            .expect_err("missing card data without an identity must fail");
+
+        assert!(error.to_string().contains("card-data.json"));
+        assert!(error.to_string().contains("no PHASE_CHANNEL identity"));
     }
 
     #[test]
