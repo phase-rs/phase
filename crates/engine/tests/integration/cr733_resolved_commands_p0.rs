@@ -6,8 +6,7 @@ use std::process::Command;
 use serde_json::Value;
 
 const AUTHORITY_MATRIX: &str = include_str!("../fixtures/cr733/authority_matrix.json");
-const WRITE_SITE_CLASSIFICATIONS: &str =
-    include_str!("../fixtures/cr733/blocked_write_sites.json");
+const WRITE_SITE_CLASSIFICATIONS: &str = include_str!("../fixtures/cr733/blocked_write_sites.json");
 
 #[test]
 fn cr733_authority_matrix_covers_the_fresh_write_census() {
