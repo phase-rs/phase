@@ -1804,19 +1804,45 @@ fn sacrificed_object_context_from_events(
     // (singular). When the parent effect sacrificed more than one permanent there
     // is no single resolvable subject, so yield no snapshot — mirroring the guard
     // in `moved_object_context_from_events`.
-    let mut sacrificed = events.iter().filter_map(|event| match event {
-        GameEvent::PermanentSacrificed { object_id, .. } => state
-            .lki_cache
-            .get(object_id)
-            .cloned()
-            .map(|lki| CostPaidObjectSnapshot {
-                object_id: *object_id,
-                lki,
-            }),
+    //
+    // CR 701.21a + CR 400.7j + CR 608.2h: Prefer the battlefield-exit LKI cache
+    // entry, but if that miss-filters the `PermanentSacrificed` event (cache gap
+    // after a redirected move), fall back to the same-span `ZoneChanged` record
+    // for that object so "that creature's toughness" still binds (Consuming
+    // Vapors / Tribute to Hunger class — issue #5925).
+    let mut sacrificed_ids = events.iter().filter_map(|event| match event {
+        GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
         _ => None,
     });
-    let first = sacrificed.next()?;
-    sacrificed.next().is_none().then_some(first)
+    let object_id = sacrificed_ids.next()?;
+    if sacrificed_ids.next().is_some() {
+        return None;
+    }
+    snapshot_for_sacrificed_object(state, events, object_id)
+}
+
+/// CR 701.21a + CR 608.2h: Build a singular sacrifice referent from LKI cache,
+/// then from the same-span battlefield-exit `ZoneChanged` record.
+fn snapshot_for_sacrificed_object(
+    state: &GameState,
+    events: &[GameEvent],
+    object_id: ObjectId,
+) -> Option<CostPaidObjectSnapshot> {
+    if let Some(lki) = state.lki_cache.get(&object_id).cloned() {
+        return Some(CostPaidObjectSnapshot { object_id, lki });
+    }
+    events.iter().find_map(|event| match event {
+        GameEvent::ZoneChanged {
+            object_id: moved_id,
+            from: Some(Zone::Battlefield),
+            to,
+            record,
+        } if *moved_id == object_id && is_public_zone(*to) => Some(CostPaidObjectSnapshot {
+            object_id,
+            lki: lki_snapshot_from_zone_change_record(record),
+        }),
+        _ => None,
+    })
 }
 
 fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObjectSnapshot> {
@@ -6742,7 +6768,24 @@ fn perform_player_scope_sacrifices(
     }
     if completion.propagate_parent_context {
         if let Some(snapshot) =
-            parent_referent_context_from_events(state, &events[events_before_sacrifice..])
+            parent_referent_context_from_events(state, &events[events_before_sacrifice..]).or_else(
+                || {
+                    // CR 608.2c + CR 701.21a: When the event-scan referent misses
+                    // (e.g. PermanentSacrificed without a matching LKI row) but the
+                    // completion ledger recorded exactly one sacrifice, bind that
+                    // object so a chained Demonstrative / CostPaidObject quantity
+                    // still reads the sacrificed permanent (issue #5925).
+                    (completion.sacrificed.len() == 1)
+                        .then_some(())
+                        .and_then(|_| {
+                            snapshot_for_sacrificed_object(
+                                state,
+                                &events[events_before_sacrifice..],
+                                completion.sacrificed[0],
+                            )
+                        })
+                },
+            )
         {
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 frame
@@ -8989,6 +9032,21 @@ fn resolve_chain_body(
         owned.set_amassed_army_object_recursive(snapshot.clone());
         amassed_army_owned = owned;
         &amassed_army_owned
+    } else {
+        ability
+    };
+    // CR 608.2c + CR 400.7j: Stamp the earlier-instruction referent onto the
+    // ability carrier before walking the sub-chain — mirrors `amassed_army`
+    // so Demonstrative / CostPaidObject quantities on a SequentialSibling
+    // (Consuming Vapors: "You gain life equal to that creature's toughness")
+    // resolve against the sacrificed object even when a later hand-off path
+    // forgets the explicit `apply_parent_chain_context` argument (issue #5925).
+    let effect_context_owned;
+    let ability = if let Some(snapshot) = &effect_context_object {
+        let mut owned = ability.clone();
+        owned.set_effect_context_object_recursive(snapshot.clone());
+        effect_context_owned = owned;
+        &effect_context_owned
     } else {
         ability
     };
@@ -14654,6 +14712,210 @@ mod tests {
         // Choosing the MV-3 creature -> lose 3 life (20 -> 17): proves the
         // stamp tracks the actual choice, not the first eligible card.
         run_effect_zone_choice_lose_life_case(false);
+    }
+
+    /// CR 608.2c + CR 701.21a + CR 119.3 + CR 400.7j (issue #5925):
+    /// "Target player sacrifices a creature of their choice. You gain life
+    /// equal to that creature's toughness." — the interactive
+    /// `EffectZoneChoice` must stamp the sacrificed creature onto the pending
+    /// GainLife continuation so `Toughness { Demonstrative }` reads LKI, not 0.
+    fn run_target_player_sacrifice_then_gain_life_case(choose_tough_5: bool) {
+        let mut state = GameState::new_two_player(42);
+        let tough5 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Five Toughness".to_string(),
+            Zone::Battlefield,
+        );
+        let tough2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Two Toughness".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, toughness) in [(tough5, 5), (tough2, 2)] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(1);
+            obj.toughness = Some(toughness);
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(toughness);
+            obj.controller = PlayerId(1);
+        }
+
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Demonstrative,
+                    },
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        gain_life.sub_link = SubAbilityLink::SequentialSibling;
+
+        let sacrifice = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(gain_life);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &sacrifice, &mut events, 0).unwrap();
+
+        let choice_player = match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                effect_kind: EffectKind::Sacrifice,
+                cards,
+                ..
+            } => {
+                assert!(cards.contains(&tough5));
+                assert!(cards.contains(&tough2));
+                *player
+            }
+            other => panic!("expected EffectZoneChoice for sacrifice, got {other:?}"),
+        };
+        assert!(
+            state.active_ability_continuation().is_some(),
+            "GainLife tail must be stashed as a pending continuation"
+        );
+        assert_eq!(
+            choice_player,
+            PlayerId(1),
+            "target player chooses the sacrifice"
+        );
+
+        let chosen = if choose_tough_5 { tough5 } else { tough2 };
+        let unchosen = if choose_tough_5 { tough2 } else { tough5 };
+        let expected_gain = if choose_tough_5 { 5 } else { 2 };
+
+        crate::game::engine::apply(
+            &mut state,
+            choice_player,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            state.objects[&chosen].zone,
+            Zone::Graveyard,
+            "chosen creature must be sacrificed"
+        );
+        assert_eq!(
+            state.objects[&unchosen].zone,
+            Zone::Battlefield,
+            "unchosen creature must remain"
+        );
+        // Discriminating: controller gains the chosen creature's toughness.
+        // A stamp regression leaves Demonstrative at 0 and life at 20.
+        assert_eq!(
+            state.players[0].life,
+            20 + expected_gain,
+            "controller must gain life equal to the sacrificed creature's toughness"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "target player must not gain the life (Consuming Vapors / Tribute class)"
+        );
+        assert!(
+            state.active_ability_continuation().is_none(),
+            "continuation should be drained after the sacrifice choice"
+        );
+    }
+
+    #[test]
+    fn effect_zone_choice_sacrifice_then_gain_life_reads_sacrificed_toughness() {
+        run_target_player_sacrifice_then_gain_life_case(true);
+        run_target_player_sacrifice_then_gain_life_case(false);
+    }
+
+    /// CR 608.2c + CR 701.21a: Single eligible creature auto-sacrifices (no
+    /// EffectZoneChoice). The SYNC parent→child hand-off must still capture
+    /// Demonstrative toughness for the GainLife sibling.
+    #[test]
+    fn auto_sacrifice_then_gain_life_reads_sacrificed_toughness() {
+        let mut state = GameState::new_two_player(42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Lone Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(4);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(4);
+            obj.controller = PlayerId(1);
+        }
+
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: crate::types::ability::ObjectScope::Demonstrative,
+                    },
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        gain_life.sub_link = SubAbilityLink::SequentialSibling;
+
+        let sacrifice = ResolvedAbility::new(
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: Some(ControllerRef::TargetPlayer),
+                    properties: vec![],
+                }),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(gain_life);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &sacrifice, &mut events, 0).unwrap();
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "single eligible creature must auto-sacrifice without EffectZoneChoice"
+        );
+        assert_eq!(state.objects[&creature].zone, Zone::Graveyard);
+        assert_eq!(
+            state.players[0].life, 24,
+            "controller gains life equal to the auto-sacrificed creature's toughness"
+        );
     }
 
     fn bounce_then_draw_if_controller_matched_lki(

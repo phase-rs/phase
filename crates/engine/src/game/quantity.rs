@@ -4846,9 +4846,19 @@ where
         // cost referent (slot 3: `cost_paid_object`). This arm differs from
         // `CostPaidObject` only in slot priority — instruction-order (608.2c)
         // first, vs. cost referent (608.2k) first.
+        //
+        // CR 608.2h: When the snapshot exists but its embedded LKI lacks the
+        // requested characteristic (cache-gap after a redirected sacrifice),
+        // fall through to live-then-LKI by object id — same ladder as
+        // `AmassedArmy` — so Consuming Vapors-class life gain still reads the
+        // sacrificed creature's toughness (issue #5925).
         ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .and_then(|snapshot| {
+                lki_extract(&snapshot.lki).or_else(|| {
+                    read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                })
+            })
             .or_else(|| {
                 // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
                 // ETB incarnation identity. Slots 1 and 3 are unchanged.

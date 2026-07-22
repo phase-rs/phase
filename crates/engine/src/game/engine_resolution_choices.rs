@@ -4640,6 +4640,30 @@ pub(super) fn handle_resolution_choice(
                             if state.active_ability_continuation().is_none() {
                                 state.finish_active_paused_post_replacement_dispatch();
                             }
+                            // CR 608.2c + CR 400.7j + CR 701.21a: Sacrifice's
+                            // EffectZoneChoice arm early-returns after resume, so
+                            // it never reaches the shared post-match stamp below
+                            // (ChangeZone / BounceAll / …). Re-stamp the singular
+                            // sacrificed referent onto the pending continuation
+                            // before draining so "You gain life equal to that
+                            // creature's toughness" (Consuming Vapors / Tribute to
+                            // Hunger — issue #5925) reads Demonstrative LKI, not 0.
+                            // `propagate_parent_context` already attempts this inside
+                            // `perform_player_scope_sacrifices`; this is the same
+                            // authority mirrored at the EffectZoneChoice site so a
+                            // nested active frame cannot hide the consumer.
+                            if let Some(snapshot) = effects::parent_referent_context_from_events(
+                                state,
+                                &events[events_before_sacrifice
+                                    ..events_after_sacrifice.min(events.len())],
+                            ) {
+                                if let Some(frame) = state.active_ability_continuation_frame_mut() {
+                                    frame
+                                        .pending
+                                        .chain
+                                        .set_effect_context_object_recursive(snapshot);
+                                }
+                            }
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(

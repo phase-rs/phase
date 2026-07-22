@@ -77,6 +77,7 @@ mod combat_damage_order_triggers_no_hang;
 mod combo_infinite_pile;
 mod comeuppance;
 mod companion_special_action;
+mod consuming_vapors_life_gain_5925;
 mod consuming_vapors_rebound;
 mod copy_gy_creature_mana_value_x;
 mod copy_retarget_past_rider;
