@@ -15271,7 +15271,7 @@ impl GameState {
                 unit.pip_id = id;
             }
         }
-        let pool_units: Vec<ManaUnit> = self.players[idx].mana_pool.mana.iter().cloned().collect();
+        let pool_units: Vec<ManaUnit> = self.players[idx].mana_pool.mana.to_vec();
         for unit in pool_units {
             if !self.resolved_rules_journal.has_produced_pip(unit.pip_id) {
                 let producer = self

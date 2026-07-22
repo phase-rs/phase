@@ -294,7 +294,7 @@ impl ResolvedRulesJournal {
         caused_by: Option<RulesExecutionNodeRef>,
     ) -> Result<RulesExecutionNodeRef, ResolvedRulesJournalError> {
         self.begin_settlement(
-            |ordinal| RulesExecutionNodeRef::ActivatedMana(ordinal),
+            RulesExecutionNodeRef::ActivatedMana,
             RulesExecutionNodeKind::ActivatedMana { source },
             caused_by,
             None,
@@ -312,7 +312,7 @@ impl ResolvedRulesJournal {
             .transpose()?
             .flatten();
         self.begin_settlement(
-            |ordinal| RulesExecutionNodeRef::TriggeredMana(ordinal),
+            RulesExecutionNodeRef::TriggeredMana,
             RulesExecutionNodeKind::TriggeredMana { source, trigger },
             caused_by,
             bundle_parent,
@@ -369,7 +369,7 @@ impl ResolvedRulesJournal {
             producers.push(produced.producer);
         }
         let payment = self.begin_settlement(
-            |ordinal| RulesExecutionNodeRef::Payment(ordinal),
+            RulesExecutionNodeRef::Payment,
             RulesExecutionNodeKind::Payment {
                 payer,
                 recipient: recipient.clone(),
