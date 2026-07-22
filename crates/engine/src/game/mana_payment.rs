@@ -147,7 +147,7 @@ pub fn refill_infinite_mana(state: &mut GameState) {
         for (color, count) in to_add {
             for _ in 0..count {
                 // CR 118.3a: stamp pip ids so debug-refilled mana is pinnable too.
-                state.add_mana_to_pool(
+                let _ = state.add_mana_to_pool(
                     player_id,
                     ManaUnit::new(color, ObjectId(0), false, Vec::new()),
                 );
@@ -287,7 +287,7 @@ pub fn produce_mana(
     player_id: PlayerId,
     tapped_for_mana: bool,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     produce_mana_with_attributes(
         state,
         source_id,
@@ -298,7 +298,7 @@ pub fn produce_mana(
         &[],
         None,
         events,
-    );
+    )
 }
 
 /// Produce mana and add it to a player's mana pool, carrying spend restrictions,
@@ -320,7 +320,7 @@ pub fn produce_mana_with_attributes(
     grants: &[ManaSpellGrant],
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     let source_could_produce_two_or_more_colors =
         super::mana_sources::source_could_produce_two_or_more_colors(state, source_id, player_id);
     produce_mana_with_attributes_from_source_quality(
@@ -334,7 +334,7 @@ pub fn produce_mana_with_attributes(
         grants,
         expiry,
         events,
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -349,7 +349,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     grants: &[ManaSpellGrant],
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     use crate::game::replacement::{self, ReplacementResult};
     use crate::types::proposed_event::ProposedEvent;
 
@@ -362,7 +362,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             ..
         }) => (resolved, count),
         // CR 614.1: A fully-prevented mana production produces no mana.
-        ReplacementResult::Prevented => return,
+        ReplacementResult::Prevented => return Vec::new(),
         // CR 614.5: Mana-type replacements do not require a player choice; any
         // other outcome (including unexpected pipeline results) falls back to
         // the original type so mana production is never silently dropped.
@@ -372,6 +372,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     // CR 107.4h + CR 106.3: mana produced by a snow source is snow mana (payable for {S}).
     let source_is_snow = super::mana_sources::source_is_snow(state, source_id);
 
+    let mut produced = Vec::with_capacity(final_count as usize);
     for _ in 0..final_count {
         let unit = ManaUnit {
             color: final_mana_type,
@@ -385,7 +386,9 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
         };
 
         // CR 118.3a: stamp a stable pip id on pool entry so the unit can be pinned.
-        state.add_mana_to_pool(player_id, unit);
+        if let Some(unit) = state.add_mana_to_pool(player_id, unit) {
+            produced.push(unit);
+        }
 
         events.push(GameEvent::ManaAdded {
             player_id,
@@ -397,6 +400,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     if final_count > 0 && has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
+    produced
 }
 
 /// Check if the mana pool can pay the given cost (CR 202.1a).

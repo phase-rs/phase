@@ -21,6 +21,7 @@ pub mod proposed_event;
 pub mod replacements;
 pub mod replay;
 pub mod resolution;
+pub mod resolved_commands;
 pub mod statics;
 pub mod stickers;
 pub mod triggers;
@@ -71,6 +72,11 @@ pub use resolution::{
     MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
     RESOLUTION_STATE_WIRE_VERSION,
+};
+pub use resolved_commands::{
+    ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
+    ResolvedRulesJournal, ResolvedRulesJournalError, RulesExecutionNodeKind, RulesExecutionNodeRef,
+    SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};

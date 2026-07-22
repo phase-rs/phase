@@ -3059,7 +3059,7 @@ pub(super) fn resume_delve_mana_payment(state: &mut GameState) -> WaitingFor {
     };
     // CR 118.3a: The generic-only marker is consumed by the shared mana-payment
     // finalizer and cannot be pinned or spent on a colored cost.
-    state.add_mana_to_pool(
+    let _ = state.add_mana_to_pool(
         player,
         crate::types::mana::ManaUnit::convoke_payment(
             crate::types::mana::ManaType::Colorless,
@@ -6250,7 +6250,7 @@ fn apply_action(
             // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
             // are consumed by the shared algorithm and never pinned (the frontend
             // filters ConvokePayment units); Waterbend produces real pinnable mana.
-            state.add_mana_to_pool(*player, unit);
+            let _ = state.add_mana_to_pool(*player, unit);
             if mode == ConvokeMode::Waterbend {
                 events.push(GameEvent::ManaAdded {
                     player_id: *player,

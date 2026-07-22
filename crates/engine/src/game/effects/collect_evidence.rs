@@ -612,6 +612,7 @@ mod tests {
             player: PlayerId(0),
             source_id,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,

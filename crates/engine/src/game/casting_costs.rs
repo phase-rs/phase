@@ -10118,32 +10118,35 @@ fn auto_tap_mana_sources_inner(
             }
         } else {
             // Basic-land-subtype fallback — no explicit ability, just tap + produce.
-            if let Some(obj) = state.objects.get_mut(&option.object_id) {
-                if !obj.tapped {
-                    obj.tapped = true;
-                    events.push(GameEvent::PermanentTapped {
-                        object_id: option.object_id,
-                        caused_by: None,
-                    });
+            let node = state.begin_activated_mana_journal_node(option.object_id);
+            state.with_rules_execution_node(node, |state| {
+                if let Some(obj) = state.objects.get_mut(&option.object_id) {
+                    if !obj.tapped {
+                        obj.tapped = true;
+                        events.push(GameEvent::PermanentTapped {
+                            object_id: option.object_id,
+                            caused_by: None,
+                        });
+                    }
                 }
-            }
-            mana_payment::produce_mana(
-                state,
-                option.object_id,
-                option.mana_type,
-                player,
-                true,
-                events,
-            );
-            // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
-            // always includes `{T}` in its cost, so this auto-tap fallback
-            // taps the land for mana. Emit one `TappedForMana` per resolution
-            // so `TapsForMana` triggers fire exactly once.
-            events.push(GameEvent::TappedForMana {
-                player_id: player,
-                source_id: option.object_id,
-                produced: vec![option.mana_type],
-                tap_state: ManaTapState::FromTap,
+                mana_payment::produce_mana(
+                    state,
+                    option.object_id,
+                    option.mana_type,
+                    player,
+                    true,
+                    events,
+                );
+                // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
+                // always includes `{T}` in its cost, so this auto-tap fallback
+                // taps the land for mana. Emit one `TappedForMana` per resolution
+                // so `TapsForMana` triggers fire exactly once.
+                events.push(GameEvent::TappedForMana {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    tap_state: ManaTapState::FromTap,
+                });
             });
         }
     }

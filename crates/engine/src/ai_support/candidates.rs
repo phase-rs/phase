@@ -6448,7 +6448,7 @@ mod tests {
             },
         )));
         // Floated mana that a pin could target — must still not surface a pin action.
-        state.add_mana_to_pool(
+        let _ = state.add_mana_to_pool(
             PlayerId(0),
             crate::types::mana::ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()),
         );

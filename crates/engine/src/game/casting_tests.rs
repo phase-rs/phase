@@ -45496,7 +45496,7 @@ use crate::types::mana::ManaPipId;
 /// `add_mana_to_pool` so every seeded unit is stamped distinctly (a direct
 /// `pool.add` would leave the sentinel `ManaPipId(0)` and pins would collide).
 fn seed_unit(state: &mut GameState, player: PlayerId, unit: ManaUnit) -> ManaPipId {
-    state.add_mana_to_pool(player, unit);
+    let _ = state.add_mana_to_pool(player, unit);
     state
         .players
         .iter()

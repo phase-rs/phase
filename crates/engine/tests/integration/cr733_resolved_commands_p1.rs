@@ -1,0 +1,132 @@
+//! P1 runtime coverage for resolved-command mana provenance.
+
+use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::visibility::filter_state_for_viewer;
+use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::game_state::GameState;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
+use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::resolved_commands::{
+    ManaPaymentRecipient, RulesExecutionNodeKind, RulesExecutionNodeRef,
+};
+
+const DIMIR_SIGNET_ORACLE: &str = "{1}, {T}: Add {U}{B}.";
+
+fn make_artifact(runner: &mut GameRunner, id: ObjectId) {
+    let object = runner.state_mut().objects.get_mut(&id).unwrap();
+    object.card_types.core_types = vec![CoreType::Artifact];
+    object.base_card_types = object.card_types.clone();
+    object.power = None;
+    object.toughness = None;
+    object.base_power = None;
+    object.base_toughness = None;
+}
+
+/// P1 must observe the engine's real mana-ability path, not a hand-built
+/// journal: auto-tapping a basic land pays the Signet's cost, then the Signet
+/// produces two new units. The consumed land unit must retain its exact pip,
+/// producer node, and recipient identity.
+#[test]
+fn real_mana_activation_records_exact_produced_and_spent_units() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario.add_basic_land(P0, ManaColor::White);
+    let signet = scenario
+        .add_creature_from_oracle(P0, "Dimir Signet", 0, 0, DIMIR_SIGNET_ORACLE)
+        .id();
+
+    let mut runner = scenario.build();
+    make_artifact(&mut runner, signet);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: signet,
+            ability_index: 0,
+        })
+        .expect("the real Signet mana ability must activate");
+
+    let state = runner.state();
+    let journal = &state.resolved_rules_journal;
+    let spent = journal
+        .spent_mana()
+        .first()
+        .expect("the Signet's generic cost consumes the land's exact mana unit");
+    assert_ne!(spent.unit.pip_id.0, 0, "consumed mana must be stamped");
+    assert_eq!(spent.unit.source_id, land);
+    assert!(matches!(
+        spent.producer,
+        RulesExecutionNodeRef::ActivatedMana(_)
+    ));
+    assert_eq!(
+        spent.recipient,
+        ManaPaymentRecipient::Object(ObjectIncarnationRef::from_object(&state.objects[&signet])),
+        "the payment recipient is the exact Signet incarnation"
+    );
+    assert!(
+        journal.produced_mana().iter().any(|record| {
+            record.unit.pip_id == spent.unit.pip_id
+                && record.unit == spent.unit
+                && record.producer == spent.producer
+        }),
+        "every spent pip has exactly the produced record from its producer node"
+    );
+
+    let payment = journal
+        .nodes()
+        .iter()
+        .find(|node| node.identity == spent.payment)
+        .expect("spent unit's payment node exists");
+    assert_eq!(payment.depends_on, vec![spent.producer]);
+    assert!(matches!(
+        &payment.kind,
+        RulesExecutionNodeKind::Payment { .. }
+    ));
+    let land_node = journal
+        .nodes()
+        .iter()
+        .find(|node| node.identity == spent.producer)
+        .expect("land producer node exists");
+    assert!(
+        matches!(
+            &land_node.kind,
+            RulesExecutionNodeKind::ActivatedMana { source }
+                if *source == ObjectIncarnationRef::from_object(&state.objects[&land])
+        ),
+        "the nested land activation keeps its exact source identity"
+    );
+    let signet_node = journal
+        .nodes()
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.kind,
+                RulesExecutionNodeKind::ActivatedMana { source }
+                    if *source == ObjectIncarnationRef::from_object(&state.objects[&signet])
+            )
+        })
+        .expect("the Signet activation has its own node");
+    assert_eq!(land_node.caused_by, Some(signet_node.identity));
+}
+
+#[test]
+fn provenance_journal_is_not_exposed_in_a_viewer_projection() {
+    let mut state = GameState::new_two_player(11);
+    let _ = state.add_mana_to_pool(
+        P0,
+        ManaUnit::new(ManaType::Green, ObjectId(99), false, Vec::new()),
+    );
+    assert!(
+        !state.resolved_rules_journal.produced_mana().is_empty(),
+        "authoritative state has provenance to redact"
+    );
+
+    let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+    assert!(opponent_view.resolved_rules_journal.nodes().is_empty());
+    assert!(opponent_view
+        .resolved_rules_journal
+        .produced_mana()
+        .is_empty());
+    assert!(opponent_view.resolved_rules_journal.spent_mana().is_empty());
+}

@@ -80,6 +80,10 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // payloads; the separately projected `WaitingFor` prompt is the complete
     // viewer-facing interaction surface.
     filtered.resolution_stack = Default::default();
+    // The provenance journal contains exact source identities, restrictions,
+    // and cost-recipient relationships. It is server authority and must not
+    // expose one player's mana history to another viewer.
+    filtered.resolved_rules_journal = Default::default();
     let replacement_candidate_source_ids = match &state.waiting_for {
         WaitingFor::ReplacementChoice { candidates, .. } => Some(
             candidates
@@ -1874,6 +1878,7 @@ mod tests {
             player,
             source_id,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
