@@ -31930,3 +31930,111 @@ fn parse_static_condition_requires_full_consumption() {
         Some(StaticCondition::IsRingBearer)
     );
 }
+
+// CR 205.4a + CR 105.1 + issue #6332: the Legends (1994) banding-land cycle —
+// "<Color> legendary creatures you control have \"bands with other legendary
+// creatures.\"" (Unholy Citadel [Black], Seafarer's Quay [Blue], Adventurers'
+// Guildhouse [Green], Cathedral of Serra [White], Mountain Stronghold [Red]) —
+// compounds a color adjective with the legendary supertype. Before the fix,
+// every bespoke descriptor recognizer in `parse_typed_you_control` declined:
+// `parse_named_color` requires a BARE color word (`descriptor.rest.is_empty()`
+// guard), `descriptor_is_supertype` requires a BARE supertype word
+// (`all_consuming`), and `is_capitalized_words` requires every word
+// Title-Cased (mid-sentence Oracle text lowercases "legendary"). The whole
+// static line failed to parse and the card did nothing.
+#[test]
+fn parse_unholy_citadel_black_legendary_bands_with_other() {
+    use crate::types::mana::ManaColor;
+
+    let def = parse_static_line(
+        "Black legendary creatures you control have \"bands with other legendary creatures.\" (Any legendary creatures can attack in a band as long as at least one has \"bands with other legendary creatures.\" Bands are blocked as a group. If at least two legendary creatures you control, one of which has \"bands with other legendary creatures,\" are blocking or being blocked by the same creature, you divide that creature's combat damage, not its controller, among any of the creatures it's being blocked by or is blocking.)",
+    )
+    .expect("the color+legendary compound subject must parse (was Unimplemented)");
+    assert_eq!(def.mode, StaticMode::Continuous);
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected a Typed filter, got {:?}", def.affected);
+    };
+    assert_eq!(tf.controller, Some(ControllerRef::You));
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "subject must still be scoped to creatures: {:?}",
+        tf.type_filters
+    );
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasColor {
+                color: ManaColor::Black
+            }
+        )),
+        "the color adjective must survive: {:?}",
+        tf.properties
+    );
+    assert!(
+        tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary
+            }
+        )),
+        "the legendary supertype must survive alongside the color: {:?}",
+        tf.properties
+    );
+    // The quoted grant itself and its "Legend" quality normalization are
+    // pre-existing, already-tested machinery (`parse_granted_keyword_fragment`,
+    // `normalize_bands_with_other_quality`) — this only pins that the subject
+    // fix lets the grant actually reach them.
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::BandsWithOther("Legend".to_string())
+        }]
+    );
+}
+
+// Build-for-the-class regression: the fix is a general compound-descriptor
+// fallback, not a one-off for Black — it must generalize across every color in
+// the cycle. Seafarer's Quay is the Blue member.
+#[test]
+fn parse_seafarers_quay_blue_legendary_bands_with_other() {
+    use crate::types::mana::ManaColor;
+
+    let def = parse_static_line(
+        "Blue legendary creatures you control have \"bands with other legendary creatures.\"",
+    )
+    .expect("the color+legendary compound subject must parse for every color in the cycle");
+    let Some(TargetFilter::Typed(ref tf)) = def.affected else {
+        panic!("expected a Typed filter, got {:?}", def.affected);
+    };
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasColor {
+            color: ManaColor::Blue
+        }
+    )));
+    assert!(tf.properties.iter().any(|p| matches!(
+        p,
+        FilterProp::HasSupertype {
+            value: Supertype::Legendary
+        }
+    )));
+    assert_eq!(
+        def.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::BandsWithOther("Legend".to_string())
+        }]
+    );
+}
+
+// Decline guard: the new fallback delegates to `parse_type_phrase` and
+// requires FULL consumption of the subject as a single `Typed` filter. An
+// unrecognized leading word before "legendary" must not be silently accepted
+// as a fabricated filter — it must still fall through to `Unimplemented`
+// rather than mis-parsing into a filter that matches nothing (or everything).
+#[test]
+fn parse_unrecognized_word_legendary_creatures_you_control_declines() {
+    assert_eq!(
+        parse_static_line("Zzyzx legendary creatures you control have flying."),
+        None
+    );
+}

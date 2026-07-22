@@ -125,6 +125,36 @@ pub(crate) fn parse_typed_you_control(
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
+                // CR 105.1 + CR 205.4a: a descriptor ending in a supertype word
+                // ("Black legendary", "Blue legendary", ...) compounds a color
+                // adjective with a trailing supertype — the Legends
+                // banding-land cycle (Unholy Citadel, Seafarer's Quay,
+                // Adventurers' Guildhouse, Cathedral of Serra, Mountain
+                // Stronghold): "<Color> legendary creatures you control have
+                // \"bands with other legendary creatures.\"" (issue #6332).
+                // None of the bespoke arms above recognize a compound
+                // descriptor, so delegate the full subject to
+                // `parse_type_phrase` — the general subject-filter grammar
+                // that already composes a color prefix and a supertype prefix
+                // in either order (see its leading and post-negation
+                // supertype/color passes in `oracle_target.rs`) — rather than
+                // growing a second bespoke color+supertype combinator here.
+                // Declines unless the whole subject is consumed as a single
+                // Typed filter, so this cannot misfire into a fabricated
+                // filter for an unrelated descriptor shape.
+                } else if descriptor
+                    .rsplit(' ')
+                    .next()
+                    .is_some_and(descriptor_is_supertype)
+                {
+                    let subject_and_type = tp.original[..creatures_pos + " creatures".len()].trim();
+                    let (compound_filter, remainder) = parse_type_phrase(subject_and_type);
+                    match compound_filter {
+                        TargetFilter::Typed(typed) if remainder.trim().is_empty() => {
+                            TargetFilter::Typed(typed.controller(ControllerRef::You))
+                        }
+                        _ => return None,
+                    }
                 } else {
                     return None;
                 }
