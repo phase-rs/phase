@@ -9519,11 +9519,24 @@ fn collect_sorted_auto_tap_source_options(
         .filter(|oid| !excluded_sources.contains(oid))
         .filter_map(|&oid| {
             let obj = state.objects.get(&oid)?;
+            if obj.controller != player {
+                return None;
+            }
+            // CR 106.12 + CR 302.6: The tapped prefilter only holds for `{T}`
+            // sources. A permanent whose payable mana ability is an unambiguous
+            // self-sacrifice (Gold's "Sacrifice this token: Add one mana of any
+            // color.") can still pay while tapped, so it must reach
+            // `auto_tap_mana_options`, which re-applies the per-ability `{T}`
+            // gate. Every other tapped source is dropped here as before.
+            if obj.tapped && !mana_sources::object_has_tapless_self_sacrifice_mana_ability(obj) {
+                return None;
+            }
             // CR 701.26a + CR 508.1f: a "can't become tapped" mana source (e.g. a
-            // goaded mana dork) can't be auto-tapped to pay for a spell.
-            if obj.controller != player
-                || obj.tapped
-                || crate::game::restrictions::object_cant_tap(state, oid)
+            // goaded mana dork) can't be auto-tapped for its `{T}` ability. A
+            // self-sacrifice source needs no tap, so this restriction does not
+            // apply to it; the per-ability gate keeps `{T}` costs off-limits.
+            if crate::game::restrictions::object_cant_tap(state, oid)
+                && !mana_sources::object_has_tapless_self_sacrifice_mana_ability(obj)
             {
                 return None;
             }

@@ -291,6 +291,30 @@ pub(crate) fn has_unambiguous_self_sacrifice_component(cost: &Option<AbilityCost
     })
 }
 
+/// CR 605.3a + CR 106.12 + CR 302.6: True when `obj` has an activated mana
+/// ability that pays purely by sacrificing its own source with **no** `{T}`
+/// component (Gold's "Sacrifice this token: Add one mana of any color."). Such
+/// an ability is unaffected by the untapped/summoning-sickness gate, so a
+/// *tapped* or summoning-sick source can still pay it. Auto-tap source
+/// discovery uses this to decide whether the tapped/summoning-sick object-level
+/// prefilter may be skipped for that source.
+///
+/// A source whose only self-sacrifice mana ability *also* carries `{T}`
+/// (Treasure's `{T}, Sacrifice this artifact`) is deliberately excluded: once
+/// tapped it genuinely cannot activate, so it must stay behind the object-level
+/// tapped prefilter — skipping it would let the tapped source re-enter the
+/// per-ability payability scan and break the auto-tap linearity guarantee.
+pub(crate) fn object_has_tapless_self_sacrifice_mana_ability(
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && mana_abilities::is_mana_ability(ability)
+            && has_unambiguous_self_sacrifice_component(&ability.cost)
+            && !has_tap_component(&ability.cost)
+    })
+}
+
 /// CR 605.3a + CR 106.12 + CR 107.6: True when paying this mana-ability cost is
 /// conclusively decided by the non-simulating cheap gate, so
 /// `can_activate_mana_ability_now` may skip the full-state legality clone.
@@ -1001,10 +1025,23 @@ pub(crate) fn auto_tap_mana_options(
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
-    if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
+    if obj.zone != Zone::Battlefield || obj.controller != controller {
         return Vec::new();
     }
-    if restrictions::summoning_sick_for_tap_ability(state, obj) {
+    // CR 106.12 + CR 302.6: The tapped / summoning-sickness prefilter is only
+    // valid for a `{T}` cost. A source whose sole payable mana ability is an
+    // unambiguous self-sacrifice (Gold's "Sacrifice this token: Add one mana of
+    // any color.") can pay even while tapped or summoning-sick, so we must not
+    // discard it at the object level. When such an ability is present we fall
+    // through to `scan_mana_abilities`; the per-ability `{T}` gate in
+    // `is_active_tap_mana_ability` still rejects any tap-cost ability of a
+    // tapped/summoning-sick source, so no `{T}` source leaks through.
+    if obj.tapped && !object_has_tapless_self_sacrifice_mana_ability(obj) {
+        return Vec::new();
+    }
+    if restrictions::summoning_sick_for_tap_ability(state, obj)
+        && !object_has_tapless_self_sacrifice_mana_ability(obj)
+    {
         return Vec::new();
     }
     scan_mana_abilities(state, obj, object_id, controller, false, None)
@@ -1800,6 +1837,28 @@ fn scan_mana_abilities(
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
     for (ability_index, ability) in obj.abilities.iter().enumerate() {
+        // CR 106.12 + CR 302.6 + CR 107.6: On the auto-tap path
+        // (`require_current_payability == false`) `is_active_tap_mana_ability`
+        // does not consult the current-payability gate, so a `{T}`/`{Q}` ability
+        // of a *tapped* or summoning-sick source would otherwise be offered.
+        // This can only be reached when the object-level tapped/summoning-sick
+        // prefilter was skipped because the source carries a tapless
+        // self-sacrifice mana ability (Gold); its own `{T}` abilities (if any)
+        // must still be excluded here. A pure cost/field check — no legality
+        // simulation, so it never triggers a readiness call and leaves the
+        // `require_current_payability == true` callers (which already gate via
+        // `can_activate_mana_ability_now`) untouched.
+        if !require_current_payability
+            && (has_tap_component(&ability.cost) || has_untap_component(&ability.cost))
+        {
+            let tap_gated = has_tap_component(&ability.cost)
+                && (obj.tapped || restrictions::object_cant_tap(state, object_id));
+            let untap_gated = has_untap_component(&ability.cost) && !obj.tapped;
+            let sick_gated = restrictions::summoning_sick_for_tap_ability(state, obj);
+            if tap_gated || untap_gated || sick_gated {
+                continue;
+            }
+        }
         if !is_active_tap_mana_ability(
             state,
             object_id,

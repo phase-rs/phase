@@ -91,3 +91,41 @@ fn treasure_token_is_auto_tapped_for_mana_control_case() {
     outcome.assert_zone(&[spell], Zone::Graveyard);
     outcome.assert_hand_drawn(P0, 1);
 }
+
+/// Regression for the maintainer review on PR #6230: a Gold token that is
+/// already **tapped** (and summoning-sick) must still be selected by the
+/// auto-tap payment path. Gold's cost is "Sacrifice this token: Add one mana
+/// of any color." — an unambiguous self-sacrifice with **no** `{T}` component
+/// (CR 111.10c). CR 106.12 / CR 302.6 gate only `{T}`/`{Q}` costs on an
+/// untapped, non-summoning-sick source, so a tapped Gold can legally pay a
+/// sacrifice cost. The earlier object-level tapped/summoning-sickness prefilter
+/// short-circuited before the self-sacrifice predicate could run, leaving the
+/// spell unpayable; this test fails on that pre-fix code and passes once the
+/// prefilter is made conditional on the ability requiring `{T}`.
+#[test]
+fn tapped_gold_token_still_auto_taps_for_self_sacrifice_mana() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = draw_spell(&mut scenario);
+    let mut runner = scenario.build();
+    let gold = make_token(runner.state_mut(), 902, "Gold");
+    // Tap the Gold token and mark it summoning-sick: neither state may block a
+    // sacrifice-cost mana ability, since the cost carries no `{T}` symbol.
+    {
+        let obj = runner.state_mut().objects.get_mut(&gold).unwrap();
+        obj.tapped = true;
+        obj.summoning_sick = true;
+    }
+
+    let outcome = runner.cast(spell).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "auto payment should fully resolve using a tapped Gold token via its \
+         self-sacrifice mana ability without pausing for manual input, got {:?}",
+        outcome.final_waiting_for()
+    );
+    outcome.assert_zone(&[gold], Zone::Graveyard);
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    outcome.assert_hand_drawn(P0, 1);
+}
