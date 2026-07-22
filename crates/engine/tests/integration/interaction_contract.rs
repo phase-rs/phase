@@ -16,9 +16,9 @@ use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, CastingVariant, GameState,
-    MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason,
-    PendingTriggerSummary, TurnBoundary, WaitingFor,
+    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, GameState, MulliganBottomEntry,
+    MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PendingTriggerSummary,
+    TurnBoundary, WaitingFor,
 };
 use engine::types::identifiers::CardId;
 use engine::types::interaction::{
