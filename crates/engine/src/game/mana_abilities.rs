@@ -223,6 +223,15 @@ pub fn resolve_triggered_mana_ability_inline(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
 ) {
+    // CR 603.3d: a triggered mana ability still resolves after its source has
+    // left its zone. Production paths carry exact identity via the Plan-04
+    // `trigger_source` context (captured at trigger time, LKI-safe); the
+    // object lookup covers pre-P04 callers whose source is still present.
+    // When neither is available (source gone AND no trigger context — only
+    // synthetic/legacy callers), no dedicated journal node is begun: produced
+    // mana falls back to the automatic Proposal attribution in
+    // `add_mana_to_pool`, preserving pip conservation without fabricating an
+    // exact incarnation identity.
     let source = ability
         .trigger_source
         .as_ref()
@@ -232,22 +241,23 @@ pub fn resolve_triggered_mana_ability_inline(
                 .objects
                 .get(&ability.source_id)
                 .map(crate::types::ObjectIncarnationRef::from_object)
-        })
-        .expect("triggered mana ability must retain exact source identity");
-    let caused_by = match trigger_event {
-        Some(
-            GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
-        ) => state
-            .resolved_rules_journal
-            .latest_mana_producer_for_source(*source_id),
-        _ => None,
-    };
-    let node = state.begin_triggered_mana_journal_node(
-        source,
-        ability.trigger_definition_ref.clone(),
-        caused_by,
-    );
-    state.with_rules_execution_node(node, |state| {
+        });
+    let node = source.map(|source| {
+        let caused_by = match trigger_event {
+            Some(
+                GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+            ) => state
+                .resolved_rules_journal
+                .latest_mana_producer_for_source(*source_id),
+            _ => None,
+        };
+        state.begin_triggered_mana_journal_node(
+            source,
+            ability.trigger_definition_ref.clone(),
+            caused_by,
+        )
+    });
+    state.with_optional_rules_execution_node(node, |state| {
         let previous_trigger_event = state.current_trigger_event.clone();
         let previous_mana_override = state.current_triggered_mana_override.take();
         state.current_trigger_event = trigger_event.cloned();

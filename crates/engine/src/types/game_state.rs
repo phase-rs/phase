@@ -15203,6 +15203,21 @@ impl GameState {
         result
     }
 
+    /// `with_rules_execution_node` for callers whose node is conditional
+    /// (CR 603.3d source-gone triggered mana): with `None` the operation runs
+    /// under the enclosing scope unchanged, so produced mana falls back to the
+    /// ambient node or the automatic Proposal attribution.
+    pub(crate) fn with_optional_rules_execution_node<T>(
+        &mut self,
+        node: Option<RulesExecutionNodeRef>,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        match node {
+            Some(node) => self.with_rules_execution_node(node, operation),
+            None => operation(self),
+        }
+    }
+
     /// CR 118.3a: Record the exact stamped pool units consumed for one mana
     /// cost component. The payment solver remains authoritative for which
     /// units leave the pool; this only captures its completed result.

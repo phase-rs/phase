@@ -166,6 +166,15 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
                     "out-of-reachable field {field:?} must state why it is outside the P0 closure"
                 );
             }
+            // The provenance journal (P1) is the recording sink itself: its
+            // writes are the recording mechanism and must never receive a
+            // command family (self-referential).
+            "provenance_sink" => {
+                assert!(
+                    entry["reason"].as_str().is_some(),
+                    "provenance-sink field {field:?} must state why it is never journaled"
+                );
+            }
             unexpected => panic!(
                 "CR733 authority matrix field {field:?} has unsupported classification {unexpected:?}"
             ),
@@ -212,7 +221,7 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
                     "discarded clone site {site_id:?} must have source-read provenance"
                 );
             }
-            "derived" | "blocked" | "out_of_reachable_closure" => {
+            "derived" | "blocked" | "out_of_reachable_closure" | "provenance_sink" => {
                 assert_eq!(
                     site["reroute_required"].as_bool(),
                     Some(false),
