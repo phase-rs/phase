@@ -4173,7 +4173,7 @@ mod tests {
         obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(land_id.into());
         obj.entered_battlefield_turn = Some(1);
-        obj.trigger_definitions.push(
+        obj.push_printed_trigger(
             TriggerDefinition::new(TriggerMode::TapsForMana)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Database,
@@ -4470,7 +4470,7 @@ mod tests {
         obj.card_types.subtypes.push("Aura".to_string());
         obj.attached_to = Some(land_id.into());
         obj.entered_battlefield_turn = Some(1);
-        obj.trigger_definitions.push(
+        obj.push_printed_trigger(
             TriggerDefinition::new(TriggerMode::TapsForMana)
                 .execute(AbilityDefinition::new(
                     AbilityKind::Database,
