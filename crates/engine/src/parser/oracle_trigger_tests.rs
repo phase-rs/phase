@@ -4,6 +4,7 @@ use crate::parser::oracle::parse_oracle_text;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::doc::PrintedTriggerIndex;
+use crate::parser::oracle_ir::effect_chain::PlayerScopeRewrite;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, AttackScope,
     AttackSubject, BounceSelection, CardSelectionMode, CastingPermission, ChosenAttribute,
@@ -210,6 +211,34 @@ fn glory_of_battle_trigger_gates_on_creature_recipient() {
             assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
         }
         other => panic!("expected creature-scoped valid_target, got {other:?}"),
+    }
+}
+
+#[test]
+fn damage_done_recipient_gates_on_blocking_creature() {
+    // CR 509.1g + CR 120.3 (issue #5951): "Whenever equipped creature deals
+    // damage to a blocking creature, ..." (Kusari-Gama) must set a typed
+    // `valid_target` carrying `FilterProp::Blocking` so the trigger fires ONLY
+    // when the damaged object is a blocker — not when the equipped creature
+    // deals combat damage to a player. A bare combat-status adjective on the
+    // recipient is the class fixed here, so exercise the building block
+    // ("a blocking creature") rather than the single card.
+    let def = parse_trigger_line(
+        "Whenever equipped creature deals damage to a blocking creature, \
+         this Equipment deals that much damage to each other creature defending player controls.",
+        "Kusari-Gama",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    match &def.valid_target {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert!(
+                tf.properties.contains(&FilterProp::Blocking),
+                "recipient must be gated on the blocking combat status, got {:?}",
+                tf.properties,
+            );
+        }
+        other => panic!("expected a blocking-creature valid_target, got {other:?}"),
     }
 }
 
@@ -542,6 +571,178 @@ fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
     assert_eq!(hellion.condition, expected);
     // The intervening-if clause is stripped, so the effect still parses.
     assert!(hellion.execute.is_some());
+}
+
+/// Recursively collect the leaf `TargetFilter`s under any nesting of
+/// `And`/`Or`/`Not`, so structural assertions are robust to
+/// `TargetFilter::normalized` flattening/reordering.
+fn collect_leaf_filters<'a>(filter: &'a TargetFilter, out: &mut Vec<&'a TargetFilter>) {
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters {
+                collect_leaf_filters(f, out);
+            }
+        }
+        TargetFilter::Not { filter } => collect_leaf_filters(filter, out),
+        leaf => out.push(leaf),
+    }
+}
+
+/// True if any `Typed` leaf anywhere under `filter` carries `FilterProp::IsSaddled`.
+fn filter_mentions_is_saddled(filter: &TargetFilter) -> bool {
+    let mut leaves = Vec::new();
+    collect_leaf_filters(filter, &mut leaves);
+    leaves.iter().any(
+        |f| matches!(f, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::IsSaddled)),
+    )
+}
+
+/// True if any embedded `TargetFilter` under `condition` mentions
+/// `FilterProp::IsSaddled` (recursing through `And`/`Or`/`Not`).
+fn condition_mentions_is_saddled(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::SourceMatchesFilter { filter }
+        | TriggerCondition::EventDamageSourceMatchesFilter { filter } => {
+            filter_mentions_is_saddled(filter)
+        }
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(condition_mentions_is_saddled)
+        }
+        TriggerCondition::Not { condition } => condition_mentions_is_saddled(condition),
+        _ => false,
+    }
+}
+
+#[test]
+fn attacks_while_saddled_gates_trigger_on_saddled_filter() {
+    // CR 508.1m + CR 702.171b + ruling 2025-02-07: "Whenever this creature
+    // attacks while saddled" — the elided-subject "saddled" participle is a
+    // DECLARATION-TIME subject qualifier, NOT a stored intervening-if
+    // condition. It folds into the attack trigger's `valid_card` as
+    // And { filters: [SelfRef, Typed([IsSaddled])] }, evaluated once when
+    // attackers are declared. Alacrian Jaguar and its 27-card class.
+    let def = parse_trigger_line(
+        "Whenever this creature attacks while saddled, it gets +2/+2 until end of turn.",
+        "Alacrian Jaguar",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+
+    // REVERT-FAILING: the pre-restructure behavior stored the saddled gate as a
+    // `TriggerCondition::SourceMatchesFilter`; the fold makes `condition` empty.
+    // Reverting step 1c (fold into valid_card) repopulates `condition` and fails
+    // this.
+    assert!(
+        def.condition.is_none(),
+        "saddled gate must not be a stored condition, got {:?}",
+        def.condition
+    );
+
+    // REVERT-FAILING: `valid_card` must be an `And` carrying BOTH the original
+    // subject (SelfRef) and the saddled qualifier. Robust to And-flattening /
+    // normalization (`TargetFilter::normalized` merges Typed leaves and
+    // reorders): collect leaves and assert membership rather than matching a
+    // fixed nesting shape. Reverting the fold leaves `valid_card == SelfRef`
+    // (no IsSaddled), failing the second assertion.
+    let valid_card = def.valid_card.as_ref().expect("attack trigger valid_card");
+    let mut leaves = Vec::new();
+    collect_leaf_filters(valid_card, &mut leaves);
+    assert!(
+        leaves.iter().any(|f| matches!(f, TargetFilter::SelfRef)),
+        "valid_card must retain the SelfRef subject, got {valid_card:?}"
+    );
+    assert!(
+        filter_mentions_is_saddled(valid_card),
+        "valid_card must carry the IsSaddled qualifier, got {valid_card:?}"
+    );
+
+    // Reach-guard: the "while saddled" clause is stripped and the effect body
+    // still parses as the +2/+2 pump — no Effect::Unimplemented anywhere. This
+    // proves the fold branch did NOT short-circuit past effect parsing.
+    let execute = def.execute.as_ref().expect("execute ability");
+    match &*execute.effect {
+        Effect::Pump {
+            power, toughness, ..
+        } => {
+            assert_eq!(power, &PtValue::Fixed(2));
+            assert_eq!(toughness, &PtValue::Fixed(2));
+        }
+        other => panic!("expected Pump +2/+2, got {other:?}"),
+    }
+    fn has_unimplemented(ability: &AbilityDefinition) -> bool {
+        matches!(*ability.effect, Effect::Unimplemented { .. })
+            || ability
+                .sub_ability
+                .as_ref()
+                .is_some_and(|s| has_unimplemented(s))
+    }
+    assert!(
+        !has_unimplemented(execute),
+        "effect chain leaked Unimplemented: {execute:?}"
+    );
+}
+
+#[test]
+fn while_saddled_fold_refused_for_non_attacks_trigger_is_strictly_unsupported() {
+    // CR 508.1m: the subject-state fold applies ONLY to attack triggers (the
+    // saddled state is a property of the declared attacker). A non-attacks
+    // while-gate has no rules-correct home, and re-parsing the original clause
+    // would let event-verb leaves (the dies verb tag-matches "die" and drops
+    // the unconsumed tail) accept the text WITHOUT its saddled semantics. The
+    // classifier therefore returns the strict `Unknown` fallback on the whole
+    // clause — coverage stays red until a real card motivates a design.
+    let mut ctx = ParseContext::default();
+    let def = parse_trigger_line_with_index(
+        "When this creature dies while saddled, draw a card.",
+        "Synthetic Dies Gate",
+        None,
+        &mut ctx,
+    );
+
+    // COVERAGE-HONESTY (revert-failing): reverting the strict refusal back to
+    // an original-clause re-parse yields a clean ChangesZone dies trigger with
+    // the saddled rider silently discarded — this assertion fails there. The
+    // Unknown payload preserves the full clause, rider included, so the line
+    // is reported unsupported rather than blessed without its rules text.
+    match &def.mode {
+        TriggerMode::Unknown(clause) => assert!(
+            clause.contains("while saddled"),
+            "Unknown payload must preserve the saddled rider, got {clause:?}"
+        ),
+        other => {
+            panic!("non-attack while-saddled must be strictly unsupported (Unknown), got {other:?}")
+        }
+    }
+
+    // No IsSaddled anywhere in the trigger's subject filter OR stored condition —
+    // the refused gate must not leak into either axis.
+    assert!(
+        !def.valid_card
+            .as_ref()
+            .is_some_and(filter_mentions_is_saddled),
+        "dies trigger valid_card must not carry IsSaddled, got {:?}",
+        def.valid_card
+    );
+    assert!(
+        !def.condition
+            .as_ref()
+            .is_some_and(condition_mentions_is_saddled),
+        "dies trigger condition must not carry IsSaddled, got {:?}",
+        def.condition
+    );
+
+    // Pairs with step 1c's `truncate`: the refused probe must not leak duplicate
+    // diagnostics into the final parse. Reverting the truncate would let the
+    // probe's diagnostics (when the probe parse is non-clean) accumulate on top
+    // of the final parse's; assert no identical entry appears twice.
+    for i in 0..ctx.diagnostics.len() {
+        for j in (i + 1)..ctx.diagnostics.len() {
+            assert_ne!(
+                format!("{:?}", ctx.diagnostics[i]),
+                format!("{:?}", ctx.diagnostics[j]),
+                "probe leaked a duplicate diagnostic"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1632,6 +1833,55 @@ fn parse_wave_of_rats_dies_dealt_combat_damage_intervening_if() {
     );
 }
 
+/// CR 603.4 + CR 107.1: Shadowborn Demon — the hoisted intervening-"if"
+/// gate ("if there are fewer than six creature cards in your graveyard")
+/// must lift to a strict-inequality `QuantityComparison` on the controller's
+/// graveyard creature count (LT 6), the same seam Impending Disaster's
+/// "or more" suffix uses in the opposite comparator direction. Pre-fix the
+/// "fewer than" prefix was unrecognized and the condition silently swallowed,
+/// so the demon sacrificed a creature on every upkeep regardless of graveyard
+/// size.
+#[test]
+fn parse_shadowborn_demon_upkeep_fewer_than_creatures_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if there are fewer than six creature cards in your \
+         graveyard, sacrifice a creature.",
+        "Shadowborn Demon",
+    );
+
+    // Revert-guard: pre-fix `def.condition` is None (swallowed).
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Creature],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        }),
+        "upkeep intervening-if must lift to ZoneCardCount(Graveyard, Creature, Controller) LT 6, got {:?}",
+        def.condition,
+    );
+
+    // Positive reach-guard: the sacrifice body still parses (not swallowed into
+    // the condition, not Unimplemented, no residual "if …" text).
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::Sacrifice { .. }),
+        "execute must be Sacrifice, got {:?}",
+        execute.effect,
+    );
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "execute must not be Unimplemented",
+    );
+}
+
 #[test]
 fn parse_deathknell_berserker_dies_power_lki_intervening_if() {
     let def = parse_trigger_line(
@@ -2441,6 +2691,46 @@ fn grim_hireling_combat_damage_trigger_is_batched() {
         );
     assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
     assert!(def.batched);
+}
+
+#[test]
+fn malcolm_keen_eyed_navigator_damage_trigger_counts_damaged_opponents() {
+    let def = parse_trigger_line(
+        "Whenever one or more Pirates you control deal damage to your opponents, you create a Treasure token for each opponent dealt damage.",
+        "Malcolm, Keen-Eyed Navigator",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDoneOnceByController);
+    assert_eq!(def.damage_kind, DamageKindFilter::Any);
+    assert_eq!(
+        def.valid_source,
+        Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Pirate".to_string())],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        }))
+    );
+    assert!(matches!(
+        def.valid_target,
+        Some(TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }))
+    ));
+    assert!(def.batched);
+
+    let execute = def.execute.as_ref().expect("trigger should execute");
+    let Effect::Token { name, count, .. } = execute.effect.as_ref() else {
+        panic!("expected Token effect, got {:?}", execute.effect);
+    };
+    assert_eq!(name, "Treasure");
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::EventContextPlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }
+    );
 }
 
 #[test]
@@ -5775,6 +6065,181 @@ fn etb_token_copier_exile_anaphor_binds_created_token() {
         }
 }
 
+/// Walk an ability chain, descending through coin-flip `win_effect`s,
+/// `CreateDelayedTrigger.effect`, and `sub_ability`. Used to prove the folded
+/// per-win/per-head token-rider shape.
+fn collect_through_flip<'a>(def: &'a AbilityDefinition, out: &mut Vec<&'a Effect>) {
+    out.push(&def.effect);
+    match &*def.effect {
+        Effect::FlipCoinUntilLose { win_effect } => collect_through_flip(win_effect, out),
+        Effect::FlipCoins {
+            win_effect: Some(win_effect),
+            ..
+        } => collect_through_flip(win_effect, out),
+        _ => {}
+    }
+    if let Effect::CreateDelayedTrigger { effect: inner, .. } = &*def.effect {
+        collect_through_flip(inner, out);
+    }
+    if let Some(sub) = def.sub_ability.as_deref() {
+        collect_through_flip(sub, out);
+    }
+}
+
+/// The `affected` recipient of the first `GenericEffect` keyword-grant static in
+/// a collected effect list ("those tokens gain haste").
+fn grant_affected(effs: &[&Effect]) -> Option<TargetFilter> {
+    effs.iter().find_map(|e| match e {
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities.first().and_then(|s| s.affected.clone()),
+        _ => None,
+    })
+}
+
+/// Mirror March (#5966): "Whenever a nontoken creature you control enters, flip
+/// a coin until you lose a flip. For each flip you won, create a token that's a
+/// copy of that creature. Those tokens gain haste. Exile them at the beginning
+/// of the next end step."
+///
+/// CR 705.2 (flip loop runs the win effect once per win) + CR 707.1 (token
+/// copy) + CR 603.7c (delayed exile). The redundant "for each flip you won,"
+/// quantifier must be stripped so the win clause reaches `CopyTokenOf`, and the
+/// per-win rider clauses ("those tokens gain haste", "exile them") must fold
+/// INTO `win_effect` — bound to the created tokens (`LastCreated`) — because a
+/// post-loop sibling would only touch the final win's token (each `CopyTokenOf`
+/// overwrites `state.last_created_token_ids`).
+#[test]
+fn mirror_march_flip_win_effect_folds_copy_haste_exile_on_last_created() {
+    let text = "Whenever a nontoken creature you control enters, flip a coin until you lose a flip. \
+        For each flip you won, create a token that's a copy of that creature. Those tokens gain haste. \
+        Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Mirror March");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+
+    // Structural fold guard (revert-fails Step 2): the per-win riders live inside
+    // `win_effect`, NOT as post-loop siblings of the flip effect.
+    assert!(
+        matches!(&*exec.effect, Effect::FlipCoinUntilLose { .. }),
+        "top-level effect must be FlipCoinUntilLose"
+    );
+    assert!(
+        exec.sub_ability.is_none(),
+        "haste/exile must fold into win_effect, not hang as post-loop siblings"
+    );
+
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+
+    // Reach guard (pairs with the negatives below): the copy clause parsed
+    // (revert-fails Step 1) — exactly one CopyTokenOf, reached via win_effect.
+    let copy_sources: Vec<_> = effs
+        .iter()
+        .filter_map(|e| match e {
+            Effect::CopyTokenOf { target, .. } => Some(target.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        copy_sources.len(),
+        1,
+        "exactly one CopyTokenOf inside win_effect, got {copy_sources:?}"
+    );
+    // `ParentTarget` resolves to the entering creature at runtime (verified by
+    // the `mirror_march_copy_token_exile` integration test); the trigger's
+    // top-level ParentTarget→TriggeringSource rewrite does not descend into
+    // `win_effect`, and does not need to.
+    assert_eq!(copy_sources[0], TargetFilter::ParentTarget);
+
+    // Both anaphors bind the created tokens.
+    assert_eq!(
+        grant_affected(&effs),
+        Some(TargetFilter::LastCreated),
+        "\"those tokens gain haste\" must bind the created tokens"
+    );
+    assert_eq!(
+        effs.iter().find_map(|e| match e {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => Some(target.clone()),
+            _ => None,
+        }),
+        Some(TargetFilter::LastCreated),
+        "delayed \"exile them\" must bind the created tokens, not the entering creature (#5966)"
+    );
+
+    // Revert-failing negative: no clause dropped to Unimplemented anywhere.
+    assert!(
+        !effs
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "no clause may lower to Unimplemented, got {effs:?}"
+    );
+}
+
+/// CR 705.2 + CR 603.7c: the fixed-count sibling has the same per-win rider
+/// boundary as Mirror March. The present-tense form is used by cards such as
+/// Yusri, Fortune's Flame; once lowered, the copied token's haste/exile riders
+/// must be part of `FlipCoins.win_effect`, not post-loop siblings.
+#[test]
+fn flip_coins_present_tense_win_effect_folds_last_created_riders() {
+    let text = "Whenever a nontoken creature you control enters, flip two coins. \
+        For each flip you win, create a token that's a copy of that creature. Those tokens gain haste. \
+        Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Fixed-count copy coins");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+
+    assert!(
+        matches!(&*exec.effect, Effect::FlipCoins { .. }),
+        "top-level effect must be FlipCoins"
+    );
+    assert!(
+        exec.sub_ability.is_none(),
+        "haste/exile must fold into FlipCoins.win_effect, not remain post-loop siblings"
+    );
+
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+    assert!(
+        effs.iter()
+            .any(|effect| matches!(effect, Effect::CopyTokenOf { .. })),
+        "the present-tense quantifier must reach CopyTokenOf"
+    );
+    assert_eq!(grant_affected(&effs), Some(TargetFilter::LastCreated));
+    assert_eq!(
+        effs.iter().find_map(|effect| match effect {
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target,
+                ..
+            } => Some(target.clone()),
+            _ => None,
+        }),
+        Some(TargetFilter::LastCreated)
+    );
+}
+
+/// Latent-bug guard (surfaced by #5966): the plural "Those tokens gain haste"
+/// grant after a token copier must bind `LastCreated`, not the `TrackedSet(0)`
+/// sentinel the plural-anaphor path defaults to. Independent of the coin flip —
+/// a plain ETB copier exercises the same rebind. CR 608.2c + CR 611.2c.
+#[test]
+fn plural_those_tokens_gain_haste_binds_last_created() {
+    let text = "Whenever a nontoken creature you control enters, create a token that's a copy of \
+        that creature. Those tokens gain haste. Exile them at the beginning of the next end step.";
+    let def = parse_trigger_line(text, "Plural ETB copier");
+    let exec = def.execute.as_ref().expect("execute must be Some");
+    let mut effs = Vec::new();
+    collect_through_flip(exec, &mut effs);
+    assert_eq!(
+        grant_affected(&effs),
+        Some(TargetFilter::LastCreated),
+        "plural \"those tokens gain haste\" must bind LastCreated, not TrackedSet(0)"
+    );
+}
+
 /// Molten Echoes (GitHub #4709/#4708): "Whenever a nontoken creature you
 /// control of the chosen type enters, create a token that's a copy of that
 /// creature. That token gains haste. Exile it at the beginning of the next
@@ -6330,6 +6795,55 @@ fn doran_attack_block_pump_resolves_pt_difference() {
         }
         other => panic!("expected Effect::Pump, got {other:?}"),
     }
+}
+
+#[test]
+fn jaws_of_defeat_binds_life_loss_to_entering_creature_pt_difference() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+        "Jaws of Defeat",
+    );
+
+    assert_eq!(def.mode, TriggerMode::ChangesZone);
+    assert_eq!(def.destination, Some(Zone::Battlefield));
+    assert_eq!(
+        def.valid_card,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You)
+        ))
+    );
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+    let execute = def.execute.as_ref().expect("Jaws trigger execute");
+    let Effect::LoseLife { amount, target } = execute.effect.as_ref() else {
+        panic!("expected typed LoseLife, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        target,
+        &Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent)
+        )),
+        "target opponent must remain a selectable opponent player filter"
+    );
+    assert_eq!(
+        amount,
+        &QuantityExpr::Difference {
+            left: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
+            right: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::Demonstrative,
+                },
+            }),
+        }
+    );
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "Jaws must not hide the dynamic quantity behind Unimplemented"
+    );
 }
 
 #[test]
@@ -11452,7 +11966,7 @@ fn trigger_unless_you_return_from_graveyard() {
 
 #[test]
 fn trigger_unless_you_tap_untapped_creature() {
-    // CR 118.12 + CR 701.20a: Koskun Falls — "sacrifice this enchantment
+    // CR 118.12 + CR 701.26a: Koskun Falls — "sacrifice this enchantment
     // unless you tap an untapped creature you control."
     let def = parse_trigger_line(
             "At the beginning of your upkeep, sacrifice this enchantment unless you tap an untapped creature you control.",
@@ -11491,7 +12005,7 @@ fn trigger_unless_you_tap_untapped_creature() {
 
 #[test]
 fn trigger_unless_you_tap_untapped_permanent() {
-    // CR 118.12 + CR 701.20a: Command Bridge — "sacrifice it unless you
+    // CR 118.12 + CR 701.26a: Command Bridge — "sacrifice it unless you
     // tap an untapped permanent you control."
     let def = parse_trigger_line(
         "When this land enters, sacrifice it unless you tap an untapped permanent you control.",
@@ -13942,6 +14456,140 @@ fn phase_trigger_combat_on_your_turn() {
     assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
 }
 
+/// CR 118.12 + CR 603.12 + CR 102.1: Kitt Kanto's beginning-of-combat trigger
+/// pays an optional fixed-count tap-creatures cost, then the reflexive body may
+/// target only a creature controlled by the player whose turn it is.
+#[test]
+fn kitt_kanto_reflexive_tap_two_cost_targets_active_player_creature() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::BeginCombat));
+    assert!(
+        !def.optional,
+        "the trigger itself is mandatory; only paying the tap cost is optional"
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    assert!(execute.optional, "the PayCost instruction is optional");
+    match execute.effect.as_ref() {
+        Effect::PayCost {
+            cost:
+                AbilityCost::TapCreatures {
+                    requirement,
+                    filter,
+                },
+            payer,
+            ..
+        } => {
+            assert_eq!(requirement.fixed_count(), Some(2));
+            assert_eq!(payer, &TargetFilter::Controller);
+            match filter {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                    assert_eq!(tf.controller, Some(ControllerRef::You));
+                }
+                other => panic!("expected creature-you-control cost filter, got {other:?}"),
+            }
+        }
+        other => panic!("expected optional PayCost(TapCreatures), got {other:?}"),
+    }
+
+    let reflexive = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    assert_eq!(reflexive.condition, Some(AbilityCondition::WhenYouDo));
+    match reflexive.effect.as_ref() {
+        Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "\"that player controls\" must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected targeted GenericEffect reflexive body, got {other:?}"),
+    }
+}
+
+/// CR 118.12 + CR 603.12 + CR 102.1: Reflexive optional-payment parsing must
+/// let exact target phrases bind themselves. Seeing one "that player controls"
+/// clause must not rewrite a separate "you control" target in the same body.
+#[test]
+fn reflexive_optional_payment_does_not_rewrite_separate_you_control_target() {
+    let def = parse_trigger_line(
+        "At the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature you control gets +1/+1 until end of turn. Target creature that player controls gets +1/+1 until end of turn.",
+        "Reflexive Mixed Controller Test",
+    );
+
+    let execute = def.execute.as_ref().expect("execute");
+    let first = execute
+        .sub_ability
+        .as_ref()
+        .expect("PayCost must have WhenYouDo body");
+    match first.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "the exact 'you control' target must remain controller-scoped"
+            );
+        }
+        other => panic!("expected first targeted Pump, got {other:?}"),
+    }
+
+    let second = first
+        .sub_ability
+        .as_ref()
+        .expect("reflexive chain must include the second target");
+    match second.effect.as_ref() {
+        Effect::Pump {
+            target: TargetFilter::Typed(tf),
+            ..
+        } => {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "the exact 'that player controls' target must bind to the active/scoped turn player"
+            );
+        }
+        other => panic!("expected second targeted Pump, got {other:?}"),
+    }
+}
+
+/// CR 118.12 + CR 603.12: the generic reflexive optional-cost splitter only
+/// supports straight-line resolution costs. Disjunctive `OneOf` costs require a
+/// branch-choice payment flow, so they must not be exported as a supported
+/// optional `PayCost` until that flow exists.
+#[test]
+fn reflexive_optional_disjunctive_cost_remains_parser_gap() {
+    let def = parse_trigger_line(
+        "Whenever you discard a card, you may pay {1} or discard a card. When you do, draw a card.",
+        "Disjunctive Reflexive Test",
+    );
+    let execute = def.execute.as_ref().expect("execute");
+    assert!(
+        !matches!(execute.effect.as_ref(), Effect::PayCost { .. }),
+        "OneOf resolution costs must not be surfaced through the straight-line PayCost prompt"
+    );
+    assert!(
+        matches!(execute.effect.as_ref(), Effect::Unimplemented { .. }),
+        "unsupported reflexive optional costs should remain honest parser gaps, got {:?}",
+        execute.effect
+    );
+}
+
 /// Issue #1993: Halana and Alena, Partners — X in the counter clause must bind
 /// to source power, not an unresolved Variable name.
 #[test]
@@ -14198,6 +14846,69 @@ fn phase_trigger_exactly_thirteen_cards_in_hand_win_the_game() {
         Some(Effect::WinTheGame { .. }) => {}
         other => panic!("expected WinTheGame effect, got {other:?}"),
     }
+}
+
+/// CR 401.3 + CR 603.4 + CR 104.2b: Battle of Wits' full Oracle text must
+/// preserve its controller-library threshold as an intervening-if on the upkeep
+/// trigger, then execute the ordinary controller-scoped win effect.
+#[test]
+fn battle_of_wits_full_oracle_parses_library_threshold_win_trigger() {
+    const ORACLE: &str = "At the beginning of your upkeep, if you have 200 or more cards in your library, you win the game.";
+
+    let parsed = parse_oracle_text(ORACLE, "Battle of Wits", &[], &[], &[]);
+    assert!(
+        parsed.abilities.is_empty(),
+        "trigger text must not leak into spell abilities"
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected exactly one upkeep trigger"
+    );
+
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 200 },
+        })
+    );
+
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("win trigger must have an effect");
+    assert!(matches!(execute.effect.as_ref(), Effect::WinTheGame { .. }));
+    assert!(
+        execute.condition.is_none(),
+        "the leading intervening-if must exist only on the trigger"
+    );
+
+    fn assert_no_unimplemented(ability: &AbilityDefinition) {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "Battle of Wits must not contain Unimplemented effects: {ability:?}"
+        );
+        if let Some(sub_ability) = ability.sub_ability.as_deref() {
+            assert_no_unimplemented(sub_ability);
+        }
+    }
+    assert_no_unimplemented(execute);
 }
 
 /// CR 603.2b + CR 603.4 + CR 102.1: Ghirapur Orrery — the intervening-if
@@ -17563,6 +18274,8 @@ fn lower_effect_chain_ir_advances_boundary_past_special_clause() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17642,6 +18355,8 @@ fn branch_otherwise_fallback_self_emits_unimplemented_marker_and_else() {
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,
@@ -17735,6 +18450,8 @@ fn modify_prior_enters_tapped_attacking_patches_prior_token_with_condition_else(
     let ir = EffectChainIr {
         clauses: builder.finish(),
         kind: AbilityKind::Spell,
+        continuation_kind: None,
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
         chain_rounding: None,
         actor: None,
         in_trigger: true,

@@ -81,6 +81,7 @@ pub fn apply_debug_action(
                 }
             }
 
+            // allow-raw-zone: debug-only object deletion forces state, not a CR zone-change event (CR 400.1).
             zones::remove_from_zone(state, object_id, zone, owner);
             state.objects.remove(&object_id);
             crate::game::layers::mark_layers_full(state);
@@ -405,9 +406,14 @@ pub fn apply_debug_action(
             if enabled {
                 // Delegate to the single write authority; record the six Mana axes.
                 state.mark_unbounded_loop(player_id, &super::mana_payment::INFINITE_MANA_AXES);
+                // CR 500.5 debug exemption marker: tag this player's Mana axes as the debug
+                // toggle so the end-of-step keep-gate suppresses the empty for them only (a
+                // loop-backed Mana axis, absent from this set, drains and de-realizes instead).
+                state.debug_infinite_mana.insert(player_id);
                 // Seed immediately so the pool reads full before the next probe.
                 super::mana_payment::refill_infinite_mana(state);
             } else {
+                state.debug_infinite_mana.remove(&player_id);
                 state.clear_unbounded_loop(player_id);
             }
         }
@@ -701,6 +707,7 @@ pub fn route_debug_create_to_battlefield(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        enter_as_copy: None,
         applied: HashSet::new(),
     };
 
@@ -926,7 +933,7 @@ mod tests {
             "SOS Pest preset must install its attack-life trigger"
         );
         assert_eq!(
-            obj.trigger_definitions[0].mode,
+            obj.trigger_definitions[0].definition.mode,
             crate::types::triggers::TriggerMode::Attacks
         );
         assert!(
@@ -1666,7 +1673,7 @@ mod tests {
             watcher
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t.mode == TriggerMode::Drawn),
+                .any(|t| t.definition.mode == TriggerMode::Drawn),
             "sanity: watcher carries a Drawn trigger"
         );
     }

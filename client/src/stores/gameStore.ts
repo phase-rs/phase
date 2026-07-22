@@ -53,6 +53,7 @@ export {
 
 export type GameMode =
   | "ai"
+  | "native-ai"
   | "online"
   | "local"
   | "p2p-host"
@@ -65,7 +66,8 @@ export type GameMode =
  * must not build a stateHistory or expose an Undo affordance. */
 export function isMultiplayerMode(mode: GameMode | null): boolean {
   return (
-    mode === "online"
+    mode === "native-ai"
+    || mode === "online"
     || mode === "p2p-host"
     || mode === "p2p-join"
     || mode === "draft-match"
@@ -76,12 +78,20 @@ export function isMultiplayerMode(mode: GameMode | null): boolean {
 interface GameStoreState {
   gameId: string | null;
   gameMode: GameMode | null;
+  /** Transport selected for the current solo-AI game. F.5 telemetry reads this
+   * alongside `nativeEngineFallbackReason`; neither field drives game rules. */
+  engineMode: "native" | "wasm" | null;
+  nativeEngineFallbackReason: string | null;
   gameState: GameState | null;
   events: GameEvent[];
   eventHistory: GameEvent[];
   logHistory: GameLogEntry[];
   nextLogSeq: number;
   adapter: EngineAdapter | null;
+  /** Monotonically unique local game lifecycle identity. Unlike gameId, it
+   * changes for a fresh init/resume/reset even when the adapter and id are
+   * reused. Transient: never persisted or restored from engine snapshots. */
+  gameSessionGeneration: number;
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
@@ -248,6 +258,7 @@ interface GameStoreActions {
     },
   ) => boolean;
   setGameMode: (mode: GameMode) => void;
+  setEngineMode: (mode: "native" | "wasm" | null, fallbackReason?: string | null) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
   setIsResolvingAll: (isResolvingAll: boolean) => void;
@@ -257,17 +268,27 @@ interface GameStoreActions {
   clearStartingContest: () => void;
 }
 
+let latestGameSessionGeneration = 0;
+
+export function nextGameSessionGeneration(): number {
+  latestGameSessionGeneration += 1;
+  return latestGameSessionGeneration;
+}
+
 export type GameStore = GameStoreState & GameStoreActions;
 
 const initialState: GameStoreState = {
   gameId: null,
   gameMode: null,
+  engineMode: null,
+  nativeEngineFallbackReason: null,
   gameState: null,
   events: [],
   eventHistory: [],
   logHistory: [],
   nextLogSeq: 0,
   adapter: null,
+  gameSessionGeneration: nextGameSessionGeneration(),
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
@@ -374,6 +395,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: initLogEntries,
@@ -399,6 +421,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: [],
@@ -425,6 +448,7 @@ export const useGameStore = create<GameStore>()(
         extraState: {
           gameId,
           adapter,
+          gameSessionGeneration: nextGameSessionGeneration(),
           events: [],
           eventHistory: [],
           logHistory: [],
@@ -505,7 +529,7 @@ export const useGameStore = create<GameStore>()(
       if (adapter) {
         adapter.dispose();
       }
-      set(initialState);
+      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration() });
     },
 
     setAdapter: (adapter) => {
@@ -514,6 +538,10 @@ export const useGameStore = create<GameStore>()(
 
     setGameMode: (mode) => {
       set({ gameMode: mode });
+    },
+
+    setEngineMode: (mode, fallbackReason = null) => {
+      set({ engineMode: mode, nativeEngineFallbackReason: fallbackReason });
     },
 
     setLobbyProgress: (progress) => {

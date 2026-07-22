@@ -1038,6 +1038,15 @@ pub(crate) enum TargetedImperativeAst {
         /// True for the untargeted mass form ("gain control of all/each …"),
         /// lowered to `Effect::GainControlAll`; false for targeted GainControl.
         all: bool,
+        /// CR 115.1d + CR 601.2c: Variable target count for "gain control of up to N target
+        /// …" (The Super Hero Civil War's "up to two target creatures with total
+        /// mana value 6 or less"; Jace, Ingenious Mind-Mage's "up to three target
+        /// creatures"). `None` for the common single-target "gain control of
+        /// target creature". Carried onto `ParsedEffectClause.multi_target` at
+        /// lowering so the targeting system surfaces N optional slots — without
+        /// it the count collapsed to one and only a single creature could be
+        /// chosen (issue #6205). Mirrors the same field on `Tap`/`Untap`.
+        multi_target: Option<MultiTargetSpec>,
     },
     ControlNextTurn {
         target: TargetFilter,
@@ -1716,8 +1725,25 @@ pub(crate) fn with_clause_duration(
         }
         Effect::BecomeCopy {
             duration: ref mut effect_duration,
+            recipient,
             ..
         } => {
+            // CR 611.2b + CR 301.5: a leading "for as long as ~ remains
+            // attached to it" binds a singular become-copy to the attachment
+            // host. The duration is stripped before the body is parsed, so
+            // this is the first point where both the copy and its final
+            // duration are available.
+            if matches!(
+                &duration,
+                Duration::ForAsLongAs {
+                    condition: StaticCondition::RecipientMatchesFilter {
+                        filter: TargetFilter::AttachedTo,
+                    },
+                }
+            ) && *recipient == TargetFilter::SelfRef
+            {
+                *recipient = TargetFilter::AttachedTo;
+            }
             *effect_duration = Some(duration);
         }
         _ => {}

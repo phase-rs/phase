@@ -320,7 +320,8 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(100),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -332,6 +333,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -455,8 +457,7 @@ mod tests {
             crate::types::game_state::WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining double-counter additions should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(

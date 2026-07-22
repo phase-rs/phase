@@ -165,16 +165,41 @@ fn is_search_result_reveal_clause(lower: &str) -> bool {
     )
 }
 
+/// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
+/// after a search compound — library-only (Assassin's Trophy comma-split) or
+/// multi-zone (The Hunger Tide Rises: "library and/or graveyard … and put it
+/// onto the battlefield"). Composed from independent verb/pronoun/tapped axes
+/// so Field-of-Ruin "puts it" and Winds-of-Abandon "those cards tapped" share
+/// one grammar instead of N! enumerated sentences.
+fn parse_search_result_put_onto_battlefield_restatement(
+    input: &str,
+) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (input, _) = alt((tag::<_, _, OracleError<'_>>("put "), tag("puts "))).parse(input)?;
+    let (input, _) = alt((
+        tag("that card "),
+        tag("it "),
+        tag("them "),
+        tag("those cards "),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("onto the battlefield").parse(input)?;
+    let (input, _) = opt(tag(" tapped")).parse(input)?;
+    Ok((input, ()))
+}
+
+/// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
+/// after a search compound. Shared by the bare-`and` split suppressor and the
+/// SearchDestination follow-up absorber.
+fn is_search_result_put_onto_battlefield_restatement(lower: &str) -> bool {
+    let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
+    parse_search_result_put_onto_battlefield_restatement(bare)
+        .map(|(rest, _)| rest.trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn has_conditional_search_result_destination(lower: &str) -> bool {
     fn parse_clause(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
-        let (input, _) = alt((
-            tag::<_, _, OracleError<'_>>("put that card onto the battlefield"),
-            tag("put it onto the battlefield"),
-            tag("put them onto the battlefield"),
-            tag("put those cards onto the battlefield"),
-        ))
-        .parse(input)?;
-        let (input, _) = opt(tag(" tapped")).parse(input)?;
+        let (input, _) = parse_search_result_put_onto_battlefield_restatement(input)?;
         let (input, _) = alt((tag(" if it's "), tag(" if it is "))).parse(input)?;
         let (input, _) = take_until(" card").parse(input)?;
         let (input, _) = tag(" card").parse(input)?;
@@ -1096,6 +1121,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && tag::<_, _, OracleError<'_>>("exile them")
                                 .parse(remainder_trimmed)
                                 .is_ok();
+                        // CR 701.23a + CR 701.18a: "search [library and/or graveyard]
+                        // for … and put it onto the battlefield" is one search
+                        // compound (The Hunger Tide Rises). Without this guard the
+                        // bare-`and` splitter peels the put-step into a sibling
+                        // ChangeZone that duplicates the SearchDestination
+                        // continuation — and multi-zone puts use `origin: None`,
+                        // so the follow-up absorber's library-only arm misses them.
+                        let search_put_destination = has_search_prefix
+                            && is_search_result_put_onto_battlefield_restatement(remainder_trimmed);
                         // CR 707.9: ", except <body> and <body> [and …]" — inside
                         // a copy-effect except clause, " and " is an internal
                         // delimiter between recognised body shapes (SetName, P/T,
@@ -1290,6 +1324,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || targeted_compound_continuation
                         || prevent_then_put_continuation
                         || search_with_that_name
+                        || search_put_destination
                         || inside_except_clause
                         || choice_partition_remainder
                         || compound_subject_each
@@ -1355,8 +1390,10 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
 /// (`you get an emblem with "…"` or the subject-stripped `get an emblem with
 /// "…"`). Combinator-only dispatch mirroring `try_parse_emblem_creation`'s prefix
 /// so the clause splitter treats an emblem's granted-ability quote as a
-/// self-contained sentence.
-fn clause_is_emblem_creation_head(current: &str) -> bool {
+/// self-contained sentence. Also the emblem-head deferral predicate for
+/// `should_defer_spell_to_effect`: a spell line matching this head routes to
+/// the effect parser even when its quoted body looks like a static pattern.
+pub(crate) fn is_emblem_creation_head(current: &str) -> bool {
     let is_emblem_head = alt((
         tag_no_case::<_, _, OracleError<'_>>("you get an emblem with \""),
         tag_no_case("get an emblem with \""),
@@ -1385,7 +1422,7 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     // sibling effects split into their own clauses — Nissa, Who Shakes the World's
     // "… Search your library …" would otherwise be swallowed into the emblem's
     // static text (issue #5282).
-    if clause_is_emblem_creation_head(current) {
+    if is_emblem_creation_head(current) {
         return true;
     }
 
@@ -1403,6 +1440,22 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
     {
         return true;
     }
+    // CR 111.3 + CR 608.2c (issue #5844): a token/permanent granted-ability quote
+    // that ends a sentence can be followed by a fresh IMPERATIVE sibling sentence
+    // that acts on the created object — Alien Invasion: `… and "This token
+    // attacks each combat if able." Put a +1/+1 counter on it for each invasion
+    // counter on this enchantment, then …`. Without splitting here the whole
+    // remainder is swallowed into the token-creation clause: its "for each
+    // invasion counter" is mis-read as the token COUNT and the "+1/+1 counter"
+    // pump is dropped entirely. Split when the continuation begins with an
+    // imperative game-action verb; anaphoric-subject continuations ("It becomes
+    // a 2/2 …", "The token is goaded", "That creature gains …") begin with a
+    // pronoun/determiner, NOT a verb, and stay attached so the token-creation
+    // path handles them inline.
+    if starts_imperative_action_continuation(trimmed_lower.as_str()) {
+        return true;
+    }
+
     // CR 608.2c: read the whole text and apply the rules of English — a
     // granted-ability quote that ends a sentence can be followed by a fresh
     // causative "may have …" sentence directed at the affected object's
@@ -1414,6 +1467,48 @@ fn quote_closes_sentence_before_sequence(current: &str, remainder: &str) -> bool
         tag::<_, _, OracleError<'_>>("may have ").parse(i)
     })
     .is_some()
+}
+
+/// True iff `remainder_lower` begins a fresh IMPERATIVE sibling sentence — a game-
+/// action verb such as "put "/"exile "/"create "/"tap " — as opposed to an
+/// anaphoric-subject continuation ("It becomes …", "The token is goaded", "That
+/// creature gains …") that the token-creation path keeps attached to the quote.
+///
+/// Reuses the shared clause-starter verb table (`starts_clause_text_lower`) but
+/// first excludes the pronoun/determiner/subject starters it also recognizes for
+/// comma / "then" / bare-"and" splits. Those subject starters, after a granted
+/// quote, are anaphors that must stay attached (per the guardrail in
+/// `quote_closes_sentence_before_sequence`); only a bare imperative verb marks a
+/// genuine sibling effect here.
+fn starts_imperative_action_continuation(remainder_lower: &str) -> bool {
+    !starts_anaphoric_subject(remainder_lower) && starts_clause_text_lower(remainder_lower)
+}
+
+/// True iff `remainder_lower` begins with a demonstrative/pronoun word that, after
+/// a token/permanent's granted-ability quote, refers back to the CREATED object —
+/// an anaphor ("It becomes …", "Its power …", "That creature gains …", "Those
+/// tokens …", "They gain haste") that must stay attached to the quote rather than
+/// split as a sibling imperative. Each starter carries a trailing space so only a
+/// complete word matches (e.g. "it " does not fire on "item").
+///
+/// Restricted to genuine last-created anaphors. Independent subject-led clauses
+/// that `starts_clause_text_lower` recognizes as fresh instructions — "You gain
+/// …", "Each opponent …", "All creatures …" — are NOT token anaphors and must be
+/// allowed to split, so they are deliberately absent here (issue #5844 review).
+/// "The …" is likewise absent: it is not a `starts_clause_text_lower` starter, so
+/// "The token is goaded" already fails the authority check and stays attached
+/// without an explicit guard.
+fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
+    alt((
+        tag::<_, _, OracleError<'_>>("it "),
+        tag("its "),
+        tag("that "),
+        tag("this "),
+        tag("those "),
+        tag("they "),
+    ))
+    .parse(remainder_lower)
+    .is_ok()
 }
 
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
@@ -2632,16 +2727,46 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         value((), alt((tag("it's "), tag("it’s ")))),
         value((), tag("this creature gets ")),
         value((), tag("~ gets ")),
-        // CR 104.3 + CR 119.7 + CR 119.8: Bare-plural-player subject + restriction
-        // predicate. Everybody Lives! prints "Players can't lose life this turn
-        // and players can't lose the game or win the game this turn." — the
-        // conjunction must split so each half parses as its own
-        // subject + predicate clause. Safe to split: "players can't" /
-        // "players cannot" can only begin a subject-predicate clause, never a
-        // noun-phrase continuation.
-        value((), tag("players can't ")),
-        value((), tag("players cannot ")),
     )))
+    // CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: Plural-player subject +
+    // restriction predicate. Everybody Lives! prints "Players can't lose life
+    // this turn and players can't lose the game or win the game this turn.";
+    // Angel's Grace prints "You can't lose the game this turn and your
+    // opponents can't win the game this turn." (same conjunct in Celestine
+    // Reef's chaos trigger and Courageous Resolve's fateful-hour list) — the
+    // conjunction must split so each half parses as its own
+    // subject + predicate clause
+    // (`try_parse_subject_restriction_clause` → `parse_restriction_modes`).
+    // Safe to split: a plural-player subject followed by "can't"/"cannot" can
+    // only begin a subject-predicate clause, never a noun-phrase continuation.
+    // The subject axis is composed with the negation axis rather than
+    // enumerated per permutation (CLAUDE.md "compose, don't enumerate
+    // permutations").
+    //
+    // Class boundary — the subject axis is deliberately closed over the two
+    // forms printed cards actually feed to THIS bare-and boundary ("players",
+    // "your opponents"; AtomicCards survey of `and <player-subject> can't`).
+    // Sibling player-subject forms are excluded, each for cause:
+    // - "opponents can't" (bare, The Bird Champion) and the static-line
+    //   compounds (Platinum Angel, Abyssal Persecutor, Herald of Eternal
+    //   Dawn, Cloudsteel Kirin's granted ability) never reach this splitter:
+    //   whole-line "can't win/lose" statics are owned by the
+    //   `is_cant_win_lose_compound` seam (`oracle.rs` B20), which splits at
+    //   " and " before effect-sequence chunking.
+    // - "your opponent can't" (singular) appears only inside reminder text
+    //   (Adventurer Beguiler), which is stripped before parsing.
+    // - "each opponent can't" / "an opponent can't" / "their opponents
+    //   can't" appear in no printed Oracle text as a bare-and conjunct;
+    //   admitting them here would be speculative grammar with no card able
+    //   to exercise the lowering. Widen this axis only with a real card AND
+    //   a verified `parse_subject_application` lowering for the new subject.
+    .or(preceded(
+        alt((
+            tag::<_, _, OracleError<'_>>("players "),
+            tag("your opponents "),
+        )),
+        value((), alt((tag("can't "), tag("cannot ")))),
+    ))
     // CR 109.3 + CR 201.4b + CR 608.2k: gendered pronouns ("he"/"she") used as an
     // Oracle-text subject refer to the card itself (Machine Man, Model X-51:
     // "... put a +1/+1 counter on ~ and he gains flying until end of turn";
@@ -3214,7 +3339,16 @@ pub(super) fn push_clause_chunk(
     raw_text: &str,
     boundary_after: Option<ClauseBoundary>,
 ) {
-    let text = raw_text.trim().trim_end_matches('.').trim();
+    // CR 119.7 + CR 119.8: an Oxford-comma list ("X, Y, and Z") peeled from the
+    // tail via the bare-and splitter leaves the second-to-last chunk ending in
+    // a dangling list comma ("Y,") — trim it here, not just the sentence-final
+    // period, or the comma survives into the clause text and breaks any
+    // all_consuming parse (e.g. `parse_restriction_modes`) downstream.
+    // Courageous Resolve's fateful-hour list ("you can't lose life this turn,
+    // you can't lose the game this turn, and your opponents can't win the game
+    // this turn") is the exemplar: without this trim, "can't lose the game
+    // this turn," fails all_consuming and falls to Unimplemented.
+    let text = raw_text.trim().trim_end_matches(['.', ',']).trim();
     if text.is_empty() {
         return;
     }
@@ -4267,8 +4401,8 @@ pub(super) fn apply_clause_continuation(
             let bottom_def = AbilityDefinition::new(
                 kind,
                 Effect::PutAtLibraryPosition {
-                    target: TargetFilter::Any,
-                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ExiledBySource,
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
                     position: crate::types::ability::LibraryPosition::Bottom,
                 },
             );
@@ -5889,6 +6023,7 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
         | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
         | Effect::Planeswalk
         | Effect::ChaosEnsues
         | Effect::RedistributeLifeTotals
@@ -6209,6 +6344,10 @@ pub(super) fn parse_followup_continuation_ast(
             let choice_optional = alt((
                 tag::<_, _, OracleError<'_>>("you may choose "),
                 tag("may choose "),
+                tag("you may exile "),
+                tag("may exile "),
+                tag("you may discard "),
+                tag("may discard "),
             ))
             .parse(lower.as_str())
             .is_ok();
@@ -6766,6 +6905,8 @@ pub(super) fn parse_followup_continuation_ast(
         // (e.g., Assassin's Trophy / Ranging Raptors / Harrow compound), the
         // explicit "put it onto the battlefield" chunk in the same sentence is
         // a paraphrase and must be absorbed to avoid a duplicate ChangeZone.
+        // Third-person search text uses "puts it" (Field of Ruin) and has the
+        // same meaning as the imperative "put it" form.
         //
         // CR 701.23i + CR 608.2c: Iterated-search variants (Winds of Abandon class)
         // surface a plural subject ("those players put those cards onto the
@@ -6776,23 +6917,11 @@ pub(super) fn parse_followup_continuation_ast(
         // prefix-strip on the player-subject so all (subject × pronoun × tapped)
         // permutations match without N! enumerated arms.
         Effect::ChangeZone {
-            origin: Some(Zone::Library),
+            origin,
             destination: Zone::Battlefield,
             ..
-        } if {
-            let bare = strip_search_result_subject(lower.trim().trim_end_matches('.'));
-            matches!(
-                bare,
-                "put that card onto the battlefield"
-                    | "put it onto the battlefield"
-                    | "put them onto the battlefield"
-                    | "put those cards onto the battlefield"
-                    | "put that card onto the battlefield tapped"
-                    | "put it onto the battlefield tapped"
-                    | "put them onto the battlefield tapped"
-                    | "put those cards onto the battlefield tapped"
-            )
-        } =>
+        } if matches!(origin, None | Some(Zone::Library))
+            && is_search_result_put_onto_battlefield_restatement(&lower) =>
         {
             Some(ContinuationAst::SearchResultClauseHandled)
         }
@@ -7012,8 +7141,32 @@ fn parse_explicit_choose_and_sacrifice_rest_filter(
     ))
     .parse(input)?;
     let (input, _) = tag("all other ").parse(input)?;
-    let (input, filter) =
+    let (input, mut filter) =
         alt((parse_nonland_permanent_domain, parse_creature_domain)).parse(input)?;
+
+    // CR 608.2c: an optional trailing relative qualifier narrows the sweep, e.g.
+    // Winnowing's "that don't share a creature type with the chosen creature
+    // they control". Reuse the shared-quality combinator (the anaphor "the
+    // chosen creature" resolves to `ParentTarget`, which the resolver scopes to
+    // each player's kept creature). The redundant trailing controller phrase on
+    // the reference ("they control") is consumed so `all_consuming` succeeds.
+    let (after_domain, _) = opt(tag::<_, _, OracleError<'_>>(" ")).parse(input)?;
+    if let Ok((rest, prop)) = crate::parser::oracle_target::parse_shared_quality_clause(
+        after_domain,
+        &ParseContext::default(),
+    ) {
+        let (rest, _) = opt(alt((
+            tag::<_, _, OracleError<'_>>(" they control"),
+            tag(" you control"),
+            tag(" that player controls"),
+        )))
+        .parse(rest)?;
+        if let TargetFilter::Typed(ref mut typed) = filter {
+            typed.properties.push(prop);
+        }
+        return Ok((rest, Some(filter)));
+    }
+
     Ok((input, Some(filter)))
 }
 
@@ -7877,6 +8030,83 @@ mod tests {
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
     }
 
+    #[test]
+    fn quoted_grant_splits_before_imperative_sibling_sentence() {
+        // CR 111.3 + CR 608.2c (issue #5844): Alien Invasion — the token's quoted
+        // ability ends the sentence (`able."`); the following IMPERATIVE sentence
+        // ("Put a +1/+1 counter on it …") is a sibling effect and must split off.
+        // Without the split the token-creation clause swallows it, mis-reading
+        // "for each invasion counter" as the token COUNT and dropping the pump.
+        let chunks = clause_texts(
+            "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\" Put a +1/+1 counter on it for each invasion counter on this enchantment, then put an invasion counter on this enchantment.",
+        );
+        assert_eq!(
+            chunks[0],
+            "create a 1/1 red Alien creature token with haste and \"This token attacks each combat if able.\"",
+            "the token + quoted ability must be its own chunk: {chunks:?}"
+        );
+        // allow-noncombinator: structural test assertion over the pre-tokenized chunk vector, not parser dispatch
+        let counter_clause_split_off = chunks.len() >= 2
+            && chunks[1].starts_with("Put a +1/+1 counter on it for each invasion counter"); // allow-noncombinator: same, on the `.starts_with` line
+        assert!(
+            counter_clause_split_off,
+            "the imperative counter sentence must split into its own chunk: {chunks:?}"
+        );
+    }
+
+    /// CR 608.2c (#5844 review): an INDEPENDENT subject-led continuation after a
+    /// granted-ability quote — "You gain …", "Each opponent …", "All creatures …" —
+    /// is a fresh sibling instruction, NOT an anaphor to the created token, so it
+    /// must split off. `starts_clause_text_lower` already recognizes `you `,
+    /// `each `/`each opponent `, and `all ` as clause starters; the anaphor guard
+    /// must not reject them before that authority is consulted, or they stay glued
+    /// to the token clause and are swallowed — the very bug class this PR fixes.
+    #[test]
+    fn quoted_grant_splits_before_independent_subject_continuation() {
+        for (text, expected_head) in [
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" You gain 3 life.",
+                "You gain 3 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" Each opponent loses 2 life.",
+                "Each opponent loses 2 life",
+            ),
+            (
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\" All creatures you control get +1/+1 until end of turn.",
+                "All creatures you control get +1/+1 until end of turn",
+            ),
+        ] {
+            let chunks = clause_texts(text);
+            assert_eq!(
+                chunks[0],
+                "create a 1/1 white Soldier creature token with \"This creature can't block.\"",
+                "the token + quoted ability must stay its own chunk: {chunks:?}"
+            );
+            assert_eq!(
+                chunks.get(1).map(String::as_str),
+                Some(expected_head),
+                "an independent subject-led continuation must split into its own chunk: {chunks:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_grant_keeps_anaphoric_subject_continuation() {
+        // The exclusion side of #5844: an anaphoric-SUBJECT continuation after a
+        // token quote ("It gains …", "That creature gets …") refers back to the
+        // CREATED object, not a fresh instruction, so it must stay attached — the
+        // token-creation path resolves the anaphor inline.
+        let chunks = clause_texts(
+            "create a 1/1 white Soldier creature token with \"This creature can't block.\" It gains haste until end of turn.",
+        );
+        assert_eq!(
+            chunks.len(),
+            1,
+            "anaphoric 'It gains …' must not split: {chunks:?}"
+        );
+    }
+
     // --- Bare " and " splitting: positive cases (should split) ---
 
     #[test]
@@ -7948,6 +8178,103 @@ mod tests {
             "search its controller's graveyard, hand, and library for any number of cards with the same name as that land and exile them",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_multi_zone_search_put_onto_battlefield_compound() {
+        // CR 701.23a (issue #5977): The Hunger Tide Rises — "search your library
+        // and/or graveyard for … and put it onto the battlefield" must stay one
+        // compound so SearchDestination owns the put-step (origin: None).
+        let chunks = clause_texts(
+            "search your library and/or graveyard for a creature card with mana value less than or equal to the number of creatures sacrificed this way and put it onto the battlefield",
+        );
+        assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn search_result_put_restatement_covers_verb_pronoun_tapped_axes() {
+        for phrase in [
+            "put that card onto the battlefield",
+            "put it onto the battlefield",
+            "puts that card onto the battlefield",
+            "puts it onto the battlefield",
+            "put them onto the battlefield",
+            "put those cards onto the battlefield",
+            "put that card onto the battlefield tapped",
+            "puts it onto the battlefield tapped",
+        ] {
+            assert!(
+                is_search_result_put_onto_battlefield_restatement(phrase),
+                "expected restatement match for {phrase:?}"
+            );
+        }
+        for phrase in [
+            "that player put it onto the battlefield",
+            "those players put those cards onto the battlefield tapped",
+            "each player puts them onto the battlefield",
+        ] {
+            assert!(
+                is_search_result_put_onto_battlefield_restatement(phrase),
+                "expected subject-stripped restatement match for {phrase:?}"
+            );
+        }
+        for phrase in [
+            "put it into your hand",
+            "put that card on top of your library",
+            "exile it",
+        ] {
+            assert!(
+                !is_search_result_put_onto_battlefield_restatement(phrase),
+                "must not match non-battlefield put restatement {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_result_put_restatement_parses_independent_axes() {
+        let verbs = ["put ", "puts "];
+        let pronouns = ["that card ", "it ", "them ", "those cards "];
+        for verb in verbs {
+            for pronoun in pronouns {
+                for tapped in [false, true] {
+                    let mut phrase = format!("{verb}{pronoun}onto the battlefield");
+                    if tapped {
+                        phrase.push_str(" tapped");
+                    }
+                    let (rest, _) = parse_search_result_put_onto_battlefield_restatement(&phrase)
+                        .unwrap_or_else(|_| panic!("failed to parse {phrase:?}"));
+                    assert!(
+                        rest.is_empty(),
+                        "parser must consume full restatement for {phrase:?}, leftover {rest:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_zone_search_put_restatement_absorbed_after_origin_none_destination() {
+        let previous = Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::Any,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        let result = parse_followup_continuation_ast(
+            "put it onto the battlefield",
+            &previous,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(result, Some(ContinuationAst::SearchResultClauseHandled));
     }
 
     #[test]
@@ -11478,6 +11805,51 @@ mod tests {
         // verb must NOT split (no false clause boundary).
         assert!(!starts_bare_and_clause("he attacks this turn"));
         assert!(!starts_bare_and_clause("she deals 2 damage to any target"));
+    }
+
+    /// CR 104.2b + CR 104.3e + CR 119.7 + CR 119.8: plural-player subject +
+    /// "can't"/"cannot" restriction boundary. Admitted subjects are exactly
+    /// the forms printed cards feed to this bare-and conjunct boundary:
+    /// "players" (Everybody Lives!) and "your opponents" (Angel's Grace,
+    /// Celestine Reef's chaos trigger, Courageous Resolve's fateful-hour
+    /// list). Sibling player-subject forms must NOT match — no printed card
+    /// reaches this boundary with them: bare "opponents can't" (The Bird
+    /// Champion) and the Platinum Angel-class compounds are whole-line
+    /// statics owned by the `is_cant_win_lose_compound` seam in `oracle.rs`;
+    /// singular "your opponent can't" occurs only in stripped reminder text
+    /// (Adventurer Beguiler); "each opponent"/"an opponent"/"their
+    /// opponents" + "can't" appear in no Oracle text at all.
+    #[test]
+    fn bare_and_clause_plural_player_restriction_boundary() {
+        // Admitted forms, verbatim from the cards that exercise them.
+        assert!(starts_bare_and_clause(
+            "players can't lose the game or win the game this turn"
+        ));
+        assert!(starts_bare_and_clause(
+            "your opponents can't win the game this turn"
+        ));
+        assert!(starts_bare_and_clause("your opponents can't win the game"));
+        // Excluded sibling subjects — must stay un-split at this boundary.
+        assert!(!starts_bare_and_clause("opponents can't win the game"));
+        assert!(!starts_bare_and_clause(
+            "your opponent can't win the game this turn"
+        ));
+        assert!(!starts_bare_and_clause(
+            "each opponent can't win the game this turn"
+        ));
+        assert!(!starts_bare_and_clause(
+            "an opponent can't win the game this turn"
+        ));
+        assert!(!starts_bare_and_clause(
+            "their opponents can't win the game this turn"
+        ));
+        // Possessive noun phrase is a continuation, not a player subject.
+        assert!(!starts_bare_and_clause(
+            "your opponents' creatures can't block this turn"
+        ));
+        // Admitted subject WITHOUT the restriction predicate must not split
+        // via this arm.
+        assert!(!starts_bare_and_clause("your opponents gain 2 life"));
     }
 
     /// CR 601.2c + CR 611.2c: A second `"target <noun>"` conjunct joined by a

@@ -339,26 +339,30 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // [keyword]" — a once-per-turn keyword grant gated on the first qualifying
     // spell of the turn (Peri Brown, The Twelfth Doctor, Maelstrom Nexus,
     // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
-    // `parse_first_qualified_spell_filter` grammar + `first_qualified_spell_condition`
+    // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
     // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
     // instead of collapsing to "every spell you cast".
-    match parse_first_qualified_spell_filter(subject) {
-        // Not a first-qualified-spell line — fall through to the ordinary
+    match parse_nth_qualified_spell_filter(subject) {
+        // Not an Nth-qualified-spell line — fall through to the ordinary
         // "[type] spells you cast [from zone] have [keyword]" patterns below.
-        FirstQualifiedSpell::NotApplicable => {}
+        NthQualifiedSpell::NotApplicable => {}
         // The shape is present but the qualifier/timing isn't representable. Fall
         // through (NOT a `return None`) so the existing gateless static is
         // preserved for not-yet-representable qualifiers — no regression.
-        FirstQualifiedSpell::UnsupportedQualifier => {}
-        FirstQualifiedSpell::Supported(filter, timing) => {
-            // CR 601.2f: trailing-residue guard. `parse_first_qualified_spell_filter`
+        NthQualifiedSpell::UnsupportedQualifier => {}
+        NthQualifiedSpell::Supported {
+            filter,
+            timing,
+            ordinal,
+        } => {
+            // CR 601.2f: trailing-residue guard. `parse_nth_qualified_spell_filter`
             // discards any text after the timing phrase; if that region is
             // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
             // "that mana from a Treasure was spent to cast"; TARDIS Bay's
             // post-timing "with mana value 2 or greater"). Decline rather than emit
             // a residue-blind gate — fall through to the existing gateless static.
-            if first_qualified_spell_subject_fully_consumed(subject) {
+            if nth_qualified_spell_subject_fully_consumed(subject) {
                 // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
                 // recursion) so an opponent's qualifying spell never qualifies.
                 let affected =
@@ -369,12 +373,12 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
                 // TARDIS Bay itself declines above because its MV qualifier follows
                 // the timing). When a leading "during your turn," scope was already
                 // stripped, combine both rather than dropping either.
-                let first_qualified = first_qualified_spell_condition(&filter, &timing);
+                let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
                 let combined_condition = match condition.clone() {
                     Some(leading) => StaticCondition::And {
-                        conditions: vec![leading, first_qualified],
+                        conditions: vec![leading, nth_qualified],
                     },
-                    None => first_qualified,
+                    None => nth_qualified,
                 };
                 return Some(
                     StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
@@ -1272,12 +1276,17 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     let mut modifications = Vec::new();
 
-    // CR 205.1a + CR 613.1d/f: "loses all [other] abilities, card types, and
-    // creature types" — a comma-and enumeration parsed with nom. Each member
-    // maps to one modification. `CardTypes` requires the granted core-type
-    // list, which only the "is a [type]" caller (`parse_enchanted_is_type`)
-    // owns — in the standalone path it has no type set and is a no-op (such
-    // text does not occur outside the "is a [type]" frame).
+    // CR 205.1a + CR 205.3i + CR 613.1d/f: "loses all [other] abilities, card
+    // types, creature types, and land types" — a comma-and enumeration parsed
+    // with nom. Each member maps to one modification. `CardTypes` requires the
+    // granted core-type list, which only the "is a [type]" caller
+    // (`parse_enchanted_is_type`) owns — in the standalone path it has no type
+    // set and is a no-op (such text does not occur outside the "is a [type]"
+    // frame). `LandTypes` (Alpine Moon, Lithoform Blight, Ultima, Origin of
+    // Oblivion — "loses all land types and abilities") reuses the same
+    // `RemoveAllSubtypes` runtime the `CreatureTypes` arm already exercises;
+    // `game/layers.rs` already has a working `SubtypeSet::Land` arm, so this is
+    // pure parser wiring, no engine change.
     for member in scan_loss_enumeration(unquoted_tp.lower) {
         match member {
             LossMember::Abilities => {
@@ -1286,6 +1295,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             LossMember::CreatureTypes => {
                 modifications.push(ContinuousModification::RemoveAllSubtypes {
                     set: crate::types::card_type::SubtypeSet::Creature,
+                });
+            }
+            LossMember::LandTypes => {
+                modifications.push(ContinuousModification::RemoveAllSubtypes {
+                    set: crate::types::card_type::SubtypeSet::Land,
                 });
             }
             LossMember::CardTypes => {}
@@ -1847,6 +1861,12 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
         return Vec::new();
     }
 
+    // CR 114.1 + CR 113.3d: Nested single-quoted granted abilities inside a
+    // double-quoted grant body must be promoted to double quotes before
+    // dispatch so static-line and activated parsers recognise the inner ability
+    // boundary (Koth emblem, Roar of the Fifth People chapter II — #5978).
+    let ability_text = super::grammar::promote_nested_ability_quotes(ability_text);
+
     // CR 207.2c: A granted ability's text may carry an italicized ability-word
     // prefix ("Landfall — Whenever a land you control enters, ..."). Ability
     // words have no rules meaning, so the body parses through ordinary
@@ -1855,7 +1875,8 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // (otherwise the ability-word prefix masks the trigger keyword and the line
     // falls through to the GrantAbility catch-all as an unimplemented effect).
     // Gated on a known ability word so a legitimate em-dash body is untouched.
-    if let Some((aw_name, body)) = super::oracle_modal::strip_ability_word_with_name(ability_text) {
+    if let Some((aw_name, body)) = super::oracle_modal::strip_ability_word_with_name(&ability_text)
+    {
         if super::oracle_modal::is_known_ability_word(&aw_name) {
             return classify_quoted_inner(&body);
         }
@@ -1869,7 +1890,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
         || nom_tag_lower(&lower, &lower, "at the beginning of ").is_some()
         || nom_tag_lower(&lower, &lower, "at the end of ").is_some()
     {
-        return super::oracle_trigger::parse_trigger_lines(ability_text, "~")
+        return super::oracle_trigger::parse_trigger_lines(&ability_text, "~")
             .into_iter()
             .map(|trigger| ContinuousModification::GrantTrigger {
                 trigger: Box::new(trigger),
@@ -1887,7 +1908,7 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     // `starts_with` guard is required — without it any quoted line would be
     // mis-parsed as equip.
     if nom_tag_lower(&lower, &lower, "equip").is_some() {
-        if let Some(ability) = super::oracle::try_parse_equip(ability_text) {
+        if let Some(ability) = super::oracle::try_parse_equip(&ability_text) {
             return vec![ContinuousModification::GrantAbility {
                 definition: Box::new(ability),
             }];
@@ -1901,13 +1922,13 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
     }
 
     // CR 113.3d + CR 604.1: Static-line text → GrantStaticAbility / AddStaticMode.
-    if let Some(static_modifications) = parse_quoted_rule_static_modifications(ability_text) {
+    if let Some(static_modifications) = parse_quoted_rule_static_modifications(&ability_text) {
         return static_modifications;
     }
 
     // CR 113 / CR 117 fallback: spell/activated text → GrantAbility.
     vec![ContinuousModification::GrantAbility {
-        definition: Box::new(parse_quoted_ability(ability_text)),
+        definition: Box::new(parse_quoted_ability(&ability_text)),
     }]
 }
 

@@ -229,6 +229,11 @@
       "remove": "Rimuovi magia firma",
       "mustBeInstantOrSorcery": "La magia firma deve essere un'istantanea o una stregoneria",
       "outsideColorIdentity": "{{name}}: fuori dall'identità di colore dell'Oathbreaker"
+    },
+    "companion": {
+      "heading": "Compagno",
+      "noCompanion": "Nessun compagno selezionato",
+      "remove": "Rimuovi compagno"
     }
   },
   "manaCurve": {

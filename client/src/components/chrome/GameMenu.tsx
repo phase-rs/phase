@@ -132,7 +132,7 @@ export function GameMenu({
       {open && (
         <div
           aria-label={t("gameMenu.menu")}
-          className="absolute left-0 top-full mt-1 w-72 max-w-[calc(100vw-1rem)] rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
+          className="game-menu-scroll thin-scrollbar absolute left-0 top-full mt-1 w-72 max-w-[calc(100vw-1rem)] touch-pan-y overflow-y-auto overscroll-contain rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm"
         >
           <div className="mb-1 flex items-center gap-1 border-b border-gray-700/80 px-2 pb-1">
             <VolumeControl variant="game" />

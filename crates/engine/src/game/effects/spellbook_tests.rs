@@ -114,7 +114,7 @@ fn resolve_chain_stashes_spellbook_continuation_until_choice_resolves() {
         WaitingFor::SpellbookDraft { .. }
     ));
     assert!(
-        state.pending_continuation.is_some(),
+        state.active_ability_continuation().is_some(),
         "the Draw tail must wait until the spellbook choice is submitted"
     );
     assert_eq!(

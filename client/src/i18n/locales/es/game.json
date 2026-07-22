@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Bloqueada",
+    "cantBeActivated": "Esta habilidad no puede activarse",
+    "cantActivateDuring": "No puede activarse ahora",
+    "prohibited": "Activar esta habilidad está prohibido"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -321,7 +327,7 @@
     "assignRemaining_other": "Asignar {{count}} más",
     "confirmDistribute_one": "Declarar {{count}} atacante",
     "confirmDistribute_other": "Declarar {{count}} atacantes",
-    "mustAttackPlayer": "{{creature}} debe atacar a {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Control",
@@ -367,7 +373,14 @@
     "scopeOwnTurn": "Se detiene solo en tus turnos.",
     "scopeOpponentsTurns": "Se detiene solo en los turnos de los oponentes.",
     "tooltipCurrentPhase": "Fase actual.",
-    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Parada de fase: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Fase actual: {{phase}}. Abrir ajustes de paradas de fase.",
+    "sheetTitle": "Fases del turno",
+    "sheetSubtitle": "Toca un paso para cambiar cuándo se detiene el pase automático.",
+    "scopeShortOff": "Desactivado",
+    "scopeShortAllTurns": "Todos los turnos",
+    "scopeShortOwnTurn": "Tus turnos",
+    "scopeShortOpponentsTurns": "Turnos de oponentes"
   },
   "phaseTracker": {
     "turn": "Turno {{number}}"
@@ -407,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 contador {{label}}\n{{description}}",
     "summary_other": "{{count}} contadores {{label}}\n{{description}}",
+    "summaryUnbounded": "∞ contadores {{label}}\n{{description}}",
     "descriptions": {
       "p1p1": "Cada contador +1/+1 da +1/+1 al permanente.",
       "m1m1": "Cada contador -1/-1 da -1/-1 al permanente.",
@@ -506,6 +520,11 @@
     "castCommander": "Lanza {{name}} — haz doble clic o arrastra para jugar",
     "castCommanderTax": "Lanza {{name}} (Impuesto: +{{tax}}) — haz doble clic o arrastra para jugar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — haz clic para devolver un atacante no bloqueado a la mano y poner a este comandante en el campo de batalla girado y atacando",
+    "signatureSpell": "Hechizo distintivo",
+    "signatureSpellTitle": "Hechizo distintivo: {{name}}",
+    "signatureSpellTitleTax": "Hechizo distintivo: {{name}} (Impuesto: +{{tax}})",
+    "castSignatureSpell": "Lanza {{name}} — haz doble clic o arrastra para jugar",
+    "castSignatureSpellTax": "Lanza {{name}} (Impuesto: +{{tax}}) — haz doble clic o arrastra para jugar",
     "tax": "Impuesto: +{{tax}}",
     "companion": "Compañero",
     "companionTitle": "Compañero: {{name}}",
@@ -565,6 +584,15 @@
     "resourceMana": "maná",
     "resourceCounters": "contadores",
     "resourceSpeed": "velocidad",
+    "loopCollapseTitleTokens": "Elige cuántas fichas crear",
+    "loopCollapseTitleCounters": "Elige cuántas veces añadir contadores",
+    "loopCollapseTitleLife": "Elige cuántas veces ganar vida",
+    "loopCollapseTitleMixed": "Elige cuántas veces repetir el bucle",
+    "loopCollapseAmountTokens_one": "Crear {{count}} ficha",
+    "loopCollapseAmountTokens_other": "Crear {{count}} fichas",
+    "loopCollapseAmountCounters": "Añadir contadores {{value}}×",
+    "loopCollapseAmountLife": "Ganar vida {{value}}×",
+    "loopCollapseAmountMixed": "Repetir el bucle {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Maná manual — solo esta partida. Toca tus propias tierras y maná para pagar.",
     "spendHint": "Haz clic en tu maná para gastarlo en este coste",
@@ -628,8 +656,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Asignar {{amount}} de daño de combate",
@@ -713,6 +739,7 @@
     "confirmTap": "Confirmar giro ({{selected}}/{{count}})",
     "keepCurrentTargets": "Conservar objetivos actuales",
     "skip": "Omitir",
+    "opponentChoice": "(elección del oponente)",
     "chooseNewTarget": "Elige el nuevo objetivo del hechizo",
     "chooseNewTargetForSpell": "Elige un nuevo objetivo para {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1667,6 +1694,13 @@
     "battleFallback": "Batalla",
     "subtitle": "{{name}} necesita un nuevo protector. Elige qué oponente la defenderá."
   },
+  "announcingOpponent": {
+    "title": "Elegir oponente que anuncia ({{current}} de {{total}})",
+    "subtitle": "Elige qué oponente anuncia {{target}} ({{current}} de {{total}}).",
+    "targetLand": "el objetivo de tierra",
+    "targetCreature": "el objetivo de criatura",
+    "targetChoice": "esta elección de objetivo"
+  },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."
@@ -1748,6 +1782,13 @@
     "variantBestow": "Lanzar con Otorgar",
     "variantFreerunning": "Lanzar con Freerunning",
     "variantFuse": "Lanzar con Fusión",
+    "variantMutate": "Lanzar con Mutate",
+    "variantAwaken": "Lanzar con Despertar",
+    "variantCleave": "Lanzar con Recortar",
+    "variantImpending": "Lanzar con Inminencia",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Lanzar con Prototipo",
+    "variantFaceDown": "Lanzar boca abajo",
     "variantFallback": "Lanzar con {{type}}"
   },
   "categoryChoice": {
@@ -2040,6 +2081,7 @@
     "fromSideboard": "Desde el banquillo"
   },
   "phaseName": {
+    "Untap": "Enderezar",
     "Upkeep": "Mantenimiento",
     "Draw": "Robar",
     "PreCombatMain": "Fase principal 1",

@@ -31,11 +31,11 @@ use super::oracle_ir::feature::{
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Comparator,
-    ContinuousModification, CopyRetargetPermission, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementMode,
-    RestrictionExpiry, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerConstraint, TriggerDefinition, UnlessPayScaling,
+    ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
+    DoubleTarget, Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint,
+    OpponentMayScope, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementMode, RestrictionExpiry, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
 };
 use crate::types::game_state::RetargetScope;
 use crate::types::keywords::Keyword;
@@ -2030,6 +2030,58 @@ fn any_ability_has_apnap_ordering(parsed: &ParsedAbilities) -> bool {
 
 // ── Detector F: DynamicQty ──────────────────────────────────────────────
 
+/// Dynamic-quantity marker phrases other than " twice " (which each caller
+/// handles per-site: the has_marker gate ORs it with its activation-limit
+/// guard; the *_is_only_dynamic_marker helpers treat it as the sole/second
+/// marker). Extracted so the list can't drift across the three call sites.
+const OTHER_DYNAMIC_MARKERS: &[&str] = &[
+    " equal to ",
+    "for each ",
+    "where x is ",
+    "the number of ",
+    "half your ",
+    "half their ",
+    "half its ",
+    "half the ",
+];
+
+/// True when a " twice " occurrence denotes a fixed-count activation/usage
+/// limit rather than a dynamic quantity, so the DynamicQty / repeat_for
+/// suppression must not treat it as a dynamic marker. Two surface forms qualify:
+/// "Activate ... twice each turn" (CR 602.5b usage-limited activation) and
+/// "can [keyword] twice ... rather than once" — boast's base "only once each
+/// turn" limit is CR 702.142a (an activation restriction, CR 602.5b), and boast
+/// is a referable ability (CR 702.142b) so an effect like Birgi, God of
+/// Storytelling can raise that limit.
+///
+/// "twice each turn" is accepted on wording alone. "rather than once" is NOT:
+/// the wording is not unique to any parser production on its own, and the only
+/// unit that actually lowers it to a fixed-count limit is
+/// `StaticMode::ModifyActivationLimit` (the "can boast N times/twice/thrice ...
+/// rather than once" combinator in `oracle_static/dispatch.rs`). Wording alone
+/// is therefore not a reliable signal for that arm: an unsupported future
+/// clause could reuse the same "rather than once" idiom without producing that
+/// typed carrier, and would wrongly have its DynamicQty marker suppressed if
+/// the text shape were trusted by itself. The "rather than once" arm keys off
+/// the wording only as a LOCATOR and additionally requires the scoped unit's
+/// `evidence` to contain a `StaticMode::ModifyActivationLimit` before
+/// suppressing the marker — with no typed carrier present, the "rather than
+/// once" wording is treated as a live dynamic-quantity marker instead. "twice
+/// that many" / "twice X" remain real dynamic-quantity multipliers and are
+/// excluded regardless of which arm matched. Shared by both call sites so the
+/// predicate can't drift.
+fn twice_is_activation_limit(cleaned: &str, evidence: &UnitEvidence) -> bool {
+    // allow-noncombinator: swallow detector marker scan on classified text
+    let twice_each_turn = cleaned.contains("twice each turn");
+    let rather_than_once = cleaned.contains("rather than once") // allow-noncombinator: swallow detector marker scan on classified text; locator only — gated below
+        && evidence.any_static_mode(|m| matches!(m, StaticMode::ModifyActivationLimit { .. }));
+    (twice_each_turn || rather_than_once)
+        // allow-noncombinator: swallow detector marker scan on classified text
+        && !cleaned.contains("twice that")
+        // allow-noncombinator: swallow detector marker scan on classified text
+        && !cleaned.contains("twice x")
+}
+
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
 /// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
@@ -2043,21 +2095,11 @@ fn detect_dynamic_qty(
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    // CR 605.1g: "Activate ... twice each turn" is a fixed-count activation
-    // limit (handled by ActivateLimit detector), not a dynamic quantity.
-    // "twice that many" / "twice X" remain real dynamic-quantity markers.
-    let twice_is_activation_limit = cleaned.contains("twice each turn") // allow-noncombinator: swallow detector marker scan on classified text
-        && !cleaned.contains("twice that") // allow-noncombinator: swallow detector marker scan on classified text
-        && !cleaned.contains("twice x"); // allow-noncombinator: swallow detector marker scan on classified text
-    let has_marker = cleaned.contains(" equal to ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("for each ") // allow-noncombinator: swallow detector marker scan on classified text
-        || (cleaned.contains(" twice ") && !twice_is_activation_limit) // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("where x is ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("the number of ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half your ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half their ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half its ") // allow-noncombinator: swallow detector marker scan on classified text
-        || cleaned.contains("half the "); // allow-noncombinator: swallow detector marker scan on classified text
+    // CR 702.142a + CR 602.5b: "Activate ... twice each turn" / "can [keyword]
+    // twice ... rather than once" is a fixed-count activation limit (handled by
+    // ActivateLimit / ModifyActivationLimit), not a dynamic quantity.
+    let has_marker = (cleaned.contains(" twice ") && !twice_is_activation_limit(cleaned, evidence)) // allow-noncombinator: swallow detector marker scan on classified text
+        || OTHER_DYNAMIC_MARKERS.iter().any(|m| cleaned.contains(m));
     if !has_marker {
         return;
     }
@@ -2214,8 +2256,24 @@ fn detect_dynamic_qty(
     {
         return;
     }
+    // CR 701.10e: The counter-multiplier escape hatch. Both `MultiplyCounter`
+    // ("double the number of +1/+1 counters") and the "each kind" form
+    // (`Effect::Double { target_kind: DoubleTarget::Counters, .. }`, counter.rs)
+    // carry the doubled amount intrinsically in the resolver ("give as many of
+    // those counters as already present"), never as a `QuantityExpr`. So the
+    // "the number of" dynamic marker IS represented by the effect itself — the
+    // DynamicQty warning would be a false positive.
     if cleaned_has_only_counter_multiplier_dynamic(cleaned)
-        && evidence.any_effect(|e| matches!(e, Effect::MultiplyCounter { .. }))
+        && evidence.any_effect(|e| {
+            matches!(
+                e,
+                Effect::MultiplyCounter { .. }
+                    | Effect::Double {
+                        target_kind: DoubleTarget::Counters { .. },
+                        ..
+                    }
+            )
+        })
     {
         return;
     }
@@ -2226,7 +2284,27 @@ fn detect_dynamic_qty(
     // `repeat_for` is a structural field, not a value-typed `"type":"Ref"` node.
     // When "twice" is the SOLE dynamic marker and the AST carries a `repeat_for`,
     // the quantity IS represented; the warning is a false positive.
-    if cleaned_twice_is_only_dynamic_marker(cleaned) && evidence.has_slot("repeat_for") {
+    if cleaned_twice_is_only_dynamic_marker(cleaned, evidence) && evidence.has_slot("repeat_for") {
+        return;
+    }
+    // CR 614.1a + CR 701.10g: "...it deals twice that much damage instead"
+    // (Neriv, Heart of the Storm) is a damage-doubling value-modifier
+    // replacement whose ×2 is carried by `ReplacementDefinition.damage_modification`
+    // (`Double`/`Triple`), NOT a `QuantityExpr` node — the sibling of the
+    // `quantity_modification` slot ("twice that many", Doubling Season) and the
+    // `repeat_for` clause above. `Double` is a UNIT variant with no `QuantityExpr`
+    // field, so it also escapes the `any_quantity_expr` carrier. When
+    // "twice that much damage" is the SOLE dynamic marker and the AST carries such
+    // a modification, the multiplier IS represented — runtime resolves it
+    // end-to-end via the `damage_done_applier` Double/Triple arm. Distinct from
+    // the `repeat_for` guard above (repeat-count "twice", which deliberately
+    // rejects the "twice that" multiplier form): here that multiplier IS the
+    // carried modification, so it is the accepted marker.
+    if cleaned_twice_damage_double_is_only_dynamic_marker(cleaned)
+        && evidence.any_at::<DamageModification>(&["damage_modification"], |m| {
+            matches!(m, DamageModification::Double | DamageModification::Triple)
+        })
+    {
         return;
     }
     // CR 608.2e + CR 109.5: "For each opponent who doesn't, <body>" is a
@@ -2487,8 +2565,16 @@ fn decline_iteration_prefix(input: &str) -> bool {
 }
 
 fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
+    // The counter multiplier phrase: either the "+1/+1 counters" form
+    // (`Effect::MultiplyCounter`) or the "each kind of counter" form
+    // (`Effect::Double { DoubleTarget::Counters }`, counter.rs).
+    let has_counter_multiplier = [
+        "double the number of +1/+1 counters",
+        "double the number of each kind of counter",
+    ]
+    .iter()
     // allow-noncombinator: swallow detector phrase scan on classified text
-    let has_counter_multiplier = cleaned.contains("double the number of +1/+1 counters");
+    .any(|phrase| cleaned.contains(phrase));
     if !has_counter_multiplier {
         return false;
     }
@@ -2511,21 +2597,24 @@ fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
 }
 
 /// True when " twice " is the ONLY dynamic-quantity marker in `cleaned` (and
-/// is not the "twice each turn" activation-limit form). Used to keep the
-/// `repeat_for` suppression narrow: a card that ALSO carries another dynamic
-/// phrase ("for each", "equal to", "the number of", …) must still flag, since
-/// that second marker may be a genuinely-swallowed clause `repeat_for` does
-/// not account for.
-fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
+/// is not an activation-limit form per `twice_is_activation_limit` — see that
+/// function for the evidence-backed contract on "rather than once"). Used to
+/// keep the `repeat_for` suppression narrow: a card that ALSO carries another
+/// dynamic phrase ("for each", "equal to", "the number of", …) must still
+/// flag, since that second marker may be a genuinely-swallowed clause
+/// `repeat_for` does not account for.
+fn cleaned_twice_is_only_dynamic_marker(cleaned: &str, evidence: &UnitEvidence) -> bool {
     // allow-noncombinator: swallow detector marker scan on classified text
-    let twice_is_activation_limit = cleaned.contains("twice each turn")
-        // allow-noncombinator: swallow detector marker scan on classified text
-        && !cleaned.contains("twice that")
-        // allow-noncombinator: swallow detector marker scan on classified text
-        && !cleaned.contains("twice x");
-    // allow-noncombinator: swallow detector marker scan on classified text
-    let has_twice = cleaned.contains(" twice ") && !twice_is_activation_limit;
+    let has_twice = cleaned.contains(" twice ") && !twice_is_activation_limit(cleaned, evidence);
     if !has_twice {
+        return false;
+    }
+    // A bare "rather than once" clause is not a repeat-count instruction.
+    // `twice_is_activation_limit` has already accepted the form when the AST
+    // proves it is `ModifyActivationLimit`; without that carrier, do not let an
+    // unrelated `repeat_for` suppress this unresolved dynamic wording.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if cleaned.contains("rather than once") {
         return false;
     }
     // "twice that many" / "twice x" are multiplier markers, not the plain
@@ -2535,19 +2624,30 @@ fn cleaned_twice_is_only_dynamic_marker(cleaned: &str) -> bool {
         return false;
     }
     // No OTHER dynamic marker may be present.
-    ![
-        " equal to ",
-        "for each ",
-        "where x is ",
-        "the number of ",
-        "half your ",
-        "half their ",
-        "half its ",
-        "half the ",
-    ]
-    .iter()
     // allow-noncombinator: swallow detector marker scan on classified text
-    .any(|marker| cleaned.contains(marker))
+    !OTHER_DYNAMIC_MARKERS.iter().any(|m| cleaned.contains(m))
+}
+
+/// True when the sole dynamic-quantity marker in `cleaned` is the
+/// damage-doubling phrase "twice that much damage" — the surface form Neriv,
+/// Heart of the Storm lowers to `DamageModification::Double`. Sibling of
+/// `cleaned_twice_is_only_dynamic_marker` (repeat-count "twice") for the
+/// damage-modification carrier: that helper deliberately REJECTS "twice that" (a
+/// multiplier needing a real `QuantityExpr`), but here the ×2 IS the
+/// "twice that much damage" phrase, already carried by `DamageModification`, so
+/// it is the accepted marker. Every OTHER dynamic marker — a second, independent
+/// "twice", "for each", "equal to", "the number of", "where x is", "half …" —
+/// keeps the warning, so a genuinely-swallowed second clause is never masked.
+fn cleaned_twice_damage_double_is_only_dynamic_marker(cleaned: &str) -> bool {
+    // allow-noncombinator: swallow detector phrase scan on classified text
+    if !cleaned.contains("twice that much damage") {
+        return false;
+    }
+    // Strip the accepted doubling phrase, then require no dynamic marker to
+    // remain — a residual " twice " catches a second, independent doubling.
+    let residual = cleaned.replace("twice that much damage", " ");
+    // allow-noncombinator: swallow detector marker scan on classified text
+    !(residual.contains(" twice ") || OTHER_DYNAMIC_MARKERS.iter().any(|m| residual.contains(m)))
 }
 
 /// CR 702.170c + CR 608.2c: "[you may] exile a card. If you do, it becomes
@@ -4419,11 +4519,14 @@ mod tests {
 
     use super::{
         any_ability_has_unimplemented, def_tree_has_optional, def_tree_has_unimplemented,
-        trigger_tree_has_optional,
+        trigger_tree_has_optional, twice_is_activation_limit,
     };
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
-    use crate::types::ability::{AbilityDefinition, Effect, OutsideGameSourcePool, TargetFilter};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DamageModification, Effect, OutsideGameSourcePool,
+        QuantityExpr, TargetFilter,
+    };
     use crate::types::identifiers::TrackedSetId;
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaCost;
@@ -4446,6 +4549,58 @@ mod tests {
             &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
             &[],
         )
+    }
+
+    /// Evidence carrying NO `StaticMode::ModifyActivationLimit` — for exercising the
+    /// "rather than once" arm of `twice_is_activation_limit` /
+    /// `cleaned_twice_is_only_dynamic_marker` against text-only wording with no typed
+    /// carrier behind it (the case the evidence gate must NOT treat as an activation
+    /// limit). Field list is taken verbatim from the `ParsedAbilities` struct
+    /// definition in `crates/engine/src/parser/oracle.rs` (same pattern as
+    /// `parsed_with_one_replacement_description` below).
+    fn no_activation_limit_evidence() -> UnitEvidence {
+        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        })
+    }
+
+    /// Evidence with a `repeat_for` carrier but no activation-limit static. This
+    /// distinguishes a real repeat-count parse from unsupported "rather than
+    /// once" wording that must still be reported as dynamic quantity text.
+    fn repeat_for_without_activation_limit_evidence() -> UnitEvidence {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        ability.repeat_for = Some(QuantityExpr::Fixed { value: 2 });
+        UnitEvidence::of(&crate::parser::oracle::ParsedAbilities {
+            abilities: vec![ability],
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        })
     }
 
     fn has_swallowed_detector(
@@ -4735,22 +4890,36 @@ mod tests {
     }
 
     /// Registration + real-pipeline positive: a "choose up to X, where X is ..."
-    /// modal keeps the fixed-default cap (the existing "where" guard blocks the
-    /// cast-{X} arm), so the real parser yields a modal node WITHOUT
-    /// `dynamic_max_choices`. Driven end-to-end through `parse_oracle_text` →
-    /// `check_swallowed_clauses`, so it discriminates the detector registration.
-    /// This "where X is" shape is unaffected by Sub-plan B's "that many" arm,
-    /// keeping the test stable across both commits. Revert the registration line
-    /// in `check_swallowed_clauses` → no diagnostic → fails.
+    /// modal whose `<expr>` `parse_cda_quantity` does NOT recognize keeps the
+    /// fixed-default cap — the where-X arm's `map_opt` fails, the `CostXPaid`
+    /// arm's `not(where)` lookahead rejects it, and it falls through with NO
+    /// `dynamic_max_choices`, so the detector fires. The `is_none()` guard below
+    /// pins the fixture expr as genuinely-unsupported: if a future quantity arm
+    /// ever supports it, that guard fails LOUDLY (never a silent vacuous pass),
+    /// signalling the fixture needs a still-dropped expr. Driven end-to-end
+    /// through `parse_oracle_text` → `check_swallowed_clauses`, so it
+    /// discriminates the detector registration. The positive where-X capability
+    /// (supported exprs → dynamic cap) is pinned separately by
+    /// `parse_modal_choose_count_up_to_x_redefined_is_dynamic`. Revert the
+    /// registration line in `check_swallowed_clauses` → no diagnostic → fails.
     #[test]
     fn modal_dynamic_max_dropped_registered_via_real_parse() {
-        let parsed = parse_named(
-            "Choose up to X, where X is the number of cards in your hand \u{2014}\n\
-             \u{2022} You gain 2 life.\n\
-             \u{2022} Draw a card.",
-            "Synthetic Dropped Cap Modal",
-            &["Sorcery"],
+        // A cross-player "greatest number of creatures" count that no
+        // `parse_cda_quantity` arm recognizes ⇒ the dynamic cap is genuinely
+        // dropped. Shared const feeds both the guard and the fixture so they
+        // cannot drift.
+        const DROPPED_EXPR: &str = "the greatest number of creatures a player controls";
+        assert!(
+            crate::parser::oracle_quantity::parse_cda_quantity(DROPPED_EXPR).is_none(),
+            "fixture expr must stay unsupported so the modal cap is genuinely \
+             dropped; pick another still-unsupported expr if this fails",
         );
+        let oracle = format!(
+            "Choose up to X, where X is {DROPPED_EXPR} \u{2014}\n\
+             \u{2022} You gain 2 life.\n\
+             \u{2022} Draw a card."
+        );
+        let parsed = parse_named(&oracle, "Synthetic Dropped Cap Modal", &["Sorcery"]);
         assert!(
             has_swallowed_detector(&parsed, "Modal_DynamicMaxDropped"),
             "real parse of a dropped-cap modal must surface the detector: {:?}",
@@ -7016,6 +7185,37 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
     }
 
+    #[test]
+    fn dynamic_qty_accepts_jaws_of_defeat_pt_difference_carrier() {
+        let parsed = parse_named(
+            "Whenever a creature you control enters, target opponent loses life equal to the difference between that creature's power and its toughness.",
+            "Jaws of Defeat",
+            &["Enchantment"],
+        );
+
+        let trigger = parsed.triggers.first().expect("Jaws trigger must parse");
+        let execute = trigger.execute.as_ref().expect("Jaws execute must parse");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::LoseLife {
+                    amount: crate::types::ability::QuantityExpr::Difference { .. },
+                    ..
+                }
+            ),
+            "positive reach guard: Jaws must carry a typed P/T Difference, got {execute:?}"
+        );
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref())
+                .all(|ability| !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })),
+            "positive reach guard: Jaws must contain no Unimplemented root effect"
+        );
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
     /// CR 702.170a: Fblthp's "The plot cost is equal to its mana cost" is the
     /// intrinsic plot cost of the `TopOfLibraryHasPlot` static (computed at
     /// synthesis, no stored `QuantityExpr`), so the " equal to " marker must NOT
@@ -7177,32 +7377,127 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     /// must keep the warning live even if a `repeat_for` is also present.
     #[test]
     fn twice_is_only_dynamic_marker_gate() {
+        let evidence = no_activation_limit_evidence();
         // Plain "twice" with no other marker — the suppression-eligible case.
         assert!(super::cleaned_twice_is_only_dynamic_marker(
-            "investigate. if this spell was cast from a graveyard, investigate twice instead."
+            "investigate. if this spell was cast from a graveyard, investigate twice instead.",
+            &evidence
         ));
         // "twice that" is a multiplier — needs a real QuantityExpr.
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
-            "they lose twice that much life instead."
+            "they lose twice that much life instead.",
+            &evidence
         ));
         // "twice x" is a multiplier.
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
-            "deal damage equal to twice x to any target."
+            "deal damage equal to twice x to any target.",
+            &evidence
         ));
         // A second dynamic marker present — must not be suppression-eligible.
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
-            "investigate twice instead, then draw cards equal to your life total."
+            "investigate twice instead, then draw cards equal to your life total.",
+            &evidence
         ));
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
-            "investigate twice instead and create a token for each creature you control."
+            "investigate twice instead and create a token for each creature you control.",
+            &evidence
         ));
-        // "twice each turn" alone is the activation-limit form, not dynamic.
+        // "twice each turn" alone is the activation-limit form, not dynamic —
+        // this arm is wording-only and needs no evidence.
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
-            "activate this ability only twice each turn."
+            "activate this ability only twice each turn.",
+            &evidence
         ));
         // No "twice" at all.
         assert!(!super::cleaned_twice_is_only_dynamic_marker(
-            "draw a card for each creature you control."
+            "draw a card for each creature you control.",
+            &evidence
+        ));
+    }
+
+    /// CR 614.1a + CR 701.10g: Neriv, Heart of the Storm — "it deals twice that
+    /// much damage instead" is a `DamageModification::Double` replacement. The ×2
+    /// is carried by the modification (a unit variant with no `QuantityExpr`), so
+    /// the "twice" marker must not flag DynamicQty.
+    ///
+    /// Non-vacuous: the two reach-guards prove the parse reached the real Double
+    /// carrier and admitted zero `Effect::Unimplemented` (an Unimplemented would
+    /// early-return `check_swallowed_clauses` and make the negative pass for the
+    /// wrong reason — card-test foot-gun #6). Revert surface: remove the
+    /// `damage_modification` suppression clause in `detect_dynamic_qty` and this
+    /// flips to a live DynamicQty warning.
+    #[test]
+    fn dynamic_qty_accepts_damage_double_carrier_neriv() {
+        // Verbatim Oracle text. "Flying" is supplied as an MTGJSON keyword — as
+        // the real card-data pipeline does — so it is recognized rather than left
+        // as an Unimplemented line; the doubling clause is the unit under test.
+        let types: Vec<String> = ["Legendary", "Creature", "Dragon"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let parsed = parse_oracle_text(
+            "Flying\n\
+             If a creature you control that entered this turn would deal damage, it deals twice \
+             that much damage instead.",
+            "Neriv, Heart of the Storm",
+            &["Flying".to_string()],
+            &types,
+            &["Dragon".to_string()],
+        );
+
+        // Reach-guard A: zero Unimplemented ⇒ the doubling unit's detector runs to
+        // completion (an Unimplemented would early-return `check_swallowed_clauses`
+        // — card-test foot-gun #6). Isolation was measured: the doubling clause
+        // ALONE parses to zero abilities + one Double replacement, so this
+        // negative is exercised on the doubling unit, not masked by the "Flying"
+        // keyword line.
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach-guard: Neriv must parse with zero Unimplemented (else the negative is vacuous)"
+        );
+        // Reach-guard B: the Double carrier the suppression keys on is present.
+        assert!(
+            parsed
+                .replacements
+                .iter()
+                .any(|r| r.damage_modification == Some(DamageModification::Double)),
+            "reach-guard: Neriv must parse to a Double damage-modification replacement"
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    /// Helper-level narrowness gate for
+    /// `cleaned_twice_damage_double_is_only_dynamic_marker`: the damage-double
+    /// suppression fires ONLY when "twice that much damage" is the sole dynamic
+    /// marker, and — unlike `cleaned_twice_is_only_dynamic_marker` (repeat-count
+    /// "twice") — it accepts the "twice that" multiplier form because here the ×2
+    /// is carried by `DamageModification::Double`. Any second dynamic marker keeps
+    /// the warning, so a real second clause is never masked.
+    #[test]
+    fn dynamic_qty_damage_double_marker_gate() {
+        // Neriv's sole-marker case — suppression-eligible.
+        assert!(super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "if a creature you control that entered this turn would deal damage, it deals twice \
+             that much damage instead."
+        ));
+        // The OLD repeat-count helper REJECTS this exact phrase (it treats
+        // "twice that" as a multiplier needing a real QuantityExpr) — which is
+        // precisely why the damage-double helper is a separate sibling.
+        assert!(!super::cleaned_twice_is_only_dynamic_marker(
+            "it deals twice that much damage instead.",
+            &no_activation_limit_evidence()
+        ));
+        // Non-masking: a genuine second dynamic marker keeps the warning live.
+        assert!(!super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "it deals twice that much damage. then draw cards equal to the number of counters on it."
+        ));
+        assert!(!super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "it deals twice that much damage, then create a token for each creature you control."
+        ));
+        // No damage-double phrase at all → not eligible.
+        assert!(!super::cleaned_twice_damage_double_is_only_dynamic_marker(
+            "investigate twice instead."
         ));
     }
 
@@ -7551,8 +7846,8 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
     fn optional_you_may_accepts_mizzix_mastery_cast_copy() {
         let parsed = parse_named(
             "Exile target card that's an instant or sorcery from your graveyard. \
-             For each card exiled this way, copy it. You may cast the copy \
-             without paying its mana cost.",
+             For each card exiled this way, copy it, and you may cast the copy \
+             without paying its mana cost. Exile Mizzix's Mastery.",
             "Mizzix's Mastery",
             &["Sorcery"],
         );
@@ -8373,6 +8668,77 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
         );
     }
 
+    /// FIX1 recognizer (CR 701.10e): the counter-multiplier escape-hatch phrase
+    /// scan must ALSO accept the "each kind of counter" doubling form (which
+    /// emits `Effect::Double`, not `MultiplyCounter`), while staying
+    /// RED-conservative — a SECOND dynamic marker keeps the warning alive.
+    #[test]
+    fn counter_multiplier_recognizer_accepts_each_kind_form() {
+        // "each kind" doubling form — newly recognized.
+        assert!(super::cleaned_has_only_counter_multiplier_dynamic(
+            "double the number of each kind of counter on target creature"
+        ));
+        // Historical "+1/+1 counters" form — regression guard.
+        assert!(super::cleaned_has_only_counter_multiplier_dynamic(
+            "double the number of +1/+1 counters on target creature"
+        ));
+        // A SECOND dynamic marker ("for each") must keep the warning: a real
+        // uncaptured clause may hide behind it.
+        assert!(!super::cleaned_has_only_counter_multiplier_dynamic(
+            "double the number of each kind of counter on target creature for each card in your hand"
+        ));
+    }
+
+    /// FIX1 end-to-end (CR 701.10e): the "each kind of counter" doubling form no
+    /// longer produces a false-positive DynamicQty swallowed-clause warning — the
+    /// escape hatch now recognizes `Effect::Double { DoubleTarget::Counters }` as
+    /// the intrinsic carrier of the doubled count. Covers a synthetic targeted
+    /// instant AND Zimone, Paradox Sculptor's real activated line.
+    #[test]
+    fn double_each_kind_of_counter_is_not_a_dynamic_qty_swallow() {
+        use crate::parser::oracle_ir::feature::OracleSemanticFeature;
+
+        for (text, name, types) in [
+            (
+                "Double the number of each kind of counter on target creature.",
+                "Synthetic Counter Doubler",
+                &["Instant"][..],
+            ),
+            (
+                "{G}{U}, {T}: Double the number of each kind of counter on up to two target creatures and/or artifacts you control.",
+                "Zimone, Paradox Sculptor",
+                &["Legendary", "Creature"][..],
+            ),
+        ] {
+            let parsed = parse_named(text, name, types);
+
+            // REACH GUARDS (avoid vacuity): the line must actually parse and the
+            // detector's dynamic marker must be present, or the silence proves
+            // nothing about the escape-hatch arm.
+            assert!(
+                !parsed.abilities.is_empty(),
+                "{name}: the line must parse to at least one ability"
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: the targeted form must parse — a self-suppressing Unimplemented would make this vacuous"
+            );
+            assert!(
+                // allow-noncombinator: test reach-guard asserting the fixture text carries the marker
+                text.to_lowercase().contains("the number of"),
+                "{name}: the dynamic-qty marker must be present in the fixture"
+            );
+
+            assert!(
+                !has_swallowed_detector(
+                    &parsed,
+                    OracleSemanticFeature::DynamicQty.detector_label()
+                ),
+                "{name}: an intrinsic counter-doubler must not be flagged as a swallowed DynamicQty clause"
+            );
+        }
+    }
+
     /// The OTHER half of the `ActivateOnlyDuring` input space, pinned to what the parser
     /// ACTUALLY does — which is not what it looks like from the detector alone.
     ///
@@ -8463,6 +8829,142 @@ this spell's mana cost.\nAttacking creatures get -3/-0 until end of turn.",
             !has_swallowed_detector(&parsed, "APNAP"),
             "a typed 'starting with' ordering must SILENCE the APNAP detector — if this fires, \
              the typed evidence arm is not being consulted"
+        );
+    }
+
+    /// Birgi, God of Storytelling's boast-limit static parses to
+    /// `ModifyActivationLimit` (reach-guard, per the vacuous-negative rule) and
+    /// must NOT raise a false-positive `DynamicQty` swallow warning: its " twice "
+    /// is a fixed activation limit (CR 702.142a), not a dynamic quantity.
+    ///
+    /// REVERT DISCRIMINATOR: dropping the `"rather than once"` arm of
+    /// `twice_is_activation_limit` makes `has_marker` fire on this line with no
+    /// dynamic carrier present, so the `!has_swallowed_detector` assertion below
+    /// flips to a failure.
+    #[test]
+    fn birgi_boast_limit_static_does_not_flag_dynamic_qty() {
+        let parsed = parse(
+            "Creatures you control can boast twice during each of your turns rather than once.",
+            &["Creature"],
+        );
+        // Reach-guard: the line actually parses to the ModifyActivationLimit
+        // static — not an `Effect::Unimplemented` that would make the negative
+        // below vacuous (`check_swallowed_clauses` early-returns on unparsed
+        // abilities).
+        assert!(
+            parsed.statics.iter().any(|s| matches!(
+                &s.mode,
+                StaticMode::ModifyActivationLimit { keyword, new_limit }
+                    if keyword == "boast" && *new_limit == 2
+            )),
+            "boast-twice line must parse to ModifyActivationLimit {{ boast, 2 }}"
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "DynamicQty"),
+            "boast activation-limit `twice` must not be read as a dynamic quantity"
+        );
+    }
+
+    /// Building-block guard for the carve-out: the activation-limit forms
+    /// ("twice each turn", "... rather than once") are recognized, while real
+    /// dynamic multipliers ("twice that many", "twice x") are NOT — so a genuinely
+    /// swallowed multiplier still reaches `detect_dynamic_qty`'s marker gate and
+    /// flags. This pins the boundary the Birgi fix widened.
+    ///
+    /// Also pins the evidence gate itself: "rather than once" wording with NO
+    /// `StaticMode::ModifyActivationLimit` behind it must NOT be treated as an
+    /// activation limit — see `dynamic_qty_flags_unbacked_rather_than_once_wording`
+    /// for the full-pipeline version of the same regression.
+    #[test]
+    fn twice_is_activation_limit_scopes_to_fixed_limits_only() {
+        let with_modify_activation_limit = UnitEvidence::of(&parse(
+            "Creatures you control can boast twice during each of your turns rather than once.",
+            &["Creature"],
+        ));
+        let without_modify_activation_limit = no_activation_limit_evidence();
+
+        // Activation-limit surface forms → treated as a fixed limit (suppressed) when
+        // the typed carrier backs the wording.
+        assert!(twice_is_activation_limit(
+            "creatures you control can boast twice during each of your turns rather than once",
+            &with_modify_activation_limit
+        ));
+        // "twice each turn" is a wording-only arm — needs no evidence.
+        assert!(twice_is_activation_limit(
+            "activate this ability only twice each turn",
+            &without_modify_activation_limit
+        ));
+        // EVIDENCE GATE: the identical "rather than once" wording with NO
+        // ModifyActivationLimit carrier behind it is NOT an activation limit —
+        // wording alone must not suppress the marker.
+        assert!(!twice_is_activation_limit(
+            "creatures you control can boast twice during each of your turns rather than once",
+            &without_modify_activation_limit
+        ));
+        // Real dynamic multipliers → NOT a fixed limit; the DynamicQty gate must
+        // still see them as markers and flag when no typed carrier exists.
+        assert!(!twice_is_activation_limit(
+            "draw twice that many cards",
+            &without_modify_activation_limit
+        ));
+        assert!(!twice_is_activation_limit(
+            "deal twice x damage",
+            &without_modify_activation_limit
+        ));
+        // Multiplier exclusion wins even alongside an activation-limit phrase and even
+        // when the ModifyActivationLimit carrier IS present.
+        assert!(!twice_is_activation_limit(
+            "boast twice rather than once, then draw twice that many cards",
+            &with_modify_activation_limit
+        ));
+    }
+
+    /// Step 3 regression (reviewer blocker on PR #6174): a unit whose text has the
+    /// "twice ... rather than once" SHAPE but whose parsed output contains NO
+    /// `StaticMode::ModifyActivationLimit` must still report the `DynamicQty`
+    /// diagnostic — the textual shape is a LOCATOR only, never sufficient on its
+    /// own to suppress the marker. Exercises the real production seam
+    /// (`detect_dynamic_qty`, the function `check_swallowed_clauses` calls) with an
+    /// evidence tree that genuinely lacks the typed carrier, simulating an
+    /// unsupported future clause that reuses the "rather than once" idiom without
+    /// ever reaching the `ModifyActivationLimit` combinator.
+    ///
+    /// REVERT DISCRIMINATOR: reverting the evidence-gate arm makes
+    /// `twice_is_activation_limit` return `true` on wording alone, `has_marker`
+    /// goes `false`, and this assertion flips from a warning to none.
+    #[test]
+    fn dynamic_qty_flags_unbacked_rather_than_once_wording() {
+        let cleaned = "creatures you control can forage twice during each of your turns rather \
+                       than once.";
+        let evidence = no_activation_limit_evidence();
+        let mut found = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        assert!(
+            found.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty"
+            )),
+            "\"rather than once\" wording with no ModifyActivationLimit carrier must still \
+             raise DynamicQty"
+        );
+    }
+
+    /// `repeat_for` alone must not silence unbacked "rather than once"
+    /// wording: it only carries a repeat count after the parser has identified
+    /// the plain repeat instruction, not an arbitrary dynamic clause.
+    #[test]
+    fn dynamic_qty_flags_unbacked_rather_than_once_with_repeat_for() {
+        let cleaned = "creatures you control can forage twice during each of your turns rather \
+                       than once.";
+        let evidence = repeat_for_without_activation_limit_evidence();
+        let mut found = Vec::new();
+        super::detect_dynamic_qty(cleaned, cleaned, &evidence, &mut found);
+        assert!(
+            found.iter().any(|d| matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "DynamicQty"
+            )),
+            "repeat_for must not hide unbacked 'rather than once' wording"
         );
     }
 }

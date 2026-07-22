@@ -6,7 +6,10 @@ use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use engine::ai_support::{auto_pass_recommended, legal_actions_for_viewer, legal_actions_full};
+use engine::ai_support::{
+    auto_pass_recommended, auto_pass_recommended_for_viewer, legal_actions_for_viewer,
+    legal_actions_full,
+};
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
 use engine::database::{CardDatabase, CardSearchQuery};
 use engine::game::engine::{
@@ -15,10 +18,11 @@ use engine::game::engine::{
 };
 use engine::game::preview::{compute_preview_diff, preview_auto_payment_sources};
 use engine::game::{
-    can_pair_commanders, deck_copy_limit_for, estimate_bracket, evaluate_deck_compatibility,
-    filter_state_for_viewer, finalize_public_state, is_brawl_commander_eligible,
-    is_commander_eligible, is_tiny_leader_eligible, load_and_hydrate_decks,
-    rehydrate_game_from_card_db, resolve_deck_list, start_game, start_game_with_starting_player,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
+    evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    load_and_hydrate_decks, rehydrate_game_from_card_db, resolve_deck_list,
+    signature_spell_selection_policy, start_game, start_game_with_starting_player,
     validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
     PlayerDeckList, ReplayPlayer,
 };
@@ -572,6 +576,38 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
     })
 }
 
+/// Returns the engine-authored Oathbreaker signature-spell selection policy.
+#[wasm_bindgen(js_name = signatureSpellSelectionPolicy)]
+pub fn signature_spell_selection_policy_js(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&signature_spell_selection_policy(db, &request)))
+    })
+}
+
+/// Returns legal Commander-family companion candidates from the main deck.
+#[wasm_bindgen(js_name = companionCandidates)]
+pub fn companion_candidates_js(request: JsValue) -> Result<JsValue, JsValue> {
+    let request: DeckCompatibilityRequest = serde_wasm_bindgen::from_value(request)
+        .map_err(|e| JsValue::from_str(&format!("Invalid compatibility request: {e}")))?;
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        Ok(to_js(&companion_candidates(db, &request)))
+    })
+}
+
 /// Estimates a Commander deck's bracket without touching `GAME_STATE`.
 /// Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
 /// deck has no commander or the card database is not loaded.
@@ -709,6 +745,7 @@ pub fn initialize_game(
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.companion,
                         &deck.planar_deck,
                         &deck.scheme_deck,
                         &deck.signature_spell,
@@ -731,6 +768,7 @@ pub fn initialize_game(
                         &deck.main_deck,
                         &deck.sideboard,
                         &deck.commander,
+                        &deck.companion,
                         &deck.planar_deck,
                         &deck.scheme_deck,
                         &deck.signature_spell,
@@ -1119,10 +1157,13 @@ pub fn get_game_state() -> JsValue {
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
     match with_state(|state| {
         let filtered = filter_state_for_viewer(state, PlayerId(viewer));
-        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
-            &filtered,
-            Some(PlayerId(viewer)),
-        ))
+        to_js(
+            &engine::game::derived_views::ClientGameStateRef::wrap_filtered(
+                state,
+                &filtered,
+                Some(PlayerId(viewer)),
+            ),
+        )
     }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
@@ -1158,16 +1199,10 @@ pub fn get_legal_actions_js() -> JsValue {
 pub fn get_legal_actions_for_viewer_js(player_id: u32) -> JsValue {
     match with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
-        let (actions, spell_costs, legal_actions_by_object) =
-            legal_actions_for_viewer(state, PlayerId(player_id as u8));
-        let auto_pass = auto_pass_recommended(state, &actions);
-        to_js(&LegalActionsResult {
-            actions,
-            auto_pass_recommended: auto_pass,
-            spell_costs,
-            legal_actions_by_object,
-            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
-        })
+        to_js(&legal_actions_result_for_viewer(
+            state,
+            PlayerId(player_id as u8),
+        ))
     }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
@@ -1235,22 +1270,75 @@ struct ViewerSnapshot {
     stuck_diagnostic: Option<engine::ai_support::StuckDecisionDiagnostic>,
 }
 
+fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
+    let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
+    let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
+    LegalActionsResult {
+        actions,
+        auto_pass_recommended,
+        spell_costs,
+        legal_actions_by_object,
+        stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
+    }
+}
+
+#[cfg(test)]
+mod viewer_priority_tests {
+    use super::*;
+    use engine::types::game_state::{PriorityPassingMode, WaitingFor};
+    use engine::types::phase::Phase;
+
+    #[test]
+    fn viewer_result_routes_turn_control_recommendation_only_to_controller() {
+        let controller = PlayerId(0);
+        let controlled = PlayerId(1);
+        let mut state = GameState::new_two_player(19);
+        state.active_player = controlled;
+        state.phase = Phase::End;
+        state.waiting_for = WaitingFor::Priority { player: controlled };
+        state.priority_player = controller;
+        state.turn_decision_controller = Some(controller);
+        state
+            .priority_passing_modes
+            .insert(controller, PriorityPassingMode::SkipLowUseWindows);
+
+        let controller_result = legal_actions_result_for_viewer(&state, controller);
+        assert!(
+            controller_result
+                .actions
+                .iter()
+                .any(|action| matches!(action, GameAction::PassPriority)),
+            "the authorized controller must receive the controlled seat's priority actions"
+        );
+        assert!(controller_result.auto_pass_recommended);
+
+        let controlled_result = legal_actions_result_for_viewer(&state, controlled);
+        assert!(controlled_result.actions.is_empty());
+        assert!(
+            auto_pass_recommended(&state, &controlled_result.actions),
+            "reach guard: the unscoped recommendation would leak true to the controlled viewer"
+        );
+        assert!(
+            !controlled_result.auto_pass_recommended,
+            "the controlled viewer is not authorized to act and must receive false"
+        );
+    }
+}
+
 #[wasm_bindgen]
 pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
     match with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
-        let (actions, spell_costs, legal_actions_by_object) =
-            legal_actions_for_viewer(state, viewer);
-        let auto_pass = auto_pass_recommended(state, &actions);
+        let legal = legal_actions_result_for_viewer(state, viewer);
         to_js(&ViewerSnapshot {
             state: filtered,
-            actions,
-            auto_pass_recommended: auto_pass,
-            spell_costs,
-            legal_actions_by_object,
-            stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
+            actions: legal.actions,
+            auto_pass_recommended: legal.auto_pass_recommended,
+            spell_costs: legal.spell_costs,
+            legal_actions_by_object: legal.legal_actions_by_object,
+            stuck_diagnostic: legal.stuck_diagnostic,
         })
     }) {
         Ok(val) => val,
@@ -1820,6 +1908,7 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
                 main_deck: deck_data.main_deck,
                 sideboard: deck_data.sideboard,
                 commander: deck_data.commander,
+                companion: deck_data.companion,
                 attraction_deck: deck_data.attraction_deck,
                 planar_deck: deck_data.planar_deck,
                 scheme_deck: deck_data.scheme_deck,

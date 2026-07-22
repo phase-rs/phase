@@ -27,7 +27,11 @@ export async function ensureWasmInit(): Promise<void> {
   if (!wasmInitPromise) {
     wasmInitPromise = (async () => {
       const engine = await loadEngineModule();
-      await engine.default();
+      if (__ENGINE_WASM_URL__) {
+        await engine.default({ module_or_path: __ENGINE_WASM_URL__ });
+      } else {
+        await engine.default();
+      }
     })();
   }
   return wasmInitPromise;
@@ -230,6 +234,26 @@ export async function commanderPartnerCandidates(
   await ensureCardDatabase();
   const engine = await loadEngineModule();
   return engine.commanderPartnerCandidates(firstCommander, candidates) as string[];
+}
+
+export type SignatureSpellSelectionPolicy =
+  | { type: "None" }
+  | { type: "Required"; data: { candidates: string[] } };
+
+/** Returns the engine-authored Oathbreaker signature-spell selection policy. */
+export async function signatureSpellSelectionPolicy(
+  request: unknown,
+): Promise<SignatureSpellSelectionPolicy> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.signatureSpellSelectionPolicy(request) as SignatureSpellSelectionPolicy;
+}
+
+/** Returns the engine-approved Commander-family companion candidates. */
+export async function companionCandidates(request: unknown): Promise<string[]> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.companionCandidates(request) as string[];
 }
 
 /**

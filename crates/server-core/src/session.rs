@@ -409,6 +409,7 @@ impl GameSession {
                 main_deck: deck.main_deck.clone(),
                 sideboard: deck.sideboard.clone(),
                 commander: deck.commander.clone(),
+                companion: deck.companion.clone(),
                 planar_deck: deck.planar_deck.clone(),
                 scheme_deck: deck.scheme_deck.clone(),
                 attraction_deck: deck.attraction_deck.clone(),
@@ -1093,13 +1094,17 @@ impl SessionManager {
             ));
         }
 
-        // SetPhaseStops: per-player preference keyed to the authenticated player,
+        // SetPhaseStops / SetPriorityPassingMode: per-player preferences keyed
+        // to the authenticated player,
         // not the priority holder. Bypasses the turn/legal-action prechecks (any
         // player may adjust their own stops at any time) and delegates the
         // mutation to the engine (single authority — the write handler keys by
         // `actor`, i.e. the authenticated player). Not an undo point → no
         // takeback snapshot. CR 102.1 (scope resolves against the active player).
-        if matches!(action, GameAction::SetPhaseStops { .. }) {
+        if matches!(
+            action,
+            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. }
+        ) {
             let result = apply(&mut session.state, player, action).map_err(|e| {
                 warn!(game = %game_code, player = ?player, error = %e, reason = "engine_error", "action rejected");
                 format!("Engine error: {}", e)
@@ -1313,7 +1318,11 @@ impl SessionManager {
                     .accepts_freeform_counter_removal());
         if !skip_legality {
             let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
-            if !legal_actions.contains(&action) {
+            // CR 601.2g: candidates are enumerated with the canonical `Auto`
+            // payment mode, so the player's `Manual` payment preference must
+            // be erased before membership matching (GH #6275). The action
+            // applied below keeps the submitted mode.
+            if !legal_actions.contains(action.with_canonical_payment_mode().as_ref()) {
                 warn!(game = %game_code, player = ?player, reason = "illegal_action", "action rejected");
                 return Err(format!("Illegal action: {:?}", action));
             }
@@ -1948,6 +1957,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn priority_passing_mode_route_updates_recommendation_without_history_or_advance() {
+        use std::sync::Arc;
+
+        use engine::game::zones::create_object;
+        use engine::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
+        };
+        use engine::types::game_state::PriorityPassingMode;
+        use engine::types::identifiers::CardId;
+
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.state.active_player = PlayerId(0);
+        session.state.priority_player = PlayerId(0);
+        session.state.phase = Phase::End;
+        session.state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source = create_object(
+            &mut session.state,
+            CardId(900),
+            PlayerId(0),
+            "Priority Test Source".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut session.state.objects.get_mut(&source).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        );
+        let waiting_before = session.state.waiting_for.clone();
+        let stack_before = session.state.stack.clone();
+        let pass_before = session.state.priority_passes.clone();
+        let history_before = session.takeback_history.len();
+
+        let (_, events, _, logs, standard, _, _) = mgr
+            .handle_action(
+                &code,
+                &token0,
+                GameAction::SetPriorityPassingMode {
+                    mode: PriorityPassingMode::Standard,
+                },
+            )
+            .expect("Standard preference route");
+        assert!(!standard, "meaningful End-step action holds in Standard");
+        assert!(events.is_empty() && logs.is_empty());
+
+        let (_, events, _, logs, skips_low_use_window, _, _) = mgr
+            .handle_action(
+                &code,
+                &token0,
+                GameAction::SetPriorityPassingMode {
+                    mode: PriorityPassingMode::SkipLowUseWindows,
+                },
+            )
+            .expect("low-use-window preference route");
+        assert!(
+            skips_low_use_window,
+            "the opt-in mode passes the player's own empty End window"
+        );
+        assert!(events.is_empty() && logs.is_empty());
+        assert_eq!(
+            mgr.sessions
+                .get(&code)
+                .unwrap()
+                .state
+                .priority_passing_modes,
+            HashMap::from([(PlayerId(0), PriorityPassingMode::SkipLowUseWindows)])
+        );
+
+        let (_, _, _, _, standard_again, _, _) = mgr
+            .handle_action(
+                &code,
+                &token0,
+                GameAction::SetPriorityPassingMode {
+                    mode: PriorityPassingMode::Standard,
+                },
+            )
+            .expect("return to sparse Standard");
+        assert!(!standard_again);
+        let session = mgr.sessions.get(&code).unwrap();
+        assert!(session.state.priority_passing_modes.is_empty());
+        assert_eq!(session.state.waiting_for, waiting_before);
+        assert_eq!(session.state.stack, stack_before);
+        assert_eq!(session.state.priority_passes, pass_before);
+        assert_eq!(session.takeback_history.len(), history_before);
+    }
+
     /// `ReorderHand` succeeds even when the sender is not the priority holder.
     /// The hand is reordered to the requested permutation.
     #[test]
@@ -2042,6 +2144,57 @@ mod tests {
             hand,
             vec![id_a, id_b],
             "Hand should be unchanged after invalid reorder"
+        );
+    }
+
+    /// GH #6275: candidates are enumerated with `CastPaymentMode::Auto`, so
+    /// the legality gate must erase a submitted `Manual` payment preference
+    /// before membership matching — otherwise every manual-mana cast in a
+    /// Full-mode game is rejected as illegal.
+    #[test]
+    fn legality_gate_accepts_manual_payment_mode_casts() {
+        let (mut mgr, code, token0, _token1) = setup_two_player_game();
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Gate Probe", false, "Draw a card.")
+            .id();
+        let runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        session.state = runner.state().clone();
+
+        // Reach guard: the Auto twin must be an enumerated candidate, so the
+        // Manual acceptance below flows through payment-mode canonicalization
+        // rather than any legality bypass.
+        let (legal_actions, _, _) = engine_legal_actions_full(&session.state);
+        let auto_twin = GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        };
+        assert!(
+            legal_actions.contains(&auto_twin),
+            "scenario must make the cast an enumerated candidate; got {legal_actions:?}"
+        );
+
+        let result = mgr.handle_action(
+            &code,
+            &token0,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Manual,
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "Manual-mode cast must pass the legality gate: {:?}",
+            result.err()
         );
     }
 

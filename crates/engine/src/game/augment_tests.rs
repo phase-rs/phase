@@ -266,7 +266,7 @@ fn combine_host_uses_current_copiable_values_after_copy_effect() {
         merged
             .trigger_definitions
             .iter_all()
-            .find_map(gain_life_amount),
+            .find_map(|entry| gain_life_amount(&entry.definition)),
         Some(5)
     );
 }

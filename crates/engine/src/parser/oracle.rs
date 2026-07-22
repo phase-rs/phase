@@ -57,7 +57,7 @@ use super::oracle_dispatch::dispatch_line_nom;
 use super::oracle_effect::sequence::try_parse_same_is_true_continuation;
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_additional_cost_instead_condition_fragment, parse_effect_chain,
-    parse_effect_chain_with_context, rewrite_condition_keyword,
+    parse_effect_chain_ir, parse_effect_chain_with_context, rewrite_condition_keyword,
     try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
@@ -67,7 +67,8 @@ use super::oracle_ir::doc::{
     OracleUnitSource, PrintedAbilityIndex, PrintedTriggerIndex,
 };
 use super::oracle_ir::feature::ItemIdTracks;
-use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind};
+use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
+use super::oracle_ir::replacement::ReplacementIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -82,6 +83,7 @@ use super::oracle_modal::{
 use super::oracle_replacement::{
     find_copy_verb_present, lower_as_enters_becomes_choice_modal,
     lower_as_enters_or_face_up_counters, lower_replacement_ir, parse_replacement_line,
+    parse_replacement_line_ir,
 };
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
@@ -207,10 +209,10 @@ pub(crate) fn is_commander_permission_sentence(line: &str) -> bool {
     parsed
 }
 
-fn parse_replacement_sentence_sequence(
+fn parse_replacement_sentence_sequence_ir(
     line: &str,
     card_name: &str,
-) -> Option<Vec<ReplacementDefinition>> {
+) -> Option<Vec<ReplacementIr>> {
     // CR 614.1c: Effects that read "[This permanent] enters with ...",
     // "As [this permanent] enters ...", or "[This permanent] enters as ..."
     // are replacement effects.
@@ -225,7 +227,7 @@ fn parse_replacement_sentence_sequence(
         if !is_replacement_pattern(&sentence.to_lowercase()) {
             return None;
         }
-        replacements.push(parse_replacement_line(sentence, card_name)?);
+        replacements.push(parse_replacement_line_ir(sentence, card_name)?);
     }
     Some(replacements)
 }
@@ -624,13 +626,21 @@ fn parse_begin_game_counter_clause(
     ))
 }
 
+fn lower_spell_node(node: &OracleNodeIr) -> Option<AbilityDefinition> {
+    match node {
+        OracleNodeIr::Spell(effect_ir) => Some(lower_effect_chain_ir(effect_ir)),
+        OracleNodeIr::PreLoweredSpell(definition) => Some(definition.clone()),
+        _ => None,
+    }
+}
+
 fn parsed_result_recently_granted_flashback(emitter: &DocEmitter<'_>) -> bool {
     // u4-c2: reads the emitter's last-emitted-per-category peeks instead of
     // `result.{abilities,triggers,statics}.last()` (the vectors moved into the
     // source-ordered builder). Same semantics: was flashback just granted?
     emitter
-        .last_ability()
-        .is_some_and(definition_grants_flashback)
+        .last_ability_definition()
+        .is_some_and(|definition| definition_grants_flashback(&definition))
         || emitter.last_trigger().is_some_and(|trigger| {
             trigger
                 .execute
@@ -906,15 +916,31 @@ fn try_parse_graveyard_keyword_static_with_continuation(line: &str) -> Option<St
 /// (e.g., cross-mode conjunctions) emit all their constituent statics
 /// rather than silently dropping the extras.
 ///
-/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), cant-cast
-/// gate parentheticals stripped by `strip_reminder_text` are re-applied without
-/// passing raw reminder parentheticals through the general static parser.
+/// When `raw_line_for_cant_cast_gates` is set (oracle dispatch only), rules-
+/// bearing parentheticals stripped by `strip_reminder_text` are recovered for
+/// their specific static forms without feeding reminder text through the
+/// general static parser.
 fn parse_static_line_with_graveyard_keyword_continuation(
     line: &str,
     raw_line_for_cant_cast_gates: Option<&str>,
     card_name_for_cant_cast_gates: Option<&str>,
 ) -> Vec<StaticDefinition> {
-    let mut defs = if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
+    // CR 205.1a + CR 611.3a: a parenthetical subtype-loss rider belongs to
+    // its own conditional type grant, even though reminder stripping removes it
+    // from the general dispatch line (Goddric's Celebration).
+    let raw_conditional_type_grant = raw_line_for_cant_cast_gates
+        .zip(card_name_for_cant_cast_gates)
+        .and_then(|(raw_line, card_name)| {
+            let normalized_raw = normalize_self_refs_for_static(raw_line, card_name);
+            let raw_lower = normalized_raw.to_lowercase();
+            crate::parser::oracle_static::parse_inverted_base_pt_type_grant(
+                &normalized_raw,
+                &raw_lower,
+            )
+        });
+    let mut defs = if let Some(def) = raw_conditional_type_grant {
+        vec![def]
+    } else if let Some(def) = try_parse_graveyard_keyword_static_with_continuation(line) {
         vec![def]
     } else if let Some(def) = try_parse_graveyard_keyword_grant_static(line) {
         vec![def]
@@ -950,7 +976,7 @@ fn parse_static_replacement_compound(
     line: &str,
     lower: &str,
     card_name: &str,
-) -> Option<(Vec<StaticDefinition>, Vec<ReplacementDefinition>)> {
+) -> Option<(Vec<StaticDefinition>, Vec<ReplacementIr>)> {
     // Re-attach the shared subject to each conjunct so each clause parses
     // independently (Oracle text drops the subject on the second conjunct).
     let (subject, p1, p2) = split_dual_cant_clause(line, lower)?;
@@ -959,8 +985,8 @@ fn parse_static_replacement_compound(
 
     let left_statics = parse_static_line_with_graveyard_keyword_continuation(&left, None, None);
     let right_statics = parse_static_line_with_graveyard_keyword_continuation(&right, None, None);
-    let left_repl = parse_replacement_line(&left, card_name);
-    let right_repl = parse_replacement_line(&right, card_name);
+    let left_repl = parse_replacement_line_ir(&left, card_name);
+    let right_repl = parse_replacement_line_ir(&right, card_name);
 
     // Each conjunct must be claimed by at least one layer; otherwise this is not
     // a clean cross-layer compound and the line belongs to the single-layer
@@ -1116,12 +1142,15 @@ fn try_split_and_cant_become_untapped(
 // vectors for a matching shape (a dual authority the parse/lower split removes).
 // ===========================================================================
 
-/// The lowered replacement definition an item carries, if it is a replacement.
-/// Only `PreLowered*` nodes are inspected: the dedicated IR variants
-/// (`Spell`/`Trigger`/`Static`/`Replacement`) are never constructed today, and
-/// gain relation participation when the dispatch-cutover unit builds them.
+/// The replacement definition an item carries, if it is a replacement.
+///
+/// `ReplacementIr` already owns the parsed definition relation discovery needs;
+/// lowering it is currently an identity conversion. Treat both representations
+/// uniformly so document relations are recovered before the lower seam folds
+/// the items into category vectors.
 fn item_replacement(item: &OracleItemIr) -> Option<&ReplacementDefinition> {
     match &item.node {
+        OracleNodeIr::Replacement(replacement_ir) => Some(&replacement_ir.definition),
         OracleNodeIr::PreLoweredReplacement(def) => Some(def),
         _ => None,
     }
@@ -2565,7 +2594,7 @@ fn ability_word_to_ability_condition(
 /// - Structural equality (`==`) is the dedup criterion.
 /// - Results never nest: `And` children are always leaves, never `And`.
 /// - Empty-conjunction not produced — at least one operand is always retained.
-fn merge_ability_condition(
+pub(crate) fn merge_ability_condition(
     existing: Option<crate::types::ability::AbilityCondition>,
     incoming: crate::types::ability::AbilityCondition,
 ) -> crate::types::ability::AbilityCondition {
@@ -3035,8 +3064,39 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
 
 // --- CR 607.1 + CR 610.3: ETB exile → LTB return two-trigger pair --------------
 
-/// Whether a trigger is the LTB "return the exiled card to the battlefield" side.
-fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+/// CR 610.3: The automatic `check_exile_returns` path this synthesis activates
+/// performs a plain zone move with no entry modifiers — it can't carry a
+/// printed rider like "return the exiled cards to the battlefield TAPPED"
+/// (Realm Razer). Only pair the linked-ability synthesis with an unmodified
+/// return; a modified return needs its own modifier-carrying mechanism and
+/// stays unsupported by this synthesis until one exists (caught in review
+/// of #6055 — Realm Razer would otherwise return its lands untapped,
+/// contradicting its printed text).
+fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
+    match effect {
+        Effect::ChangeZone {
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters,
+            conditional_enter_with_counters,
+            face_down_profile: None,
+            enters_modified_if: None,
+            ..
+        } => enter_with_counters.is_empty() && conditional_enter_with_counters.is_empty(),
+        _ => false,
+    }
+}
+
+/// The LTB "return the exiled card(s) to the battlefield" trigger *shape*, with
+/// no entry-modifier gate: mode `LeavesBattlefield` whose execute is a
+/// `ChangeZone` of a `TrackedSet` back to the battlefield. This is the raw
+/// pairing signal; whether the automatic return path can actually carry the
+/// printed return is decided by `change_zone_return_has_no_entry_modifiers`
+/// (see `trigger_is_ltb_return` / `trigger_is_ltb_return_with_entry_modifier`).
+fn trigger_is_ltb_return_shape(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::LeavesBattlefield
         && def.execute.as_deref().is_some_and(|ex| {
             matches!(
@@ -3050,8 +3110,43 @@ fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
         })
 }
 
-/// Whether a trigger is the ETB "exile target X" side with no printed duration
-/// (the side that must gain `Duration::UntilHostLeavesPlay`).
+/// Whether a trigger is the LTB "return the exiled card to the battlefield" side
+/// that the automatic `ExileLink::UntilSourceLeaves` return path can carry — the
+/// shape matches and the return has no entry modifiers. Journey to Nowhere,
+/// Oblivion Ring, and Worldgorger Dragon all pass here.
+fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
+    trigger_is_ltb_return_shape(def)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(|ex| change_zone_return_has_no_entry_modifiers(&ex.effect))
+}
+
+/// CR 610.3: Whether a trigger is the LTB return side whose shape matches but
+/// whose return carries an entry modifier the automatic return path can't apply
+/// (Realm Razer's "return the exiled cards to the battlefield tapped"). This is
+/// exactly the class that shape-matched yet the modifier check rejected — the
+/// surviving signal that distinguishes "shape matched, modifier rejected it"
+/// from "no LTB-return shape at all", so coverage can flag the unsupported
+/// return instead of the card silently showing as fully supported.
+fn trigger_is_ltb_return_with_entry_modifier(def: &TriggerDefinition) -> bool {
+    trigger_is_ltb_return_shape(def)
+        && def
+            .execute
+            .as_deref()
+            .is_some_and(|ex| !change_zone_return_has_no_entry_modifiers(&ex.effect))
+}
+
+/// CR 610.3: Whether a trigger is the ETB "exile ..." side with no printed
+/// duration (the side that must gain `Duration::UntilHostLeavesPlay`). Covers
+/// both the single-target exile (`Effect::ChangeZone`, Journey to Nowhere /
+/// Oblivion Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all
+/// other permanents you control" — Worldgorger Dragon). The two effect
+/// variants share the CR 610.3 "until"-duration vehicle, so the duration
+/// stamp applies identically to either — gated, in `trigger_is_ltb_return`,
+/// on the paired LTB return having no entry modifiers (a card like Realm
+/// Razer, "return the exiled cards to the battlefield TAPPED," is excluded
+/// from this synthesis rather than silently dropping its tapped rider).
 fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::ChangesZone
         && def.destination == Some(Zone::Battlefield)
@@ -3062,51 +3157,120 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
                     Effect::ChangeZone {
                         destination: Zone::Exile,
                         ..
+                    } | Effect::ChangeZoneAll {
+                        destination: Zone::Exile,
+                        ..
                     }
                 )
         })
 }
 
-/// CR 607.1 + CR 610.3: Pair each ETB "exile target X" trigger with the LTB
-/// "return the exiled card" trigger (Journey to Nowhere, Oblivion Ring, and the
-/// broader two-trigger class). Emitted only when the LTB-return side exists.
+/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Pair each ETB "exile ..."
+/// trigger with the LTB "return the exiled card(s)" trigger. Covers both the
+/// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
+/// class ("exile all other permanents you control" — Worldgorger Dragon).
+/// CR 610.3: When an unmodified LTB-return side exists, emit `DurationStamped`
+/// relations so the ETB exiles gain `Duration::UntilHostLeavesPlay`. Otherwise,
+/// if a shape-matching LTB return exists whose entry modifier the automatic
+/// return path can't carry (Realm Razer), emit `ModifierUnsupported` relations
+/// so the unsupported return is marked visible to coverage. When neither side
+/// exists, no relation is emitted and ordinary cards are untouched. The
+/// diagnostic fragment is captured here, while `items` is in scope, because the
+/// relation applier has no access to the item list afterward.
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
-    let Some(ltb) = items
+    let ltb_return = items
         .iter()
-        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return))
-    else {
-        return;
+        .find(|item| item_trigger(item).is_some_and(trigger_is_ltb_return));
+
+    let (ltb, outcome) = match ltb_return {
+        Some(ltb) => (ltb, LinkedReturnOutcome::DurationStamped),
+        None => {
+            let Some(ltb) = items.iter().find(|item| {
+                item_trigger(item).is_some_and(trigger_is_ltb_return_with_entry_modifier)
+            }) else {
+                return;
+            };
+            // CR 610.3: A low-precision span tier may report no fragment; fall
+            // back to a static description of the unsupported return so the
+            // coverage diagnostic is never handed an empty clause.
+            let fragment = ltb.source.fragment().map(str::to_owned).unwrap_or_else(|| {
+                "return the exiled cards to the battlefield with an entry modifier".to_string()
+            });
+            (ltb, LinkedReturnOutcome::ModifierUnsupported { fragment })
+        }
     };
+
     for item in items {
         if item_trigger(item).is_some_and(trigger_is_etb_exile_pending_duration) {
             relations.push(DocumentRelationIr::EtbExileLtbReturn {
                 etb_exile: item.id,
                 ltb_return: ltb.id,
+                outcome: outcome.clone(),
             });
         }
     }
 }
 
-/// Stamp `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the
-/// existing `ExileLink::UntilSourceLeaves` mechanism returns the exiled card.
+/// CR 610.3: Apply an ETB-exile / LTB-return pair. `DurationStamped` stamps
+/// `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the existing
+/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card(s).
+/// `ModifierUnsupported` instead marks the LTB return trigger unsupported so the
+/// modifier-bearing return is visible to coverage rather than silently dropped.
 fn apply_etb_exile_ltb_return(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
     trigger_ids: &[OracleItemId],
 ) {
     for relation in relations {
-        let DocumentRelationIr::EtbExileLtbReturn { etb_exile, .. } = relation else {
+        let DocumentRelationIr::EtbExileLtbReturn {
+            etb_exile,
+            ltb_return,
+            outcome,
+        } = relation
+        else {
             continue;
         };
-        let Some(pos) = position_of(trigger_ids, *etb_exile) else {
-            continue;
-        };
-        if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
-            if execute.duration.is_none() {
-                execute.duration = Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+        match outcome {
+            LinkedReturnOutcome::DurationStamped => {
+                let Some(pos) = position_of(trigger_ids, *etb_exile) else {
+                    continue;
+                };
+                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+                    if execute.duration.is_none() {
+                        execute.duration =
+                            Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+                    }
+                }
+            }
+            LinkedReturnOutcome::ModifierUnsupported { fragment } => {
+                let Some(pos) = position_of(trigger_ids, *ltb_return) else {
+                    continue;
+                };
+                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
+                    attach_modifier_unsupported_marker(execute, fragment);
+                }
             }
         }
     }
+}
+
+/// CR 610.3: Append an `Effect::unimplemented` gap marker to the tail of a
+/// trigger execute's sub-ability chain, marking a modifier-bearing linked LTB
+/// return unsupported so coverage reports the gap. Appends to the chain tail
+/// rather than overwriting any existing sub-ability (defensive — for this card
+/// class the chain is currently always empty).
+fn attach_modifier_unsupported_marker(execute: &mut AbilityDefinition, fragment: &str) {
+    let mut cursor: &mut AbilityDefinition = execute;
+    while cursor.sub_ability.is_some() {
+        cursor = cursor
+            .sub_ability
+            .as_deref_mut()
+            .expect("sub_ability checked present");
+    }
+    cursor.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("modifier_bearing_linked_return", fragment),
+    )));
 }
 
 /// CR 207.2c + CR 601.2f: Extract the per-target cost-increase clause,
@@ -3193,9 +3357,9 @@ struct DocEmitter<'a> {
     /// `result.{triggers,statics}.last()` (`parsed_result_recently_granted_flashback`).
     /// INSERTION recency: overwritten on each emit of that category. Safe as a
     /// clone-on-emit slot because NO `triggers.pop()`/`statics.pop()` exists in the
-    /// parser (doc.rs verifies this) — nothing can revert them. The ABILITY peek is
-    /// deliberately NOT here: it must be pop-aware, so `last_ability()` reads the
-    /// builder's `spells_emitted` stack via `peek_last_spell` instead.
+    /// parser (doc.rs verifies this) — nothing can revert them. The ability peek is
+    /// deliberately NOT here: it must be pop-aware, so `last_ability_node()` reads
+    /// the builder's `spells_emitted` stack via `peek_last_spell_node` instead.
     ///
     /// If a trigger/static pop is ever introduced, make these
     /// `*_emitted: Vec<OracleItemId>` stacks (like `spells_emitted`) first.
@@ -3264,8 +3428,8 @@ impl<'a> DocEmitter<'a> {
     }
 
     fn ability_at(&mut self, line: usize, def: AbilityDefinition) {
-        // No `last_ability` clone: the ability peek is pop-aware, read from the
-        // builder's `spells_emitted` stack (see `last_ability`).
+        // No ability clone: the ability peek is pop-aware, read from the builder's
+        // `spells_emitted` stack (see `last_ability_node`).
         self.emit_at(line, OracleNodeIr::PreLoweredSpell(def));
     }
     fn trigger_at(&mut self, line: usize, def: TriggerDefinition) {
@@ -3277,13 +3441,16 @@ impl<'a> DocEmitter<'a> {
         self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
 
-    /// Last-emitted definition per category — the read-only peeks for
+    /// Last-emitted node per category — the read-only peeks for
     /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
-    /// `result.{abilities,triggers,statics}.last()`). All three are INSERTION
-    /// recency; `last_ability` is pop-aware (via `spells_emitted`), the other two
-    /// are clone-on-emit slots (no pop exists to revert them).
-    fn last_ability(&self) -> Option<&AbilityDefinition> {
-        self.builder.peek_last_spell()
+    /// `result.{abilities,triggers,statics}.last()`). All three are insertion
+    /// recency; `last_ability_node` is pop-aware (via `spells_emitted`), the other
+    /// two are clone-on-emit slots (no pop exists to revert them).
+    fn last_ability_node(&self) -> Option<&OracleNodeIr> {
+        self.builder.peek_last_spell_node()
+    }
+    fn last_ability_definition(&self) -> Option<AbilityDefinition> {
+        self.last_ability_node().and_then(lower_spell_node)
     }
     fn last_trigger(&self) -> Option<&TriggerDefinition> {
         self.last_trigger.as_ref()
@@ -4309,8 +4476,8 @@ pub(crate) fn parse_oracle_ir(
             && scan_contains(&lower, "enters with")
             && !scan_contains(&lower, "enters this way,")
         {
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
                 continue;
             }
@@ -4598,8 +4765,8 @@ pub(crate) fn parse_oracle_ir(
         // Corpus: Traxos, Scourge of Kroog; Grimgrin, Corpse-Born; Leviathan.
         if is_enters_tapped_cant_untap_compound(&lower) {
             let mut consumed = false;
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 consumed = true;
             }
             let defs = parse_static_line_with_graveyard_keyword_continuation(
@@ -4641,8 +4808,8 @@ pub(crate) fn parse_oracle_ir(
             for __item in statics {
                 emitter.static_at(item_line, __item);
             }
-            for __item in replacements {
-                emitter.replacement_at(item_line, __item);
+            for replacement_ir in replacements {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
             }
             i += 1;
             continue;
@@ -4778,21 +4945,23 @@ pub(crate) fn parse_oracle_ir(
             // replacement parsers; the legacy `as long as` precondition still
             // routes the duration-gated replacement fallback.
             if find_copy_verb_present(&lower) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                    for __item in rep_defs {
-                        emitter.replacement_at(item_line, __item);
+                if let Some(replacement_irs) =
+                    parse_replacement_sentence_sequence_ir(&line, card_name)
+                {
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     }
                     i += 1;
                     continue;
                 }
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
             } else if lower_starts_with(&lower, "as long as ") && is_replacement_pattern(&lower) {
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -4805,8 +4974,8 @@ pub(crate) fn parse_oracle_ir(
                 // replacement parser first; a line that is not actually an
                 // enters-with-counter replacement returns `None` and falls
                 // through to the static parser below.
-                if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -4828,8 +4997,8 @@ pub(crate) fn parse_oracle_ir(
                     let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
                     let mut defs = parse_static_line_with_graveyard_keyword_continuation(
                         &effect_static,
-                        None,
-                        None,
+                        Some(raw_line),
+                        Some(card_name),
                     );
                     if !defs.is_empty() {
                         if let Some(cond) = ability_word_to_condition(&aw_name) {
@@ -4973,9 +5142,9 @@ pub(crate) fn parse_oracle_ir(
         {
             ctx.subject = None;
             ctx.actor = None;
-            let def = parse_effect_chain_with_context(&line, AbilityKind::Spell, &mut ctx);
-            if !has_unimplemented(&def) {
-                emitter.ability_at(item_line, def);
+            let effect_ir = parse_effect_chain_ir(&line, AbilityKind::Spell, &mut ctx);
+            if !has_unimplemented(&lower_effect_chain_ir(&effect_ir)) {
+                emitter.emit_at(item_line, OracleNodeIr::Spell(effect_ir));
                 i += 1;
                 continue;
             }
@@ -5023,15 +5192,16 @@ pub(crate) fn parse_oracle_ir(
             // A single Oracle paragraph can contain multiple independent ETB
             // replacement sentences. Parse each replacement sentence instead of
             // letting the first successful parser drop sibling modifiers.
-            if let Some(rep_defs) = parse_replacement_sentence_sequence(&line, card_name) {
-                for __item in rep_defs {
-                    emitter.replacement_at(item_line, __item);
+            if let Some(replacement_irs) = parse_replacement_sentence_sequence_ir(&line, card_name)
+            {
+                for replacement_ir in replacement_irs {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 }
                 i += 1;
                 continue;
             }
-            if let Some(rep_def) = parse_replacement_line(&line, card_name) {
-                emitter.replacement_at(item_line, rep_def);
+            if let Some(replacement_ir) = parse_replacement_line_ir(&line, card_name) {
+                emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                 i += 1;
                 continue;
             }
@@ -5044,16 +5214,17 @@ pub(crate) fn parse_oracle_ir(
             // exactly as the unprefixed Blind Obedience / Authority of the
             // Consuls lines do.
             if let Some(effect_text) = strip_ability_word(&line) {
-                if let Some(rep_defs) = parse_replacement_sentence_sequence(&effect_text, card_name)
+                if let Some(replacement_irs) =
+                    parse_replacement_sentence_sequence_ir(&effect_text, card_name)
                 {
-                    for __item in rep_defs {
-                        emitter.replacement_at(item_line, __item);
+                    for replacement_ir in replacement_irs {
+                        emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     }
                     i += 1;
                     continue;
                 }
-                if let Some(rep_def) = parse_replacement_line(&effect_text, card_name) {
-                    emitter.replacement_at(item_line, rep_def);
+                if let Some(replacement_ir) = parse_replacement_line_ir(&effect_text, card_name) {
+                    emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
                     i += 1;
                     continue;
                 }
@@ -5397,7 +5568,8 @@ pub(crate) fn parse_oracle_ir(
             // the ability-word merge and the cross-line binder below exactly like any
             // other override — the binder wraps it in `ConditionInstead` and parks the
             // printed Dig as the `else_ability` fallback.
-            let dig_alt = emitter.builder.peek_last_spell().and_then(|previous| {
+            let previous_spell = emitter.last_ability_definition();
+            let dig_alt = previous_spell.as_ref().and_then(|previous| {
                 crate::parser::oracle_effect::conditions::try_parse_dig_instead_alternative(
                     &effect_line,
                     Some(previous),
@@ -5498,7 +5670,7 @@ pub(crate) fn parse_oracle_ir(
                     }
                     // No previous ability to compose with — restore condition and push standalone.
                     def.condition = Some(condition);
-                } else if emitter.builder.peek_last_spell().is_some() {
+                } else if emitter.last_ability_node().is_some() {
                     // CR 614.6: "If an event is replaced, it never happens."
                     //
                     // The line IS a self-replacement override of the preceding
@@ -5522,8 +5694,7 @@ pub(crate) fn parse_oracle_ir(
                     def.sub_ability = None;
                     def.else_ability = None;
                 }
-            } else if is_unbindable_self_replacement && emitter.builder.peek_last_spell().is_some()
-            {
+            } else if is_unbindable_self_replacement && emitter.last_ability_node().is_some() {
                 // CR 614.6 + CR 614.15: the residual self-replacement printings — a
                 // PARTIAL override whose antecedent is not a Dig ("search your library
                 // for up to three basic Forest cards instead of two"), or one that

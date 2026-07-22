@@ -60,6 +60,7 @@ pub(crate) fn complete_discard_to_graveyard(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        enter_as_copy: None,
         applied,
     };
     match replacement::replace_event(state, proposed, events) {

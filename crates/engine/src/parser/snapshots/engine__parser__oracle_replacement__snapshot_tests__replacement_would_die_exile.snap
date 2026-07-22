@@ -3,7 +3,7 @@ source: crates/engine/src/parser/oracle_replacement.rs
 expression: def
 ---
 {
-  "event": "Destroy",
+  "event": "Moved",
   "execute": {
     "kind": "Spell",
     "effect": {
@@ -35,5 +35,6 @@ expression: def
     "type": "SelfRef"
   },
   "description": "If ~ would die, exile it instead.",
-  "condition": null
+  "condition": null,
+  "destination_zone": "Graveyard"
 }

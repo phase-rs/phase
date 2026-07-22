@@ -77,6 +77,9 @@ pub fn transform_permanent(
     // `timestamp`) so the single write covers both flip directions and cannot
     // be clobbered by the back-face application.
     obj.timestamp = ts;
+    // CR 701.27f: Track successful transforms/conversions to ignore stale
+    // self-transform instructions from abilities already on the stack.
+    obj.transformation_count = obj.transformation_count.wrapping_add(1);
 
     crate::game::layers::mark_layers_full(state);
 

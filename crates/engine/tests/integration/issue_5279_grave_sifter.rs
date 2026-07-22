@@ -25,7 +25,12 @@ fn parsed_grave_sifter() -> engine::parser::oracle::ParsedAbilities {
     )
 }
 
-fn setup_grave_sifter_cast() -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+fn setup_grave_sifter_cast() -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    ObjectId,
+    ObjectId,
+) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -33,7 +38,7 @@ fn setup_grave_sifter_cast() -> (engine::game::scenario::GameRunner, ObjectId, O
         .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
         .with_subtypes(vec!["Bear"])
         .id();
-    let _hill_giant = scenario
+    let hill_giant = scenario
         .add_creature_to_graveyard(P1, "Hill Giant", 3, 3)
         .with_subtypes(vec!["Giant"])
         .id();
@@ -66,7 +71,7 @@ fn setup_grave_sifter_cast() -> (engine::game::scenario::GameRunner, ObjectId, O
         "Beast".to_string(),
     ];
 
-    (runner, grave_sifter, bears)
+    (runner, grave_sifter, bears, hill_giant)
 }
 
 #[test]
@@ -126,7 +131,7 @@ fn grave_sifter_etb_parses_choose_creature_type_per_player() {
 
 #[test]
 fn grave_sifter_etb_prompts_creature_type_choice() {
-    let (mut runner, grave_sifter, _bears) = setup_grave_sifter_cast();
+    let (mut runner, grave_sifter, _bears, _hill_giant) = setup_grave_sifter_cast();
 
     runner.cast(grave_sifter).resolve();
 
@@ -158,7 +163,7 @@ fn grave_sifter_etb_prompts_creature_type_choice() {
 
 #[test]
 fn grave_sifter_each_player_creature_type_return_from_graveyard() {
-    let (mut runner, grave_sifter, bears) = setup_grave_sifter_cast();
+    let (mut runner, grave_sifter, bears, hill_giant) = setup_grave_sifter_cast();
 
     runner.cast(grave_sifter).resolve();
 
@@ -200,11 +205,34 @@ fn grave_sifter_each_player_creature_type_return_from_graveyard() {
             choice: "Giant".to_string(),
         })
         .expect("P1 chooses Giant");
+
+    match &runner.state().waiting_for {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P1, "P1 resolves their own return instruction");
+            assert_eq!(
+                cards,
+                &vec![hill_giant],
+                "P1's Giant choice must not reuse P0's Bear choice"
+            );
+        }
+        other => panic!("expected P1's Giant return choice, got {other:?}"),
+    }
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![hill_giant],
+        })
+        .expect("P1 returns Hill Giant");
     runner.advance_until_stack_empty();
 
     assert_eq!(
         runner.state().objects[&bears].zone,
         Zone::Hand,
         "Grizzly Bears must return to P0's hand"
+    );
+    assert_eq!(
+        runner.state().objects[&hill_giant].zone,
+        Zone::Hand,
+        "Hill Giant must return to P1's hand"
     );
 }

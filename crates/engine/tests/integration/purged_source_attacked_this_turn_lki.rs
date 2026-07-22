@@ -325,6 +325,7 @@ fn purged_token_attack_lookback_is_keyed_by_the_source_not_the_board() {
             .trigger_definitions
             .first()
             .expect("PREMISE: Taigam must parse to exactly one triggered ability")
+            .definition
             .condition
             .clone()
             .expect("PREMISE: that trigger must carry an intervening-if");

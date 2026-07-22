@@ -11,8 +11,8 @@
 
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
-    ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PriorModifier, ReplaceMeaningKind,
-    ReplicateKind,
+    AbsorbKind, ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
+    PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
@@ -60,13 +60,14 @@ use super::{
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate,
+    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate, draw_object_count_filter,
     fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
     mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
     publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
     rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
-    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
-    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
+    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback,
 };
 
 // ===========================================================================
@@ -1100,6 +1101,7 @@ impl AssemblyEnv {
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let kind = ir.kind;
+    let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
 
     // ── Phase 1: ClauseIr → AbilityDefinition ──────────────────────────
     let mut defs: Vec<AbilityDefinition> = Vec::new();
@@ -1141,14 +1143,38 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
                 true
-            } else if let ClauseDisposition::Absorb { rider, kind: _ } = &clause_ir.disposition {
+            } else if let ClauseDisposition::Absorb { rider, kind } = &clause_ir.disposition {
                 // CR 614.1a / CR 701.19c: attach the rider as the tail of the prior
                 // def's sub_ability chain instead of overwriting it — multi-target
                 // damage spells (Serpentine Spike) populate the chain with
-                // continuation events, so the rider must attach AFTER them. Both
-                // `AbsorbKind`s share this mechanic (`kind` is provenance only).
+                // continuation events, so the rider must attach AFTER them.
                 if let Some(last_def) = defs.last_mut() {
                     append_to_deepest_sub_ability(last_def, Some(rider.clone()));
+                }
+                // CR 608.2c: a die-exile rider printed after an optional
+                // "instead" damage clause is independent of that choice.
+                // The bargained branch reaches the appended tail; the
+                // unbargained branch needs the same tail in else_ability.
+                // The override and its Scry continuation can still be
+                // separate top-level defs at this assembly stage.
+                if matches!(kind, AbsorbKind::DieExile) {
+                    'find_override: for root in defs.iter_mut().rev() {
+                        let mut cursor = Some(root);
+                        while let Some(def) = cursor {
+                            if matches!(
+                                def.condition,
+                                Some(AbilityCondition::AdditionalCostPaidInstead)
+                            ) {
+                                if let Some(base_chain) = def.else_ability.as_mut() {
+                                    append_to_deepest_sub_ability(base_chain, Some(rider.clone()));
+                                } else {
+                                    def.else_ability = Some(rider.clone());
+                                }
+                                break 'find_override;
+                            }
+                            cursor = def.sub_ability.as_deref_mut();
+                        }
+                    }
                 }
                 true
             } else if let ClauseDisposition::BranchOtherwise {
@@ -1719,18 +1745,24 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 SubAbilityLink::ContinuationStep
             }
         };
-        // CR 615.5: A "(When|Whenever|If) damage is prevented this way, …" rider
-        // is printed as its own sentence but is not an independent instruction —
-        // its "this way" back-reference binds to the preceding prevention. Detect
-        // it (only when the previous clause is the prevention it references) so the
-        // clause is folded into that prevention rather than dropped as a sibling.
-        let is_prevented_this_way_rider = matches!(
-            defs.last().map(|d| &*d.effect),
-            Some(Effect::PreventDamage { .. })
-        )
-            && crate::parser::oracle_replacement::clause_is_prevented_this_way_rider(
+        // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
+        // prevented this way, …" rider is printed as its own sentence but is not
+        // an independent instruction — its "this way" back-reference binds to the
+        // prevention in the chain. Detect it (only when the chain root is that
+        // prevention — `any` covers Comeuppance's TWO riders, whose second rider's
+        // immediate predecessor is the first rider, not the PreventDamage) so the
+        // clause is folded into the prevention rather than dropped as a sibling.
+        let prevented_this_way_gate = if defs
+            .iter()
+            .any(|d| matches!(&*d.effect, Effect::PreventDamage { .. }))
+        {
+            crate::parser::oracle_replacement::prevented_this_way_rider_source_gate(
                 clause_ir.source.fragment().unwrap_or_default(),
-            );
+            )
+        } else {
+            None
+        };
+        let is_prevented_this_way_rider = prevented_this_way_gate.is_some();
         // The Sentence boundary would mark the rider `SequentialSibling`, which the
         // prevention resolver never installs as the shield's `runtime_execute` (the
         // payoff silently does nothing — New Way Forward, Phyrexian Vindicator,
@@ -1956,27 +1988,32 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             }
         }
         // CR 115.1d: Apply multi-target spec — prefer explicit choose-count text,
-        // then strip result, then clause-level propagation.
-        if let Some(spec) =
-            extract_exact_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(spec) =
-            extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(spec) =
-            extract_optional_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(spec) =
-            extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
-        {
-            def = def.multi_target(spec);
-        } else if let Some(ref spec) = clause_ir.multi_target {
-            def = def.multi_target(spec.clone());
-        } else if let Some(ref spec) = clause_ir.parsed.multi_target {
-            def = def.multi_target(spec.clone());
+        // then strip result, then clause-level propagation. An explicit
+        // `ChooseObjectsIntoTrackedSet` instead owns its selection cardinality in
+        // the effect's `min`/`max`; adding `multi_target` would duplicate that
+        // resolver-owned selection state.
+        if !matches!(&*def.effect, Effect::ChooseObjectsIntoTrackedSet { .. }) {
+            if let Some(spec) =
+                extract_exact_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+            {
+                def = def.multi_target(spec);
+            } else if let Some(spec) =
+                extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
+            {
+                def = def.multi_target(spec);
+            } else if let Some(spec) = extract_optional_target_multi_target(
+                clause_ir.source.fragment().unwrap_or_default(),
+            ) {
+                def = def.multi_target(spec);
+            } else if let Some(spec) =
+                extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
+            {
+                def = def.multi_target(spec);
+            } else if let Some(ref spec) = clause_ir.multi_target {
+                def = def.multi_target(spec.clone());
+            } else if let Some(ref spec) = clause_ir.parsed.multi_target {
+                def = def.multi_target(spec.clone());
+            }
         }
         if parse_controlled_by_different_players_target_constraint(
             clause_ir.source.fragment().unwrap_or_default(),
@@ -2023,12 +2060,41 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     current,
                 );
             }
+            // CR 615.5 + CR 120.1: A source-type-qualified rider ("if damage from
+            // a creature source is prevented this way, …" — Comeuppance) gates the
+            // reflection on the prevented event's source type and reflects to that
+            // source object. Attach the gate as
+            // `PostReplacementDamageSourceMatchesFilter` and rewrite the "that
+            // creature"/"that source" anaphor (`TriggeringSource`) to
+            // `PostReplacementDamageSource`. The bare rider (`Some(None)`) keeps
+            // its existing unconditional behavior.
+            if let Some(Some(gate_filter)) = &prevented_this_way_gate {
+                for current in &mut current_defs {
+                    crate::parser::oracle_replacement::rewrite_triggering_source_to_post_replacement_damage_source(
+                        current,
+                    );
+                    // CR 608.2c: The reflection gate is conjoined with any
+                    // co-existing rider condition, not substituted for it — a rider
+                    // that already carries a game-state condition (e.g. an embedded
+                    // "if you control …") must satisfy BOTH. Compose through the
+                    // single-authority `merge_ability_condition` building block so
+                    // the gate is never silently dropped when a condition is present.
+                    let gate =
+                        crate::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                            filter: gate_filter.clone(),
+                        };
+                    current.condition = Some(crate::parser::oracle::merge_ability_condition(
+                        current.condition.take(),
+                        gate,
+                    ));
+                }
+            }
         }
 
         // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.
         if let Some(ref delayed_cond) = clause_ir.delayed_condition {
             for current in &mut current_defs {
-                let inner = std::mem::replace(
+                let mut inner = std::mem::replace(
                     current,
                     AbilityDefinition::new(
                         kind,
@@ -2048,6 +2114,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 let lifted_optional_for = inner.optional_for;
                 let lifted_repeat_for = inner.repeat_for.clone();
                 let lifted_player_scope = inner.player_scope.clone();
+                // CR 608.2c: The `CreateDelayedTrigger` wrapper — not its payload —
+                // is the node that occupies this clause's slot in the parent's
+                // `sub_ability` chain, so it must carry the clause's `sub_link`
+                // (the boundary that separated it from the preceding clause). A
+                // separate sentence ("…investigate X times. Return the exiled
+                // cards…" — Disorder in the Court) stamps `SequentialSibling`, which
+                // keeps the delayed-return OUT of a preceding `repeat_for` process
+                // (it is created once after the loop, not once per iteration) and
+                // lets it resolve when an optional parent is declined. The inner
+                // payload's link is to the delayed trigger it fires from, not to the
+                // parent chain, so reset it to the default within-process step.
+                let lifted_sub_link = inner.sub_link;
+                inner.sub_link = SubAbilityLink::ContinuationStep;
                 *current = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -2061,6 +2140,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 current.optional_for = lifted_optional_for;
                 current.repeat_for = lifted_repeat_for;
                 current.player_scope = lifted_player_scope;
+                current.sub_link = lifted_sub_link;
             }
         }
 
@@ -2086,6 +2166,23 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         rewrite_parent_targets_to_tracked_set(&mut current.effect);
+                    }
+                }
+            } else if contains_explicit_tracked_set_pronoun(&source_text_lower) {
+                // CR 603.7 + issue #6065: "those creatures gain <keyword>" after a
+                // "draw a card for each <creature filter>" clause (Inspiring Call).
+                // Draw publishes no tracked set (its target is the drawing player),
+                // so the branch above skips it and the grant's ParentTarget would
+                // resolve to the controller. Bind it directly to the nearest prior
+                // Draw's count filter — the counted creatures the pronoun names.
+                if let Some(filter) = defs
+                    .iter()
+                    .rev()
+                    .find_map(|d| draw_object_count_filter(&d.effect))
+                    .cloned()
+                {
+                    for current in &mut current_defs {
+                        rewrite_grant_parent_to_filter(&mut current.effect, &filter);
                     }
                 }
             }
@@ -2231,22 +2328,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
 
-    // CR 701.20a + CR 608.2c: A bare private "look at the top N cards" instruction
+    // CR 701.20e + CR 608.2c: A bare private "look at the top N cards" instruction
     // is only a look; it does not move a chosen card to hand. Continuations that
     // actually choose cards from among them patch destination/keep_count before this
     // pass. Anything still in the raw private-Dig shape is a pure peek: skip
     // DigChoice and only populate last_revealed_ids for downstream conditions.
     for def in &mut defs {
-        if let Effect::Dig {
-            reveal: false,
-            keep_count: None,
-            keep_count_expr: None,
-            filter: TargetFilter::Any,
-            destination: None,
-            rest_destination: None,
-            ..
-        } = &*def.effect
-        {
+        if super::effect_is_bare_private_peek(&def.effect) {
             if let Effect::Dig { keep_count, .. } = &mut *def.effect {
                 *keep_count = Some(0);
             }
@@ -2294,14 +2382,20 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // R1 — a SHAPE REPAIR, not materialization.
             merge_search_tail_into_additional_cost_else(&mut prev, &chain);
             // A node attached as a `sub_ability` is a resolution continuation
-            // of its parent, not an independently activatable ability.
-            // Normalize its kind to `Spell` (the "resolves alongside parent"
-            // kind) before linking. This matches the convention used by
-            // dedicated clause builders that construct sub-abilities directly
-            // (e.g., `try_parse_pump_with_damage_sub` at line 3220).
-            chain.kind = AbilityKind::Spell;
+            // of its parent, not an independently activatable ability. Ordinary
+            // chains normalize it to `Spell`; an IR producer can preserve a
+            // legacy enclosing kind when that is part of its lowered shape.
+            chain.kind = continuation_kind;
             // R2 — a SHAPE REPAIR, not materialization.
             normalize_linked_exile_cast_pair(&mut prev, &mut chain);
+            // CR 608.2c: an independent sentence after an if/otherwise choice
+            // resolves after either branch (for example, Wedding Announcement's
+            // three-counter transform also follows its Human-token branch).
+            if chain.sub_link == SubAbilityLink::SequentialSibling {
+                if let Some(else_chain) = prev.else_ability.as_mut() {
+                    append_to_deepest_sub_ability(else_chain, Some(Box::new(chain.clone())));
+                }
+            }
             if prev.sub_ability.is_some() {
                 // Walk to the deepest sub_ability and append there
                 let mut cursor = &mut prev;
@@ -2333,12 +2427,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         })
     };
 
-    // CR 608.2 + CR 107.2: Wherever an ability in the chain carries
-    // `player_scope` (outermost OR a nested sub-ability), rewrite target-scoped
-    // refs ("their life", "their hand") to their per-iterating-player
-    // equivalents. Walks the whole tree so a scoped clause buried under earlier
-    // non-scoped clauses (Betor, Kin to All) is still rewritten.
-    apply_player_scope_rewrites(&mut result);
+    // CR 608.2 + CR 107.2: Ordinary parsed clauses rewrite target-scoped refs
+    // ("their life", "their hand") to their per-iterating-player equivalents.
+    // Whole-body recognizers can preserve explicitly constructed scoped fields;
+    // the walk still covers a scoped clause buried under earlier non-scoped
+    // clauses (Betor, Kin to All).
+    if matches!(ir.player_scope_rewrite, PlayerScopeRewrite::Apply) {
+        apply_player_scope_rewrites(&mut result);
+    }
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
     // to every DivideRounded in the built tree. No-op when the sentence was

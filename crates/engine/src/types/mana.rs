@@ -9,7 +9,7 @@ use super::keywords::{Keyword, KeywordKind};
 use super::player::PlayerId;
 use super::zones::Zone;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
     White,
     Blue,
@@ -343,6 +343,11 @@ pub enum PaymentContext<'a> {
 /// `ManaSpendRestriction::is_coverage_supported`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialAction {
+    /// CR 116.2g + CR 702.139a: Paying {3} to put a revealed companion from
+    /// outside the game into its owner's hand. This payment uses the mana pool,
+    /// so mana restricted to this exact special action is eligible while mana
+    /// restricted to casting, activating, or another special action is not.
+    CompanionToHand,
     /// CR 116.2m + CR 709.5e: Paying a locked Room half's unlock cost to give
     /// the permanent the appropriate unlocked designation.
     UnlockDoor,
@@ -914,7 +919,7 @@ pub mod snow_compat {
 /// player can direct (pin) which specific unit pays a pending cost. The sentinel
 /// `ManaPipId(0)` marks an unstamped unit (convoke markers, detached preview
 /// pools) and never matches a real pin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ManaPipId(pub u64);
 
 #[derive(Debug, Clone, Eq, Serialize, Deserialize)]

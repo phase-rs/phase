@@ -128,6 +128,16 @@ fn resolve_effect_recipients(
     if matches!(target_filter, TargetFilter::SelfRef) {
         return vec![TargetRef::Object(ability.source_id)];
     }
+    // CR 615.5 + CR 120.1: the prevented event's damage source object (Comeuppance
+    // reflecting to "that creature"). An OBJECT context ref — resolved here (not
+    // via `player_context_target`, which only projects players) before the
+    // `ability.targets` fallback, since the reflection rider carries no targets.
+    if matches!(target_filter, TargetFilter::PostReplacementDamageSource) {
+        return state
+            .post_replacement_event_source()
+            .map(|id| vec![TargetRef::Object(id)])
+            .unwrap_or_default();
+    }
     if let Some(target) = player_context_target(state, ability, target_filter) {
         return vec![target];
     }
@@ -700,6 +710,15 @@ pub(crate) fn apply_damage_after_replacement(
                 .map(|object| object.controller)
                 .unwrap_or(ctx.controller),
         };
+        // CR 400.7: Snapshot the target's incarnation at damage time so
+        // subsequent zone-change look-backs do not match a new incarnation.
+        let target_incarnation = match t {
+            TargetRef::Object(object_id) => state
+                .objects
+                .get(object_id)
+                .map(|object| object.incarnation),
+            TargetRef::Player(_) => None,
+        };
         // CR 608.2i + CR 608.2h: Snapshot the damage source's characteristics at
         // damage time so look-back source-filter queries ("opponents who were
         // dealt combat damage by ~ or a Dragon this turn") evaluate against the
@@ -711,6 +730,7 @@ pub(crate) fn apply_damage_after_replacement(
             source_controller: ctx.controller,
             target: t.clone(),
             target_controller,
+            target_incarnation,
             // CR 120.4a: the permanent was dealt only the lethal portion; the
             // excess is recorded against the controller by the redirect below.
             amount: primary_amount,
@@ -1560,6 +1580,17 @@ pub fn resolve_all(
     // protection purposes); rebinding it here too keeps recipient-set
     // membership consistent with which object CR 120.1 says the damage is
     // actually FROM.
+    // Only the resolved damage source's OBJECT identity is overridden here —
+    // `source_controller` is deliberately left as `FilterContext::from_ability`
+    // set it (the ability's own controller). Per `FilterContext`'s own
+    // documented invariant (`filter.rs`), `source_controller` is what
+    // `ControllerRef::You` ("creatures you control") resolves against, and
+    // that pronoun refers to the ABILITY's controller (who cast the spell) —
+    // not to whoever happens to control the resolved damage source (e.g. a
+    // stolen creature dealing the damage). An earlier version of this fix
+    // also overrode `source_controller`, which made "you control" resolve
+    // against the wrong player whenever the resolved source's controller
+    // differs from the caster.
     let mut ctx = filter::FilterContext::from_ability(ability);
     if matches!(damage_source, Some(DamageSource::Target)) {
         if let Some(resolved_source_id) = ability.targets.iter().find_map(|t| match t {
@@ -1567,7 +1598,6 @@ pub fn resolve_all(
             _ => None,
         }) {
             ctx.source_id = resolved_source_id;
-            ctx.source_controller = state.objects.get(&resolved_source_id).map(|o| o.controller);
         }
     }
     let matching_objects: Vec<_> = state
@@ -2813,8 +2843,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("remaining source must be stashed while first source waits");
         assert_eq!(
             cont.parent_kind,
@@ -2854,7 +2883,7 @@ mod tests {
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after replacement resume"
         );
         assert!(
@@ -3092,8 +3121,7 @@ mod tests {
             "first source's post-replacement damage applies before lifelink pauses"
         );
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("remaining post-replacement survivor must be stashed");
         match &cont.chain.effect {
             Effect::ApplyPostReplacementDamage {
@@ -3214,8 +3242,7 @@ mod tests {
             "first source's damage applies before lifelink gain pauses"
         );
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("remaining post-replacement source must be stashed");
         assert_eq!(
             cont.parent_kind,
@@ -3265,7 +3292,7 @@ mod tests {
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after post-replacement survivor resumes"
         );
         assert!(
@@ -3556,6 +3583,10 @@ mod tests {
         assert_eq!(
             state.damage_dealt_this_turn[0].target_controller,
             PlayerId(1)
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn[0].target_incarnation,
+            Some(state.objects[&target].incarnation)
         );
     }
 
@@ -4252,6 +4283,94 @@ mod tests {
 
         assert_eq!(state.objects[&bear1].damage_marked, 2);
         assert_eq!(state.objects[&bear2].damage_marked, 2);
+    }
+
+    /// #4960 follow-up (maintainer review on PR #5834, second pass): pins the
+    /// FINAL, corrected behavior after an intermediate version of this fix
+    /// was reverted for contradicting `FilterContext`'s own documented
+    /// invariant (`filter.rs`): `source_controller` is what `ControllerRef::
+    /// You` ("creatures you control") resolves against, and that pronoun
+    /// refers to the ABILITY's controller (who cast the spell) — not to
+    /// whoever happens to control the resolved damage source. Only
+    /// `filter_ctx.source_id` (the object identity, for `FilterProp::Another`
+    /// exclusion and similar) is overridden to the resolved damage source;
+    /// `source_controller` is deliberately left untouched.
+    ///
+    /// Two otherwise-identical creature recipients: one controlled by P0 (the
+    /// ability's controller — must match "you control"), one controlled by
+    /// P1 (the resolved damage source's controller, simulating a stolen
+    /// creature dealing the damage — must NOT match "you control", since
+    /// "you" is the caster, not the source).
+    #[test]
+    fn damage_all_controller_matches_recipient_reads_ability_controller() {
+        let mut state = GameState::new_two_player(42);
+        // Damage source: controlled by P1, even though the ability itself
+        // (below) has controller P0 — simulating a control change that
+        // happened between the source being targeted and this ability
+        // resolving.
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(1),
+            "Stolen Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_p0 = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "P0's Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient_p1 = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "P1's Other Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, recipient_p0, recipient_p1] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.base_power = Some(4);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::ControllerMatches {
+                            player: Box::new(crate::types::ability::PlayerFilter::Controller),
+                        },
+                    ],
+                }),
+                player_filter: None,
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&recipient_p0].damage_marked, 3,
+            "\"you control\" resolves against the ABILITY's controller (P0), \
+             per FilterContext's documented source_controller invariant"
+        );
+        assert_eq!(
+            state.objects[&recipient_p1].damage_marked, 0,
+            "the resolved damage source's controller (P1) must NOT be used \
+             for \"you control\" — only source_id (object identity) is \
+             overridden to the resolved damage source, not source_controller"
+        );
     }
 
     #[test]
@@ -5648,8 +5767,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining batch targets");
 
         // Every remaining creature must be encoded as its own chain node.
@@ -5762,8 +5880,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining batch targets");
         let summary = collect_chain_summary(&cont.chain);
         assert_eq!(
@@ -5804,8 +5921,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining-player damage");
 
         let summary = collect_chain_summary(&cont.chain);
@@ -5867,8 +5983,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for remaining multi-target damage");
         let summary = collect_chain_summary(&cont.chain);
         assert_eq!(summary.len(), 1, "one remaining target; got {summary:?}");
@@ -5946,8 +6061,7 @@ mod tests {
 
         assert_eq!(
             state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .and_then(|c| c.parent_kind),
             Some(EffectKind::DamageAll),
             "the stashed continuation must carry EffectKind::DamageAll so the drain re-emits the parent event",
@@ -5979,7 +6093,7 @@ mod tests {
             result.events,
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after drain"
         );
     }
@@ -6023,8 +6137,7 @@ mod tests {
 
         assert_eq!(
             state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .and_then(|c| c.parent_kind),
             Some(EffectKind::DamageEachPlayer),
             "the stashed continuation must carry EffectKind::DamageEachPlayer",
@@ -6055,7 +6168,7 @@ mod tests {
             result.events,
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed after drain"
         );
     }

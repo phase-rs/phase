@@ -215,9 +215,7 @@ pub(crate) fn start_draw_sequence_with_origin(
     origin: DrawSequenceOrigin,
     events: &mut Vec<GameEvent>,
 ) -> replacement::ReplacementResult {
-    let frame_id = state
-        .draw_sequences
-        .push_with_replacement_applied_and_origin(player, count, applied, origin);
+    let frame_id = state.push_draw_sequence_with_origin(player, count, applied, origin);
     resume_draw_sequence(state, frame_id, events)
 }
 
@@ -254,7 +252,7 @@ pub(crate) fn resume_draw_sequence(
         // Take the next owed unit off the cursor BEFORE attempting it, so a park
         // mid-attempt leaves the frame recording the units AFTER this one. The
         // in-flight unit is settled by the replacement choice that parked it.
-        let Some(frame) = state.draw_sequences.active_if(frame_id) else {
+        let Some(frame) = state.active_draw_sequence_if(frame_id) else {
             debug_assert!(
                 false,
                 "resume_draw_sequence({frame_id:?}) is not the active draw frame — a nested \
@@ -282,11 +280,22 @@ pub(crate) fn resume_draw_sequence(
         );
         match result {
             ReplacementResult::Execute(_) | ReplacementResult::Prevented => {
-                // The unit's delivery may itself have pushed and popped a nested
-                // instruction, so re-address this frame by ID rather than assuming
-                // it is still whatever `active_mut()` returns.
-                if let Some(frame) = state.draw_sequences.active_if(frame_id) {
+                // The unit's delivery may itself have pushed a nested instruction.
+                // Credit this exact frame by identity, but never resume it while
+                // the nested frame remains active.
+                if let Some(frame) = state.draw_sequence_frame_mut(frame_id) {
                     frame.accumulated += unit_drawn;
+                }
+                if state
+                    .active_draw_sequence()
+                    .is_none_or(|frame| frame.frame_id != frame_id)
+                {
+                    return ReplacementResult::NeedsChoice(
+                        state
+                            .waiting_for
+                            .acting_player()
+                            .unwrap_or(state.active_player),
+                    );
                 }
             }
             // The frame stays parked on the stack; the choice resumes it.
@@ -296,19 +305,18 @@ pub(crate) fn resume_draw_sequence(
         }
     }
 
-    let Some(frame) = state.draw_sequences.pop(frame_id) else {
+    let Some(frame) = state.pop_active_draw_sequence(frame_id) else {
         debug_assert!(false, "draw frame {frame_id:?} vanished before completion");
         return ReplacementResult::Prevented;
     };
     state.last_effect_count = Some(frame.accumulated as i32);
-
     match frame.origin {
         DrawSequenceOrigin::Plain => {
             // Intentionally no `EffectResolved { Draw }`: no trigger matcher consumes
             // `EffectKind::Draw` today, so wiring that event is out of scope here.
         }
         DrawSequenceOrigin::ConniveTail { conniver, count } => {
-            super::connive::apply_connive_tail(state, conniver, count, events);
+            super::connive::apply_connive_tail(state, *conniver, count, events);
         }
         DrawSequenceOrigin::ScryCompletion { source_id } => {
             events.push(GameEvent::EffectResolved {
@@ -316,6 +324,25 @@ pub(crate) fn resume_draw_sequence(
                 source_id,
                 subject: None,
             });
+        }
+    }
+
+    // CR 615.5: A `Draw` with a chained follow-up leaves that follow-up in the
+    // normal pending-continuation slot. Keep this paused drain resident until
+    // that chain runs: its `PostReplacementSourceController` read still needs
+    // the prevented-event context. A draw without a parked follow-up is the
+    // terminal action of this dispatch and can retire the exact top entry now.
+    // Nested replacement dispatches retain their own stack entries, so this
+    // never pops an outer paused event context.
+    if state.active_ability_continuation().is_none() {
+        let completed = state
+            .take_completed_multi_draw_frame()
+            .expect("completed multi-draw frame must remain top-owned");
+        // The promoted continuation is now the paused drain's direct child;
+        // it must read the resident event context before its own completion
+        // retires that drain.
+        if completed.is_some() && state.active_ability_continuation().is_none() {
+            state.finish_active_paused_post_replacement_dispatch();
         }
     }
 
@@ -441,7 +468,7 @@ pub fn apply_draw_after_replacement(
         // SelfRef`-bound to a battlefield host; the only `valid_card: None` class
         // — Rest in Peace / Leyline "put into a graveyard → exile" — is
         // destination-gated to Graveyard), so a draw cannot surface a CR 616.1
-        // ordering choice and no `pending_batch_deliveries` resume is wired.
+        // ordering choice and no BatchDelivery resume is wired.
         //
         // The assert catches the MECHANICAL non-delivery bug: if the card is
         // still in the library, the move stranded — `move_object` returned a

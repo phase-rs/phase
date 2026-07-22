@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
 import type { ObjectId } from "../../adapter/types.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import { useBlockRequirements, type BlockRequirement } from "./useBlockRequirements.ts";
 
 interface Anchor {
@@ -78,6 +79,7 @@ function badgeTone(status: BlockRequirement["status"]): string {
 export function BlockRequirementBadges() {
   const { t } = useTranslation("game");
   const { byAttacker } = useBlockRequirements();
+  const objects = useGameStore((s) => s.gameState?.objects);
   const attackerIds = Array.from(byAttacker.keys());
   const anchors = useAttackerAnchors(attackerIds);
 
@@ -94,10 +96,20 @@ export function BlockRequirementBadges() {
             : req.status === "incomplete"
               ? t("combat.blockProgressBadge", { assigned: req.assigned, required: req.required })
               : t("combat.blockNeedsBadge", { required: req.required });
-        const title =
+        const baseTitle =
           req.status === "incomplete"
             ? t("combat.blockIncompleteAttacker", { assigned: req.assigned, required: req.required })
             : t("combat.menaceRequirement", { count: req.required });
+        // Display-only source attribution: suppress the self-source (Menace's
+        // carrier is the attacker itself → bare badge) and skip ids that no
+        // longer resolve (departed-source guard), mirroring AttackRequirementBadges.
+        const names = req.sources
+          .filter((id) => id !== req.attackerId)
+          .map((id) => objects?.[String(id)]?.name)
+          .filter((n): n is string => !!n);
+        const title = names.length
+          ? `${baseTitle} ${t("preview.fromSource", { source: names.join(", ") })}`
+          : baseTitle;
         return (
           <div
             key={req.attackerId}

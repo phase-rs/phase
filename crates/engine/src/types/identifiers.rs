@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::game_state::LKISnapshot;
 use super::zones::Zone;
 use crate::game::game_object::GameObject;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CardId(pub u64);
@@ -11,6 +10,15 @@ pub struct CardId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ObjectId(pub u64);
+
+/// Monotonic identity for one logical simultaneous zone-change action.
+///
+/// This remains distinct from an [`ObjectId`]: a logical group can contain
+/// several object incarnations, and a nested batch must never inherit its
+/// parent's trigger-observation authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LogicalZoneChangeGroupId(pub u64);
 
 /// Unique identifier for a set of objects tracked across delayed trigger boundaries.
 /// CR 603.7: Delayed triggers reference the specific objects from the originating effect.
@@ -28,7 +36,7 @@ pub const LEGACY_INCARNATION: u64 = u64::MAX;
 /// CR 400.7: an object that changes zones becomes a new object. This pair is the
 /// exact cross-incarnation identity of one object: the stable storage `ObjectId`
 /// plus the monotonic `incarnation` epoch (see `GameObject::incarnation`).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 #[serde(from = "ObjectIncarnationRefCompat")]
 pub struct ObjectIncarnationRef {
     pub object_id: ObjectId,

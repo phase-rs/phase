@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 981
 expression: "&ir"
 ---
 {
@@ -22,42 +23,46 @@ expression: "&ir"
         "fragment": "~ enters with X +1/+1 counters on it."
       },
       "node": {
-        "PreLoweredReplacement": {
-          "event": "Moved",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutCounter",
-              "counter_type": "P1P1",
-              "count": {
-                "type": "Ref",
-                "qty": {
-                  "type": "CostXPaid"
+        "Replacement": {
+          "definition": {
+            "event": "Moved",
+            "execute": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "P1P1",
+                "count": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "CostXPaid"
+                  }
+                },
+                "target": {
+                  "type": "SelfRef"
                 }
               },
-              "target": {
-                "type": "SelfRef"
-              }
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "description": "~ enters with X +1/+1 counters on it.",
             "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            "destination_zone": "Battlefield"
           },
-          "mode": {
-            "type": "Mandatory"
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "description": "~ enters with X +1/+1 counters on it.",
-          "condition": null,
-          "destination_zone": "Battlefield"
+          "source_text": "~ enters with X +1/+1 counters on it.",
+          "execute_ir": null
         }
       }
     },

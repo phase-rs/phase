@@ -37,14 +37,14 @@ import type {
   SubmitResult,
 } from "../../adapter/types";
 import { nextSnapshotSeq } from "../../adapter/types";
-import { useGameStore } from "../../stores/gameStore";
+import { nextGameSessionGeneration, useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import {
   buildGameState,
   buildLegalActionsResult,
   buildPriorityWaitingFor,
 } from "../../test/factories/gameStateFactory";
-import { dispatchAction } from "../dispatch";
+import { dispatchAction, dispatchActionForGameSession } from "../dispatch";
 
 const PRIORITY = buildPriorityWaitingFor({ data: { player: 0 } });
 
@@ -222,6 +222,77 @@ describe("P2P host softlock — engine advance during the animation window", () 
     expect(useGameStore.getState().waitingFor).toEqual(OPTIONAL_EFFECT_CHOICE);
     expect(useGameStore.getState().legalActions).toEqual(OPTIONAL_EFFECT_ACTIONS);
     expect(storeHoldsMixedPair()).toBe(false);
+  });
+
+  it("drops a delayed preference dispatch when a replacement game lifecycle takes over", async () => {
+    let releaseOldSubmit!: (result: SubmitResult) => void;
+    const oldGetSnapshot = vi.fn<EngineAdapter["getSnapshot"]>();
+    const oldAdapter: EngineAdapter = {
+      ...baseAdapter(),
+      submitAction: vi.fn(
+        () =>
+          new Promise<SubmitResult>((resolve) => {
+            releaseOldSubmit = resolve;
+          }),
+      ),
+      getState: vi.fn(async () => PRIORITY_STATE),
+      getLegalActions: vi.fn(async () => PRIORITY_LEGAL),
+      getSnapshot: oldGetSnapshot,
+    };
+    seedStore(oldAdapter);
+
+    const oldGeneration = useGameStore.getState().gameSessionGeneration;
+    const oldDispatch = dispatchActionForGameSession(
+      { type: "SetPhaseStops", data: { stops: [] } },
+      oldAdapter,
+      oldGeneration,
+      0,
+    );
+    expect(oldAdapter.submitAction).toHaveBeenCalledTimes(1);
+
+    const newGetSnapshot = vi.fn(async (): Promise<EngineSnapshot> => ({
+      state: OPTIONAL_STATE,
+      legalResult: OPTIONAL_LEGAL,
+      seq: nextSnapshotSeq(),
+    }));
+    const newAdapter: EngineAdapter = {
+      ...baseAdapter(),
+      submitAction: vi.fn(async (): Promise<SubmitResult> => ({
+        events: [],
+        log_entries: [],
+      })),
+      getState: vi.fn(async () => OPTIONAL_STATE),
+      getLegalActions: vi.fn(async () => OPTIONAL_LEGAL),
+      getSnapshot: newGetSnapshot,
+    };
+    const newGeneration = nextGameSessionGeneration();
+    useGameStore.setState({
+      adapter: newAdapter,
+      gameState: OPTIONAL_STATE,
+      waitingFor: OPTIONAL_EFFECT_CHOICE,
+      legalActions: OPTIONAL_EFFECT_ACTIONS,
+      gameSessionGeneration: newGeneration,
+    });
+
+    // The replacement lifecycle may legitimately send the same preference.
+    // It must not be deduplicated against the old session's in-flight action.
+    const newDispatch = dispatchActionForGameSession(
+      { type: "SetPhaseStops", data: { stops: [] } },
+      newAdapter,
+      newGeneration,
+      0,
+    );
+
+    releaseOldSubmit({ events: [], log_entries: [] });
+    await oldDispatch;
+    await newDispatch;
+
+    expect(oldGetSnapshot).not.toHaveBeenCalled();
+    expect(newAdapter.submitAction).toHaveBeenCalledTimes(1);
+    expect(newGetSnapshot).toHaveBeenCalledTimes(1);
+    expect(useGameStore.getState().gameState).toEqual(OPTIONAL_STATE);
+    expect(useGameStore.getState().waitingFor).toEqual(OPTIONAL_EFFECT_CHOICE);
+    expect(useGameStore.getState().legalActions).toEqual(OPTIONAL_EFFECT_ACTIONS);
   });
 
   it("red-before-green control: the OLD split-fetch pairing produces exactly the softlock shape", async () => {

@@ -1,12 +1,17 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameEvent, GameState } from "../../adapter/types";
+import type { EngineAdapter, EngineSnapshot, GameAction, GameEvent, GameState, SubmitResult } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { GAME_CHECKPOINTS_PREFIX, GAME_KEY_PREFIX } from "../../constants/storage";
 import { useGameStore } from "../../stores/gameStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
-import { buildGameState, buildPriorityWaitingFor } from "../../test/factories/gameStateFactory";
-import { restoreGameState } from "../dispatch";
+import {
+  buildGameState,
+  buildLegalActionsResult,
+  buildPriorityWaitingFor,
+} from "../../test/factories/gameStateFactory";
+import { dispatchAction, restoreGameState } from "../dispatch";
 
 vi.mock("idb-keyval", () => ({
   createStore: vi.fn(() => ({})),
@@ -139,5 +144,63 @@ describe("restoreGameState", () => {
       [checkpoint],
       expect.anything(),
     );
+  });
+
+  it("releases the dispatch mutex before accepting actions for the restored state", async () => {
+    const oldState = createMockState({ turn_number: 3 });
+    const restoredState = createMockState({ turn_number: 9 });
+    let currentState = oldState;
+    let releaseOldAction!: (result: SubmitResult) => void;
+    const submitAction = vi
+      .fn<EngineAdapter["submitAction"]>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<SubmitResult>((resolve) => {
+            releaseOldAction = resolve;
+          }),
+      )
+      .mockResolvedValue({ events: [], log_entries: [] } as SubmitResult);
+    const getSnapshot = vi
+      .fn<EngineAdapter["getSnapshot"]>()
+      .mockImplementation(async (): Promise<EngineSnapshot> => ({
+        state: currentState,
+        legalResult: buildLegalActionsResult(),
+        seq: nextSnapshotSeq(),
+      }));
+    const adapter = buildEngineAdapterMock(oldState, {
+      submitAction,
+      getSnapshot,
+      restoreState: vi.fn(async (state: GameState) => {
+        currentState = state;
+      }),
+    });
+
+    useGameStore.setState({
+      adapter,
+      gameMode: "ai",
+      gameState: oldState,
+      waitingFor: oldState.waiting_for,
+    });
+
+    const oldDispatch = dispatchAction({ type: "PassPriority" } as GameAction, 0);
+    expect(submitAction).toHaveBeenCalledTimes(1);
+
+    await expect(restoreGameState(restoredState)).resolves.toBeNull();
+
+    // The old action is still awaiting the adapter, but it must not keep the
+    // restored game's response queued behind the old dispatch generation.
+    const restoredDispatch = dispatchAction(
+      { type: "DecideOptionalEffect", data: { accept: true } } as GameAction,
+      0,
+    );
+    expect(submitAction).toHaveBeenCalledTimes(2);
+    await expect(restoredDispatch).resolves.toBeUndefined();
+
+    releaseOldAction({ events: [], log_entries: [] } as SubmitResult);
+    await expect(oldDispatch).resolves.toBeUndefined();
+
+    // The stale action cannot fetch or commit a snapshot after the restore.
+    expect(getSnapshot).toHaveBeenCalledTimes(2);
+    expect(useGameStore.getState().gameState).toEqual(restoredState);
   });
 });

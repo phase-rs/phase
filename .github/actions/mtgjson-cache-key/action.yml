@@ -1,0 +1,46 @@
+name: MTGJSON cache key
+description: >
+  Derive the mtgjson-full cache-key suffix from MTGJSON's published release
+  version, so the cache rolls exactly when new data is published.
+
+outputs:
+  suffix:
+    description: Published MTGJSON version (sanitized), or a week-based fallback.
+    value: ${{ steps.probe.outputs.suffix }}
+
+runs:
+  using: composite
+  steps:
+    - name: Probe published MTGJSON version
+      id: probe
+      shell: bash
+      # Calendar-week keys race MTGJSON's publish schedule: ISO-week keys roll
+      # at Monday 00:00 UTC but MTGJSON publishes ~06:00 UTC, so any job in
+      # that window seeds the week's immutable cache entry with LAST week's
+      # data and pins every consumer to it until the next roll (observed
+      # 2026-07-20: prod served the 07-12 release all morning). Keying on the
+      # published `.meta.version` makes the key roll exactly when the data
+      # does, and picks up mid-week republishes for free.
+      #
+      # deploy.yml and release.yml SHARE the `mtgjson-full-<suffix>` cache
+      # namespace, so this computation must be single-authority: if the two
+      # workflows ever computed the suffix differently they would silently
+      # fork the cache and could reintroduce staleness on one path. Change the
+      # formula only here.
+      #
+      # Every failure path (host down, HTTP error via -f, malformed body,
+      # missing .meta.version) must degrade to the week-based fallback with
+      # exit 0 — the probe may never fail a job that succeeds today. The
+      # `week-` prefix cannot collide with a version string, and `+` is
+      # rewritten to `-` for cache-key hygiene.
+      run: |
+        raw="$(curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 10 \
+          -H 'User-Agent: phase-rs-card-data/1.0 (+https://github.com/phase-rs/phase)' \
+          https://mtgjson.com/api/v5/Meta.json)" || raw=""
+        version="$(printf '%s' "$raw" | jq -r '.meta.version // empty' 2>/dev/null | tr -d '\r' | tr '+' '-' || true)"
+        if [ -n "$version" ]; then
+          suffix="$version"
+        else
+          suffix="week-$(date -u +%Y-W%V)"
+        fi
+        echo "suffix=$suffix" >> "$GITHUB_OUTPUT"

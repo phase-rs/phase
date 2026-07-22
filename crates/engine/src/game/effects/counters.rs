@@ -152,7 +152,7 @@ pub(crate) fn stash_pending_counter_additions(
     remaining: Vec<PendingCounterAddition>,
     completion: PendingEffectResolved,
 ) {
-    state.pending_counter_additions = Some(PendingCounterAdditionQueue {
+    state.push_counter_additions(PendingCounterAdditionQueue {
         remaining,
         completion: Some(completion),
     });
@@ -204,8 +204,7 @@ pub(crate) fn append_pending_counter_post_actions(
         return;
     }
     if let Some(completion) = state
-        .pending_counter_additions
-        .as_mut()
+        .active_counter_additions_mut()
         .and_then(|queue| queue.completion.as_mut())
     {
         completion.post_actions.extend(post_actions);
@@ -247,7 +246,7 @@ fn merge_pending_counter_completion_after_nested_pause(
     state: &mut GameState,
     completion: PendingEffectResolved,
 ) {
-    let Some(queue) = state.pending_counter_additions.as_mut() else {
+    let Some(queue) = state.active_counter_additions_mut() else {
         stash_pending_counter_additions(state, Vec::new(), completion);
         return;
     };
@@ -282,8 +281,12 @@ fn merge_pending_counter_completion_after_nested_pause(
 }
 
 pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.pending_counter_additions.take() {
+    while let Some(mut queue) = state.active_counter_additions().cloned() {
         let Some(next) = queue.remaining.first().cloned() else {
+            state
+                .take_active_counter_additions()
+                .expect("settled counter-additions queue must own the active frame")
+                .expect("settled counter-additions frame must exist");
             if let Some(PendingEffectResolved {
                 kind,
                 source_id,
@@ -328,7 +331,9 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
             continue;
         };
         queue.remaining.remove(0);
-        state.pending_counter_additions = Some(queue);
+        state
+            .replace_active_counter_additions(queue)
+            .expect("re-parked counter-additions queue must own the active frame");
         let completed = match next {
             PendingCounterAddition::Object {
                 actor,
@@ -431,7 +436,7 @@ fn apply_pending_counter_post_action(
             }) {
                 state
                     .zone_changes_this_turn
-                    .push(zone_change_record.clone());
+                    .push_back(zone_change_record.clone());
                 events.push(GameEvent::ZoneChanged {
                     object_id,
                     from: None,
@@ -536,7 +541,7 @@ fn apply_pending_counter_post_action(
             crate::game::restrictions::record_token_created(state, object_id);
             push_token_entry_events(state, events, object_id, name, source_id);
             state.last_created_token_ids.push(object_id);
-            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            if let Some(pending) = state.active_copy_token_mut() {
                 pending.created_ids.push(object_id);
             }
             true
@@ -561,7 +566,7 @@ fn apply_pending_counter_post_action(
                 events,
             );
             let completion = status.completion;
-            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
+            if let Some(pending) = state.active_copy_token_mut() {
                 pending.created_ids.extend(status.created_ids);
             } else {
                 state.last_created_token_ids.extend(status.created_ids);
@@ -622,8 +627,9 @@ fn apply_pending_counter_post_action(
             if !state.last_created_token_ids.contains(&object_id) {
                 state.last_created_token_ids.push(object_id);
             }
-            if let Some(pending) = state.pending_copy_token_resolution.as_mut() {
-                pending.created_ids = state.last_created_token_ids.clone();
+            let created_ids = state.last_created_token_ids.clone();
+            if let Some(pending) = state.active_copy_token_mut() {
+                pending.created_ids = created_ids;
             }
             true
         }
@@ -887,7 +893,11 @@ pub fn resolve_counter_match_for_removal(
             .counters
             .iter()
             .filter(|(_, &n)| n > 0)
-            .max_by_key(|(_, &n)| n)
+            // Issue #4878: `obj.counters` is a default-RandomState HashMap, so
+            // `max_by_key` alone would break ties by per-process hash-iteration
+            // order. Tie-break by CounterType's derived Ord for a deterministic
+            // choice when two or more types share the max count.
+            .max_by(|(ta, &na), (tb, &nb)| na.cmp(&nb).then_with(|| ta.cmp(tb)))
             .map(|(ty, _)| ty.clone()),
     }
 }
@@ -1144,8 +1154,12 @@ fn move_counter_with_replacement_entry(
 }
 
 pub(crate) fn drain_pending_counter_moves(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.pending_counter_moves.take() {
+    while let Some(mut queue) = state.active_counter_moves().cloned() {
         let Some(next) = queue.remaining.first().cloned() else {
+            state
+                .take_active_counter_moves()
+                .expect("settled counter-moves queue must own the active frame")
+                .expect("settled counter-moves frame must exist");
             events.push(GameEvent::EffectResolved {
                 kind: queue.effect_kind,
                 source_id: queue.source_id,
@@ -1154,7 +1168,9 @@ pub(crate) fn drain_pending_counter_moves(state: &mut GameState, events: &mut Ve
             continue;
         };
         queue.remaining.remove(0);
-        state.pending_counter_moves = Some(queue);
+        state
+            .replace_active_counter_moves(queue)
+            .expect("re-parked counter-moves queue must own the active frame");
         if !move_counter_with_replacement_entry(state, next, events) {
             return;
         }
@@ -1486,6 +1502,51 @@ pub fn resolve_multiply(
     });
 
     Ok(())
+}
+
+/// CR 608.2d + CR 118.12 + CR 122.1: True when a `RemoveCounter` effect used as
+/// an optional "you may" gate cannot be performed — none of its resolved target
+/// object(s) hold a matching counter that is *permitted to be removed*. "You may
+/// remove a charge counter from this artifact" with zero charge counters (Sun
+/// Droplet), or with the counter present but frozen by a `CountersCantBeRemoved`
+/// static (Fear of Sleep Paralysis class).
+///
+/// CR 608.2d: a player can't choose an impossible option. Removing a counter that
+/// isn't there — or one an effect forbids removing — does nothing, so the
+/// up-front "you may" must not be offered. CR 118.12: the `EffectOutcome::
+/// OptionalEffectPerformed` rider ("If you do, gain 1 life") checks whether the
+/// player chose to perform the action; if the action is impossible the choice is
+/// never offered, so the rider must not fire.
+///
+/// Both the presence check and the removal-prohibition check use the resolver's
+/// own authorities (`resolve_defined_or_targets`, `counter_removal_blocked`), so
+/// feasibility and resolution can never diverge. A `count > 1` request is still
+/// feasible whenever ≥1 permitted counter exists — the resolver removes as many
+/// as available (CR 122.1 "as much as possible"), a nonzero action. Returns
+/// `false` (feasible) for any non-`RemoveCounter` effect so the caller's other
+/// arms are unaffected.
+pub(crate) fn remove_counter_optional_is_infeasible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Effect::RemoveCounter { counter_type, .. } = &ability.effect else {
+        return false;
+    };
+    let targets = resolve_defined_or_targets(state, ability);
+    // Feasible iff SOME resolved target holds a matching counter that is not
+    // removal-blocked. `counter_type` is `Option<CounterType>`: `Some(ct)`
+    // matches that specific kind ("a charge counter"), `None` means any kind
+    // ("a counter"). An empty target set is infeasible (nothing to remove from).
+    let feasible = targets.iter().any(|obj_id| {
+        state.objects.get(obj_id).is_some_and(|obj| {
+            obj.counters.iter().any(|(ct, &n)| {
+                n > 0
+                    && counter_type.as_ref().is_none_or(|expected| expected == ct)
+                    && !counter_removal_blocked(state, *obj_id, ct)
+            })
+        })
+    });
+    !feasible
 }
 
 /// Resolve targeting to object IDs using the typed TargetFilter.
@@ -1986,7 +2047,7 @@ pub(crate) fn validate_and_queue_counter_move_distribution(
         }
     }
 
-    state.pending_counter_moves = Some(PendingCounterMoveQueue {
+    state.push_counter_moves(PendingCounterMoveQueue {
         remaining: moves,
         effect_kind: EffectKind::from(&pending_effect.effect),
         source_id: pending_effect.source_id,
@@ -2316,8 +2377,8 @@ pub(crate) fn validate_counter_selection(
     Ok(total)
 }
 
-/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and stash the
-/// per-type removals into `pending_counter_removals` for
+/// CR 107.1c: Validate a submitted `RemoveCountersChoice` answer and park the
+/// per-type removals in the typed `CounterRemovals` frame for
 /// `drain_pending_counter_removals` to apply. Mirrors
 /// `validate_and_queue_counter_move_distribution` so the `apply()` handler stays
 /// a thin dispatcher.
@@ -2333,7 +2394,7 @@ pub(crate) fn validate_and_queue_counter_removal(
         .iter()
         .map(|s| (s.counter_type.clone(), s.count))
         .collect();
-    state.pending_counter_removals = Some(PendingCounterRemovalQueue {
+    state.push_counter_removals(PendingCounterRemovalQueue {
         remaining,
         source_id,
         effect_kind: EffectKind::from(&pending_effect.effect),
@@ -2352,11 +2413,15 @@ pub(crate) fn validate_and_queue_counter_removal(
 /// `EffectResolved` so a downstream "create that many" / "add that much" rider
 /// reading `QuantityRef::EventContextAmount` picks up the removed count.
 pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    while let Some(mut queue) = state.pending_counter_removals.take() {
+    while let Some(mut queue) = state.active_counter_removals().cloned() {
         let Some((counter_type, count)) = queue.remaining.first().cloned() else {
             // CR 608.2h: ordering invariant — stamp the total removed before the
             // terminating EffectResolved (and thus before the continuation drains).
             state.last_effect_count = Some(queue.total as i32);
+            state
+                .take_active_counter_removals()
+                .expect("settled counter-removals queue must own the active frame")
+                .expect("settled counter-removals frame must exist");
             events.push(GameEvent::EffectResolved {
                 kind: queue.effect_kind,
                 source_id: queue.source_ability_id,
@@ -2366,7 +2431,9 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
         };
         queue.remaining.remove(0);
         let source_id = queue.source_id;
-        state.pending_counter_removals = Some(queue);
+        state
+            .replace_active_counter_removals(queue)
+            .expect("re-parked counter-removals queue must own the active frame");
         // CR 614.1: single-authority remove pipeline (applies prevention /
         // modification replacements; keeps obj.loyalty / obj.defense in lockstep).
         remove_counter_with_replacement(state, source_id, counter_type, count, events);
@@ -2381,15 +2448,18 @@ pub(crate) fn drain_pending_counter_removals(state: &mut GameState, events: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, FilterProp, QuantityExpr, QuantityModification, ReplacementDefinition,
-        TargetChoiceTiming, TargetFilter, TypedFilter,
+        ReplacementMode, TargetChoiceTiming, TargetFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
+    use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
     use crate::types::zones::Zone;
 
     fn make_counter_ability(effect: Effect, target: ObjectId) -> ResolvedAbility {
@@ -2468,6 +2538,38 @@ mod tests {
         );
     }
 
+    /// Issue #4878: `resolve_counter_match_for_removal`'s `CounterMatch::Any`
+    /// arm used to break count ties with a bare `max_by_key`, which falls back
+    /// to `obj.counters`' per-process HashMap (RandomState) iteration order —
+    /// a different `CounterType` could be selected for removal across
+    /// processes on an identical seed. The fix tie-breaks by `CounterType`'s
+    /// derived `Ord`, so a tied object always resolves to the same,
+    /// Ord-greatest type. Reverting to bare `max_by_key` makes this assertion
+    /// flip to "unspecified" (test would become flaky, not merely wrong).
+    #[test]
+    fn resolve_counter_match_for_removal_breaks_ties_by_counter_type_ord() {
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tied Counters Test".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.counters.insert(CounterType::Plus1Plus1, 2);
+        obj.counters.insert(CounterType::Minus1Minus1, 2);
+
+        // CounterType::Minus1Minus1 is declared after Plus1Plus1, so it is the
+        // Ord-greater of the two tied types and must win deterministically.
+        assert_eq!(
+            resolve_counter_match_for_removal(&state, id, &CounterMatch::Any),
+            Some(CounterType::Minus1Minus1)
+        );
+    }
+
     fn mark_creature(state: &mut GameState, object_id: ObjectId) {
         state
             .objects
@@ -2511,6 +2613,25 @@ mod tests {
             .push(
                 ReplacementDefinition::new(ReplacementEvent::AddCounter)
                     .quantity_modification(QuantityModification::Plus { value: 1 }),
+            );
+    }
+
+    fn install_counter_removal_optional_replacement(state: &mut GameState) {
+        let replacement_id = create_object(
+            state,
+            CardId(902),
+            PlayerId(0),
+            "Counter Removal Optional".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&replacement_id)
+            .expect("counter-removal replacement exists")
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::RemoveCounter)
+                    .mode(ReplacementMode::Optional { decline: None }),
             );
     }
 
@@ -2997,8 +3118,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining target should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -3027,7 +3147,7 @@ mod tests {
     #[test]
     fn nested_post_action_pause_preserves_parent_completion() {
         let mut state = GameState::new_two_player(42);
-        state.pending_counter_additions = Some(PendingCounterAdditionQueue {
+        state.push_counter_additions(PendingCounterAdditionQueue {
             remaining: vec![PendingCounterAddition::Object {
                 actor: PlayerId(0),
                 object_id: ObjectId(10),
@@ -3055,8 +3175,7 @@ mod tests {
         );
 
         let queue = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("nested queue remains installed");
         assert_eq!(queue.remaining.len(), 1);
         let completion = queue
@@ -3124,8 +3243,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining object should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -3239,8 +3357,7 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining target should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -3953,6 +4070,308 @@ mod tests {
         )));
     }
 
+    /// CR 616.1 + CR 122.5: a selected CounterMoves queue remains the sole
+    /// runtime owner while each move's add stage chooses among noncommuting
+    /// counter replacements. The queue re-parks for every prompt and v2 restores
+    /// that real prompt boundary before production replacement actions resume it.
+    #[test]
+    fn counter_moves_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let destination_id = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .expect("counter source exists")
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        install_noncommuting_counter_replacements(&mut state);
+        state.push_counter_moves(PendingCounterMoveQueue {
+            remaining: vec![
+                PendingCounterMove {
+                    actor: PlayerId(0),
+                    source_id,
+                    destination_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    remove_count: 1,
+                    add_count: 1,
+                },
+                PendingCounterMove {
+                    actor: PlayerId(0),
+                    source_id,
+                    destination_id,
+                    counter_type: CounterType::Plus1Plus1,
+                    remove_count: 1,
+                    add_count: 1,
+                },
+            ],
+            effect_kind: EffectKind::MoveCounters,
+            source_id,
+        });
+
+        drain_pending_counter_moves(&mut state, &mut Vec::new());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CounterMoves(_))
+        ));
+        assert_eq!(
+            state
+                .active_counter_moves()
+                .expect("counter queue remains active at its prompt")
+                .remaining
+                .len(),
+            1
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("paused CounterMoves prompt serializes as v2");
+        assert_eq!(saved["resolution_state_version"], 2);
+        assert!(saved.get("pending_counter_moves").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 CounterMoves prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter queue");
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                assert!(matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterMoves(_))
+                ));
+            }
+        }
+
+        assert!(state.active_counter_moves().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.objects[&source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert!(
+            state.objects[&destination_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+                > 2,
+            "both counter moves must complete through the chosen replacement paths"
+        );
+    }
+
+    /// CR 107.1c + CR 608.2h + CR 616.1: the production counter-removal choice
+    /// parks its selected tail in CounterRemovals while each removal offers its
+    /// applicable optional replacement. v2 restores that real replacement prompt
+    /// before the production actions finish the queue and stamp its total.
+    #[test]
+    fn counter_removals_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(912),
+            PlayerId(0),
+            "Counter Removal Source".to_string(),
+            Zone::Battlefield,
+        );
+        let charge = CounterType::Generic("charge".to_string());
+        {
+            let source = state
+                .objects
+                .get_mut(&source_id)
+                .expect("counter-removal source exists");
+            source.counters.insert(CounterType::Plus1Plus1, 1);
+            source.counters.insert(charge.clone(), 1);
+        }
+        install_counter_removal_optional_replacement(&mut state);
+        state.waiting_for = WaitingFor::RemoveCountersChoice {
+            player: PlayerId(0),
+            source_id,
+            counter_type: None,
+            available: vec![(CounterType::Plus1Plus1, 1), (charge.clone(), 1)],
+            pending_effect: Box::new(make_counter_ability(
+                Effect::RemoveCounter {
+                    counter_type: None,
+                    count: QuantityExpr::Fixed { value: -1 },
+                    target: TargetFilter::Any,
+                },
+                source_id,
+            )),
+        };
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseCountersToRemove {
+                selections: vec![
+                    CounterRemoveChoice {
+                        counter_type: CounterType::Plus1Plus1,
+                        count: 1,
+                    },
+                    CounterRemoveChoice {
+                        counter_type: charge.clone(),
+                        count: 1,
+                    },
+                ],
+            },
+        )
+        .expect("production removal choice creates its first replacement prompt");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CounterRemovals(_))
+        ));
+        assert_eq!(
+            state
+                .active_counter_removals()
+                .expect("counter-removals queue owns its prompt")
+                .remaining
+                .len(),
+            1
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("paused CounterRemovals prompt serializes as v2");
+        assert_eq!(saved["resolution_state_version"], 2);
+        assert!(saved.get("pending_counter_removals").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 CounterRemovals prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter-removals queue");
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                assert!(matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterRemovals(_))
+                ));
+            }
+        }
+
+        assert!(state.active_counter_removals().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.last_effect_count, Some(2));
+        assert!(state.objects[&source_id].counters.is_empty());
+    }
+
+    /// CR 122.1 + CR 616.1: the production multi-target counter-addition
+    /// resolver parks its remaining recipients and completion in CounterAdditions
+    /// while each recipient's placement chooses among noncommuting replacements.
+    /// v2 restores that real prompt before production replacement actions finish
+    /// the queue.
+    #[test]
+    fn counter_additions_queue_reparks_and_roundtrips_v2_at_replacement_choice() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let first = create_object(
+            &mut state,
+            CardId(913),
+            PlayerId(0),
+            "First Counter Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(914),
+            PlayerId(0),
+            "Second Counter Recipient".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first), TargetRef::Object(second)],
+            ObjectId(915),
+            PlayerId(0),
+        );
+
+        resolve_add(&mut state, &ability, &mut Vec::new())
+            .expect("production counter-addition resolver creates its first prompt");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        assert!(matches!(
+            state.resolution_stack.last(),
+            Some(ResolutionFrame::CounterAdditions(_))
+        ));
+        assert_eq!(
+            state
+                .active_counter_additions()
+                .expect("counter-additions queue owns its prompt")
+                .remaining
+                .len(),
+            1
+        );
+
+        let saved = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("paused CounterAdditions prompt serializes as v2");
+        assert_eq!(saved["resolution_state_version"], 2);
+        assert!(saved.get("pending_counter_additions").is_none());
+        let restored: ResolutionStateWire =
+            serde_json::from_value(saved).expect("v2 CounterAdditions prompt restores");
+        let mut state = restored.into_game_state();
+
+        for _ in 0..8 {
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("production replacement action resumes the counter-additions queue");
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                assert!(matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::CounterAdditions(_))
+                ));
+            }
+        }
+
+        assert!(state.active_counter_additions().is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        for object_id in [first, second] {
+            assert!(
+                state.objects[&object_id]
+                    .counters
+                    .get(&CounterType::Plus1Plus1)
+                    .copied()
+                    .unwrap_or(0)
+                    >= 3,
+                "each recipient must resolve through both counter replacements"
+            );
+        }
+    }
+
     #[test]
     fn atomic_move_counter_add_stage_prevention_cancels_whole_move() {
         let mut state = GameState::new_two_player(42);
@@ -4297,7 +4716,7 @@ mod tests {
         )
         .unwrap();
 
-        let queued = state.pending_counter_moves.as_ref().unwrap();
+        let queued = state.active_counter_moves().unwrap();
         assert_eq!(queued.remaining.len(), 2);
     }
 
@@ -4693,6 +5112,194 @@ mod tests {
             obj.loyalty,
             Some(6),
             "obj.loyalty must mirror the doubled counter count"
+        );
+    }
+
+    /// CR 614.1a: No-regression guard for the actor/recipient subject axis. A
+    /// Doubling-Season-class doubler (`valid_card: SelfRef`, no `valid_player`,
+    /// default `Recipient` subject) must fire regardless of *who* puts the
+    /// counters — the recipient axis is orthogonal to the actor. Hostile
+    /// fixture: an opponent (P1) is the actor placing counters on a permanent
+    /// carrying the doubler, and the counters still double. This must stay green
+    /// both before and after the Vorinclex actor-scope change.
+    #[test]
+    fn selfref_doubler_fires_regardless_of_counter_actor() {
+        use crate::types::ability::{
+            CounterReplacementSubject, QuantityModification, ReplacementDefinition, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Self Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let mut repl = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+        repl.valid_card = Some(TargetFilter::SelfRef);
+        repl.quantity_modification = Some(QuantityModification::DOUBLE);
+        assert_eq!(
+            repl.counter_replacement_subject,
+            CounterReplacementSubject::Recipient,
+            "a hand-built AddCounter replacement must default to Recipient subject"
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .replacement_definitions
+            .push(repl);
+
+        let mut events = Vec::new();
+        // Hostile: the OPPONENT (P1) is the actor putting the counters on P0's
+        // permanent. A recipient-scoped doubler must still apply.
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(1),
+            obj_id,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&obj_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(4),
+            "recipient-scoped SelfRef doubler must double regardless of the actor"
+        );
+    }
+
+    /// CR 614.1a: THE discriminating test for the actor-vs-recipient subject
+    /// axis (Step 3 runtime scoping). Vorinclex's "If you would put …, put twice
+    /// that many" doubles the counters *you* put — even on a permanent an
+    /// opponent controls (official Vorinclex, Monstrous Raider ruling). This is
+    /// the only configuration where the axis is observable: the actor (P0)
+    /// differs from the recipient's controller (P1).
+    ///
+    /// Revert-failing assertion: with `subject = Actor`, the doubler compares the
+    /// actor (P0) to Vorinclex's controller (P0) → `You` matches → doubles → 4.
+    /// Reverting to `Recipient` would compare the recipient's controller (P1) to
+    /// P0 → `You` fails → no doubling → 2.
+    #[test]
+    fn actor_scoped_doubler_applies_when_actor_differs_from_recipient() {
+        use crate::types::ability::{
+            CounterReplacementSubject, QuantityModification, ReplacementDefinition,
+            ReplacementPlayerScope, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        // P0 controls Vorinclex: doubles the counters P0 puts, anywhere.
+        let vorinclex = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vorinclex".to_string(),
+            Zone::Battlefield,
+        );
+        let mut doubling = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Any)
+            .quantity_modification(QuantityModification::DOUBLE)
+            .counter_subject(CounterReplacementSubject::Actor);
+        doubling.valid_player = Some(ReplacementPlayerScope::You);
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .replacement_definitions
+            .push(doubling);
+
+        // P1's creature receives the counters; P0 is the actor placing them.
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0), // actor = P0 (Vorinclex's controller)
+            opp_creature,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&opp_creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(4),
+            "actor-scoped You doubler must double counters P0 puts, even on P1's creature \
+             (reverting subject to Recipient scopes by P1 and yields 2)"
+        );
+    }
+
+    /// CR 614.1a: Negative sibling — an opponent (P1) putting counters on their
+    /// own creature is NOT doubled by P0's `You`-scoped Vorinclex, because the
+    /// actor (P1) is not "you" relative to Vorinclex's controller (P0).
+    #[test]
+    fn actor_scoped_you_doubler_ignores_opponent_actor() {
+        use crate::types::ability::{
+            CounterReplacementSubject, QuantityModification, ReplacementDefinition,
+            ReplacementPlayerScope, TargetFilter,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let vorinclex = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vorinclex".to_string(),
+            Zone::Battlefield,
+        );
+        let mut doubling = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .valid_card(TargetFilter::Any)
+            .quantity_modification(QuantityModification::DOUBLE)
+            .counter_subject(CounterReplacementSubject::Actor);
+        doubling.valid_player = Some(ReplacementPlayerScope::You);
+        state
+            .objects
+            .get_mut(&vorinclex)
+            .unwrap()
+            .replacement_definitions
+            .push(doubling);
+
+        let p1_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Bear".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut events = Vec::new();
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(1), // actor = P1 (an opponent of Vorinclex's controller)
+            p1_creature,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+
+        assert_eq!(
+            state.objects[&p1_creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(2),
+            "a You-scoped doubler must not double the opponent's own counter placement"
         );
     }
 

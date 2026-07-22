@@ -229,6 +229,11 @@
       "remove": "Signaturzauber entfernen",
       "mustBeInstantOrSorcery": "Der Signaturzauber muss ein Spontanzauber oder eine Hexerei sein",
       "outsideColorIdentity": "{{name}}: außerhalb der Farbidentität des Eidbrechers"
+    },
+    "companion": {
+      "heading": "Gefährte",
+      "noCompanion": "Kein Gefährte ausgewählt",
+      "remove": "Gefährten entfernen"
     }
   },
   "manaCurve": {

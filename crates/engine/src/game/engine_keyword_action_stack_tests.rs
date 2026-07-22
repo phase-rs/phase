@@ -622,10 +622,14 @@ fn crewed_trigger_matcher_fires_on_resolution_event_not_announcement() {
     .unwrap();
 
     let trigger = TriggerDefinition::new(TriggerMode::Crewed);
-    let fires_at_announce = announce
-        .events
-        .iter()
-        .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
+    let fires_at_announce = announce.events.iter().any(|e| {
+        match_vehicle_crewed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, vehicle_id),
+            &state,
+        )
+    });
     assert!(
         !fires_at_announce,
         "CR 702.122e: Crewed trigger must not fire at announcement"
@@ -633,10 +637,14 @@ fn crewed_trigger_matcher_fires_on_resolution_event_not_announcement() {
 
     apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
     let resolve = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
-    let fires_at_resolve = resolve
-        .events
-        .iter()
-        .any(|e| match_vehicle_crewed(e, &trigger, vehicle_id, &state));
+    let fires_at_resolve = resolve.events.iter().any(|e| {
+        match_vehicle_crewed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, vehicle_id),
+            &state,
+        )
+    });
     assert!(
         fires_at_resolve,
         "CR 702.122e: Crewed trigger fires when the Crew ability resolves"
@@ -672,20 +680,24 @@ fn stationed_trigger_matcher_fires_on_resolution_event_not_announcement() {
 
     let trigger = TriggerDefinition::new(TriggerMode::Stationed);
     assert!(
-        !announce
-            .events
-            .iter()
-            .any(|e| match_stationed(e, &trigger, spacecraft_id, &state)),
+        !announce.events.iter().any(|e| match_stationed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, spacecraft_id),
+            &state,
+        )),
         "CR 702.184a: Stationed trigger must not fire at announcement"
     );
 
     apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
     let resolve = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
     assert!(
-        resolve
-            .events
-            .iter()
-            .any(|e| match_stationed(e, &trigger, spacecraft_id, &state)),
+        resolve.events.iter().any(|e| match_stationed(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, spacecraft_id),
+            &state,
+        )),
         "CR 702.184a: Stationed trigger fires when Station resolves"
     );
 }
@@ -719,20 +731,24 @@ fn saddled_trigger_matcher_fires_on_resolution_event_not_announcement() {
 
     let trigger = TriggerDefinition::new(TriggerMode::Saddled);
     assert!(
-        !announce
-            .events
-            .iter()
-            .any(|e| match_saddled(e, &trigger, mount_id, &state)),
+        !announce.events.iter().any(|e| match_saddled(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, mount_id),
+            &state,
+        )),
         "CR 702.171b: Saddled trigger must not fire at announcement"
     );
 
     apply(&mut state, PlayerId(0), GameAction::PassPriority).unwrap();
     let resolve = apply(&mut state, PlayerId(1), GameAction::PassPriority).unwrap();
     assert!(
-        resolve
-            .events
-            .iter()
-            .any(|e| match_saddled(e, &trigger, mount_id, &state)),
+        resolve.events.iter().any(|e| match_saddled(
+            e,
+            &trigger,
+            &crate::game::trigger_matchers::test_trigger_source_context(&state, mount_id),
+            &state,
+        )),
         "CR 702.171b: Saddled trigger fires when Saddle resolves"
     );
 }

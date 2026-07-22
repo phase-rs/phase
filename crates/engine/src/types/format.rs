@@ -449,7 +449,7 @@ impl GameFormat {
                 format: GameFormat::HistoricBrawl,
                 label: "Historic Brawl",
                 short_label: "HBR",
-                description: "60-card eternal singleton",
+                description: "100-card eternal singleton",
                 group: FormatGroup::Commander,
                 default_config: FormatConfig::historic_brawl(),
             },
@@ -767,10 +767,13 @@ impl FormatConfig {
         }
     }
 
-    /// Historic Brawl: same rules as Brawl but with the broader Historic card pool.
+    /// Historic Brawl: Brawl's structural rules with the broader Historic card
+    /// pool and a 100-card deck (Arena's 100-card Brawl, formerly "Historic
+    /// Brawl" — distinct from 60-card Standard Brawl).
     pub fn historic_brawl() -> Self {
         FormatConfig {
             format: GameFormat::HistoricBrawl,
+            deck_size: 100,
             ..Self::brawl()
         }
     }
@@ -1002,6 +1005,20 @@ mod tests {
         assert_eq!(config.commander_damage_threshold, None);
         assert!(!config.uses_commander);
         assert!(!config.team_based);
+    }
+
+    #[test]
+    fn format_config_brawl_deck_sizes() {
+        // Standard Brawl is 60 cards; Historic Brawl (Arena's 100-card Brawl)
+        // is 100. Both share the remaining structural rules.
+        let brawl = FormatConfig::brawl();
+        assert_eq!(brawl.deck_size, 60);
+        let historic = FormatConfig::historic_brawl();
+        assert_eq!(historic.deck_size, 100);
+        assert_eq!(historic.starting_life, brawl.starting_life);
+        assert!(historic.singleton);
+        assert!(historic.command_zone);
+        assert_eq!(historic.commander_damage_threshold, Some(21));
     }
 
     #[test]

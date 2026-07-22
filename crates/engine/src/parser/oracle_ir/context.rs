@@ -249,6 +249,25 @@ pub(crate) struct ParseContext {
     /// scan, but for the hand-reveal producer shape. `None` when no such
     /// producer exists in this chain, or during standalone clause parsing.
     pub chain_prior_hand_reveal_target: Option<TargetFilter>,
+    /// CR 608.2c: The object POPULATION established by a mass ("each …") effect in
+    /// an earlier clause of this same chain — Ardbert, Warrior of Darkness:
+    /// "put a +1/+1 counter on each legendary creature you control. They gain
+    /// vigilance until end of turn."
+    ///
+    /// Distinct from [`Self::parent_target_available`], which tracks a CHOSEN
+    /// referent that `TargetFilter::ParentTarget` binds to (see
+    /// `has_typed_target_widened`'s single-target whitelist). A mass effect
+    /// chooses nothing, so an anaphor referring back to its population cannot use
+    /// `ParentTarget` — it must inherit the population FILTER itself. `None` when
+    /// no such producer exists in this chain, or during standalone clause parsing.
+    pub chain_prior_mass_population: Option<TargetFilter>,
+    /// True when the SAME chain's most recent producer was a self-library peek
+    /// (look at the top N cards of YOUR library without exiling/moving them).
+    /// The bare "from among them" cast anaphor that follows must route to the
+    /// one-shot during-resolution cast (CR 608.2g), not the exile-and-grant
+    /// lingering path. Mirrors `chain_has_prior_exile_producer`.
+    // CR 608.2g + CR 701.20e
+    pub chain_prior_self_library_peek: bool,
 }
 
 impl ParseContext {
