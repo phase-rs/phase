@@ -1,5 +1,0 @@
-rule = "508.3e"
-section = 508
-title = "Declare Attackers Step — CR 508.3e"
-status = "skeleton"
-text = "An ability that reads “Whenever [a player] attacks [another player], . . .” triggers if one or more creatures the first player controls are declared as attackers attacking the second player. It won’t trigger if a creature is put onto the battlefield attacking or if a creature attacks a planeswalker or a battle."

@@ -1,5 +1,0 @@
-rule = "702.2c"
-section = 702
-title = "Keyword Abilities — CR 702.2c"
-status = "skeleton"
-text = "Any nonzero amount of combat damage assigned to a creature by a source with deathtouch is considered to be lethal damage for the purposes of determining if excess damage is being dealt."

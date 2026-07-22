@@ -1,5 +1,0 @@
-rule = "603.3"
-section = 603
-title = "Handling Triggered Abilities — CR 603.3"
-status = "skeleton"
-text = "Once an ability has triggered, its controller puts it on the stack as an object that’s not a card the next time a player would receive priority. See rule 117, “Timing and Priority.” The ability becomes the topmost object on the stack. It has the text of the ability that created it, and no other characteristics. It remains on the stack until it’s countered, it resolves, a rule causes it to be removed from the stack, or an effect moves it elsewhere."

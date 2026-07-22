@@ -1,5 +1,0 @@
-rule = "116.2i"
-section = 116
-title = "Special Actions — CR 116.2i"
-status = "skeleton"
-text = "In a Planechase game, rolling the planar die is a special action. A player can take this action any time they have priority and the stack is empty during a main phase of their turn. Taking this action costs a player an amount of mana equal to the number of times they have previously taken this action on that turn. Note that this number won’t be equal to the number of times the player has rolled the planar die that turn if an effect has caused the player to roll the planar die that turn. See rule 901, “Planechase.”"

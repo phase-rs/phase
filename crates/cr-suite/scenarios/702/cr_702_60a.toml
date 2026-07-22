@@ -1,5 +1,0 @@
-rule = "702.60a"
-section = 702
-title = "Keyword Abilities — CR 702.60a"
-status = "skeleton"
-text = "Ripple is a triggered ability that functions only while the card with ripple is on the stack. “Ripple N” means “When you cast this spell, you may reveal the top N cards of your library, or, if there are fewer than N cards in your library, you may reveal all the cards in your library. If you reveal cards from your library this way, you may cast any of those cards with the same name as this spell without paying their mana costs, then put all revealed cards not cast this way on the bottom of your library in any order.”"

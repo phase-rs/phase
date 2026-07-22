@@ -1,5 +1,0 @@
-rule = "704.6c"
-section = 704
-title = "State-Based Actions — CR 704.6c"
-status = "skeleton"
-text = "In a Commander game, a player who’s been dealt 21 or more combat damage by the same commander over the course of the game loses the game. See rule 903, “Commander.”"

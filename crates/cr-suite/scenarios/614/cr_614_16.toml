@@ -1,5 +1,0 @@
-rule = "614.16"
-section = 614
-title = "Replacement Effects — CR 614.16"
-status = "skeleton"
-text = "Some replacement effects apply “if an effect would create one or more tokens” or “if an effect would put one or more counters on a permanent.” These replacement effects apply if the effect of a resolving spell or ability creates a token or puts a counter on a permanent, and they also apply if another replacement or prevention effect does so, even if the original event being modified wasn’t itself an effect."

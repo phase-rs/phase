@@ -1,5 +1,0 @@
-rule = "109.2"
-section = 109
-title = "Objects — CR 109.2"
-status = "skeleton"
-text = "If a spell or ability uses a description of an object that includes a card type or subtype, but doesn’t refer to a specific zone or include the word “card,” “spell,” “source,” or “scheme,” it means a permanent of that card type or subtype on the battlefield."

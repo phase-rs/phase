@@ -6,8 +6,8 @@ use engine::types::game_state::WaitingFor;
 use engine::types::player::PlayerId;
 
 use crate::assert::check_sbas_via_priority;
-use crate::schema::ScenarioStep;
 use crate::runner::{RunError, ScenarioContext};
+use crate::schema::ScenarioStep;
 
 pub fn apply_step(
     runner: &mut GameRunner,

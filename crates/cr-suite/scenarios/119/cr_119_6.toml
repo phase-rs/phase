@@ -1,5 +1,0 @@
-rule = "119.6"
-section = 119
-title = "Life — CR 119.6"
-status = "skeleton"
-text = "If a player has 0 or less life, that player loses the game as a state-based action. See rule 704."

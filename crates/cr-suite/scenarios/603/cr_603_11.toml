@@ -1,5 +1,0 @@
-rule = "603.11"
-section = 603
-title = "Handling Triggered Abilities — CR 603.11"
-status = "skeleton"
-text = "Some objects have a static ability that’s linked to one or more triggered abilities. (See rule 607, “Linked Abilities.”) These objects combine the abilities into one paragraph, with the static ability first, followed by each triggered ability that’s linked to it. A very few objects have triggered abilities which are written with the trigger condition in the middle of the ability, rather than at the beginning."

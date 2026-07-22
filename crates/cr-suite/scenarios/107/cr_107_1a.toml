@@ -1,5 +1,0 @@
-rule = "107.1a"
-section = 107
-title = "Numbers and Symbols — CR 107.1a"
-status = "skeleton"
-text = "You can’t choose a fractional number, deal fractional damage, gain fractional life, and so on. If a spell or ability could generate a fractional number, the spell or ability will tell you whether to round up or down."

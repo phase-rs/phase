@@ -32,17 +32,18 @@ pub fn assert_creature_zone(
         kind: "creature_zone".into(),
         detail: format!("unknown creature handle {creature:?}"),
     })?;
-    let obj = runner.state().objects.get(id).ok_or_else(|| AssertionFailure {
-        kind: "creature_zone".into(),
-        detail: format!("object {id:?} ({creature}) missing from state"),
-    })?;
+    let obj = runner
+        .state()
+        .objects
+        .get(id)
+        .ok_or_else(|| AssertionFailure {
+            kind: "creature_zone".into(),
+            detail: format!("object {id:?} ({creature}) missing from state"),
+        })?;
     if obj.zone != expected {
         return Err(AssertionFailure {
             kind: "creature_zone".into(),
-            detail: format!(
-                "{creature}: expected zone {expected:?}, got {:?}",
-                obj.zone
-            ),
+            detail: format!("{creature}: expected zone {expected:?}, got {:?}", obj.zone),
         });
     }
     Ok(())

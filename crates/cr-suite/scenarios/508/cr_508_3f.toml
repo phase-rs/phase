@@ -1,5 +1,0 @@
-rule = "508.3f"
-section = 508
-title = "Declare Attackers Step — CR 508.3f"
-status = "skeleton"
-text = "An ability that reads “Whenever [a creature] attacks and isn’t blocked, . . .” triggers during the declare blockers step, not the declare attackers step. See rule 509.3g."

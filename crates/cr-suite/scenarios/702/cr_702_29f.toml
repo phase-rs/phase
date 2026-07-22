@@ -1,5 +1,0 @@
-rule = "702.29f"
-section = 702
-title = "Keyword Abilities — CR 702.29f"
-status = "skeleton"
-text = "Typecycling abilities are cycling abilities, and typecycling costs are cycling costs. Any cards that trigger when a player cycles a card will trigger when a card is discarded to pay an activation cost of a typecycling ability. Any effect that stops players from cycling cards will stop players from activating cards’ typecycling abilities. Any effect that increases or reduces a cycling cost will increase or reduce a typecycling cost. Any effect that looks for a card with cycling will find a card with typecycling."

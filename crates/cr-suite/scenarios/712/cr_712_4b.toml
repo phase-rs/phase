@@ -1,5 +1,0 @@
-rule = "712.4b"
-section = 712
-title = "Double-Faced Cards — CR 712.4b"
-status = "skeleton"
-text = "The back faces of a meld pair are used only to determine the characteristics of the melded permanent that pair becomes on the battlefield. If a rule or effect references the back face of a meld card when not part of a melded permanent on the battlefield, it fails to determine its characteristics, regardless of which parts of the melded permanent is represented on that card’s back face."

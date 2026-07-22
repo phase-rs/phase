@@ -1,5 +1,0 @@
-rule = "707.10a"
-section = 707
-title = "Copying Objects — CR 707.10a"
-status = "skeleton"
-text = "If a copy of a spell is in a zone other than the stack, it ceases to exist. If a copy of a card is in any zone other than the stack or the battlefield, it ceases to exist. These are state-based actions. See rule 704."

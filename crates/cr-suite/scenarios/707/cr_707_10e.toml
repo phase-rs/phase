@@ -1,5 +1,0 @@
-rule = "707.10e"
-section = 707
-title = "Copying Objects — CR 707.10e"
-status = "skeleton"
-text = "Some effects copy a spell or ability and specify a new target for the copy. If the spell or ability has more than one target, each of the copy’s targets must be that player or object. If that player or object isn’t a legal target for each instance of the word “target,” the copy isn’t created. In the case where a replacement effect causes the copy to target more than one object, the copy’s controller chooses one of them to be the new target. The chosen target must be a legal target for that spell or ability."

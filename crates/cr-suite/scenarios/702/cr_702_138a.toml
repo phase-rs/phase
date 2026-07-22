@@ -1,5 +1,0 @@
-rule = "702.138a"
-section = 702
-title = "Keyword Abilities — CR 702.138a"
-status = "skeleton"
-text = "Escape represents a static ability that functions while the card with escape is in a player’s graveyard. “Escape [cost]” means “You may cast this card from your graveyard by paying [cost] rather than paying its mana cost.” Casting a spell using its escape ability follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."

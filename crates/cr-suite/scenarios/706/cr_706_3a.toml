@@ -1,5 +1,0 @@
-rule = "706.3a"
-section = 706
-title = "Rolling a Die — CR 706.3a"
-status = "skeleton"
-text = "The results table appears as a list or as a chart with multiple striations. Each list item or striation includes possible results and an effect associated with those results. The possible results indicated could be a single number, a range of numbers with two endpoints in the form “N1–N2,” or a range with a single endpoint in the form “N+.” Each one means “If the result was in this range, [effect].” After a die roll, use the result to determine which effect listed on the results table happens, if any."

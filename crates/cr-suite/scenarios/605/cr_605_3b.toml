@@ -1,5 +1,0 @@
-rule = "605.3b"
-section = 605
-title = "Mana Abilities — CR 605.3b"
-status = "skeleton"
-text = "An activated mana ability doesn’t go on the stack, so it can’t be targeted, countered, or otherwise responded to. Rather, it resolves immediately after it is activated. (See rule 405.6c.)"

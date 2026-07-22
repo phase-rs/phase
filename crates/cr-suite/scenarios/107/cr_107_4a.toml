@@ -1,5 +1,0 @@
-rule = "107.4a"
-section = 107
-title = "Numbers and Symbols — CR 107.4a"
-status = "skeleton"
-text = "There are five primary colored mana symbols: {W} is white, {U} blue, {B} black, {R} red, and {G} green. These symbols are used to represent colored mana, and also to represent colored mana in costs. Colored mana in costs can be paid only with the appropriate color of mana. See rule 202, “Mana Cost and Color.”"

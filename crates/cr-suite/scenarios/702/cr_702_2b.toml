@@ -1,5 +1,0 @@
-rule = "702.2b"
-section = 702
-title = "Keyword Abilities — CR 702.2b"
-status = "skeleton"
-text = "A creature with toughness greater than 0 that’s been dealt damage by a source with deathtouch since the last time state-based actions were checked is destroyed as a state-based action. See rule 704."

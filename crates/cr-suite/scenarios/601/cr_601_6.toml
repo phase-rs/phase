@@ -1,5 +1,0 @@
-rule = "601.6"
-section = 601
-title = "Casting Spells — CR 601.6"
-status = "skeleton"
-text = "Some spells specify that one of their controller’s opponents does something the controller would normally do while it’s being cast, such as choose a mode or choose targets. In these cases, the opponent does so when the spell’s controller normally would do so."

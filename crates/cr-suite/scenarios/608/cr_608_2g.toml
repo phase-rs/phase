@@ -1,5 +1,0 @@
-rule = "608.2g"
-section = 608
-title = "Resolving Spells and Abilities — CR 608.2g"
-status = "skeleton"
-text = "If an effect gives a player the option to pay mana, they may activate mana abilities before taking that action. If an effect specifically instructs or allows a player to cast a spell during resolution, they do so by following the steps in rules 601.2a–i, except no player receives priority after it’s cast. That spell becomes the topmost object on the stack, and the currently resolving spell or ability continues to resolve, which may include casting other spells this way. No other spells can normally be cast and no other abilities can normally be activated during resolution."

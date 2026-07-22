@@ -1,5 +1,0 @@
-rule = "701.18c"
-section = 701
-title = "Keyword Actions — CR 701.18c"
-status = "skeleton"
-text = "Some effects instruct a player to “play” with a certain aspect of the game changed, such as “Play with the top card of your library revealed.” “Play” in this sense means to play the Magic game."

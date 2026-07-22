@@ -1,5 +1,0 @@
-rule = "611.2e"
-section = 611
-title = "Continuous Effects — CR 611.2e"
-status = "skeleton"
-text = "If a resolving spell or ability both puts a nontoken permanent onto the battlefield and creates a continuous effect stating that the permanent “is [characteristic],” that it “has [characteristic],” or that it doesn’t have a particular characteristic, that continuous effect applies simultaneously with the permanent entering the battlefield. This characteristic is usually a color or a creature type. If the continuous effect says the permanent “becomes [characteristic]” or “gains [an ability],” that effect applies after the permanent is on the battlefield."

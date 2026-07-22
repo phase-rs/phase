@@ -1,5 +1,0 @@
-rule = "707.9a"
-section = 707
-title = "Copying Objects — CR 707.9a"
-status = "skeleton"
-text = "Some copy effects cause the copy to gain an ability as part of the copying process. This ability becomes part of the copiable values for the copy, along with any other abilities that were copied."

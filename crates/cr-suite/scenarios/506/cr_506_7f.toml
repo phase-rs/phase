@@ -1,5 +1,0 @@
-rule = "506.7f"
-section = 506
-title = "Combat Phase — CR 506.7f"
-status = "skeleton"
-text = "If a spell states that it may be cast “only during combat after blockers are declared,” but the declare blockers step is skipped that combat phase (see rule 508.8), then the spell may not be cast during that combat phase."

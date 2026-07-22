@@ -1,5 +1,0 @@
-rule = "702.88a"
-section = 702
-title = "Keyword Abilities — CR 702.88a"
-status = "skeleton"
-text = "Rebound appears on some instants and sorceries. It represents a static ability that functions while the spell is on the stack and may create a delayed triggered ability. “Rebound” means “If this spell was cast from your hand, instead of putting it into your graveyard as it resolves, exile it and, at the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.”"

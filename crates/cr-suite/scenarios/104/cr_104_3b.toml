@@ -1,5 +1,0 @@
-rule = "104.3b"
-section = 104
-title = "Ending the Game — CR 104.3b"
-status = "skeleton"
-text = "If a player’s life total is 0 or less, that player loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"

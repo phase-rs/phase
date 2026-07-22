@@ -1,5 +1,0 @@
-rule = "704.5e"
-section = 704
-title = "State-Based Actions — CR 704.5e"
-status = "skeleton"
-text = "If a copy of a spell is in a zone other than the stack, it ceases to exist. If a copy of a card is in any zone other than the stack or the battlefield, it ceases to exist."

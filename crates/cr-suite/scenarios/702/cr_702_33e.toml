@@ -1,5 +1,0 @@
-rule = "702.33e"
-section = 702
-title = "Keyword Abilities — CR 702.33e"
-status = "skeleton"
-text = "Objects with kicker or multikicker have additional abilities that specify what happens if they were kicked. These abilities are linked to the kicker or multikicker abilities printed on that object: they can refer only to those specific kicker or multikicker abilities. See rule 607, “Linked Abilities.”"

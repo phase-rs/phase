@@ -1,5 +1,0 @@
-rule = "702.33f"
-section = 702
-title = "Keyword Abilities — CR 702.33f"
-status = "skeleton"
-text = "Objects with more than one kicker cost may also have abilities that each correspond to a specific kicker cost. Those abilities contain the phrases “if it was kicked with its [A] kicker” and “if it was kicked with its [B] kicker,” where A and B are the first and second kicker costs listed on the card, respectively. Each of those abilities is linked to the appropriate kicker ability."

@@ -1,8 +1,6 @@
 //! Step-kind catalog — documents declarative runner actions.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepCatalogEntry {
     pub action: &'static str,
     pub description: &'static str,

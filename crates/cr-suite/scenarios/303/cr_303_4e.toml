@@ -1,5 +1,0 @@
-rule = "303.4e"
-section = 303
-title = "Enchantments — CR 303.4e"
-status = "skeleton"
-text = "An Aura’s controller is separate from the enchanted object’s controller or the enchanted player; the two need not be the same. If an Aura enchants an object, changing control of the object doesn’t change control of the Aura, and vice versa. Only the Aura’s controller can activate its abilities. However, if the Aura grants an ability to the enchanted object (with “gains” or “has”), the enchanted object’s controller is the only one who can activate that ability."

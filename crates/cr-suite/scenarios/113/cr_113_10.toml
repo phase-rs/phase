@@ -1,5 +1,0 @@
-rule = "113.10"
-section = 113
-title = "Abilities — CR 113.10"
-status = "skeleton"
-text = "Effects can add or remove abilities of objects. An effect that adds an ability will state that the object “gains” or “has” that ability, or similar. An effect that removes an ability will state that the object “loses” that ability."

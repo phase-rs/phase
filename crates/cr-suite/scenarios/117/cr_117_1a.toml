@@ -1,5 +1,0 @@
-rule = "117.1a"
-section = 117
-title = "Timing and Priority — CR 117.1a"
-status = "skeleton"
-text = "A player may cast an instant spell any time they have priority. A player may cast a noninstant spell during their main phase any time they have priority and the stack is empty."

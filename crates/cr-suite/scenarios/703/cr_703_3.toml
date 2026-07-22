@@ -1,5 +1,0 @@
-rule = "703.3"
-section = 703
-title = "Turn-Based Actions — CR 703.3"
-status = "skeleton"
-text = "Whenever a step or phase begins, if it’s a step or phase that has any turn-based action associated with it, those turn-based actions are automatically dealt with first. This happens before state-based actions are checked, before triggered abilities are put on the stack, and before players receive priority."

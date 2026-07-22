@@ -1,5 +1,0 @@
-rule = "205.3i"
-section = 205
-title = "Type Line — CR 205.3i"
-status = "skeleton"
-text = "Lands have their own unique set of subtypes; these subtypes are called land types. The land types are Cave, Desert, Forest, Gate, Island, Lair, Locus, Mine, Mountain, Plains, Planet, Power-Plant, Sphere, Swamp, Tower, Town, and Urza’s. Of that list, Forest, Island, Mountain, Plains, and Swamp are the basic land types. See rule 305.6."

@@ -1,5 +1,0 @@
-rule = "514.3a"
-section = 514
-title = "Cleanup Step — CR 514.3a"
-status = "skeleton"
-text = "At this point, the game checks to see if any state-based actions would be performed and/or any triggered abilities are waiting to be put onto the stack (including those that trigger “at the beginning of the next cleanup step”). If so, those state-based actions are performed, then those triggered abilities are put on the stack, then the active player gets priority. Players may cast spells and activate abilities. Once the stack is empty and all players pass in succession, another cleanup step begins."

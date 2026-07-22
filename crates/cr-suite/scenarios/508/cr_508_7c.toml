@@ -1,5 +1,0 @@
-rule = "508.7c"
-section = 508
-title = "Declare Attackers Step — CR 508.7c"
-status = "skeleton"
-text = "The reselected player, planeswalker, or battle must be an opponent of the attacking creature’s controller, a planeswalker controlled by an opponent of the attacking creature’s controller, or a battle protected by an opponent of the attacking creature’s controller."

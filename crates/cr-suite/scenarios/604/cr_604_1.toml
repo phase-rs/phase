@@ -1,5 +1,0 @@
-rule = "604.1"
-section = 604
-title = "Handling Static Abilities — CR 604.1"
-status = "skeleton"
-text = "Static abilities do something all the time rather than being activated or triggered. They are written as statements, and they’re simply true."

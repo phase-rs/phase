@@ -1,5 +1,0 @@
-rule = "120.3e"
-section = 120
-title = "Damage — CR 120.3e"
-status = "skeleton"
-text = "Damage dealt to a creature by a source with neither wither nor infect causes that much damage to be marked on that creature."

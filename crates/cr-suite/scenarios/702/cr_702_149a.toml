@@ -1,5 +1,0 @@
-rule = "702.149a"
-section = 702
-title = "Keyword Abilities — CR 702.149a"
-status = "skeleton"
-text = "Training is a triggered ability. “Training” means “Whenever this creature and at least one other creature with power greater than this creature’s power attack, put a +1/+1 counter on this creature.”"

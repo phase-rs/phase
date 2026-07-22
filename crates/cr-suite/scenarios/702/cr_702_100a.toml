@@ -1,5 +1,0 @@
-rule = "702.100a"
-section = 702
-title = "Keyword Abilities — CR 702.100a"
-status = "skeleton"
-text = "Evolve is a triggered ability. “Evolve” means “Whenever a creature you control enters, if that creature’s power is greater than this creature’s power and/or that creature’s toughness is greater than this creature’s toughness, put a +1/+1 counter on this creature.”"

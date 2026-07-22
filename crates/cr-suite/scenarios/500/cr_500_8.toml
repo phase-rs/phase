@@ -1,5 +1,0 @@
-rule = "500.8"
-section = 500
-title = "General (Turn Structure) — CR 500.8"
-status = "skeleton"
-text = "Some effects can add phases to a turn. They do this by adding the phases directly after the specified phase. If multiple extra phases are created after the same phase, the most recently created phase will occur first."

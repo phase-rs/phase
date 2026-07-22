@@ -1,5 +1,0 @@
-rule = "202.2b"
-section = 202
-title = "Mana Cost and Color — CR 202.2b"
-status = "skeleton"
-text = "Objects with no colored mana symbols in their mana costs are colorless."

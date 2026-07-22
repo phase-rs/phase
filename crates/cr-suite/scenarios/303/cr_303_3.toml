@@ -1,5 +1,0 @@
-rule = "303.3"
-section = 303
-title = "Enchantments — CR 303.3"
-status = "skeleton"
-text = "Enchantment subtypes are always a single word and are listed after a long dash: “Enchantment — Shrine.” Each word after the dash is a separate subtype. Enchantment subtypes are also called enchantment types. Enchantments may have multiple subtypes. See rule 205.3h for the complete list of enchantment types."

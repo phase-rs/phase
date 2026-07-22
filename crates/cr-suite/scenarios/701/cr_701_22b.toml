@@ -1,5 +1,0 @@
-rule = "701.22b"
-section = 701
-title = "Keyword Actions — CR 701.22b"
-status = "skeleton"
-text = "If a player is instructed to scry 0, no scry event occurs. Abilities that trigger whenever a player scries won’t trigger."

@@ -1,5 +1,0 @@
-rule = "702.134a"
-section = 702
-title = "Keyword Abilities — CR 702.134a"
-status = "skeleton"
-text = "Mentor is a triggered ability. “Mentor” means “Whenever this creature attacks, put a +1/+1 counter on target attacking creature with power less than this creature’s power.”"

@@ -1,5 +1,0 @@
-rule = "612.2"
-section = 612
-title = "Text-Changing Effects — CR 612.2"
-status = "skeleton"
-text = "A text-changing effect changes only those words that are used in the correct way (for example, a Magic color word being used as a color word, a land type word used as a land type, or a creature type word used as a creature type). An effect that changes a color word or a subtype can’t change a card name, even if that name contains a word or a series of letters that is the same as a Magic color word, basic land type, or creature type."

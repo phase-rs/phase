@@ -1,5 +1,0 @@
-rule = "202.2d"
-section = 202
-title = "Mana Cost and Color — CR 202.2d"
-status = "skeleton"
-text = "An object with one or more hybrid mana symbols and/or Phyrexian mana symbols in its mana cost is all of the colors of those mana symbols, in addition to any other colors the object might be. (Most cards with hybrid mana symbols in their mana costs are printed in a two-tone frame. See rule 107.4e.)"

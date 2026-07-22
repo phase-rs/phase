@@ -1,5 +1,0 @@
-rule = "700.2b"
-section = 700
-title = "General (Additional Rules) — CR 700.2b"
-status = "skeleton"
-text = "The controller of a modal triggered ability chooses the mode(s) as part of putting that ability on the stack. If one of the modes would be illegal (due to an inability to choose legal targets, for example), that mode can’t be chosen. If no mode is chosen, the ability is removed from the stack. (See rule 603.3c.)"

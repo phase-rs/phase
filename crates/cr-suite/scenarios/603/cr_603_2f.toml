@@ -1,5 +1,0 @@
-rule = "603.2f"
-section = 603
-title = "Handling Triggered Abilities — CR 603.2f"
-status = "skeleton"
-text = "If a triggered ability’s trigger condition is met, but the object with that triggered ability is at no time visible to all players, the ability does not trigger."

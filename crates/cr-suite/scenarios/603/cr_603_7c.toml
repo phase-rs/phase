@@ -1,5 +1,0 @@
-rule = "603.7c"
-section = 603
-title = "Handling Triggered Abilities — CR 603.7c"
-status = "skeleton"
-text = "A delayed triggered ability that refers to a particular object still affects it even if the object changes characteristics. However, if that object is no longer in the zone it’s expected to be in at the time the delayed triggered ability resolves, the ability won’t affect it. (Note that if that object left that zone and then returned, it’s a new object and thus won’t be affected. See rule 400.7.)"

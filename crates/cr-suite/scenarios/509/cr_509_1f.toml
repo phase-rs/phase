@@ -1,5 +1,0 @@
-rule = "509.1f"
-section = 509
-title = "Declare Blockers Step — CR 509.1f"
-status = "skeleton"
-text = "Once the player has enough mana in their mana pool, they pay all costs in any order. Partial payments are not allowed."

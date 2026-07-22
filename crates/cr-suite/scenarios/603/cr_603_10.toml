@@ -1,5 +1,0 @@
-rule = "603.10"
-section = 603
-title = "Handling Triggered Abilities — CR 603.10"
-status = "skeleton"
-text = "Normally, objects that exist immediately after an event are checked to see if the event matched any trigger conditions, and continuous effects that exist at that time are used to determine what the trigger conditions are and what the objects involved in the event look like. However, some triggered abilities are exceptions to this rule; the game “looks back in time” to determine if those abilities trigger, using the existence of those abilities and the appearance of objects immediately prior to the event. The list of exceptions is as follows:"

@@ -1,5 +1,0 @@
-rule = "701.44a"
-section = 701
-title = "Keyword Actions — CR 701.44a"
-status = "skeleton"
-text = "Certain spells and abilities instruct a permanent to explore. To do so, that permanent’s controller reveals the top card of their library. If a land card is revealed this way, that player puts that card into their hand. Otherwise, that player puts a +1/+1 counter on the exploring permanent and may put the revealed card into their graveyard."

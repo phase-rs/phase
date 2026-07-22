@@ -1,5 +1,0 @@
-rule = "610.3a"
-section = 610
-title = "One-Shot Effects — CR 610.3a"
-status = "skeleton"
-text = "If a resolving spell or activated ability creates the initial one-shot effect that causes the object to change zones, and the specified event has already occurred before that one-shot effect would occur but after that spell or ability was put onto the stack, the object doesn’t move."

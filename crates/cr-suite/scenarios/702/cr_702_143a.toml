@@ -1,5 +1,0 @@
-rule = "702.143a"
-section = 702
-title = "Keyword Abilities — CR 702.143a"
-status = "skeleton"
-text = "Foretell is a keyword that functions while the card with foretell is in a player’s hand. Any time a player has priority during their turn, that player may pay {2} and exile a card with foretell from their hand face down. That player may look at that card as long as it remains in exile. They may cast that card after the current turn has ended by paying any foretell cost it has rather than paying that spell’s mana cost. Casting a spell this way follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."

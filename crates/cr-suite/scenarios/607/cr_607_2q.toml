@@ -1,5 +1,0 @@
-rule = "607.2q"
-section = 607
-title = "Linked Abilities — CR 607.2q"
-status = "skeleton"
-text = "If a permanent spell has an ability printed on it that allows one or more cards to be exiled while paying a cost to cast it and the permanent that spell becomes has an ability that refers to cards “exiled with [this object],” those abilities are linked. The second ability refers only to cards exiled to pay the cost of the spell that became that permanent."

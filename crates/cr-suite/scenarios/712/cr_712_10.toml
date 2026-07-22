@@ -1,5 +1,0 @@
-rule = "712.10"
-section = 712
-title = "Double-Faced Cards — CR 712.10"
-status = "skeleton"
-text = "If a spell or ability instructs a player to transform or convert a permanent, and the face that permanent would transform or convert into is an instant or sorcery card face, or is a double-faced token that was created with an instant or sorcery face, nothing happens."

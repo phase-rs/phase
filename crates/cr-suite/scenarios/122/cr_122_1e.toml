@@ -1,5 +1,0 @@
-rule = "122.1e"
-section = 122
-title = "Counters — CR 122.1e"
-status = "skeleton"
-text = "The number of loyalty counters on a planeswalker on the battlefield indicates how much loyalty it has. A planeswalker with 0 loyalty is put into its owner’s graveyard as a state-based action. See rule 704."

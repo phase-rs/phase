@@ -1,5 +1,0 @@
-rule = "506.2a"
-section = 506
-title = "Combat Phase — CR 506.2a"
-status = "skeleton"
-text = "During the combat phase of a multiplayer game, there may be one or more defending players, depending on the variant being played and the options chosen for it. Unless all the attacking player’s opponents automatically become defending players during the combat phase, the attacking player chooses one of their opponents as a turn-based action during the beginning of combat step. (Note that the choice may be dictated by the variant being played or the options chosen for it.) That player becomes the defending player. See rule 802, “Attack Multiple Players Option,” rule 803, “Attack Left and Attack Right Options,” and rule 809, “Emperor Variant.”"

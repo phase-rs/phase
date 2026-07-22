@@ -1,5 +1,0 @@
-rule = "702.2f"
-section = 702
-title = "Keyword Abilities — CR 702.2f"
-status = "skeleton"
-text = "Multiple instances of deathtouch on the same object are redundant."

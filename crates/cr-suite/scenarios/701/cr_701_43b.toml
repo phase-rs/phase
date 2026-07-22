@@ -1,5 +1,0 @@
-rule = "701.43b"
-section = 701
-title = "Keyword Actions — CR 701.43b"
-status = "skeleton"
-text = "A permanent can be exerted even if it’s not tapped or has already been exerted in a turn. If you exert a permanent more than once before your next untap step, each effect causing it not to untap expires during the same untap step."

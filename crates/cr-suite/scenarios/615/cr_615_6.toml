@@ -1,5 +1,0 @@
-rule = "615.6"
-section = 615
-title = "Prevention Effects — CR 615.6"
-status = "skeleton"
-text = "If damage that would be dealt is prevented, it never happens. A modified event may occur instead, which may in turn trigger abilities. Note that the modified event may contain instructions that can’t be carried out, in which case the impossible instruction is simply ignored."

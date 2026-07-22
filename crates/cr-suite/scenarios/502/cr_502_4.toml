@@ -1,5 +1,0 @@
-rule = "502.4"
-section = 502
-title = "Untap Step — CR 502.4"
-status = "skeleton"
-text = "No player receives priority during the untap step, so no spells can be cast or resolve and no abilities can be activated or resolve. Any ability that triggers during this step will be held until the next time a player would receive priority, which is usually during the upkeep step. (See rule 503, “Upkeep Step.”)"

@@ -1,5 +1,0 @@
-rule = "301.2"
-section = 301
-title = "Artifacts — CR 301.2"
-status = "skeleton"
-text = "When an artifact spell resolves, its controller puts it onto the battlefield under their control."

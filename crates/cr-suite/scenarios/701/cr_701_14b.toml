@@ -1,5 +1,0 @@
-rule = "701.14b"
-section = 701
-title = "Keyword Actions — CR 701.14b"
-status = "skeleton"
-text = "If one or both creatures instructed to fight are no longer on the battlefield or are no longer creatures, neither of them fights or deals damage. If one or both creatures are illegal targets for a resolving spell or ability that instructs them to fight, neither of them fights or deals damage."

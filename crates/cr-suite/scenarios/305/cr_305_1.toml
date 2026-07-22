@@ -1,5 +1,0 @@
-rule = "305.1"
-section = 305
-title = "Lands — CR 305.1"
-status = "skeleton"
-text = "A player who has priority may play a land card from their hand during a main phase of their turn when the stack is empty. Playing a land is a special action; it doesn’t use the stack (see rule 116). Rather, the player simply puts the land onto the battlefield. Since the land doesn’t go on the stack, it is never a spell, and players can’t respond to it with instants or activated abilities."

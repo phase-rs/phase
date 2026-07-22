@@ -1,5 +1,0 @@
-rule = "602.2a"
-section = 602
-title = "Activating Activated Abilities — CR 602.2a"
-status = "skeleton"
-text = "The player announces that they are activating the ability. If an activated ability is being activated from a hidden zone, the card that has that ability is revealed (see rule 701.20a). That ability is created on the stack as an object that’s not a card. It becomes the topmost object on the stack. It has the text of the ability that created it, and no other characteristics. Its controller is the player who activated the ability. The ability remains on the stack until it’s countered, it resolves, or an effect moves it elsewhere."

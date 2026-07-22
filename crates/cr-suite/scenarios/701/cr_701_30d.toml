@@ -1,5 +1,0 @@
-rule = "701.30d"
-section = 701
-title = "Keyword Actions — CR 701.30d"
-status = "skeleton"
-text = "A player wins a clash if that player revealed a card with a higher mana value than all other cards revealed in that clash."

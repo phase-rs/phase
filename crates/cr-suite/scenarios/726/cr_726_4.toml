@@ -1,5 +1,0 @@
-rule = "726.4"
-section = 726
-title = "Restarting the Game — CR 726.4"
-status = "skeleton"
-text = "If the player who has the initiative leaves the game, the active player takes the initiative at the same time that player leaves the game. If the active player is leaving the game or if there is no active player, the next player in turn order takes the initiative."

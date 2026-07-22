@@ -1,5 +1,0 @@
-rule = "701.22c"
-section = 701
-title = "Keyword Actions — CR 701.22c"
-status = "skeleton"
-text = "If multiple players scry at once, each of those players looks at the top cards of their library at the same time. Those players decide in APNAP order (see rule 101.4) where to put those cards, then those cards move at the same time."

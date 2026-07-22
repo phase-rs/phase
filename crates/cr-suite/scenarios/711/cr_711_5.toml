@@ -1,5 +1,0 @@
-rule = "711.5"
-section = 711
-title = "Leveler Cards — CR 711.5"
-status = "skeleton"
-text = "If the number of level counters on a leveler creature is less than N1 (the first number printed in its {LEVEL N1-N2} symbol), it has the power and toughness denoted by its uppermost power/toughness box."

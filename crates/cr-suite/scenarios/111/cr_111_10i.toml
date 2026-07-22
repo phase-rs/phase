@@ -1,5 +1,0 @@
-rule = "111.10i"
-section = 111
-title = "Tokens — CR 111.10i"
-status = "skeleton"
-text = "An Incubator token is a double-faced token. Its front face is a colorless Incubator artifact with “{2}: Transform this token.” Its back face is a 0/0 colorless Phyrexian artifact creature named Phyrexian Token."

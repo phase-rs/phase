@@ -1,5 +1,0 @@
-rule = "704.5c"
-section = 704
-title = "State-Based Actions — CR 704.5c"
-status = "skeleton"
-text = "If a player has ten or more poison counters, that player loses the game. Ignore this rule in Two-Headed Giant games; see rule 704.6b instead."

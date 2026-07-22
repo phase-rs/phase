@@ -1,5 +1,0 @@
-rule = "116.1"
-section = 116
-title = "Special Actions — CR 116.1"
-status = "skeleton"
-text = "Special actions are actions a player may take when they have priority that don’t use the stack. These are not to be confused with turn-based actions and state-based actions, which the game generates automatically. (See rule 703, “Turn-Based Actions,” and rule 704, “State-Based Actions.”)"

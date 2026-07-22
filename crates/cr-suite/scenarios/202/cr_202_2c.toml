@@ -1,5 +1,0 @@
-rule = "202.2c"
-section = 202
-title = "Mana Cost and Color — CR 202.2c"
-status = "skeleton"
-text = "An object with two or more different colored mana symbols in its mana cost is each of the colors of those mana symbols. Most multicolored cards are printed with a gold frame, but this is not a requirement for a card to be multicolored."

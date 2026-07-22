@@ -1,5 +1,0 @@
-rule = "702.140b"
-section = 702
-title = "Keyword Abilities — CR 702.140b"
-status = "skeleton"
-text = "As a mutating creature spell begins resolving, if its target is illegal, it ceases to be a mutating creature spell and continues resolving as a creature spell and will be put onto the battlefield under the control of the spell’s controller."

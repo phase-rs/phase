@@ -1,5 +1,0 @@
-rule = "614.9"
-section = 614
-title = "Replacement Effects — CR 614.9"
-status = "skeleton"
-text = "Some effects replace damage dealt to one battle, creature, planeswalker, or player with the same damage dealt to another battle, creature, planeswalker, or player; such effects are called redirection effects. If one of those permanents is no longer on the battlefield when the damage would be redirected, or is no longer a battle, creature, or planeswalker when the damage would be redirected, the effect does nothing. If damage would be redirected to or from a player who has left the game, the effect does nothing."

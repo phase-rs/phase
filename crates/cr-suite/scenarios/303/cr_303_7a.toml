@@ -1,5 +1,0 @@
-rule = "303.7a"
-section = 303
-title = "Enchantments — CR 303.7a"
-status = "skeleton"
-text = "If a permanent has more than one Role controlled by the same player attached to it, each of those Roles except the one with the most recent timestamp is put into its owner’s graveyard. This is a state-based action. See rule 704."

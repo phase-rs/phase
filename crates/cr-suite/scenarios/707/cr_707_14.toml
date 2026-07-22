@@ -1,5 +1,0 @@
-rule = "707.14"
-section = 707
-title = "Copying Objects — CR 707.14"
-status = "skeleton"
-text = "One card (Magar of the Magic Strings) instructs a player to note the name of a particular card in a graveyard and create a copy of the card with the noted name. To do so, use the characteristics of that card as it last existed in the graveyard to determine the copiable values of the copy. (See rule 608.2h.)"

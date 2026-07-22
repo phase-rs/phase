@@ -1,5 +1,0 @@
-rule = "610.4"
-section = 610
-title = "One-Shot Effects — CR 610.4"
-status = "skeleton"
-text = "Some one-shot effects cause a permanent to phase out “until” a specified event occurs. A second one-shot effect is created immediately after the specified event. This second one-shot effect causes the permanent to phase in."

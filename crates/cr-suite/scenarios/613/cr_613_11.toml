@@ -1,5 +1,0 @@
-rule = "613.11"
-section = 613
-title = "Interaction of Continuous Effects — CR 613.11"
-status = "skeleton"
-text = "Some continuous effects affect game rules rather than objects. For example, effects may modify a player’s maximum hand size, or say that a creature must attack this turn if able. These effects are applied after all other continuous effects have been applied. Continuous effects that affect the costs of spells or abilities are applied according to the order specified in rule 601.2f. All other such effects are applied in timestamp order. See also the rules for timestamp order and dependency (rules 613.7 and 613.8)."

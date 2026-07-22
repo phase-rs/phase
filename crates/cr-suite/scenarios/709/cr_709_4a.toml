@@ -1,5 +1,0 @@
-rule = "709.4a"
-section = 709
-title = "Split Cards — CR 709.4a"
-status = "skeleton"
-text = "Each split card has two names. If an effect instructs a player to choose a card name and the player wants to choose a split card’s name, the player must choose one of those names and not both. An object has the chosen name if one of its names is the chosen name."

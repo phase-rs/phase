@@ -1,5 +1,0 @@
-rule = "701.24g"
-section = 701
-title = "Keyword Actions — CR 701.24g"
-status = "skeleton"
-text = "If an effect would cause a player to shuffle a library at the same time that an object would be put into a certain position in that library, the result is a shuffled library that’s randomized except that the object is in the specified position."

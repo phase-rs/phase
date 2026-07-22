@@ -1,5 +1,0 @@
-rule = "701.9b"
-section = 701
-title = "Keyword Actions — CR 701.9b"
-status = "skeleton"
-text = "By default, effects that cause a player to discard a card allow the affected player to choose which card to discard. Some effects, however, require a random discard or allow another player to choose which card is discarded."

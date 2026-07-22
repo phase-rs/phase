@@ -1,5 +1,0 @@
-rule = "301.7a"
-section = 301
-title = "Artifacts — CR 301.7a"
-status = "skeleton"
-text = "Each Vehicle has a printed power and toughness, but it has these characteristics only if it’s also a creature. See rule 208.3."

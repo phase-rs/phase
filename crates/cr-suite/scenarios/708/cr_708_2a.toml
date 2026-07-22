@@ -1,5 +1,0 @@
-rule = "708.2a"
-section = 708
-title = "Face-Down Spells and Permanents — CR 708.2a"
-status = "skeleton"
-text = "If a face-up permanent is turned face down by a spell or ability that doesn’t list any characteristics for that object, it becomes a 2/2 face-down creature with no text, no name, no subtypes, and no mana cost. A permanent that enters the battlefield face down also has these characteristics unless otherwise specified by the effect that put it onto the battlefield face down or allowed it to be cast face down. These values are the copiable values of that object’s characteristics."

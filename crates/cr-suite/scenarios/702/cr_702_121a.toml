@@ -1,5 +1,0 @@
-rule = "702.121a"
-section = 702
-title = "Keyword Abilities — CR 702.121a"
-status = "skeleton"
-text = "Melee is a triggered ability. “Melee” means “Whenever this creature attacks, it gets +1/+1 until end of turn for each opponent you attacked with a creature this combat.”"

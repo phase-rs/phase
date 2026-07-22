@@ -1,5 +1,0 @@
-rule = "118.11"
-section = 118
-title = "Costs — CR 118.11"
-status = "skeleton"
-text = "The actions performed when paying a cost may be modified by effects. Even if they are, meaning the actions that are performed don’t match the actions that are called for, the cost has still been paid."

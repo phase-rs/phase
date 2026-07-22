@@ -1,5 +1,0 @@
-rule = "500.4"
-section = 500
-title = "General (Turn Structure) — CR 500.4"
-status = "skeleton"
-text = "As a step or phase begins, if there are effects that last until that step or phase, those effects expire."

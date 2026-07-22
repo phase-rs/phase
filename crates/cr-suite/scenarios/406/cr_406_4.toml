@@ -1,5 +1,0 @@
-rule = "406.4"
-section = 406
-title = "Exile — CR 406.4"
-status = "skeleton"
-text = "Face-down cards in exile should be kept in separate piles based on when they were exiled and how they were exiled. If a player is instructed to choose an exiled card, the player may choose a specific face-down card only if the player is allowed to look at that card. Otherwise, they may choose a pile of face-down exiled cards, and then a card is chosen at random from within that pile. If choosing such a card is part of casting a spell or activating an ability, the chosen card isn’t revealed until after that cost is fully paid. (See rule 601.2i.)"

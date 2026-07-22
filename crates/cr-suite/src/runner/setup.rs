@@ -1,11 +1,10 @@
 //! Build a `GameRunner` from a declarative setup.
 
-use engine::game::scenario::{GameScenario, GameRunner};
+use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
-use crate::assert::phase::parse_phase;
-use crate::assert::HandleMap;
+use crate::assert::{parse_phase, HandleMap};
 use crate::runner::{RunError, ScenarioContext};
 use crate::schema::{CreatureSpec, SetupSpec};
 

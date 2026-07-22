@@ -1,5 +1,0 @@
-rule = "702.5c"
-section = 702
-title = "Keyword Abilities — CR 702.5c"
-status = "skeleton"
-text = "If an Aura has multiple instances of enchant, all of them apply. The Aura’s target must follow the restrictions from all the instances of enchant. The Aura can enchant only objects or players that match all of its enchant abilities."

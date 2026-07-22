@@ -1,5 +1,0 @@
-rule = "500.5a"
-section = 500
-title = "General (Turn Structure) — CR 500.5a"
-status = "skeleton"
-text = "Effects that last “until end of combat” expire at the end of the combat phase, not at the beginning of the end of combat step."

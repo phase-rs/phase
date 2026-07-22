@@ -1,5 +1,0 @@
-rule = "107.3i"
-section = 107
-title = "Numbers and Symbols — CR 107.3i"
-status = "skeleton"
-text = "Normally, all instances of X on an object have the same value at any given time."

@@ -1,5 +1,0 @@
-rule = "117.4"
-section = 117
-title = "Timing and Priority — CR 117.4"
-status = "skeleton"
-text = "If all players pass in succession (that is, if all players pass without taking any actions in between passing), the spell or ability on top of the stack resolves or, if the stack is empty, the phase or step ends."

@@ -1,5 +1,0 @@
-rule = "503.1a"
-section = 503
-title = "Upkeep Step — CR 503.1a"
-status = "skeleton"
-text = "Any abilities that triggered during the untap step and any abilities that triggered at the beginning of the upkeep are put onto the stack before the active player gets priority; the order in which they triggered doesn’t matter. (See rule 603, “Handling Triggered Abilities.”)"

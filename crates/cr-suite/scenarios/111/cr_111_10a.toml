@@ -1,5 +1,0 @@
-rule = "111.10a"
-section = 111
-title = "Tokens — CR 111.10a"
-status = "skeleton"
-text = "A Treasure token is a colorless Treasure artifact token with “{T}, Sacrifice this token: Add one mana of any color.”"

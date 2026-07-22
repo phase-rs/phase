@@ -1,5 +1,0 @@
-rule = "603.7"
-section = 603
-title = "Handling Triggered Abilities — CR 603.7"
-status = "skeleton"
-text = "An effect may create a delayed triggered ability that can do something at a later time. A delayed triggered ability will contain “when,” “whenever,” or “at,” although that word won’t usually begin the ability."

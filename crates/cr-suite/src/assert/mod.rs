@@ -18,11 +18,13 @@ use crate::schema::AssertionSpec;
 
 pub use combat::assert_creature_damage;
 pub use life::assert_player_life;
-pub use phase::assert_phase_is;
+pub use phase::{assert_phase_is, parse_phase};
 pub use player::{assert_game_not_over, assert_game_over, assert_hand_count};
 pub use sba::check_sbas_via_priority;
 pub use stack::stack_is_empty;
-pub use zone::{assert_creature_in_graveyard, assert_creature_on_battlefield, assert_creature_zone};
+pub use zone::{
+    assert_creature_in_graveyard, assert_creature_on_battlefield, assert_creature_zone,
+};
 
 /// Object handle map from fixture creature ids → ObjectIds.
 pub type HandleMap = std::collections::HashMap<String, ObjectId>;
@@ -52,9 +54,7 @@ pub fn evaluate_assertion(
         AssertionSpec::CreatureInGraveyard { creature } => {
             assert_creature_in_graveyard(runner, handles, creature)
         }
-        AssertionSpec::GameOver { winner } => {
-            assert_game_over(runner, winner.map(PlayerId))
-        }
+        AssertionSpec::GameOver { winner } => assert_game_over(runner, winner.map(PlayerId)),
         AssertionSpec::GameNotOver => assert_game_not_over(runner),
         AssertionSpec::PhaseIs { phase } => assert_phase_is(runner, phase),
         AssertionSpec::HandCountAtLeast { player, count } => {

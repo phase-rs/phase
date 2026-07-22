@@ -1,5 +1,0 @@
-rule = "721.2"
-section = 721
-title = "Handling Illegal Actions — CR 721.2"
-status = "skeleton"
-text = "A station symbol represents a static ability. The station symbol includes a single number followed by a plus sign, indicated here as “{N+}.” Any abilities printed within the same text box striation as a station symbol are part of its static ability. The same is true of any power and toughness boxes printed within that striation, indicated here as [P/T]."

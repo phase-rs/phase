@@ -1,5 +1,0 @@
-rule = "117.3a"
-section = 117
-title = "Timing and Priority — CR 117.3a"
-status = "skeleton"
-text = "The active player receives priority at the beginning of most steps and phases, after any turn-based actions (such as drawing a card during the draw step; see rule 703) have been dealt with and abilities that trigger at the beginning of that phase or step have been put on the stack. No player receives priority during the untap step. Players usually don’t get priority during the cleanup step (see rule 514.3)."

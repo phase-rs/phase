@@ -1,5 +1,0 @@
-rule = "107.4e"
-section = 107
-title = "Numbers and Symbols — CR 107.4e"
-status = "skeleton"
-text = "A hybrid mana symbol is also a colored mana symbol, even if one of its components is colorless. Each one represents a cost that can be paid in one of two ways, as represented by the two halves of the symbol. A hybrid symbol such as {W/U} can be paid with either white or blue mana, and a monocolored hybrid symbol such as {2/B} can be paid with either one black mana or two mana of any type. A hybrid mana symbol is all of its component colors."

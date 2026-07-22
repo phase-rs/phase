@@ -1,5 +1,0 @@
-rule = "607.2g"
-section = 607
-title = "Linked Abilities — CR 607.2g"
-status = "skeleton"
-text = "If an object has an ability printed on it that causes a player to pay a cost as it enters the battlefield and an ability printed on it that refers to the cost paid “as [this object] entered,” these abilities are linked. The second ability refers only to a cost paid as a result of the first ability."

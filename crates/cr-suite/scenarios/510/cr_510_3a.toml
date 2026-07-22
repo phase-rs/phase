@@ -1,5 +1,0 @@
-rule = "510.3a"
-section = 510
-title = "Combat Damage Step — CR 510.3a"
-status = "skeleton"
-text = "Any abilities that triggered on damage being dealt or while state-based actions are performed afterward are put onto the stack before the active player gets priority; the order in which they triggered doesn’t matter. (See rule 603, “Handling Triggered Abilities.”)"

@@ -1,5 +1,0 @@
-rule = "702.120a"
-section = 702
-title = "Keyword Abilities — CR 702.120a"
-status = "skeleton"
-text = "Escalate is a static ability of modal spells (see rule 700.2) that functions while the spell with escalate is on the stack. “Escalate [cost]” means “For each mode you choose beyond the first as you cast this spell, you pay an additional [cost].” Paying a spell’s escalate cost follows the rules for paying additional costs in rules 601.2f–h."

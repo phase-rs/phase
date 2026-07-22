@@ -1,5 +1,0 @@
-rule = "615.12"
-section = 615
-title = "Prevention Effects — CR 615.12"
-status = "skeleton"
-text = "Some effects state that damage “can’t be prevented.” If unpreventable damage would be dealt, any applicable prevention effects are still applied to it. Those effects won’t prevent any damage, but any additional effects they have will take place. Existing damage prevention shields won’t be reduced by damage that can’t be prevented."

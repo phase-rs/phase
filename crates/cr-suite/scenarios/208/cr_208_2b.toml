@@ -1,5 +1,0 @@
-rule = "208.2b"
-section = 208
-title = "Power/Toughness — CR 208.2b"
-status = "skeleton"
-text = "The card may have a static ability that creates a replacement effect that sets the creature’s power and toughness to one of a number of specific values as it enters the battlefield or is turned face up. (See rule 614, “Replacement Effects.”) Such an ability is worded “As [this creature] enters . . . ,” “As [this creature] is turned face up . . . ,” or “[This creature] enters as . . .” and lists two or more specific power and toughness values (and may also list additional characteristics). The characteristics chosen or determined with these effects affect the creature’s copiable values. (See rule 707.2.) While the card isn’t on the battlefield, its power and toughness are each considered to be 0."

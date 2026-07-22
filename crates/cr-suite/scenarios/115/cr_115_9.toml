@@ -1,5 +1,0 @@
-rule = "115.9"
-section = 115
-title = "Targets — CR 115.9"
-status = "skeleton"
-text = "Some objects check what another spell or ability is targeting. Depending on the wording, these may check the current state of the targets, the state of the targets at the time they were selected, or both."

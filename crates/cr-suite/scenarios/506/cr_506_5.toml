@@ -1,5 +1,0 @@
-rule = "506.5"
-section = 506
-title = "Combat Phase — CR 506.5"
-status = "skeleton"
-text = "A creature attacks alone if it’s the only creature declared as an attacker during the declare attackers step. A creature is attacking alone if it’s attacking but no other creatures are. A creature blocks alone if it’s the only creature declared as a blocker during the declare blockers step. A creature is blocking alone if it’s blocking but no other creatures are."

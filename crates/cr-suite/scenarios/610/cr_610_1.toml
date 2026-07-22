@@ -1,5 +1,0 @@
-rule = "610.1"
-section = 610
-title = "One-Shot Effects — CR 610.1"
-status = "skeleton"
-text = "A one-shot effect does something just once and doesn’t have a duration. Examples include dealing damage, destroying a permanent, creating a token, and moving an object from one zone to another."

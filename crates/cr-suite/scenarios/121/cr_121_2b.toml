@@ -1,5 +1,0 @@
-rule = "121.2b"
-section = 121
-title = "Drawing a Card — CR 121.2b"
-status = "skeleton"
-text = "Some effects say that a player can’t draw more than one card each turn. Such an effect applies to individual card draws. Instructions to draw multiple cards may still be partially carried out. However, if an effect offers the player a choice to draw multiple cards, the affected player can’t choose to do so. Similarly, the player can’t pay a cost that includes drawing multiple cards."

@@ -1,5 +1,0 @@
-rule = "120.3h"
-section = 120
-title = "Damage — CR 120.3h"
-status = "skeleton"
-text = "Damage dealt to a battle causes that many defense counters to be removed from that battle."

@@ -6,10 +6,10 @@ mod steps;
 
 use std::path::{Path, PathBuf};
 
-use crate::assert::{evaluate_assertion, AssertionFailure, HandleMap};
+use crate::assert::{AssertionFailure, HandleMap};
 use crate::loader::load_scenarios;
 use crate::report::{ScenarioReport, SuiteReport};
-use crate::schema::{ScenarioFile, ScenarioStatus};
+use crate::schema::ScenarioStatus;
 
 pub use execute::run_scenario;
 pub use setup::build_runner;
@@ -125,7 +125,8 @@ pub enum RunError {
 
 /// Convenience: run a single fixture file path.
 pub fn run_scenario_file(path: &Path) -> Result<(), RunError> {
-    let scenario = crate::loader::load_scenario_file(path).map_err(|e| RunError::Setup(e.to_string()))?;
+    let scenario =
+        crate::loader::load_scenario_file(path).map_err(|e| RunError::Setup(e.to_string()))?;
     run_scenario(&scenario)
 }
 

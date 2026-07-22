@@ -1,5 +1,0 @@
-rule = "707.11"
-section = 707
-title = "Copying Objects — CR 707.11"
-status = "skeleton"
-text = "If an effect refers to a permanent by name, the effect still tracks that permanent even if it changes names or becomes a copy of something else."

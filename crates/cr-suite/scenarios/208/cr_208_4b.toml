@@ -1,5 +1,0 @@
-rule = "208.4b"
-section = 208
-title = "Power/Toughness — CR 208.4b"
-status = "skeleton"
-text = "Some effects check a creature’s base power and/or toughness. These effects see that creature’s characteristics after applying any characteristic-defining abilities and abilities that set power and/or toughness, ignoring any effects and counters that modify power and/or toughness without setting them. See rule 613, “Interaction of Continuous Effects.”"

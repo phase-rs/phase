@@ -1,5 +1,0 @@
-rule = "702.150a"
-section = 702
-title = "Keyword Abilities — CR 702.150a"
-status = "skeleton"
-text = "Compleated is a static ability found on some planeswalker cards. Compleated means “If this permanent would enter with one or more loyalty counters on it and the player who cast it chose to pay life for any part of its cost represented by Phyrexian mana symbols, it instead enters the battlefield with that many loyalty counters minus two for each of those mana symbols.”"

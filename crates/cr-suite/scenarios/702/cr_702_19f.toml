@@ -1,5 +1,0 @@
-rule = "702.19f"
-section = 702
-title = "Keyword Abilities — CR 702.19f"
-status = "skeleton"
-text = "If a creature without trample over planeswalkers is attacking a planeswalker, none of its combat damage can be assigned to the defending player, even if that planeswalker has been removed from combat or the damage the attacking creature could assign is greater than the planeswalker’s loyalty."

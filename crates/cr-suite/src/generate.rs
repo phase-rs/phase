@@ -45,8 +45,7 @@ pub fn generate_skeletons(opts: &GenerateOptions) -> Result<GenerateStats, Strin
         }
 
         let dir = opts.out_dir.join(format!("{:03}", rule.section));
-        fs::create_dir_all(&dir)
-            .map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
+        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {}", dir.display(), e))?;
 
         let path = dir.join(format!("{}.toml", rule_to_stem(&rule.number)));
 

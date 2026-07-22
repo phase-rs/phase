@@ -1,5 +1,0 @@
-rule = "724.1b"
-section = 724
-title = "The Initiative — CR 724.1b"
-status = "skeleton"
-text = "Exile every object on the stack, including the object that’s resolving. All objects not on the battlefield or in the command zone that aren’t represented by cards will cease to exist the next time state-based actions are checked (see rule 704, “State-Based Actions”)."

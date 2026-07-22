@@ -1,5 +1,0 @@
-rule = "118.7a"
-section = 118
-title = "Costs — CR 118.7a"
-status = "skeleton"
-text = "Effects that reduce a cost by an amount of generic mana affect only the generic mana component of that cost. They can’t affect the colored or colorless mana components of that cost."

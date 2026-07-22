@@ -1,5 +1,0 @@
-rule = "403.2"
-section = 403
-title = "Battlefield — CR 403.2"
-status = "skeleton"
-text = "A spell or ability affects and checks only the battlefield unless it specifically mentions a player or another zone."

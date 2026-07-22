@@ -3,10 +3,8 @@
 //! This is documentation-as-code for extending fixtures. The runner does not
 //! invent game logic here; it only lists which typed assertions apply where.
 
-use serde::{Deserialize, Serialize};
-
 /// A catalogued assertion capability.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PredicateEntry {
     pub id: &'static str,
     pub assertion_kind: &'static str,

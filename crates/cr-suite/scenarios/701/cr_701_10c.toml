@@ -1,5 +1,0 @@
-rule = "701.10c"
-section = 701
-title = "Keyword Actions — CR 701.10c"
-status = "skeleton"
-text = "If a creature’s power is less than 0 when it’s doubled, doubling that creature’s power instead means that the creature gets -X/-0, where X is the difference between 0 and its power. Similarly, if its toughness is less than 0 when doubled, it gets -0/-X. If one characteristic’s value is negative but the other isn’t when both are doubled, it gets -X/+Y or +X/-Y, as appropriate."

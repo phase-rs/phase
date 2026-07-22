@@ -1,5 +1,0 @@
-rule = "115.4"
-section = 115
-title = "Targets — CR 115.4"
-status = "skeleton"
-text = "Some spells and abilities that refer to damage require “any target,” “another target,” “two targets,” or similar rather than “target [something].” These targets may be creatures, players, planeswalkers, or battles. Other game objects, such as noncreature artifacts or spells, can’t be chosen."

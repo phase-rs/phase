@@ -1,5 +1,0 @@
-rule = "704.5p"
-section = 704
-title = "State-Based Actions — CR 704.5p"
-status = "skeleton"
-text = "If a battle or creature is attached to an object or player, it becomes unattached and remains on the battlefield. Similarly, if any nonbattle, noncreature permanent that’s neither an Aura, an Equipment, nor a Fortification is attached to an object or player, it becomes unattached and remains on the battlefield."

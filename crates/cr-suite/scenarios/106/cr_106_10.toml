@@ -1,5 +1,0 @@
-rule = "106.10"
-section = 106
-title = "Mana — CR 106.10"
-status = "skeleton"
-text = "If an effect would add mana represented by a generic mana symbol to a player’s mana pool, that much colorless mana is added to that player’s mana pool."

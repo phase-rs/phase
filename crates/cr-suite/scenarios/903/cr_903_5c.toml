@@ -1,5 +1,0 @@
-rule = "903.5c"
-section = 903
-title = "Commander — CR 903.5c"
-status = "skeleton"
-text = "A card can be included in a Commander deck only if every color in its color identity is also found in the color identity of the deck’s commander."

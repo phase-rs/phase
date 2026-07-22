@@ -1,5 +1,0 @@
-rule = "503.1"
-section = 503
-title = "Upkeep Step — CR 503.1"
-status = "skeleton"
-text = "The upkeep step has no turn-based actions. Once it begins, the active player gets priority. (See rule 117, “Timing and Priority.”)"

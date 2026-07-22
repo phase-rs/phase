@@ -1,5 +1,0 @@
-rule = "614.14"
-section = 614
-title = "Replacement Effects — CR 614.14"
-status = "skeleton"
-text = "An object may have one ability printed on it that generates a replacement effect which causes one or more cards to be exiled, and another ability that refers either to “the exiled cards” or to cards “exiled with [this object].” These abilities are linked: the second refers only to cards in the exile zone that were put there as a direct result of the replacement event caused by the first. If another object gains a pair of linked abilities, the abilities will be similarly linked on that object. They can’t be linked to any other ability, regardless of what other abilities the object may currently have or may have had in the past. See rule 607, “Linked Abilities.”"

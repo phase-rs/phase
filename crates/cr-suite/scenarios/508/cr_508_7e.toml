@@ -1,5 +1,0 @@
-rule = "508.7e"
-section = 508
-title = "Declare Attackers Step — CR 508.7e"
-status = "skeleton"
-text = "In a multiplayer game using the limited range of influence option (see rule 801), the reselected player, planeswalker, or battle must be within the range of influence of the attacking creature’s controller. In the case of a battle, the battle’s protector must also be within the range of influence of the attacking creature’s controller."

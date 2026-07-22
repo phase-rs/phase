@@ -1,5 +1,0 @@
-rule = "704.6a"
-section = 704
-title = "State-Based Actions — CR 704.6a"
-status = "skeleton"
-text = "In a Two-Headed Giant game, if a team has 0 or less life, that team loses the game. See rule 810, “Two-Headed Giant Variant.”"

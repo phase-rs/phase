@@ -1,5 +1,0 @@
-rule = "614.7a"
-section = 614
-title = "Replacement Effects — CR 614.7a"
-status = "skeleton"
-text = "If a source would deal 0 damage, it does not deal damage at all. Replacement effects that would increase the damage dealt by that source, or would have that source deal that damage to a different object or player, have no event to replace, so they have no effect."

@@ -1,5 +1,0 @@
-rule = "701.60a"
-section = 701
-title = "Keyword Actions — CR 701.60a"
-status = "skeleton"
-text = "Certain spells and abilities instruct a player to suspect a creature. That creature becomes suspected until it leaves the battlefield or until a spell or ability causes it to no longer be suspected."

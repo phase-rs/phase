@@ -1,5 +1,0 @@
-rule = "702.19d"
-section = 702
-title = "Keyword Abilities — CR 702.19d"
-status = "skeleton"
-text = "If an attacking creature with trample or trample over planeswalkers is blocked, but there are no creatures blocking it when damage is assigned, its damage is assigned to the defending player and/or planeswalker as though all blocking creatures have been assigned lethal damage."

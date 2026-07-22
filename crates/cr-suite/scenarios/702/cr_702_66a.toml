@@ -1,5 +1,0 @@
-rule = "702.66a"
-section = 702
-title = "Keyword Abilities — CR 702.66a"
-status = "skeleton"
-text = "Delve is a static ability that functions while the spell with delve is on the stack. “Delve” means “For each generic mana in this spell’s total cost, you may exile a card from your graveyard rather than pay that mana.”"

@@ -1,5 +1,0 @@
-rule = "724.2d"
-section = 724
-title = "The Initiative — CR 724.2d"
-status = "skeleton"
-text = "The current combat phase ends. Remove all creatures and planeswalkers from combat. Effects that last “until end of combat” expire. The game skips straight to the next phase, usually the postcombat main phase; skip any steps between this step and that phase."

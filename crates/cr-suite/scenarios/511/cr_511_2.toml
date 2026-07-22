@@ -1,5 +1,0 @@
-rule = "511.2"
-section = 511
-title = "End of Combat Step — CR 511.2"
-status = "skeleton"
-text = "Abilities that trigger “at end of combat” trigger as the end of combat step begins. Effects that last “until end of combat” expire at the end of the combat phase."

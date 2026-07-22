@@ -1,5 +1,0 @@
-rule = "106.11"
-section = 106
-title = "Mana — CR 106.11"
-status = "skeleton"
-text = "If an effect would add mana represented by one or more snow mana symbols to a player’s mana pool, that much colorless mana is added to that player’s mana pool."

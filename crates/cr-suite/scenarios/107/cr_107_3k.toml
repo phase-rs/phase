@@ -1,5 +1,0 @@
-rule = "107.3k"
-section = 107
-title = "Numbers and Symbols — CR 107.3k"
-status = "skeleton"
-text = "If an object’s activated ability has an {X}, [-X], or X in its activation cost, the value of X for that ability is independent of any other values of X chosen for that object or for other instances of abilities of that object. This is an exception to rule 107.3i."

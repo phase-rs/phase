@@ -1,5 +1,0 @@
-rule = "400.7c"
-section = 400
-title = "General (Zones) — CR 400.7c"
-status = "skeleton"
-text = "Prevention effects that apply to damage from a permanent spell on the stack continue to apply to damage from the permanent that spell becomes."

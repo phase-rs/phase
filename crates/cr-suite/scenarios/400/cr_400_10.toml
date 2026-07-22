@@ -1,5 +1,0 @@
-rule = "400.10"
-section = 400
-title = "General (Zones) — CR 400.10"
-status = "skeleton"
-text = "If an object in the command zone is put into the command zone, it doesn’t change zones, but it becomes a new object that has just entered the command zone."

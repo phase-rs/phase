@@ -1,5 +1,0 @@
-rule = "122.1d"
-section = 122
-title = "Counters — CR 122.1d"
-status = "skeleton"
-text = "One or more stun counters on a permanent create a single replacement effect that stops the permanent from untapping. That effect is “If a permanent with a stun counter on it would become untapped, instead remove a stun counter from it.”"

@@ -1,5 +1,0 @@
-rule = "714.2d"
-section = 714
-title = "Saga Cards — CR 714.2d"
-status = "skeleton"
-text = "A Saga’s final chapter number is the greatest value among chapter abilities it has. If a Saga somehow has no chapter abilities, its final chapter number is 0."

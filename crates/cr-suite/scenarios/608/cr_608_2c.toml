@@ -1,5 +1,0 @@
-rule = "608.2c"
-section = 608
-title = "Resolving Spells and Abilities — CR 608.2c"
-status = "skeleton"
-text = "The controller of the spell or ability follows its instructions in the order written. However, replacement effects may modify these actions. In some cases, later text on the card may modify the meaning of earlier text (for example, “Destroy target creature. It can’t be regenerated” or “Counter target spell. If that spell is countered this way, put it on top of its owner’s library instead of into its owner’s graveyard.”) Don’t just apply effects step by step without thinking in these cases—read the whole text and apply the rules of English to the text."

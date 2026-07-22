@@ -1,5 +1,0 @@
-rule = "730.2a"
-section = 730
-title = "Miscellaneous — CR 730.2a"
-status = "skeleton"
-text = "A merged permanent has only the characteristics of its topmost component, unless otherwise specified by the effect that caused them to merge. This is a copiable effect whose timestamp is the time the objects merged. (See rule 613.2.)"

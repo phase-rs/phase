@@ -1,5 +1,0 @@
-rule = "721.1"
-section = 721
-title = "Handling Illegal Actions — CR 721.1"
-status = "skeleton"
-text = "Each station card has a striated text box and may have one or more power/toughness boxes. The text box of a station card contains one or two station symbols. Station cards also usually have the station keyword ability (see rule 702.184)."

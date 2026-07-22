@@ -1,5 +1,0 @@
-rule = "903.11a"
-section = 903
-title = "Commander — CR 903.11a"
-status = "skeleton"
-text = "If a player is allowed to bring a card from outside the game into a Commander game, that player can’t bring a card into the game this way if it has the same name as a card that player had in their starting deck, if it has the same name as a card that the player owns in the current game, or if any color in its color identity isn’t in the color identity of the player’s commander."

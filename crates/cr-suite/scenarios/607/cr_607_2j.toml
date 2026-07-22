@@ -1,5 +1,0 @@
-rule = "607.2j"
-section = 607
-title = "Linked Abilities — CR 607.2j"
-status = "skeleton"
-text = "If an object has an ability printed on it that causes a player to pay a variable additional cost as it’s cast and an ability printed on it that refers to the cost paid “as [this object] was cast,” these abilities are linked. The second refers only to the value chosen for the cost listed in the first as the object was cast as a spell. See rule 601.2b."

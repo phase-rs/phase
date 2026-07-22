@@ -1,5 +1,0 @@
-rule = "508.5a"
-section = 508
-title = "Declare Attackers Step — CR 508.5a"
-status = "skeleton"
-text = "In a multiplayer game, any rule, object, or effect that refers to a “defending player” refers to one specific defending player, not to all of the defending players. If a spell or ability could apply to multiple attacking creatures, the appropriate defending player is individually determined for each of those attacking creatures. If there are multiple defending players that could be chosen, the controller of the spell or ability chooses one."

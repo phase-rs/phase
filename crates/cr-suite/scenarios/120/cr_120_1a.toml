@@ -1,5 +1,0 @@
-rule = "120.1a"
-section = 120
-title = "Damage — CR 120.1a"
-status = "skeleton"
-text = "Damage can’t be dealt to an object that’s not a battle, a creature, or a planeswalker."

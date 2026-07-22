@@ -1,5 +1,0 @@
-rule = "121.6a"
-section = 121
-title = "Drawing a Card — CR 121.6a"
-status = "skeleton"
-text = "An effect that replaces a card draw is applied even if no cards could be drawn because there are no cards in the affected player’s library."

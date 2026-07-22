@@ -1,5 +1,0 @@
-rule = "304.2"
-section = 304
-title = "Instants — CR 304.2"
-status = "skeleton"
-text = "When an instant spell resolves, the actions stated in its rules text are followed. Then it’s put into its owner’s graveyard."

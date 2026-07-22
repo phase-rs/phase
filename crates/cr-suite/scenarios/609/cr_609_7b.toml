@@ -1,5 +1,0 @@
-rule = "609.7b"
-section = 609
-title = "Effects — CR 609.7b"
-status = "skeleton"
-text = "Some effects from resolved spells and abilities prevent or replace damage from sources with certain properties, such as a creature or a source of a particular color. When the source would deal damage, the “shield” rechecks the source’s properties. If the properties no longer match, the damage isn’t prevented or replaced. If for any reason the shield prevents no damage or replaces no damage, the shield isn’t used up."

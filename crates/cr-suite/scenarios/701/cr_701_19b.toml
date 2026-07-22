@@ -1,5 +1,0 @@
-rule = "701.19b"
-section = 701
-title = "Keyword Actions — CR 701.19b"
-status = "skeleton"
-text = "If the effect of a static ability regenerates a permanent, it replaces destruction with an alternate effect each time that permanent would be destroyed. In this case, “Regenerate [permanent]” means “Instead remove all damage marked on [permanent] and its controller taps it. If it’s an attacking or blocking creature, remove it from combat.”"

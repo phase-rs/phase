@@ -1,5 +1,0 @@
-rule = "709.5i"
-section = 709
-title = "Split Cards — CR 709.5i"
-status = "skeleton"
-text = "Some abilities trigger when a player “fully unlocks” a permanent with a shared type line. Such an ability triggers when that permanent has one of the two unlocked designations and gets the other, or when it has neither designation and gains both."

@@ -1,5 +1,0 @@
-rule = "613.4d"
-section = 613
-title = "Interaction of Continuous Effects — CR 613.4d"
-status = "skeleton"
-text = "Layer 7d: Effects that switch a creature’s power and toughness are applied. Such effects take the value of power and apply it to the creature’s toughness, and take the value of toughness and apply it to the creature’s power."

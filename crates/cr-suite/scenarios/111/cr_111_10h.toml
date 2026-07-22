@@ -1,5 +1,0 @@
-rule = "111.10h"
-section = 111
-title = "Tokens — CR 111.10h"
-status = "skeleton"
-text = "A Powerstone token is a colorless Powerstone artifact token with “{T}: Add {C}. This mana can’t be spent to cast a nonartifact spell.”"

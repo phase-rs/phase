@@ -1,5 +1,0 @@
-rule = "701.10b"
-section = 701
-title = "Keyword Actions — CR 701.10b"
-status = "skeleton"
-text = "To double a creature’s power, that creature gets +X/+0, where X is that creature’s power as the spell or ability that doubles its power resolves. Similarly, an effect that doubles a creature’s toughness gives it +0/+X, where X is that creature’s toughness. Doubling a creature’s power and toughness gives it +X/+Y, where X is its power and Y is its toughness."

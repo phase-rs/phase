@@ -1,5 +1,0 @@
-rule = "205.3b"
-section = 205
-title = "Type Line — CR 205.3b"
-status = "skeleton"
-text = "Subtypes of each card type except creature and plane are always single words and are listed after a long dash. Each word after the dash is a separate subtype. Subtypes of creature cards are one or two words and are listed after a long dash. Each word or two-word phrase, as listed in rule 205.3m, is a separate subtype. Objects other than planes may have multiple subtypes. Subtypes of planes are also listed after a long dash, but may be multiple words; all words after the dash are, collectively, a single subtype."

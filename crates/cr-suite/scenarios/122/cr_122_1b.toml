@@ -1,5 +1,0 @@
-rule = "122.1b"
-section = 122
-title = "Counters — CR 122.1b"
-status = "skeleton"
-text = "A keyword counter on a permanent or on a card in a zone other than the battlefield causes that object to gain that keyword. The keywords that a keyword counter can be are flying, first strike, double strike, deathtouch, decayed, exalted, haste, hexproof, indestructible, lifelink, menace, reach, shadow, trample, and vigilance, as well as any variants of those keywords. See rule 613.1f."

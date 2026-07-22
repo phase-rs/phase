@@ -1,5 +1,0 @@
-rule = "508.1k"
-section = 508
-title = "Declare Attackers Step — CR 508.1k"
-status = "skeleton"
-text = "Each chosen creature still controlled by the active player becomes an attacking creature. It remains an attacking creature until it’s removed from combat or the combat phase ends, whichever comes first. See rule 506.4."

@@ -1,5 +1,0 @@
-rule = "400.7h"
-section = 400
-title = "General (Zones) — CR 400.7h"
-status = "skeleton"
-text = "If an effect allows a nonland card to be cast, other parts of that effect can find the new object that card becomes after it moves to the stack as a result of being cast this way."

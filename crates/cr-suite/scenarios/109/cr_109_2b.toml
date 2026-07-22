@@ -1,5 +1,0 @@
-rule = "109.2b"
-section = 109
-title = "Objects — CR 109.2b"
-status = "skeleton"
-text = "If a spell or ability uses a description of an object that includes the word “spell,” it means a spell matching that description on the stack."

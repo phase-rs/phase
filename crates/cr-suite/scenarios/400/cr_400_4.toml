@@ -1,5 +1,0 @@
-rule = "400.4"
-section = 400
-title = "General (Zones) — CR 400.4"
-status = "skeleton"
-text = "Cards with certain card types can’t enter certain zones."

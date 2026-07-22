@@ -1,5 +1,0 @@
-rule = "613.1"
-section = 613
-title = "Interaction of Continuous Effects — CR 613.1"
-status = "skeleton"
-text = "The values of an object’s characteristics are determined by starting with the actual object. For a card, that means the values of the characteristics printed on that card. For a token or a copy of a spell or card, that means the values of the characteristics defined by the effect that created it. Then all applicable continuous effects are applied in a series of layers in the following order:"

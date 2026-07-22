@@ -1,5 +1,0 @@
-rule = "107.3h"
-section = 107
-title = "Numbers and Symbols — CR 107.3h"
-status = "skeleton"
-text = "If an effect instructs a player to pay an object’s mana cost that includes {X}, the value of X is treated as 0 unless the object is a spell on the stack. In that case, the value of X is the value chosen or determined for it as the spell was cast."

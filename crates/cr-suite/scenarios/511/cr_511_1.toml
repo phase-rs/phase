@@ -1,5 +1,0 @@
-rule = "511.1"
-section = 511
-title = "End of Combat Step — CR 511.1"
-status = "skeleton"
-text = "The end of combat step has no turn-based actions. Once it begins, the active player gets priority. (See rule 117, “Timing and Priority.”)"

@@ -1,5 +1,0 @@
-rule = "724.2f"
-section = 724
-title = "The Initiative — CR 724.2f"
-status = "skeleton"
-text = "No player gets priority during this process, so triggered abilities are not put onto the stack. If any triggered abilities have triggered since this process began, those abilities are put onto the stack during the following phase, then the active player gets priority and players can cast spells and activate abilities."

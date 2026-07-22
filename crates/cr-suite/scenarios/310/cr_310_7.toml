@@ -1,5 +1,0 @@
-rule = "310.7"
-section = 310
-title = "Battles — CR 310.7"
-status = "skeleton"
-text = "If a battle’s defense is 0 and it isn’t the source of an ability which has triggered but not yet left the stack, it’s put into its owner’s graveyard. (This is a state-based action. See rule 704.)"

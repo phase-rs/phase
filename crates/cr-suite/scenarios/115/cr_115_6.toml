@@ -1,5 +1,0 @@
-rule = "115.6"
-section = 115
-title = "Targets — CR 115.6"
-status = "skeleton"
-text = "A spell or ability that requires targets may allow zero targets to be chosen. Such a spell or ability is still said to require targets, but that spell or ability is targeted only if one or more targets have been chosen for it."

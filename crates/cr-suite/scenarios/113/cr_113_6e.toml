@@ -1,5 +1,0 @@
-rule = "113.6e"
-section = 113
-title = "Abilities — CR 113.6e"
-status = "skeleton"
-text = "An object’s ability that restricts or modifies how that particular object can be played or cast functions in any zone from which it could be played or cast and also on the stack. An object’s ability that grants it another ability that restricts or modifies how that particular object can be played or cast functions only on the stack."

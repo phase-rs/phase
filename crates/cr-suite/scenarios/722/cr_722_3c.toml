@@ -1,5 +1,0 @@
-rule = "722.3c"
-section = 722
-title = "Ending Turns and Phases — CR 722.3c"
-status = "skeleton"
-text = "As a permanent with a prepare spell gains the prepared designation or phases in prepared, its controller creates a copy of that object in exile, except that copy has only the characteristics of that permanent’s prepare spell, ignoring other exceptions to the copying process that apply to that permanent. Those characteristics become the copy’s normal characteristics. This copy remains in exile for as long as the prepared permanent remains on the battlefield and has the prepared designation. This is an exception to rule 704.5e. For as long as the copy remains in exile, the prepared permanent’s controller may cast the copy. That permanent loses the prepared designation at the time the spell becomes cast (see rule 601.2i)."

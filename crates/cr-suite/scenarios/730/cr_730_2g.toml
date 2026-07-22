@@ -1,5 +1,0 @@
-rule = "730.2g"
-section = 730
-title = "Miscellaneous — CR 730.2g"
-status = "skeleton"
-text = "A face-down merged permanent that contains an instant or sorcery card can’t be turned face up. If such a permanent would turn face up, its controller reveals it and leaves it face down. Abilities that trigger when a permanent is turned face up won’t trigger."

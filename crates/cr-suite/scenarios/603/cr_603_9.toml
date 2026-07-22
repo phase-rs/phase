@@ -1,5 +1,0 @@
-rule = "603.9"
-section = 603
-title = "Handling Triggered Abilities — CR 603.9"
-status = "skeleton"
-text = "Some triggered abilities trigger specifically when a player loses the game. These abilities trigger when a player loses or leaves the game, regardless of the reason, unless that player leaves the game as the result of a draw. See rule 104.3."

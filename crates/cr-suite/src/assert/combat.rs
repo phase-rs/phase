@@ -14,10 +14,14 @@ pub fn assert_creature_damage(
         kind: "creature_damage".into(),
         detail: format!("unknown creature handle {creature:?}"),
     })?;
-    let obj = runner.state().objects.get(id).ok_or_else(|| AssertionFailure {
-        kind: "creature_damage".into(),
-        detail: format!("object {id:?} ({creature}) missing"),
-    })?;
+    let obj = runner
+        .state()
+        .objects
+        .get(id)
+        .ok_or_else(|| AssertionFailure {
+            kind: "creature_damage".into(),
+            detail: format!("object {id:?} ({creature}) missing"),
+        })?;
     if obj.damage_marked != expected {
         return Err(AssertionFailure {
             kind: "creature_damage".into(),

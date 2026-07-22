@@ -1,5 +1,0 @@
-rule = "701.37c"
-section = 701
-title = "Keyword Actions — CR 701.37c"
-status = "skeleton"
-text = "If a permanent’s ability instructs a player to “monstrosity X,” other abilities of that permanent may also refer to X. The value of X in those abilities is equal to the value of X as that permanent became monstrous."

@@ -1,5 +1,0 @@
-rule = "503.2"
-section = 503
-title = "Upkeep Step — CR 503.2"
-status = "skeleton"
-text = "If a spell states that it may be cast only “after [a player’s] upkeep step,” and the turn has multiple upkeep steps, that spell may be cast any time after the first upkeep step ends."

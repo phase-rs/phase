@@ -1,5 +1,0 @@
-rule = "301.5d"
-section = 301
-title = "Artifacts — CR 301.5d"
-status = "skeleton"
-text = "An Equipment’s controller is separate from the equipped creature’s controller; the two need not be the same. Changing control of the creature doesn’t change control of the Equipment, and vice versa. Only the Equipment’s controller can activate its abilities. However, if the Equipment grants an ability to the equipped creature (with “gains” or “has”), the equipped creature’s controller is the only one who can activate that ability."

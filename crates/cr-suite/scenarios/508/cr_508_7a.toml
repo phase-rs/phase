@@ -1,5 +1,0 @@
-rule = "508.7a"
-section = 508
-title = "Declare Attackers Step — CR 508.7a"
-status = "skeleton"
-text = "The attacking creature isn’t removed from combat and it isn’t considered to have attacked a second time. That creature is attacking the reselected player or permanent, but it’s still considered to have attacked the player or permanent chosen as it was declared as an attacker."

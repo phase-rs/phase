@@ -1,5 +1,0 @@
-rule = "120.9"
-section = 120
-title = "Damage — CR 120.9"
-status = "skeleton"
-text = "If an ability triggers on damage being dealt by a specific source or sources, and the effect refers to the “damage dealt,” it refers only to the damage dealt by the specified sources and not to any damage dealt at the same time by other sources."

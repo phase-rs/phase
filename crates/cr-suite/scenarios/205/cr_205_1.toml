@@ -1,5 +1,0 @@
-rule = "205.1"
-section = 205
-title = "Type Line — CR 205.1"
-status = "skeleton"
-text = "The type line is printed directly below the illustration. It contains the card’s card type(s). It also contains the card’s subtype(s) and supertype(s), if applicable."

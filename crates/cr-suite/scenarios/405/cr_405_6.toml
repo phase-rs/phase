@@ -1,5 +1,0 @@
-rule = "405.6"
-section = 405
-title = "Stack — CR 405.6"
-status = "skeleton"
-text = "Some things that happen during the game don’t use the stack."

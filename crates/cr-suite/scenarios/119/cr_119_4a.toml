@@ -1,5 +1,0 @@
-rule = "119.4a"
-section = 119
-title = "Life — CR 119.4a"
-status = "skeleton"
-text = "If a cost or effect allows a player to pay an amount of life greater than 0 in a Two-Headed Giant game, the player may do so only if their team’s life total is greater than or equal to the total amount of life both team members are paying for that cost or effect. If a player pays life, the payment is subtracted from their team’s life total."

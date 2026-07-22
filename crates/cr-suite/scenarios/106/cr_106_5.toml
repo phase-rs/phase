@@ -1,5 +1,0 @@
-rule = "106.5"
-section = 106
-title = "Mana — CR 106.5"
-status = "skeleton"
-text = "If an ability would produce one or more mana of an undefined type, it produces no mana instead."

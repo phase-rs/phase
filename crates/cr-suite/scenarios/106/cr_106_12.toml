@@ -1,5 +1,0 @@
-rule = "106.12"
-section = 106
-title = "Mana — CR 106.12"
-status = "skeleton"
-text = "To “tap [a permanent] for mana” is to activate a mana ability of that permanent that includes the {T} symbol in its activation cost. See rule 605, “Mana Abilities.”"

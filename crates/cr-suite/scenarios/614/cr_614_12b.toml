@@ -1,5 +1,0 @@
-rule = "614.12b"
-section = 614
-title = "Replacement Effects — CR 614.12b"
-status = "skeleton"
-text = "If multiple replacement effects that require choices from a player would modify how multiple permanents enter the battlefield simultaneously, that player may not make choices for those effects that would cause the combined costs of those effects to not be payable."

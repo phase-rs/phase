@@ -1,5 +1,0 @@
-rule = "700.2h"
-section = 700
-title = "General (Additional Rules) — CR 700.2h"
-status = "skeleton"
-text = "Some modal spells have one or more modes with a cost listed before the effect of that mode. This indicates that the mode has an additional cost that must be paid as the spell is cast if that mode is chosen. If more than one such mode is chosen, all additional costs must be paid to cast that spell. Paying these costs follows the rules for paying additional costs in rules 601.2b and 601.2f–h."

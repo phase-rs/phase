@@ -1,5 +1,0 @@
-rule = "605.5b"
-section = 605
-title = "Mana Abilities — CR 605.5b"
-status = "skeleton"
-text = "A spell can never be a mana ability, even if it could put mana into a player’s mana pool when it resolves. It’s cast and resolves just like any other spell. Some older cards were printed with the card type “mana source”; these cards have received errata in the Oracle card reference and are now instants."

@@ -1,5 +1,0 @@
-rule = "702.61a"
-section = 702
-title = "Keyword Abilities — CR 702.61a"
-status = "skeleton"
-text = "Split second is a static ability that functions only while the spell with split second is on the stack. “Split second” means “As long as this spell is on the stack, players can’t cast other spells or activate abilities that aren’t mana abilities.”"

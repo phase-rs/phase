@@ -1,5 +1,0 @@
-rule = "607.2i"
-section = 607
-title = "Linked Abilities — CR 607.2i"
-status = "skeleton"
-text = "If an object has an ability printed on it that allows an additional cost to be paid and an ability printed on it that refers to whether that cost was paid, those abilities are linked. The second refers only to whether the intent to pay the additional cost listed in the first was declared as the object was cast as a spell. If an ability lists multiple such costs, it may have multiple abilities linked to it. Each of those abilities will specify which cost it refers to."

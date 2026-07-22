@@ -1,5 +1,0 @@
-rule = "305.2a"
-section = 305
-title = "Lands — CR 305.2a"
-status = "skeleton"
-text = "To determine whether a player can play a land, compare the number of lands the player can play this turn with the number of lands they have already played this turn (including lands played as special actions and lands played during the resolution of spells and abilities). If the number of lands the player can play is greater, the play is legal."

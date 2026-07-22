@@ -1,5 +1,0 @@
-rule = "401.4"
-section = 401
-title = "Library — CR 401.4"
-status = "skeleton"
-text = "If an effect puts two or more cards in a specific position in a library at the same time, the owner of those cards may arrange them in any order. That library’s owner doesn’t reveal the order in which the cards go into the library."

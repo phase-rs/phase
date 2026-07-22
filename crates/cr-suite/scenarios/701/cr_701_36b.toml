@@ -1,5 +1,0 @@
-rule = "701.36b"
-section = 701
-title = "Keyword Actions — CR 701.36b"
-status = "skeleton"
-text = "If you control no creature tokens when instructed to populate, you won’t create a token."

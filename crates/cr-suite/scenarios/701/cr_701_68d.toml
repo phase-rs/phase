@@ -1,5 +1,0 @@
-rule = "701.68d"
-section = 701
-title = "Keyword Actions — CR 701.68d"
-status = "skeleton"
-text = "An ability that triggers whenever a player blights triggers after the process described in rule 701.68a is complete, regardless of what events actually occurred."

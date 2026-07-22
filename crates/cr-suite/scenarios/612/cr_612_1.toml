@@ -1,5 +1,0 @@
-rule = "612.1"
-section = 612
-title = "Text-Changing Effects — CR 612.1"
-status = "skeleton"
-text = "Some continuous effects change an object’s text. This can apply to any words or symbols printed on that object, but generally affects only that object’s rules text (which appears in its text box) and/or the text that appears in its type line. Such an effect is a text-changing effect."

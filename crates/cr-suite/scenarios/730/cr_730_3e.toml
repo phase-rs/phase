@@ -1,5 +1,0 @@
-rule = "730.3e"
-section = 730
-title = "Miscellaneous — CR 730.3e"
-status = "skeleton"
-text = "If a replacement effect applies to a “card” being put into a zone without also including tokens, that effect applies to all components of the merged permanent if it’s not a token, including components that are tokens. If the merged permanent is a token but some of its components are cards, the merged permanent and its token components are put into the appropriate zone, and the components that are cards are moved by the replacement effect."

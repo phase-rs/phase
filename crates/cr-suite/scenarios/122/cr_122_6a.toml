@@ -1,5 +1,0 @@
-rule = "122.6a"
-section = 122
-title = "Counters — CR 122.6a"
-status = "skeleton"
-text = "If an object enters the battlefield with counters on it, the effect causing the object to be given counters may specify which player puts those counters on it. If the effect doesn’t specify a player, the object’s controller puts those counters on it."

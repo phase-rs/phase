@@ -1,5 +1,0 @@
-rule = "301.5b"
-section = 301
-title = "Artifacts — CR 301.5b"
-status = "skeleton"
-text = "Equipment spells are cast like other artifact spells. Equipment enter the battlefield like other artifacts. They don’t enter the battlefield attached to a creature. The equip keyword ability attaches the Equipment to a creature you control (see rule 702.6, “Equip”). Control of the creature matters only when the equip ability is activated and when it resolves. Spells and other abilities may also attach an Equipment to a creature. If an effect attempts to attach an Equipment to an object that can’t be equipped by it, the Equipment doesn’t move."

@@ -1,5 +1,0 @@
-rule = "702.192a"
-section = 702
-title = "Keyword Abilities — CR 702.192a"
-status = "skeleton"
-text = "Paradigm represents two spell abilities, one of which creates a delayed triggered ability. Paradigm means “If this is the first time a spell you control with this spell’s name has resolved this game, at the beginning of each of your precombat main phases for the rest of the game, create a copy of this object in exile. You may cast the copy without paying its mana cost” and “Exile this spell.” See rule 707.10."

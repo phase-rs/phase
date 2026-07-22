@@ -1,5 +1,0 @@
-rule = "122.9"
-section = 122
-title = "Counters — CR 122.9"
-status = "skeleton"
-text = "If an activated ability of an object instructs a player to put its counters on another object and sacrificing the object with those counters is a cost to activate that ability, the player doesn’t move counters from one object to the other. Rather, the player puts the same number of each kind of counter the first object had onto the second object. If the ability specified what kind(s) of counters to place, the player puts the same number of each of those kinds of counters the first object had onto the second object."

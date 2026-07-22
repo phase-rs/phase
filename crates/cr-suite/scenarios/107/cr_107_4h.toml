@@ -1,5 +1,0 @@
-rule = "107.4h"
-section = 107
-title = "Numbers and Symbols — CR 107.4h"
-status = "skeleton"
-text = "When used in a cost, the snow mana symbol {S} represents a cost that can be paid with one mana of any type produced by a snow source (see rule 106.3). Effects that reduce the amount of generic mana you pay don’t affect {S} costs. The {S} symbol can also be used to refer to mana of any type produced by a snow source spent to pay a cost. Snow is neither a color nor a type of mana."

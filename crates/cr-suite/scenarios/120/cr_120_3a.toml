@@ -1,5 +1,0 @@
-rule = "120.3a"
-section = 120
-title = "Damage — CR 120.3a"
-status = "skeleton"
-text = "Damage dealt to a player by a source without infect causes that player to lose that much life."

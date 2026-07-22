@@ -1,5 +1,0 @@
-rule = "701.27e"
-section = 701
-title = "Keyword Actions — CR 701.27e"
-status = "skeleton"
-text = "Some triggered abilities trigger when an object “transforms into” an object with a specified characteristic. Such an ability triggers if the object either transforms or converts (see rule 701.28) and has the specified characteristic immediately after it does so."

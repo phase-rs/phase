@@ -1,5 +1,0 @@
-rule = "614.13c"
-section = 614
-title = "Replacement Effects — CR 614.13c"
-status = "skeleton"
-text = "While applying a replacement effect that modifies how a permanent enters the battlefield, another replacement effect may cause a player to mill cards or exile cards from the top of a library. In that case, any card that is entering the battlefield from that library won’t be included in that effect, even though those cards are in the library as the effect is applied."

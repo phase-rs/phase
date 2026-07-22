@@ -1,5 +1,0 @@
-rule = "405.6d"
-section = 405
-title = "Stack — CR 405.6d"
-status = "skeleton"
-text = "Special actions don’t use the stack; they happen immediately. See rule 116, “Special Actions.”"

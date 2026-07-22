@@ -1,5 +1,0 @@
-rule = "401.1"
-section = 401
-title = "Library — CR 401.1"
-status = "skeleton"
-text = "When a game begins, each player’s deck becomes their library."

@@ -1,5 +1,0 @@
-rule = "702.64b"
-section = 702
-title = "Keyword Abilities — CR 702.64b"
-status = "skeleton"
-text = "Each absorb ability can prevent only N damage from any one source at any one time. It will apply separately to damage from other sources, or to damage dealt by the same source at a different time."

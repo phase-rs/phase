@@ -1,5 +1,0 @@
-rule = "101.2"
-section = 101
-title = "The Magic Golden Rules — CR 101.2"
-status = "skeleton"
-text = "When a rule or effect allows or directs something to happen, and another effect states that it can’t happen, the “can’t” effect takes precedence."

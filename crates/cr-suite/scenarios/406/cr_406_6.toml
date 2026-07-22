@@ -1,5 +1,0 @@
-rule = "406.6"
-section = 406
-title = "Exile — CR 406.6"
-status = "skeleton"
-text = "An object may have one ability printed on it that causes one or more cards to be exiled, and another ability that refers either to “the exiled cards” or to cards “exiled with [this object].” These abilities are linked: the second refers only to cards that have been exiled due to the first. See rule 607, “Linked Abilities.”"

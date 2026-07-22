@@ -1,5 +1,0 @@
-rule = "614.10b"
-section = 614
-title = "Replacement Effects — CR 614.10b"
-status = "skeleton"
-text = "Some effects cause a player to skip a step, phase, or turn, then take another action. That action is considered to be the first thing that happens during the next step, phase, or turn to actually occur."

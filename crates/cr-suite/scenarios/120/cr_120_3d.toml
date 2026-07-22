@@ -1,5 +1,0 @@
-rule = "120.3d"
-section = 120
-title = "Damage — CR 120.3d"
-status = "skeleton"
-text = "Damage dealt to a creature by a source with wither and/or infect causes that source’s controller to put that many -1/-1 counters on that creature."

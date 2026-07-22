@@ -1,5 +1,0 @@
-rule = "208.3"
-section = 208
-title = "Power/Toughness — CR 208.3"
-status = "skeleton"
-text = "A noncreature permanent has no power or toughness, even if it’s a card with a power and toughness printed on it (such as a Vehicle). A noncreature object not on the battlefield has power or toughness only if it has a power and toughness printed on it."

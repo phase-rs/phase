@@ -1,5 +1,0 @@
-rule = "704.5m"
-section = 704
-title = "State-Based Actions — CR 704.5m"
-status = "skeleton"
-text = "If an Aura is attached to an illegal object or player, or is not attached to an object or player, that Aura is put into its owner’s graveyard."

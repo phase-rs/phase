@@ -1,5 +1,0 @@
-rule = "510.1"
-section = 510
-title = "Combat Damage Step — CR 510.1"
-status = "skeleton"
-text = "First, the active player announces how each attacking creature assigns its combat damage, then the defending player announces how each blocking creature assigns its combat damage. This turn-based action doesn’t use the stack. A player assigns a creature’s combat damage according to the following rules:"

@@ -1,5 +1,0 @@
-rule = "300.2a"
-section = 300
-title = "General (Card Types) — CR 300.2a"
-status = "skeleton"
-text = "An object that’s both a land and another card type (for example, an artifact land) can only be played as a land. It can’t be cast as a spell."

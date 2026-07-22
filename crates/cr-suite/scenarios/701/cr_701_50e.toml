@@ -1,5 +1,0 @@
-rule = "701.50e"
-section = 701
-title = "Keyword Actions — CR 701.50e"
-status = "skeleton"
-text = "Connive N is a variant of connive. The permanent’s controller draws N cards, discards N cards, then puts a number of +1/+1 counters on the permanent equal to the number of nonland cards discarded this way."

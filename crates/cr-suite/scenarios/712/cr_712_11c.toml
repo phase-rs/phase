@@ -1,5 +1,0 @@
-rule = "712.11c"
-section = 712
-title = "Double-Faced Cards — CR 712.11c"
-status = "skeleton"
-text = "Only the face that will be face up on the stack is evaluated to determine if it can be cast. Only that face is considered to be put onto the stack."

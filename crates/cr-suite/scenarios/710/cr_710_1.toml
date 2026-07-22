@@ -1,5 +1,0 @@
-rule = "710.1"
-section = 710
-title = "Flip Cards — CR 710.1"
-status = "skeleton"
-text = "Flip cards have a two-part card frame on a single card. The text that appears right side up on the card defines the card’s normal characteristics. Additional alternative characteristics appear upside down on the card. The back of a flip card is the normal Magic card back."

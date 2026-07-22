@@ -1,5 +1,0 @@
-rule = "701.3c"
-section = 701
-title = "Keyword Actions — CR 701.3c"
-status = "skeleton"
-text = "Attaching an Aura, Equipment, or Fortification on the battlefield to a different object or player causes the Aura, Equipment, or Fortification to receive a new timestamp."

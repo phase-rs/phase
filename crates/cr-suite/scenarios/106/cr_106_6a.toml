@@ -1,5 +1,0 @@
-rule = "106.6a"
-section = 106
-title = "Mana — CR 106.6a"
-status = "skeleton"
-text = "Some replacement effects increase the amount of mana produced by a spell or ability. In these cases, any restrictions or additional effects created by the spell or ability will apply to all mana produced. If the spell or ability creates a delayed triggered ability that triggers when the mana is spent, a separate delayed triggered ability is created for each mana produced. If the spell or ability creates a continuous effect or replacement effect if the mana is spent, a separate effect is created once for each mana produced."

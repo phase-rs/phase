@@ -1,5 +1,0 @@
-rule = "302.3"
-section = 302
-title = "Creatures — CR 302.3"
-status = "skeleton"
-text = "Creature subtypes are usually a single word long and are listed after a long dash: “Creature — Human Soldier,” “Artifact Creature — Golem,” and so on. Creature subtypes are also called creature types. Creatures may have multiple subtypes. See rule 205.3m for the complete list of creature types."

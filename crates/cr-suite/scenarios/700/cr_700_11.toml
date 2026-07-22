@@ -1,5 +1,0 @@
-rule = "700.11"
-section = 700
-title = "General (Additional Rules) — CR 700.11"
-status = "skeleton"
-text = "Some cards refer to whether a player has “descended this turn.” This means that a permanent card has been put into that player’s graveyard from anywhere this turn. “The number of times [a player] descended this turn” means “the number of permanent cards put into [that player’s] graveyard from anywhere this turn.” In both cases, no permanent cards put into the player’s graveyard that turn are required to still be in that graveyard."

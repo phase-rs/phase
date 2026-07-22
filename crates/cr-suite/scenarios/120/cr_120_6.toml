@@ -1,5 +1,0 @@
-rule = "120.6"
-section = 120
-title = "Damage — CR 120.6"
-status = "skeleton"
-text = "Damage marked on a creature remains until the cleanup step, even if that permanent stops being a creature. If the total damage marked on a creature is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed as a state-based action (see rule 704). All damage marked on a permanent is removed when it regenerates (see rule 701.19, “Regenerate”) and during the cleanup step (see rule 514.2)."

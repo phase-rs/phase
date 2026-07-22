@@ -1,5 +1,0 @@
-rule = "205.2c"
-section = 205
-title = "Type Line — CR 205.2c"
-status = "skeleton"
-text = "Tokens have card types even though they aren’t cards. The same is true of copies of spells and copies of cards."

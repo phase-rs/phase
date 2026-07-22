@@ -1,5 +1,0 @@
-rule = "611.2d"
-section = 611
-title = "Continuous Effects — CR 611.2d"
-status = "skeleton"
-text = "If a resolving spell or ability that creates a continuous effect contains a variable such as X, the value of that variable is determined only once, on resolution. See rule 608.2h."

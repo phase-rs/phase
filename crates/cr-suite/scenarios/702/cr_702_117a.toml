@@ -1,5 +1,0 @@
-rule = "702.117a"
-section = 702
-title = "Keyword Abilities — CR 702.117a"
-status = "skeleton"
-text = "Surge is a static ability that functions while the spell with surge is on the stack. “Surge [cost]” means “You may pay [cost] rather than pay this spell’s mana cost as you cast this spell if you or one of your teammates has cast another spell this turn.” Casting a spell for its surge cost follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."

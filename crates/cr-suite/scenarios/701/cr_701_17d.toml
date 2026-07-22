@@ -1,5 +1,0 @@
-rule = "701.17d"
-section = 701
-title = "Keyword Actions — CR 701.17d"
-status = "skeleton"
-text = "Some spells and abilities mill a single card and then ask for information about the milled card. If more than one card is milled due to replacement effects and the effect of a spell or ability asks for information about the milled card, such as a characteristic or mana value, it gets information from each milled card and will get multiple answers. If these answers are used to determine the value of a variable, the sum of the answers is used. If that effect grants a player permission to cast or play “that” card, the permission applies to each of the milled cards. If that effect performs any actions on “the” card, it performs that action on each milled card. If that effect performs any actions on “a” card, the controller of the spell or ability chooses which card is affected."

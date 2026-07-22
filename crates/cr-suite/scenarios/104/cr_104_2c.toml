@@ -1,5 +1,0 @@
-rule = "104.2c"
-section = 104
-title = "Ending the Game — CR 104.2c"
-status = "skeleton"
-text = "In a multiplayer game between teams, a team with at least one player still in the game wins the game if all other teams have left the game. Each player on the winning team wins the game, even if one or more of those players had previously lost that game."

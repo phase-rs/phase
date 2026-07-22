@@ -1,5 +1,0 @@
-rule = "119.10"
-section = 119
-title = "Life — CR 119.10"
-status = "skeleton"
-text = "Some replacement effects are written, “If [a player] would gain life, . . . .” Such abilities are treated as though they are written, “If a source would cause [a player] to gain life, . . . .” If a player gains 0 life, no life gain event would occur, and these effects won’t apply."

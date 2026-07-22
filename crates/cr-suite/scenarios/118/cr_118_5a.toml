@@ -1,5 +1,0 @@
-rule = "118.5a"
-section = 118
-title = "Costs — CR 118.5a"
-status = "skeleton"
-text = "A spell whose mana cost is {0} must still be cast the same way as one with a cost greater than zero; it won’t cast itself automatically. The same is true for an activated ability whose cost is {0}."

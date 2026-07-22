@@ -1,5 +1,0 @@
-rule = "107.17a"
-section = 107
-title = "Numbers and Symbols — CR 107.17a"
-status = "skeleton"
-text = "A ticket symbol with a number inside it represents a ticket cost. To pay that cost, a player removes that many ticket counters from themselves."

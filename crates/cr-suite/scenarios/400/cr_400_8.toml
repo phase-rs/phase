@@ -1,5 +1,0 @@
-rule = "400.8"
-section = 400
-title = "General (Zones) — CR 400.8"
-status = "skeleton"
-text = "If an object in the exile zone is exiled, it doesn’t change zones, but it becomes a new object that has just been exiled."

@@ -1,5 +1,0 @@
-rule = "115.1e"
-section = 115
-title = "Targets — CR 115.1e"
-status = "skeleton"
-text = "Some keyword abilities, such as equip and modular, represent targeted activated or triggered abilities, and some keyword abilities, such as mutate, cause spells to have targets. In those cases, the phrase “target [something]” appears in the rule for that keyword ability rather than in the ability itself. (The keyword’s reminder text will often contain the word “target.”) See rule 702, “Keyword Abilities.”"

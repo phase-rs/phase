@@ -1,5 +1,0 @@
-rule = "608.2i"
-section = 608
-title = "Resolving Spells and Abilities — CR 608.2i"
-status = "skeleton"
-text = "Some effects look back in time and require information about previous game states and actions rather than considering the current game state. If such an effect requires information from the game about an object or group of objects, and that effect is not taking any actions on those objects, they don’t need to be currently in the zone they were in at the time of that previous game state or action, nor do they need to currently meet the criteria described in the action, as long as they did so at the specified time. This is an exception to 608.2h."

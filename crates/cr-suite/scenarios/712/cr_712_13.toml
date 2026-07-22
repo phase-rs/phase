@@ -1,5 +1,0 @@
-rule = "712.13"
-section = 712
-title = "Double-Faced Cards — CR 712.13"
-status = "skeleton"
-text = "By default, a resolving double-faced spell that becomes a permanent is put onto the battlefield with the same face up that was face up on the stack."

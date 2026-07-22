@@ -1,5 +1,0 @@
-rule = "508.1m"
-section = 508
-title = "Declare Attackers Step — CR 508.1m"
-status = "skeleton"
-text = "Any abilities that trigger on attackers being declared trigger."

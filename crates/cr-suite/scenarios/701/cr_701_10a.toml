@@ -1,5 +1,0 @@
-rule = "701.10a"
-section = 701
-title = "Keyword Actions — CR 701.10a"
-status = "skeleton"
-text = "Doubling a creature’s power and/or toughness creates a continuous effect. This effect modifies that creature’s power and/or toughness but doesn’t set those characteristics to a specific value. See rule 613.4c."

@@ -20,11 +20,10 @@ pub fn run_scenario(scenario: &ScenarioFile) -> Result<(), RunError> {
     let (mut runner, mut ctx) = build_runner(setup)?;
 
     for (idx, step) in scenario.steps.iter().enumerate() {
-        apply_step(&mut runner, &mut ctx, step)
-            .map_err(|e| match e {
-                RunError::Step(msg) => RunError::Step(format!("step {idx}: {msg}")),
-                other => other,
-            })?;
+        apply_step(&mut runner, &mut ctx, step).map_err(|e| match e {
+            RunError::Step(msg) => RunError::Step(format!("step {idx}: {msg}")),
+            other => other,
+        })?;
     }
 
     for (idx, assertion) in scenario.assertions.iter().enumerate() {

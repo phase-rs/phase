@@ -1,5 +1,0 @@
-rule = "701.24c"
-section = 701
-title = "Keyword Actions — CR 701.24c"
-status = "skeleton"
-text = "If an effect would cause a player to shuffle one or more specific objects into a library, that library is shuffled even if none of those objects are in the zone they’re expected to be in or an effect causes all of those objects to be moved to another zone or remain in their current zone."

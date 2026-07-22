@@ -1,5 +1,0 @@
-rule = "701.3b"
-section = 701
-title = "Keyword Actions — CR 701.3b"
-status = "skeleton"
-text = "If an effect tries to attach an Aura, Equipment, or Fortification to an object or player it can’t be attached to, the Aura, Equipment, or Fortification doesn’t move. If an effect tries to attach an Aura, Equipment, or Fortification to the object or player it’s already attached to, the effect does nothing. If an effect tries to attach an object that isn’t an Aura, Equipment, or Fortification to another object or player, the effect does nothing and the first object doesn’t move."

@@ -1,5 +1,0 @@
-rule = "701.58g"
-section = 701
-title = "Keyword Actions — CR 701.58g"
-status = "skeleton"
-text = "If a cloaked permanent that’s represented by an instant or sorcery card would turn face up, its controller reveals it and leaves it face down. Abilities that trigger whenever a permanent is turned face up won’t trigger."

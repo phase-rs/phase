@@ -1,5 +1,0 @@
-rule = "730.3c"
-section = 730
-title = "Miscellaneous — CR 730.3c"
-status = "skeleton"
-text = "If an effect can find the new object that a merged permanent becomes as it leaves the battlefield, it finds all of those objects. (See rule 400.7.) If that effect causes actions to be taken upon those objects, the same actions are taken upon each of them."

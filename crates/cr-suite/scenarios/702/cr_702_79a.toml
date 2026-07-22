@@ -1,5 +1,0 @@
-rule = "702.79a"
-section = 702
-title = "Keyword Abilities — CR 702.79a"
-status = "skeleton"
-text = "Persist is a triggered ability. “Persist” means “When this permanent is put into a graveyard from the battlefield, if it had no -1/-1 counters on it, return it to the battlefield under its owner’s control with a -1/-1 counter on it.”"

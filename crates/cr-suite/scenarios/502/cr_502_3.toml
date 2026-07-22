@@ -1,5 +1,0 @@
-rule = "502.3"
-section = 502
-title = "Untap Step — CR 502.3"
-status = "skeleton"
-text = "Third, the active player determines which permanents they control will untap. Then they untap them all simultaneously. This turn-based action doesn’t use the stack. Normally, all of a player’s permanents untap, but effects can keep one or more of a player’s permanents from untapping."

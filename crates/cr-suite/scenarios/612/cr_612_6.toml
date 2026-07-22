@@ -1,5 +1,0 @@
-rule = "612.6"
-section = 612
-title = "Text-Changing Effects — CR 612.6"
-status = "skeleton"
-text = "One card (Volrath’s Shapeshifter) states that an object has the “full text” of another object. This changes not just the text that appears in the object’s text box and type line, but also changes the text that represents its name, mana cost, color indicator, power, and toughness."

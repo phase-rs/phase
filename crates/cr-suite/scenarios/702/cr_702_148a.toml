@@ -1,5 +1,0 @@
-rule = "702.148a"
-section = 702
-title = "Keyword Abilities — CR 702.148a"
-status = "skeleton"
-text = "Cleave is a keyword that represents two static abilities that function while a spell with cleave is on the stack. “Cleave [cost]” means “You may cast this spell by paying [cost] rather than paying its mana cost” and “If this spell’s cleave cost was paid, change its text by removing all text found within square brackets in the spell’s rules text.” Casting a spell for its cleave cost follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."

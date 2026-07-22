@@ -1,5 +1,0 @@
-rule = "702.175a"
-section = 702
-title = "Keyword Abilities — CR 702.175a"
-status = "skeleton"
-text = "Offspring represents two abilities. “Offspring [cost]” means “You may pay an additional [cost] as you cast this spell” and “When this permanent enters, if its offspring cost was paid, create a token that’s a copy of it, except it’s 1/1.”"

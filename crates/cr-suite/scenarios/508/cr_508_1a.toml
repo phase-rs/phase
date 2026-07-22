@@ -1,5 +1,0 @@
-rule = "508.1a"
-section = 508
-title = "Declare Attackers Step — CR 508.1a"
-status = "skeleton"
-text = "The active player chooses which creatures that they control, if any, will attack. The chosen creatures must be untapped, they can’t also be battles, and each one must either have haste or have been controlled by the active player continuously since the turn began."

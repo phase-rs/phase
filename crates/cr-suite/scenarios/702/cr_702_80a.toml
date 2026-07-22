@@ -1,5 +1,0 @@
-rule = "702.80a"
-section = 702
-title = "Keyword Abilities — CR 702.80a"
-status = "skeleton"
-text = "Wither is a static ability. Damage dealt to a creature by a source with wither isn’t marked on that creature. Rather, it causes that source’s controller to put that many -1/-1 counters on that creature. See rule 120.3."

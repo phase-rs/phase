@@ -1,5 +1,0 @@
-rule = "121.6b"
-section = 121
-title = "Drawing a Card — CR 121.6b"
-status = "skeleton"
-text = "If an effect replaces a draw within a sequence of card draws, the replacement effect is completed before resuming the sequence."

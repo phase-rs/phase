@@ -1,5 +1,0 @@
-rule = "707.10f"
-section = 707
-title = "Copying Objects — CR 707.10f"
-status = "skeleton"
-text = "Some effects copy a permanent spell. As that copy resolves, it ceases being a copy of a spell and becomes a token permanent. (See rule 608.3f.)"

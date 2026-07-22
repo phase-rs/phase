@@ -1,5 +1,0 @@
-rule = "702.22k"
-section = 702
-title = "Keyword Abilities — CR 702.22k"
-status = "skeleton"
-text = "During the combat damage step, if a blocking creature is blocking a creature with banding, or both a [quality] creature with “bands with other [quality]” and another [quality] creature, the active player (rather than the defending player) chooses how the blocking creature’s damage is assigned. That player can divide that creature’s combat damage as they choose among any creatures it’s blocking. This is an exception to the procedure described in rule 510.1d."

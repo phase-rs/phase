@@ -1,5 +1,0 @@
-rule = "616.1f"
-section = 616
-title = "Interaction of Replacement and/or Prevention Effects — CR 616.1f"
-status = "skeleton"
-text = "Once the chosen effect has been applied, this process is repeated (taking into account only replacement or prevention effects that would now be applicable) until there are no more left to apply."

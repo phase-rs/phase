@@ -1,5 +1,0 @@
-rule = "603.7a"
-section = 603
-title = "Handling Triggered Abilities — CR 603.7a"
-status = "skeleton"
-text = "Delayed triggered abilities are created during the resolution of spells or abilities, as the result of a replacement effect being applied, or as a result of a static ability that allows a player to take an action. A delayed triggered ability won’t trigger until it has actually been created, even if its trigger event occurred just beforehand. Other events that happen earlier may make the trigger event impossible."

@@ -1,5 +1,0 @@
-rule = "724.1d"
-section = 724
-title = "The Initiative — CR 724.1d"
-status = "skeleton"
-text = "The current phase and/or step ends. If this happens during combat, remove all creatures and planeswalkers from combat. The game skips straight to the cleanup step; skip any phases or steps between this phase or step and the cleanup step. If an effect ends the turn during the cleanup step, a new cleanup step begins."

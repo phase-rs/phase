@@ -1,5 +1,0 @@
-rule = "605.2"
-section = 605
-title = "Mana Abilities — CR 605.2"
-status = "skeleton"
-text = "A mana ability remains a mana ability even if the game state doesn’t allow it to produce mana."

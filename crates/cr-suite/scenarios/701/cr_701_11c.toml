@@ -1,5 +1,0 @@
-rule = "701.11c"
-section = 701
-title = "Keyword Actions — CR 701.11c"
-status = "skeleton"
-text = "If a creature’s power is less than 0 when it’s tripled, tripling that creature’s power instead means that the creature gets -X/-0, where X is twice the difference between 0 and its power. Similarly, if its toughness is less than 0 when tripled, it gets -0/-X. If one characteristic’s value is negative but the other isn’t when both are tripled, it gets -X/+Y or +X/-Y, as appropriate."

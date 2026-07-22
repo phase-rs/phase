@@ -1,5 +1,0 @@
-rule = "113.3b"
-section = 113
-title = "Abilities — CR 113.3b"
-status = "skeleton"
-text = "Activated abilities have a cost and an effect. They are written as “[Cost]: [Effect.] [Activation instructions (if any).]” A player may activate such an ability whenever they have priority. Doing so puts it on the stack, where it remains until it’s countered, it resolves, or it otherwise leaves the stack. See rule 602, “Activating Activated Abilities.”"

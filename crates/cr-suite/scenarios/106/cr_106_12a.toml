@@ -1,5 +1,0 @@
-rule = "106.12a"
-section = 106
-title = "Mana — CR 106.12a"
-status = "skeleton"
-text = "An ability that triggers whenever a permanent “is tapped for mana” or is tapped for mana of a specified type triggers whenever such a mana ability resolves and produces mana or the specified type of mana."

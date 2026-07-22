@@ -1,5 +1,0 @@
-rule = "702.85b"
-section = 702
-title = "Keyword Abilities — CR 702.85b"
-status = "skeleton"
-text = "If an effect allows a player to take an action with one or more of the exiled cards “as you cascade,” the player may take that action after they have finished exiling cards due to the cascade ability. This action is taken before choosing whether to cast the last exiled card or, if no appropriate card was exiled, before putting the exiled cards on the bottom of their library in a random order."

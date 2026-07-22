@@ -123,8 +123,14 @@ fn cr_119_1_starting_life_defaults() {
         base_two_player(20, 20),
         vec![],
         vec![
-            AssertionSpec::PlayerLife { player: 0, life: 20 },
-            AssertionSpec::PlayerLife { player: 1, life: 20 },
+            AssertionSpec::PlayerLife {
+                player: 0,
+                life: 20,
+            },
+            AssertionSpec::PlayerLife {
+                player: 1,
+                life: 20,
+            },
             AssertionSpec::GameNotOver,
             AssertionSpec::PhaseIs {
                 phase: "PreCombatMain".into(),

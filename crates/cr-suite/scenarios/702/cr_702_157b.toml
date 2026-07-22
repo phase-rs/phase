@@ -1,5 +1,0 @@
-rule = "702.157b"
-section = 702
-title = "Keyword Abilities — CR 702.157b"
-status = "skeleton"
-text = "If a spell has multiple instances of squad, each is paid separately. If a permanent has multiple instances of squad, each triggers based on the payments made for that squad ability as it was cast, not based on payments for any other instance of squad."

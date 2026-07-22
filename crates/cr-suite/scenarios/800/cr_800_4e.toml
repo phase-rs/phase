@@ -1,5 +1,0 @@
-rule = "800.4e"
-section = 800
-title = "General (Multiplayer Rules) — CR 800.4e"
-status = "skeleton"
-text = "If combat damage would be assigned to a player who has left the game, that damage isn’t assigned."

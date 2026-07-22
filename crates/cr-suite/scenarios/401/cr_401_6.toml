@@ -1,5 +1,0 @@
-rule = "401.6"
-section = 401
-title = "Library — CR 401.6"
-status = "skeleton"
-text = "If an effect causes a player to play with the top card of their library revealed, and that particular card stops being revealed for any length of time before being revealed again, it becomes a new object."

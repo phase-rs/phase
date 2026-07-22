@@ -1,5 +1,0 @@
-rule = "702.97a"
-section = 702
-title = "Keyword Abilities — CR 702.97a"
-status = "skeleton"
-text = "Scavenge is an activated ability that functions only while the card with scavenge is in a graveyard. “Scavenge [cost]” means “[Cost], Exile this card from your graveyard: Put a number of +1/+1 counters equal to the power of the card you exiled on target creature. Activate only as a sorcery.”"

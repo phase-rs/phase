@@ -1,5 +1,0 @@
-rule = "703.2"
-section = 703
-title = "Turn-Based Actions — CR 703.2"
-status = "skeleton"
-text = "Turn-based actions are not controlled by any player."

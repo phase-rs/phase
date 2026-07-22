@@ -1,5 +1,0 @@
-rule = "508.8"
-section = 508
-title = "Declare Attackers Step — CR 508.8"
-status = "skeleton"
-text = "If no creatures are declared as attackers or put onto the battlefield attacking, skip the declare blockers and combat damage steps."

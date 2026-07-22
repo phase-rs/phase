@@ -1,5 +1,0 @@
-rule = "108.4"
-section = 108
-title = "Cards — CR 108.4"
-status = "skeleton"
-text = "A card doesn’t have a controller unless that card represents a permanent or spell; in those cases, its controller is determined by the rules for permanents or spells. See rules 110.2 and 112.2."

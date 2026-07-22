@@ -1,5 +1,0 @@
-rule = "603.7h"
-section = 603
-title = "Handling Triggered Abilities — CR 603.7h"
-status = "skeleton"
-text = "An activated or triggered ability may create a delayed triggered ability that triggers when the ability that created it has resolved a certain number of times in a turn. In that case, that delayed triggered ability is created only once, during the appropriate resolution of that ability."

@@ -1,5 +1,0 @@
-rule = "112.2"
-section = 112
-title = "Spells — CR 112.2"
-status = "skeleton"
-text = "A spell’s owner is the same as the owner of the card that represents it, unless it’s a copy. In that case, the owner of the spell is the player under whose control it was put on the stack. A spell’s controller is, by default, the player who put it on the stack. Every spell has a controller."

@@ -1,5 +1,0 @@
-rule = "208.5"
-section = 208
-title = "Power/Toughness — CR 208.5"
-status = "skeleton"
-text = "If a creature somehow has no value for its power, its power is 0. The same is true for toughness."

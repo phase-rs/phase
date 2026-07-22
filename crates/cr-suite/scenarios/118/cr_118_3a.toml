@@ -1,5 +1,0 @@
-rule = "118.3a"
-section = 118
-title = "Costs — CR 118.3a"
-status = "skeleton"
-text = "Paying mana is done by removing the indicated mana from a player’s mana pool. (Players can always pay 0 mana.) If excess mana remains in that player’s mana pool after making that payment, the player announces what mana is still there."

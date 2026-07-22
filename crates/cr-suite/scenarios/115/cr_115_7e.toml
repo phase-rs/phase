@@ -1,5 +1,0 @@
-rule = "115.7e"
-section = 115
-title = "Targets — CR 115.7e"
-status = "skeleton"
-text = "When changing targets or choosing new targets for a spell or ability, only the final set of targets is evaluated to determine whether the change is legal."

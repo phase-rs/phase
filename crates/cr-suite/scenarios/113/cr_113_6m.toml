@@ -1,5 +1,0 @@
-rule = "113.6m"
-section = 113
-title = "Abilities — CR 113.6m"
-status = "skeleton"
-text = "An ability whose cost or effect specifies that it moves the object it’s on out of a particular zone functions only in that zone, unless its trigger condition or a previous part of its cost or effect specifies that the object is put into that zone or, if the object is an Aura, that the object it enchants leaves the battlefield. The same is true if the effect of that ability creates a delayed triggered ability whose effect moves the object out of a particular zone."

@@ -1,5 +1,0 @@
-rule = "107.3e"
-section = 107
-title = "Numbers and Symbols — CR 107.3e"
-status = "skeleton"
-text = "If a spell or ability refers to the {X} or X in the mana cost, alternative cost, additional cost, or activation cost of another object, any X in that spell or ability’s text uses the value of X used by the other object."

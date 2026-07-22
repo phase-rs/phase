@@ -1,5 +1,0 @@
-rule = "707.9b"
-section = 707
-title = "Copying Objects — CR 707.9b"
-status = "skeleton"
-text = "Some copy effects modify a characteristic as part of the copying process. The final set of values for that characteristic becomes part of the copiable values of the copy."

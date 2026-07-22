@@ -1,5 +1,0 @@
-rule = "118.12b"
-section = 118
-title = "Costs — CR 118.12b"
-status = "skeleton"
-text = "Some effects offer a player a choice to search a zone and take additional actions with the cards found in that zone, followed by an “If [a player] does” clause. This clause checks whether the player chose to search, not whether the player took any of the additional actions."

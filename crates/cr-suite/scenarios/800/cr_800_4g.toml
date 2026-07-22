@@ -1,5 +1,0 @@
-rule = "800.4g"
-section = 800
-title = "General (Multiplayer Rules) — CR 800.4g"
-status = "skeleton"
-text = "If an object requires a player who has left the game to make a choice other than whether to pay a cost, the controller of the object chooses another player to make that choice. If the original choice was to be made by an opponent of the controller of the object, that player chooses another opponent if possible."

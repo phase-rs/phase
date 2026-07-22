@@ -1,5 +1,0 @@
-rule = "701.23a"
-section = 701
-title = "Keyword Actions — CR 701.23a"
-status = "skeleton"
-text = "To search for a card in a zone, look at all cards in that zone (even if it’s a hidden zone) and find a card that matches the given description."

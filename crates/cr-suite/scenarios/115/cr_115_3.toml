@@ -1,5 +1,0 @@
-rule = "115.3"
-section = 115
-title = "Targets — CR 115.3"
-status = "skeleton"
-text = "The same target can’t be chosen multiple times for any one instance of the word “target” on a spell or ability. If the spell or ability uses the word “target” in multiple places, the same object or player can be chosen once for each instance of the word “target” (as long as it fits the targeting criteria). This rule applies both when choosing targets for a spell or ability and when changing targets or choosing new targets for a spell or ability (see rule 115.7)."

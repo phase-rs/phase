@@ -1,5 +1,0 @@
-rule = "400.7f"
-section = 400
-title = "General (Zones) — CR 400.7f"
-status = "skeleton"
-text = "Abilities that trigger when an enchanted permanent leaves the battlefield can find the new object that each Aura enchanting that permanent became in its owner’s graveyard if it was put into that graveyard at the same time the enchanted permanent left the battlefield. It can also find the new object that each Aura enchanting it became in its owner’s graveyard as a result of being put there as a state-based action for not being attached to a permanent. (See rule 704.5m.)"

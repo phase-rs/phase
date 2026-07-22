@@ -1,5 +1,0 @@
-rule = "602.1c"
-section = 602
-title = "Activating Activated Abilities — CR 602.1c"
-status = "skeleton"
-text = "An activated ability is the only kind of ability that can be activated. If an object or rule refers to activating an ability without specifying what kind, it must be referring to an activated ability."

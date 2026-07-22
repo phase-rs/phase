@@ -1,5 +1,0 @@
-rule = "709.3b"
-section = 709
-title = "Split Cards — CR 709.3b"
-status = "skeleton"
-text = "While on the stack, only the characteristics of the half being cast exist. The other half’s characteristics are treated as though they didn’t exist."

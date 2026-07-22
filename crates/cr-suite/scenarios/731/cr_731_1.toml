@@ -1,5 +1,0 @@
-rule = "731.1"
-section = 731
-title = "Controlling Another Player — CR 731.1"
-status = "skeleton"
-text = "Day and night are designations that the game itself can have. The game starts with neither designation. “It becomes day” and “it becomes night” refer to the game gaining the day or night designation. It can become day or night through the daybound and nightbound keyword abilities (see rule 702.145). Other effects can also make it day or night. Once it has become day or night, the game will have exactly one of those designations from that point forward."

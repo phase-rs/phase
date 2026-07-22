@@ -1,5 +1,0 @@
-rule = "706.6"
-section = 706
-title = "Rolling a Die — CR 706.6"
-status = "skeleton"
-text = "If a player is instructed to ignore a roll, that roll is considered to have never happened. No abilities trigger because of the ignored roll, and no effects apply to that roll. If that player was instructed to ignore the lowest roll and multiple results are tied for the lowest, the player chooses one of those rolls to be ignored."

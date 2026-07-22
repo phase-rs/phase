@@ -1,5 +1,0 @@
-rule = "310.8b"
-section = 310
-title = "Battles — CR 310.8b"
-status = "skeleton"
-text = "A battle’s protector can never attack it. A battle can be attacked by any attacking player for whom its protector is a defending player. Notably, a Siege battle can be attacked by its own controller."

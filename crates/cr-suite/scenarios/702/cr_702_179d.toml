@@ -1,5 +1,0 @@
-rule = "702.179d"
-section = 702
-title = "Keyword Abilities — CR 702.179d"
-status = "skeleton"
-text = "There is an inherent triggered ability associated with a player having 1 or more speed. This ability has no source and is controlled by that player. That ability is “Whenever one or more opponents lose life during your turn, if your speed is less than 4, your speed increases by 1. This ability triggers only once each turn.”"

@@ -1,5 +1,0 @@
-rule = "612.10"
-section = 612
-title = "Text-Changing Effects — CR 612.10"
-status = "skeleton"
-text = "A splice ability changes a spell’s text by adding the rules text of the card with splice to the spell, following that spell’s own rules text. It doesn’t modify or replace any of that spell’s own text. (See rule 702.47, “Splice.”)"

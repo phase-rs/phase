@@ -1,5 +1,0 @@
-rule = "506.7"
-section = 506
-title = "Combat Phase — CR 506.7"
-status = "skeleton"
-text = "Some spells state that they may be cast “only [before/after] [a particular point in the combat phase],” in which that point may be “attackers are declared,” “blockers are declared,” “the combat damage step,” “the end of combat step,” “the combat phase,” or “combat.”"

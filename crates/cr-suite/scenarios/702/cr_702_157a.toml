@@ -1,5 +1,0 @@
-rule = "702.157a"
-section = 702
-title = "Keyword Abilities — CR 702.157a"
-status = "skeleton"
-text = "Squad is a keyword that represents two linked abilities. The first is a static ability that functions while the creature spell with squad is on the stack. The second is a triggered ability that functions when the creature with squad enters the battlefield. “Squad [cost]” means “As an additional cost to cast this spell, you may pay [cost] any number of times” and “When this creature enters, if its squad cost was paid, create a token that’s a copy of it for each time its squad cost was paid.” Paying a spell’s squad cost follows the rules for paying additional costs in rules 601.2b and 601.2f–h."

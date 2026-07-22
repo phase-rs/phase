@@ -1,5 +1,0 @@
-rule = "707.7"
-section = 707
-title = "Copying Objects — CR 707.7"
-status = "skeleton"
-text = "If a pair of linked abilities are copied, those abilities will be similarly linked to one another on the object that copied them. One ability refers only to actions that were taken or objects that were affected by the other. They can’t be linked to any other ability, regardless of what other abilities the copy may currently have or may have had in the past. See rule 607, “Linked Abilities.”"

@@ -1,5 +1,0 @@
-rule = "702.30a"
-section = 702
-title = "Keyword Abilities — CR 702.30a"
-status = "skeleton"
-text = "Echo is a triggered ability. “Echo [cost]” means “At the beginning of your upkeep, if this permanent came under your control since the beginning of your last upkeep, sacrifice it unless you pay [cost].”"

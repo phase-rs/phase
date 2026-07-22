@@ -1,5 +1,0 @@
-rule = "119.7"
-section = 119
-title = "Life — CR 119.7"
-status = "skeleton"
-text = "If an effect says that a player can’t gain life, that player can’t make an exchange such that the player’s life total would become higher; in that case, the exchange won’t happen. Similarly, if an effect redistributes life totals, a player can’t receive a new life total such that the player’s life total would become higher. In addition, a cost that involves having that player gain life can’t be paid, and a replacement effect that would replace a life gain event affecting that player won’t do anything."

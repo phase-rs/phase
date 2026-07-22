@@ -1,5 +1,0 @@
-rule = "202.3d"
-section = 202
-title = "Mana Cost and Color — CR 202.3d"
-status = "skeleton"
-text = "The mana value of a split card not on the stack or of a fused split spell on the stack is determined from the combined mana costs of its halves. Otherwise, while a split card is on the stack, the mana value of the spell is determined by the mana cost of the half that was chosen to be cast. See rule 709, “Split Cards.”"

@@ -1,5 +1,0 @@
-rule = "110.1"
-section = 110
-title = "Permanents — CR 110.1"
-status = "skeleton"
-text = "A permanent is a card or token on the battlefield. A permanent remains on the battlefield indefinitely. A card or token becomes a permanent as it enters the battlefield and it stops being a permanent as it’s moved to another zone by an effect or rule."

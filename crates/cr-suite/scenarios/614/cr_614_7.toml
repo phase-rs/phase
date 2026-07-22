@@ -1,5 +1,0 @@
-rule = "614.7"
-section = 614
-title = "Replacement Effects — CR 614.7"
-status = "skeleton"
-text = "If a replacement effect would replace an event, but that event never happens, the replacement effect simply doesn’t do anything."

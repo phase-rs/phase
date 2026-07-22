@@ -1,5 +1,0 @@
-rule = "701.11b"
-section = 701
-title = "Keyword Actions — CR 701.11b"
-status = "skeleton"
-text = "To triple a creature’s power, that creature gets +X/+0, where X is twice that creature’s power as the spell or ability that triples its power resolves. Similarly, an effect that triples a creature’s toughness gives it +0/+X, where X is twice that creature’s toughness. Tripling a creature’s power and toughness gives it +X/+Y, where X is twice its power and Y is twice its toughness."

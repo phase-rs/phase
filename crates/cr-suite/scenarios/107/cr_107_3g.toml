@@ -1,5 +1,0 @@
-rule = "107.3g"
-section = 107
-title = "Numbers and Symbols — CR 107.3g"
-status = "skeleton"
-text = "If a card in any zone other than the stack has an {X} in its mana cost, the value of {X} is treated as 0, even if the value of X is defined somewhere within its text."

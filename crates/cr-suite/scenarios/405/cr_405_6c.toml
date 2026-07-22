@@ -1,5 +1,0 @@
-rule = "405.6c"
-section = 405
-title = "Stack — CR 405.6c"
-status = "skeleton"
-text = "Mana abilities resolve immediately. If a mana ability both produces mana and has another effect, the mana is produced and the other effect happens immediately. If a player had priority before a mana ability was activated, that player gets priority after it resolves. (See rule 605, “Mana Abilities.”)"

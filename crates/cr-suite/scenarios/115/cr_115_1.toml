@@ -1,5 +1,0 @@
-rule = "115.1"
-section = 115
-title = "Targets — CR 115.1"
-status = "skeleton"
-text = "Some spells and abilities require their controller to choose one or more targets for them. The targets are object(s) and/or player(s) the spell or ability will affect. These targets are declared as part of the process of putting the spell or ability on the stack. The targets can’t be changed except by another spell or ability that explicitly says it can do so."

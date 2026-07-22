@@ -1,5 +1,0 @@
-rule = "603.3a"
-section = 603
-title = "Handling Triggered Abilities — CR 603.3a"
-status = "skeleton"
-text = "A triggered ability is controlled by the player who controlled its source at the time it triggered, unless it’s a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."

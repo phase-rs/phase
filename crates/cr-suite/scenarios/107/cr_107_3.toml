@@ -1,5 +1,0 @@
-rule = "107.3"
-section = 107
-title = "Numbers and Symbols — CR 107.3"
-status = "skeleton"
-text = "Many objects use the letter X as a placeholder for a number that needs to be determined. Some objects have abilities that define the value of X; the rest let their controller choose the value of X."

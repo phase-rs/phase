@@ -1,5 +1,0 @@
-rule = "701.5a"
-section = 701
-title = "Keyword Actions — CR 701.5a"
-status = "skeleton"
-text = "To cast a spell is to take it from the zone it’s in (usually the hand), put it on the stack, and pay its costs, so that it will eventually resolve and have its effect. A player may cast a spell if they have priority. See rule 601, “Casting Spells.”"

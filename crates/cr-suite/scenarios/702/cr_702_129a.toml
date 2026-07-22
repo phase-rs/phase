@@ -1,5 +1,0 @@
-rule = "702.129a"
-section = 702
-title = "Keyword Abilities — CR 702.129a"
-status = "skeleton"
-text = "Eternalize is an activated ability that functions while the card with eternalize is in a graveyard. “Eternalize [cost]” means “[Cost], Exile this card from your graveyard: Create a token that’s a copy of this card, except it’s black, it’s 4/4, it has no mana cost, and it’s a Zombie in addition to its other types. Activate only as a sorcery.”"

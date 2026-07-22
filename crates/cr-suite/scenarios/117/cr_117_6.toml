@@ -1,5 +1,0 @@
-rule = "117.6"
-section = 117
-title = "Timing and Priority — CR 117.6"
-status = "skeleton"
-text = "In a multiplayer game using the shared team turns option, teams rather than individual players have priority. See rule 805, “Shared Team Turns Option.”"

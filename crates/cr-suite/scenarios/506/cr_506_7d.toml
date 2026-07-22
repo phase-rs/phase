@@ -1,5 +1,0 @@
-rule = "506.7d"
-section = 506
-title = "Combat Phase — CR 506.7d"
-status = "skeleton"
-text = "Some spells state that they may be cast “only before (or after) [a particular point in the combat phase],” but don’t meet the additional criteria described in rule 506.7c. If a turn has multiple combat phases, such spells may be cast that turn only before (or after) the stated point of the first combat phase."

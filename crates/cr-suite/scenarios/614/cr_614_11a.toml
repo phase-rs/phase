@@ -1,5 +1,0 @@
-rule = "614.11a"
-section = 614
-title = "Replacement Effects — CR 614.11a"
-status = "skeleton"
-text = "If an effect replaces a draw within a sequence of card draws, all actions required by the replacement are completed, if possible, before resuming the sequence."

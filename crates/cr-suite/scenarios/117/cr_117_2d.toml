@@ -1,5 +1,0 @@
-rule = "117.2d"
-section = 117
-title = "Timing and Priority — CR 117.2d"
-status = "skeleton"
-text = "State-based actions happen automatically when certain conditions are met. See rule 704. They’re dealt with before a player would receive priority. See rule 117.5."

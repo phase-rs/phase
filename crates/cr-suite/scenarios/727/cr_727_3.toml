@@ -1,5 +1,0 @@
-rule = "727.3"
-section = 727
-title = "Subgames — CR 727.3"
-status = "skeleton"
-text = "Because each player draws seven cards when the new game begins, any player with fewer than seven cards in their library will lose the game when state-based actions are checked during the upkeep step of the first turn, regardless of any mulligans that player takes. (See rule 704, “State-Based Actions.”)"

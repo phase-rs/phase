@@ -1,5 +1,0 @@
-rule = "702.75a"
-section = 702
-title = "Keyword Abilities — CR 702.75a"
-status = "skeleton"
-text = "Hideaway is a triggered ability. “Hideaway N” means “When this permanent enters, look at the top N cards of your library. Exile one of them face down and put the rest on the bottom of your library in a random order. The exiled card gains ‘The player who controls the permanent that exiled this card may look at this card in the exile zone.’”"

@@ -1,5 +1,0 @@
-rule = "702.47c"
-section = 702
-title = "Keyword Abilities — CR 702.47c"
-status = "skeleton"
-text = "The spell has the characteristics of the main spell, plus the rules text of each of the spliced cards. This is a text-changing effect (see rule 612, “Text-Changing Effects”). The spell doesn’t gain any other characteristics (name, mana cost, color, supertypes, card types, subtypes, etc.) of the spliced cards. Text gained by the spell that refers to a card by name refers to the spell on the stack, not the card from which the text was copied."

@@ -1,5 +1,0 @@
-rule = "609.3"
-section = 609
-title = "Effects — CR 609.3"
-status = "skeleton"
-text = "If an effect attempts to do something impossible, it does only as much as possible."

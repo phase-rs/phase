@@ -1,5 +1,0 @@
-rule = "603.12a"
-section = 603
-title = "Handling Triggered Abilities — CR 603.12a"
-status = "skeleton"
-text = "Normally, if the trigger event or events occur multiple times during the resolution of the spell or ability that created it, the reflexive triggered ability will trigger once for each of those times. However, if a resolving spell or ability includes a choice to pay a cost “any number of times” and creates a triggered ability that triggers “when [a player] pays [that cost] one or more times,” paying that cost one or more times causes the reflexive triggered ability to trigger only once."

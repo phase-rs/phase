@@ -1,5 +1,0 @@
-rule = "109.1"
-section = 109
-title = "Objects — CR 109.1"
-status = "skeleton"
-text = "An object is an ability on the stack, a card, a copy of a card, a token, a spell, a permanent, or an emblem."

@@ -1,5 +1,0 @@
-rule = "604.4"
-section = 604
-title = "Handling Static Abilities — CR 604.4"
-status = "skeleton"
-text = "Many Auras, Equipment, and Fortifications have static abilities that modify the object they’re attached to, but those abilities don’t target that object. If an Aura, Equipment, or Fortification is moved to a different object, the ability stops applying to the original object and starts modifying the new one."

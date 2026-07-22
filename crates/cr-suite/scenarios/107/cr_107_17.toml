@@ -1,5 +1,0 @@
-rule = "107.17"
-section = 107
-title = "Numbers and Symbols — CR 107.17"
-status = "skeleton"
-text = "The ticket symbol is {TK}. It represents one ticket counter."

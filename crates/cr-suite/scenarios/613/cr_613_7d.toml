@@ -1,5 +1,0 @@
-rule = "613.7d"
-section = 613
-title = "Interaction of Continuous Effects — CR 613.7d"
-status = "skeleton"
-text = "An object receives a timestamp at the time it enters a zone."

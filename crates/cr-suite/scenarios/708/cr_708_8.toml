@@ -1,5 +1,0 @@
-rule = "708.8"
-section = 708
-title = "Face-Down Spells and Permanents — CR 708.8"
-status = "skeleton"
-text = "As a face-down permanent is turned face up, its copiable values revert to its normal copiable values. Any effects that have been applied to the face-down permanent still apply to the face-up permanent. Any abilities relating to the permanent entering the battlefield don’t trigger and don’t have any effect, because the permanent has already entered the battlefield."

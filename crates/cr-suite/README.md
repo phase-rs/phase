@@ -6,11 +6,23 @@ Annotation tracking (`cargo rules-audit`) records which CR numbers appear in
 comments. This crate turns those citations into **enforceable contracts**:
 
 1. Parse `docs/MagicCompRules.txt`
-2. Emit per-rule TOML fixtures under `scenarios/<section>/`
+2. Emit per-rule TOML fixtures under `scenarios/<section>/` (generated; not committed en masse)
 3. Promote fixtures to `status = "executable"` with typed setup/steps/assertions
 4. Run them through `GameScenario` / `GameRunner` (engine APIs only)
 
 Tracked in https://github.com/phase-rs/phase/issues/6343.
+
+## What is committed
+
+This PR ships the **runner/schema/generator** plus a **small executable seed set**
+under `scenarios/` (life, damage, zones, phases, SBAs). The full CompRules
+skeleton corpus is **not** committed here — generate it mechanically and land it
+in a separate follow-up PR so review stays within file limits.
+
+```bash
+# After this crate merges: generate skeletons (preserves authored executables)
+cargo cr-suite --generate --update
+```
 
 ## Commands
 
@@ -40,9 +52,9 @@ cargo cr-suite --run --rule 704.5a --fail-fast
 
 ## Extending coverage
 
-1. Find the skeleton under `scenarios/<section>/cr_<rule>.toml`
+1. Generate skeletons (`cargo cr-suite --generate --update`) or hand-author a fixture
 2. Set `status = "executable"`
 3. Fill `[setup]`, `[[steps]]`, `[[assertions]]` using kinds from `predicates.rs`
-4. Run `cargo cr-suite --run --rule <N>`
+4. Run `cargo cr-suite --run --rule <N>` and `cargo test -p cr-suite`
 
 Do **not** duplicate game logic in assertions — only read engine state.

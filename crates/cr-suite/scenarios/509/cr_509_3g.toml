@@ -1,5 +1,0 @@
-rule = "509.3g"
-section = 509
-title = "Declare Blockers Step — CR 509.3g"
-status = "skeleton"
-text = "An ability that reads “Whenever [a creature] attacks and isn’t blocked, . . .” triggers if no creatures are declared as blockers for that creature. It will trigger even if the creature was never declared as an attacker (for example, if it entered the battlefield attacking). It won’t trigger if the attacking creature is blocked and then all its blockers are removed from combat."

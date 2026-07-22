@@ -1,5 +1,0 @@
-rule = "706.3c"
-section = 706
-title = "Rolling a Die — CR 706.3c"
-status = "skeleton"
-text = "Some effects in results charts include the text “Roll again.” This additional roll uses the same kind of and number of dice originally called for, including any applicable modifiers."

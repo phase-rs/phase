@@ -1,5 +1,0 @@
-rule = "118.5"
-section = 118
-title = "Costs — CR 118.5"
-status = "skeleton"
-text = "Some costs are represented by {0}, or are reduced to {0}. The action necessary for a player to pay such a cost is the player’s acknowledgment that they are paying it. Even though such a cost requires no resources, it’s not automatically paid."

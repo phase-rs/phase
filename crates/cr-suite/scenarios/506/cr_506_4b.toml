@@ -1,5 +1,0 @@
-rule = "506.4b"
-section = 506
-title = "Combat Phase — CR 506.4b"
-status = "skeleton"
-text = "Tapping or untapping a creature that’s already been declared as an attacker or blocker doesn’t remove it from combat and doesn’t prevent its combat damage."

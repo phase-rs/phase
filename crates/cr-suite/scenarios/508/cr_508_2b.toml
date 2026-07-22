@@ -1,5 +1,0 @@
-rule = "508.2b"
-section = 508
-title = "Declare Attackers Step — CR 508.2b"
-status = "skeleton"
-text = "Any abilities that triggered on attackers being declared or that triggered during the process described in rules 508.1 are put onto the stack before the active player gets priority; the order in which they triggered doesn’t matter. (See rule 603, “Handling Triggered Abilities.”)"

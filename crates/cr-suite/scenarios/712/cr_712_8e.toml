@@ -1,5 +1,0 @@
-rule = "712.8e"
-section = 712
-title = "Double-Faced Cards — CR 712.8e"
-status = "skeleton"
-text = "While a nonmodal double-faced permanent has its back face up, it has only the characteristics of its back face. However, its mana value is calculated using the mana cost of its front face. If a permanent is copying the back face of a nonmodal double-faced permanent (even if the object representing that copy is itself a double-faced permanent), the mana value of that permanent is 0. See rule 202.3b."

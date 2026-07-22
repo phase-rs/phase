@@ -1,5 +1,0 @@
-rule = "202.3c"
-section = 202
-title = "Mana Cost and Color — CR 202.3c"
-status = "skeleton"
-text = "The mana value of a melded permanent is calculated as though it had the combined mana cost of the front faces of each card that represents it. If a permanent is a copy of a melded permanent (even if that copy is represented by two other meld cards), the mana value of the copy is 0."

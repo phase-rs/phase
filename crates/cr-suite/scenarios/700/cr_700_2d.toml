@@ -1,5 +1,0 @@
-rule = "700.2d"
-section = 700
-title = "General (Additional Rules) — CR 700.2d"
-status = "skeleton"
-text = "If a player is allowed to choose more than one mode for a modal spell or ability, that player normally can’t choose the same mode more than once. However, some modal spells include the instruction “You may choose the same mode more than once.” If a particular mode is chosen multiple times, the spell is treated as if that mode appeared that many times in sequence. If that mode requires a target, the same player or object may be chosen as the target for each of those modes, or different targets may be chosen."

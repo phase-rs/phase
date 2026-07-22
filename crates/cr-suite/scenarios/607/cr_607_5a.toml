@@ -1,5 +1,0 @@
-rule = "607.5a"
-section = 607
-title = "Linked Abilities — CR 607.5a"
-status = "skeleton"
-text = "If an object gains an ability that refers to a choice, but either (a) doesn’t copy that ability’s linked ability or (b) does copy the linked ability but no choice is made for it, then the choice is considered to be “undefined.” If an ability refers to an undefined choice, that part of the ability won’t do anything."

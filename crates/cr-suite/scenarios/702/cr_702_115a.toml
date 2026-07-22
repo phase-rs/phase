@@ -1,5 +1,0 @@
-rule = "702.115a"
-section = 702
-title = "Keyword Abilities — CR 702.115a"
-status = "skeleton"
-text = "Ingest is a triggered ability. “Ingest” means “Whenever this creature deals combat damage to a player, that player exiles the top card of their library.”"

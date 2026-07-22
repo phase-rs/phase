@@ -1,5 +1,0 @@
-rule = "307.5"
-section = 307
-title = "Sorceries — CR 307.5"
-status = "skeleton"
-text = "If a spell, ability, or effect states that a player can do something only “any time they could cast a sorcery” or “only as a sorcery,” it means only that the player must have priority, it must be during the main phase of their turn, and the stack must be empty. The player doesn’t need to have a sorcery card they could cast. Effects that would preclude that player from casting a sorcery spell don’t affect the player’s capability to perform that action (unless the action is actually casting a sorcery spell)."

@@ -1,5 +1,0 @@
-rule = "202.3e"
-section = 202
-title = "Mana Cost and Color — CR 202.3e"
-status = "skeleton"
-text = "When calculating the mana value of an object with an {X} in its mana cost, X is treated as 0 while the object is not on the stack, and X is treated as the number chosen for it while the object is on the stack."

@@ -1,5 +1,0 @@
-rule = "701.47a"
-section = 701
-title = "Keyword Actions — CR 701.47a"
-status = "skeleton"
-text = "To amass [subtype] N means “If you don’t control an Army creature, create a 0/0 black [subtype] Army creature token. Choose an Army creature you control. Put N +1/+1 counters on that creature. If it isn’t a [subtype], it becomes a [subtype] in addition to its other types.”"

@@ -1,5 +1,0 @@
-rule = "701.3d"
-section = 701
-title = "Keyword Actions — CR 701.3d"
-status = "skeleton"
-text = "To “unattach” an Equipment from a creature means to move it away from that creature so the Equipment is on the battlefield but is not equipping anything. It should no longer be physically touching any creature. If an Aura, Equipment, or Fortification that was attached to an object or player ceases to be attached to it, that counts as “becoming unattached [from that object or player]”; this includes if that Aura, Equipment, or Fortification leaves the battlefield, the object leaves the zone it was in, or that player leaves the game."

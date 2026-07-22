@@ -1,5 +1,0 @@
-rule = "724.1f"
-section = 724
-title = "The Initiative — CR 724.1f"
-status = "skeleton"
-text = "No player gets priority during this process, so triggered abilities are not put onto the stack. If any triggered abilities have triggered since this process began, those abilities are put onto the stack during the cleanup step, then the active player gets priority and players can cast spells and activate abilities. Then there will be another cleanup step before the turn finally ends. If no triggered abilities have triggered during this process, no player gets priority during the cleanup step. See rule 514, “Cleanup Step.”"

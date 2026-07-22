@@ -1,5 +1,0 @@
-rule = "702.191a"
-section = 702
-title = "Keyword Abilities — CR 702.191a"
-status = "skeleton"
-text = "Increment is a triggered ability. “Increment” means “Whenever you cast a spell, if this permanent is a creature and the amount of mana spent to cast that spell is greater than this creature’s power or this creature’s toughness, put a +1/+1 counter on this creature.”"

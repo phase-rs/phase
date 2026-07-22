@@ -1,5 +1,0 @@
-rule = "710.4"
-section = 710
-title = "Flip Cards — CR 710.4"
-status = "skeleton"
-text = "Flipping a permanent is a one-way process. Once a permanent is flipped, it’s impossible for it to become unflipped. However, if a flipped permanent leaves the battlefield, it retains no memory of its status. See rule 110.5."

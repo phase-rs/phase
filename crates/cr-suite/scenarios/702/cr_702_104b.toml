@@ -1,5 +1,0 @@
-rule = "702.104b"
-section = 702
-title = "Keyword Abilities — CR 702.104b"
-status = "skeleton"
-text = "Objects with tribute have triggered abilities that check “if tribute wasn’t paid.” This condition is true if the opponent chosen as a result of the tribute ability didn’t have the creature enter the battlefield with +1/+1 counters as specified by the creature’s tribute ability."

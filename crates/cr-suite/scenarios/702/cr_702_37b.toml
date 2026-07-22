@@ -1,5 +1,0 @@
-rule = "702.37b"
-section = 702
-title = "Keyword Abilities — CR 702.37b"
-status = "skeleton"
-text = "Megamorph is a variant of the morph ability. “Megamorph [cost]” means “You may cast this card as a 2/2 face-down creature with no text, no name, no subtypes, and no mana cost by paying {3} rather than paying its mana cost” and “As this permanent is turned face up, put a +1/+1 counter on it if its megamorph cost was paid to turn it face up.” A megamorph cost is a morph cost."

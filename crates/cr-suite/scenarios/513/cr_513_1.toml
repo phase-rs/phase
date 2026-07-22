@@ -1,5 +1,0 @@
-rule = "513.1"
-section = 513
-title = "End Step — CR 513.1"
-status = "skeleton"
-text = "The end step has no turn-based actions. Once it begins, the active player gets priority. (See rule 117, “Timing and Priority.”)"

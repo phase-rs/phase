@@ -1,5 +1,0 @@
-rule = "107.3n"
-section = 107
-title = "Numbers and Symbols — CR 107.3n"
-status = "skeleton"
-text = "If a delayed triggered ability created by a resolving spell or ability refers to X, X is not defined in the text of that triggered ability, and the spell or ability that created it had a value of X chosen for any of its costs, the value of X for the triggered ability is the same as the value of X for the spell of ability that created it."

@@ -1,5 +1,0 @@
-rule = "702.164c"
-section = 702
-title = "Keyword Abilities — CR 702.164c"
-status = "skeleton"
-text = "Combat damage dealt to a player by a creature with toxic causes that creature’s controller to give the player a number of poison counters equal to that creature’s total toxic value, in addition to the damage’s other results. See rule 120.3."

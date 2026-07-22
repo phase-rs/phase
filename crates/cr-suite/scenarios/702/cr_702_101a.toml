@@ -1,5 +1,0 @@
-rule = "702.101a"
-section = 702
-title = "Keyword Abilities — CR 702.101a"
-status = "skeleton"
-text = "Extort is a triggered ability. “Extort” means “Whenever you cast a spell, you may pay {W/B}. If you do, each opponent loses 1 life and you gain life equal to the total life lost this way.”"

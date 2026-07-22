@@ -1,5 +1,0 @@
-rule = "107.3c"
-section = 107
-title = "Numbers and Symbols — CR 107.3c"
-status = "skeleton"
-text = "If a spell or activated ability has an {X}, [-X], or X in its cost and/or its text, and the value of X is defined by the text of that spell or ability, then that’s the value of X while that spell or ability is on the stack. The controller of that spell or ability doesn’t get to choose the value. Note that the value of X may change while that spell or ability is on the stack."

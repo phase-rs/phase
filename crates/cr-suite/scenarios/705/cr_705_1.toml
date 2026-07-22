@@ -1,5 +1,0 @@
-rule = "705.1"
-section = 705
-title = "Flipping a Coin — CR 705.1"
-status = "skeleton"
-text = "Some cards refer to flipping a coin. A coin used in a flip must be a two-sided object with easily distinguished sides and equal likelihood that either side lands face up. If the coin that’s being flipped doesn’t have an obvious “heads” or “tails,” designate one side to be “heads,” and the other side to be “tails.” Other methods of randomization may be substituted for flipping a coin as long as there are two possible outcomes of equal likelihood and all players agree to the substitution. For example, the player may roll an even-sided die and call “odds” or “evens,” or roll an even-sided die and designate that “odds” means “heads” and “evens” means “tails.”"

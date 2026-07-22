@@ -1,5 +1,0 @@
-rule = "702.26a"
-section = 702
-title = "Keyword Abilities — CR 702.26a"
-status = "skeleton"
-text = "Phasing is a static ability that modifies the rules of the untap step. During each player’s untap step, before the active player untaps permanents, all phased-in permanents with phasing that player controls “phase out.” Simultaneously, all phased-out permanents that had phased out under that player’s control “phase in.”"

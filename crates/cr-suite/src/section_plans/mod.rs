@@ -12,10 +12,8 @@ pub mod sba;
 pub mod turn_structure;
 pub mod zones;
 
-use serde::{Deserialize, Serialize};
-
 /// A planned executable promotion for a CR rule.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoveragePlanEntry {
     pub rule: &'static str,
     pub section: u32,
@@ -24,8 +22,7 @@ pub struct CoveragePlanEntry {
     pub notes: &'static str,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoveragePriority {
     High,
     Medium,

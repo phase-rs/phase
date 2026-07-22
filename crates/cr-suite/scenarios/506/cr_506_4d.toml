@@ -1,5 +1,0 @@
-rule = "506.4d"
-section = 506
-title = "Combat Phase — CR 506.4d"
-status = "skeleton"
-text = "A permanent that’s both a blocking creature and a planeswalker that’s being attacked is removed from combat if it stops being both a creature and a planeswalker. If it stops being one of those card types but continues to be the other, it continues to be either a blocking creature or a planeswalker that’s being attacked, whichever is appropriate."

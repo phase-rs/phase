@@ -18,9 +18,7 @@ pub fn assert_game_over(
                 if *actual_winner != Some(expected) {
                     return Err(AssertionFailure {
                         kind: "game_over".into(),
-                        detail: format!(
-                            "expected winner {expected:?}, got {actual_winner:?}"
-                        ),
+                        detail: format!("expected winner {expected:?}, got {actual_winner:?}"),
                     });
                 }
             }

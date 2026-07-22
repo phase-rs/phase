@@ -1,5 +1,0 @@
-rule = "508.3a"
-section = 508
-title = "Declare Attackers Step — CR 508.3a"
-status = "skeleton"
-text = "An ability that reads “Whenever [a creature] attacks, . . .” triggers if that creature is declared as an attacker. Similarly, “Whenever [a creature] attacks [a player, planeswalker, or battle], . . .” triggers if that creature is declared as an attacker attacking that player or permanent. Such abilities won’t trigger if a creature is put onto the battlefield attacking."

@@ -1,5 +1,0 @@
-rule = "508.1f"
-section = 508
-title = "Declare Attackers Step — CR 508.1f"
-status = "skeleton"
-text = "The active player taps the chosen creatures. Tapping a creature when it’s declared as an attacker isn’t a cost; attacking simply causes creatures to become tapped."

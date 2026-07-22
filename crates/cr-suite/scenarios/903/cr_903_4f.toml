@@ -1,5 +1,0 @@
-rule = "903.4f"
-section = 903
-title = "Commander — CR 903.4f"
-status = "skeleton"
-text = "If an ability refers to the colors or number of colors in a commander’s color identity, that quality is undefined if that player doesn’t have a commander. That part of the ability won’t do anything. Costs that refer to that quality are unpayable."

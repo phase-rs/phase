@@ -1,5 +1,0 @@
-rule = "510.1d"
-section = 510
-title = "Combat Damage Step — CR 510.1d"
-status = "skeleton"
-text = "A blocking creature assigns combat damage to the creatures it’s blocking. If it isn’t currently blocking any creatures (if, for example, they were destroyed or removed from combat), it assigns no combat damage. If it’s blocking exactly one creature, it assigns all its combat damage to that creature. If it’s blocking two or more creatures, it assigns its combat damage divided as its controller chooses among them."

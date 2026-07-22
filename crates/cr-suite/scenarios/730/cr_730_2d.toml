@@ -1,5 +1,0 @@
-rule = "730.2d"
-section = 730
-title = "Miscellaneous — CR 730.2d"
-status = "skeleton"
-text = "If a merged permanent contains a token, the resulting permanent is a token only if the topmost component is a token."

@@ -1,5 +1,0 @@
-rule = "702.122d"
-section = 702
-title = "Keyword Abilities — CR 702.122d"
-status = "skeleton"
-text = "Some Vehicles have abilities that trigger when they become crewed. “Whenever [this Vehicle] becomes crewed” means “Whenever a crew ability of [this Vehicle] resolves.” If that ability has an intervening “if” clause that refers to information about the creatures that crewed it, it means only creatures that were tapped to pay the cost of the crew ability that caused it to trigger."

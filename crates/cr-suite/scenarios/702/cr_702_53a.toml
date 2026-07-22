@@ -1,5 +1,0 @@
-rule = "702.53a"
-section = 702
-title = "Keyword Abilities — CR 702.53a"
-status = "skeleton"
-text = "Transmute is an activated ability that functions only while the card with transmute is in a player’s hand. “Transmute [cost]” means “[Cost], Discard this card: Search your library for a card with the same mana value as the discarded card, reveal that card, and put it into your hand. Then shuffle your library. Activate only as a sorcery.”"

@@ -1,5 +1,0 @@
-rule = "700.9"
-section = 700
-title = "General (Additional Rules) — CR 700.9"
-status = "skeleton"
-text = "Some cards refer to modified permanents. A permanent is modified if it has one or more counters on it (see rule 122), if it is equipped (see rule 301.5), or if it is enchanted by an Aura that is controlled by that permanent’s controller (see rule 303.4)."

@@ -1,5 +1,0 @@
-rule = "510.1a"
-section = 510
-title = "Combat Damage Step — CR 510.1a"
-status = "skeleton"
-text = "Each attacking creature and each blocking creature assigns combat damage equal to its power. Creatures that would assign 0 or less damage this way don’t assign combat damage at all."

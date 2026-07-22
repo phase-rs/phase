@@ -1,5 +1,0 @@
-rule = "705.2"
-section = 705
-title = "Flipping a Coin — CR 705.2"
-status = "skeleton"
-text = "Some effects that instruct a player to flip a coin care only about whether the coin comes up heads or tails. No player wins or loses a coin flip for this kind of effect. For all other effects that instruct a player to flip a coin, the player that flips the coin calls “heads” or “tails.” If the call matches the result, the player wins the flip. Otherwise, the player loses the flip. Only the player who flips the coin wins or loses the flip; no other players are involved."

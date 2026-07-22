@@ -1,5 +1,0 @@
-rule = "509.3"
-section = 509
-title = "Declare Blockers Step — CR 509.3"
-status = "skeleton"
-text = "Triggered abilities that trigger on blockers being declared may have different trigger conditions."

@@ -1,5 +1,0 @@
-rule = "305.3"
-section = 305
-title = "Lands — CR 305.3"
-status = "skeleton"
-text = "A player can’t play a land, for any reason, if it isn’t their turn. Ignore any part of an effect that instructs a player to do so."

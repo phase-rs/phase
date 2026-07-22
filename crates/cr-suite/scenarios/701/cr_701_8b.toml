@@ -1,5 +1,0 @@
-rule = "701.8b"
-section = 701
-title = "Keyword Actions — CR 701.8b"
-status = "skeleton"
-text = "The only ways a permanent can be destroyed are as a result of an effect that uses the word “destroy” or as a result of the state-based actions that check for lethal damage (see rule 704.5g) or damage from a source with deathtouch (see rule 704.5h). If a permanent is put into its owner’s graveyard for any other reason, it hasn’t been “destroyed.”"

@@ -1,5 +1,0 @@
-rule = "601.2i"
-section = 601
-title = "Casting Spells — CR 601.2i"
-status = "skeleton"
-text = "Once the steps described in 601.2a–h are completed, effects that modify the characteristics of the spell as it’s cast are applied, then the spell becomes cast. Any abilities that trigger when a spell is cast or put onto the stack trigger at this time. If the spell’s controller had priority before casting it, they get priority."

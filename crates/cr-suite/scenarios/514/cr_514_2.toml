@@ -1,5 +1,0 @@
-rule = "514.2"
-section = 514
-title = "Cleanup Step — CR 514.2"
-status = "skeleton"
-text = "Second, the following actions happen simultaneously: all damage marked on permanents (including phased-out permanents) is removed and all “until end of turn” and “this turn” effects end. This turn-based action doesn’t use the stack."

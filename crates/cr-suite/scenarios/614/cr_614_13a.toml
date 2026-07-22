@@ -1,5 +1,0 @@
-rule = "614.13a"
-section = 614
-title = "Replacement Effects — CR 614.13a"
-status = "skeleton"
-text = "While applying an effect that modifies how a permanent enters the battlefield, you may have to choose a number of objects that will also change zones. You can’t choose the object that will become that permanent or any other object entering the battlefield at the same time as that object."

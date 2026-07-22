@@ -1,5 +1,0 @@
-rule = "509.4"
-section = 509
-title = "Declare Blockers Step — CR 509.4"
-status = "skeleton"
-text = "If a creature is put onto the battlefield blocking, its controller chooses which attacking creature it’s blocking as it enters the battlefield (unless the effect that put it onto the battlefield specifies what it’s blocking). A creature put onto the battlefield this way is “blocking” but, for the purposes of trigger events and effects, it never “blocked.”"

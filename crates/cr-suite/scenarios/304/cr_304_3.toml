@@ -1,5 +1,0 @@
-rule = "304.3"
-section = 304
-title = "Instants — CR 304.3"
-status = "skeleton"
-text = "Instant subtypes are always a single word and are listed after a long dash: “Instant — Arcane.” Each word after the dash is a separate subtype. The set of instant subtypes is the same as the set of sorcery subtypes; these subtypes are called spell types. Instants may have multiple subtypes. See rule 205.3k for the complete list of spell types."
