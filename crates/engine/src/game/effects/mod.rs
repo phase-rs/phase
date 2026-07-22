@@ -14714,6 +14714,74 @@ mod tests {
         run_effect_zone_choice_lose_life_case(false);
     }
 
+    /// CR 701.21a + CR 400.7j + CR 608.2h (issue #5925): When the LKI cache
+    /// misses the sacrificed object but the same span carries its
+    /// battlefield→public `ZoneChanged` record — and an extra unrelated move
+    /// makes the multi-move guard reject `moved_object_context_from_events` —
+    /// `snapshot_for_sacrificed_object` must still bind toughness from the
+    /// record. Without that fallback this returns `None`.
+    #[test]
+    fn sacrificed_referent_binds_zone_changed_record_on_lki_cache_miss() {
+        let mut state = GameState::new_two_player(42);
+        let sacrificed = ObjectId(50);
+        let unrelated_move = ObjectId(51);
+        // Discriminator: no lki_cache entry for the sacrificed object.
+        assert!(
+            state.lki_cache.get(&sacrificed).is_none(),
+            "cache must be empty so the ZoneChanged-record fallback is required"
+        );
+
+        let mut creature_record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            sacrificed,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        creature_record.name = "Record Only".to_string();
+        creature_record.power = Some(1);
+        creature_record.toughness = Some(7);
+        creature_record.base_power = Some(1);
+        creature_record.base_toughness = Some(7);
+        creature_record.core_types = vec![CoreType::Creature];
+        creature_record.controller = PlayerId(1);
+        creature_record.owner = PlayerId(1);
+
+        let events = vec![
+            // Extra public-zone move: without the sacrifice-id-keyed record
+            // fallback, `moved_object_context_from_events` rejects this span
+            // as non-singular and the whole parent referent collapses to None.
+            GameEvent::ZoneChanged {
+                object_id: unrelated_move,
+                from: Some(Zone::Stack),
+                to: Zone::Exile,
+                record: Box::new(crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    unrelated_move,
+                    Some(Zone::Stack),
+                    Zone::Exile,
+                )),
+            },
+            GameEvent::ZoneChanged {
+                object_id: sacrificed,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(creature_record),
+            },
+            GameEvent::PermanentSacrificed {
+                object_id: sacrificed,
+                player_id: PlayerId(1),
+            },
+        ];
+
+        let snapshot = parent_referent_context_from_events(&state, &events)
+            .expect("cache-miss sacrifice must bind the same-span ZoneChanged record (not None)");
+        assert_eq!(snapshot.object_id, sacrificed);
+        assert_eq!(
+            snapshot.lki.toughness,
+            Some(7),
+            "record-only fallback must carry the sacrificed creature's toughness"
+        );
+        assert_eq!(snapshot.lki.name, "Record Only");
+    }
+
     /// CR 608.2c + CR 701.21a + CR 119.3 + CR 400.7j (issue #5925):
     /// "Target player sacrifices a creature of their choice. You gain life
     /// equal to that creature's toughness." — the interactive
