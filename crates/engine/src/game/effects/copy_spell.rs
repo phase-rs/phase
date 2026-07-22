@@ -80,6 +80,10 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.10: no mana was spent to cast a spell copy — reset the
+        // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
+        // cast it", issue #5943) do not re-fire off the original's payment.
+        copy_obj.clear_cast_payment_stamps();
         apply_spell_copy_modifications(
             &mut copy_obj,
             &additional_modifications,
@@ -991,6 +995,91 @@ mod tests {
             }
             _ => panic!("Expected both entries to be Spells with abilities"),
         }
+    }
+
+    /// CR 707.10 (issue #5943): a spell copy is not cast — the copy born by
+    /// `resolve(Effect::CopySpell)` must carry NO cast-payment record even
+    /// though it clones the original object. All four stamps reset to their
+    /// no-payment defaults; the original keeps its own record (reach-guard).
+    #[test]
+    fn spell_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        // Stamp all four cast-payment fields non-default, as `finalize_cast`
+        // would after a real {W}{W} payment (CR 601.2h).
+        {
+            let lki = state.objects[&ObjectId(10)].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: ObjectId(10),
+                    lki,
+                },
+            );
+        }
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, ObjectId(10), "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the ORIGINAL keeps its payment record — the reset hit
+        // only the copy.
+        assert_eq!(
+            state.objects[&ObjectId(10)].mana_spent_to_cast_amount,
+            2,
+            "original keeps its own payment record"
+        );
     }
 
     /// GATE #2 — CR 702.10a + CR 603.1 + CR 608.3f / CR 707.10f: a spell copy's

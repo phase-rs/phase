@@ -4600,13 +4600,36 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
     let _ = drain_deferred_triggers_after_trigger_construction(state, &mut events_out);
 }
 
-/// Clear transient cast-tally booleans/color breakdown on all objects after
-/// trigger collection. `mana_spent_to_cast_amount` is intentionally NOT
-/// cleared: it is a historical fact about the object (how much mana was
-/// spent to cast it) used by spell resolution effects like "deals damage
-/// equal to the amount of mana spent to cast this spell" (Molten Note) and
-/// by CR 603.4 intervening-if resolution re-checks (Hungry Graffalon /
-/// Topiary Lecturer Increment).
+/// Clear the transient `mana_spent_to_cast` boolean on all objects after
+/// trigger collection, and clear ALL FOUR cast-payment stamps (the bool,
+/// `colors_spent_to_cast`, `mana_spent_to_cast_amount`,
+/// `mana_spent_source_snapshots`) on objects outside the Battlefield/Stack
+/// provenance zones, via the single authority
+/// `GameObject::clear_cast_payment_stamps`.
+///
+/// CR 601.2h + CR 603.4: for objects on the **Battlefield** or **Stack** the
+/// payment stamps survive (issue #5943). `mana_spent_to_cast_amount` is a
+/// historical fact about the object (how much mana was spent to cast it)
+/// used by spell resolution effects like "deals damage equal to the amount
+/// of mana spent to cast this spell" (Molten Note) and by CR 603.4
+/// intervening-if resolution re-checks (Hungry Graffalon / Topiary Lecturer
+/// Increment). The per-color tally `colors_spent_to_cast` feeds a
+/// "if {W}{W} was spent to cast it" ETB intervening-if (Emptiness,
+/// CR 107.4e hybrid pips) re-checked when the triggered ability *resolves*,
+/// and a spend-color rider on a spell still on the stack reads the tally at
+/// its own resolution. Clearing them here for those zones made every such
+/// rider silently do nothing at the re-check.
+///
+/// Like `cast_from_zone`, all four payment stamps are cleared once the
+/// object leaves the Battlefield|Stack provenance zones (CR 400.7 family):
+/// a spell that was COUNTERED or fizzled goes Stack → Graveyard, so
+/// `reset_for_battlefield_exit` never runs on it — it loses its payment
+/// record at the next collection pass instead, mirroring `cast_from_zone`.
+/// Leaving any stamp behind would let a reanimation produce a battlefield
+/// permanent with a phantom payment record (Satoru-class "no mana was
+/// spent" reads, `CastManaSpentMetric`). On battlefield exit,
+/// `reset_for_battlefield_exit` (the CR 400.7 exit-clear authority) clears
+/// them through the same helper.
 ///
 /// CR 603.4: `cast_from_zone` is likewise preserved for permanents on the
 /// battlefield — a `WasCast` / "if you cast it" ETB intervening-if is
@@ -4628,9 +4651,19 @@ fn clear_post_collection_transients(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
             obj.cast_from_zone = None;
+            // CR 601.2h + CR 603.4 + CR 107.4e (issue #5943): the payment
+            // stamps must stay readable on Battlefield/Stack objects for
+            // intervening-if re-checks at resolution ("if {W}{W} was spent to
+            // cast it"). Everywhere else the cast provenance is no longer
+            // meaningful — a countered/fizzled spell went Stack → Graveyard,
+            // so `reset_for_battlefield_exit` (the exit-clear authority for
+            // battlefield objects, CR 400.7) never ran on it. Clear all four
+            // payment stamps through the single authority, mirroring
+            // `cast_from_zone`, so none of them leak onto a later object
+            // identity via reanimation.
+            obj.clear_cast_payment_stamps();
         }
         obj.mana_spent_to_cast = false;
-        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
     }
 }
 
@@ -24116,6 +24149,80 @@ pub mod tests {
         assert!(
             !check_trigger_condition(&state, &condition, PlayerId(0), Some(satoru), Some(&event),),
             "a mana-paid cast must not satisfy Satoru's intervening-if at resolution"
+        );
+    }
+
+    /// CR 601.2h + CR 603.4 (issue #5943): the per-color tally must survive
+    /// `clear_post_collection_transients` for a battlefield object so a
+    /// spend-color intervening-if ("if {W}{W} was spent to cast it",
+    /// Emptiness) still holds at the resolution re-check — while a graveyard
+    /// sibling's tally is cleared (its cast provenance is no longer
+    /// meaningful).
+    #[test]
+    fn mana_color_spent_survives_transient_clear_on_battlefield_only() {
+        let mut state = setup();
+        let battlefield_obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Battlefield,
+        );
+        let graveyard_obj = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Fizzled Emptiness".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [battlefield_obj, graveyard_obj] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.colors_spent_to_cast.add(ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            let lki = obj.snapshot_for_mana_spent();
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id: id, lki });
+        }
+
+        clear_post_collection_transients(&mut state);
+
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::White,
+            minimum: 2,
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, PlayerId(0), Some(battlefield_obj), None),
+            "battlefield object's {{W}}{{W}} tally must survive the post-collection clear"
+        );
+        // Reach-guard pair: same stamping, same condition — only the zone
+        // differs, so the negative below cannot pass vacuously.
+        assert!(
+            !check_trigger_condition(&state, &cond, PlayerId(0), Some(graveyard_obj), None),
+            "graveyard object's tally must be cleared by the post-collection clear"
+        );
+        // Issue #5943 fix-round: the amount and payment-source snapshots ride
+        // the SAME lifecycle as the per-color tally (single authority:
+        // `clear_cast_payment_stamps`) — preserved on the battlefield object,
+        // cleared on the graveyard sibling so a countered spell cannot be
+        // reanimated with a phantom payment record.
+        let bf = &state.objects[&battlefield_obj];
+        assert_eq!(
+            bf.mana_spent_to_cast_amount, 2,
+            "battlefield object's spent-mana amount must survive the clear"
+        );
+        assert_eq!(
+            bf.mana_spent_source_snapshots.len(),
+            1,
+            "battlefield object's payment-source snapshots must survive the clear"
+        );
+        let gy = &state.objects[&graveyard_obj];
+        assert_eq!(
+            gy.mana_spent_to_cast_amount, 0,
+            "graveyard object's spent-mana amount must be cleared"
+        );
+        assert!(
+            gy.mana_spent_source_snapshots.is_empty(),
+            "graveyard object's payment-source snapshots must be cleared"
         );
     }
 

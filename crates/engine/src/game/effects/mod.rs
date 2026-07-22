@@ -10285,7 +10285,10 @@ pub(crate) fn evaluate_condition(
             .unwrap_or(false),
         // CR 601.2h + CR 608.2c: Spend-color riders read the resolving spell
         // object's recorded mana payment. Spell copies with no mana paid
-        // naturally fail because their tally is empty.
+        // fail because their tally is empty —
+        // `GameObject::clear_cast_payment_stamps` (called at every spell-copy
+        // birth, CR 707.10 / CR 707.12) guarantees the inherited tally is
+        // reset even though the copy clones the original object.
         AbilityCondition::ManaColorSpent { color, minimum } => state
             .objects
             .get(&ability.source_id)
