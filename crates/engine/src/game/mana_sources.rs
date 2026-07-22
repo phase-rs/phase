@@ -270,25 +270,39 @@ pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Untap))
 }
 
-/// CR 605.3a + CR 701.21: True when the cost has a `Sacrifice` component that
-/// sacrifices only the ability's own source (`TargetFilter::SelfRef`, exactly
-/// one permanent) — e.g. Gold's "Sacrifice this token: Add one mana of any
-/// color." Unlike a choice-bearing sacrifice cost (Krark-Clan Ironworks'
-/// "Sacrifice an artifact"), there is no candidate to choose among, so this
-/// activation is exactly as deterministic as a `{T}` cost and auto-tap can
-/// select it the same way. Ambiguous sacrifice costs stay off the auto-tap
-/// path and remain reachable only through
+/// CR 605.3a + CR 701.21: True when this whole cost tree pays by sacrificing
+/// only the ability's own source (`TargetFilter::SelfRef`, exactly one
+/// permanent) with **no** other player choice anywhere in the tree — Gold's
+/// bare "Sacrifice this token" and Treasure's `{T}, Sacrifice this artifact`.
+/// Such an activation is exactly as deterministic as a `{T}` cost, so auto-tap
+/// may select it the same way.
+///
+/// The predicate validates the **entire** cost, not a single component: it
+/// reuses the deny-by-default full-tree authority
+/// [`mana_abilities::cost_component_choice_free`] (`Tap` + single-token
+/// self-sacrifice + `Composite`s built solely from those) and additionally
+/// requires that a self-sacrifice component actually be present. A composite
+/// that merely *contains* a self-sacrifice beside a choice-bearing sibling —
+/// Lion's Eye Diamond's `Composite[Discard{Chosen}, Sacrifice(SelfRef,1)]` —
+/// fails the whole-tree check and is correctly rejected, so its `Discard`
+/// prompt is never bypassed. It stays off the auto-tap path and remains
+/// reachable only through
 /// `has_activatable_non_tap_mana_ability_for_payment`'s manual-payment flow.
 pub(crate) fn has_unambiguous_self_sacrifice_component(cost: &Option<AbilityCost>) -> bool {
-    cost_has_component(cost, |c| {
-        matches!(
-            c,
-            AbilityCost::Sacrifice(SacrificeCost {
-                target: TargetFilter::SelfRef,
-                requirement: SacrificeRequirement::Count { count: 1 },
-            })
-        )
-    })
+    // Whole-tree invariant first (shared authority): rejects any interactive
+    // sibling such as LED's `Discard`. Then confirm a self-sacrifice component
+    // is actually present, so a pure `{T}` cost is not misclassified as
+    // self-sacrifice by this predicate.
+    cost.as_ref().is_some_and(mana_abilities::cost_component_choice_free)
+        && cost_has_component(cost, |c| {
+            matches!(
+                c,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::SelfRef,
+                    requirement: SacrificeRequirement::Count { count: 1 },
+                })
+            )
+        })
 }
 
 /// CR 605.3a + CR 106.12 + CR 302.6: True when `obj` has an activated mana
@@ -3289,6 +3303,81 @@ mod tests {
         );
         // Should have 5 color options
         assert_eq!(options.len(), 5);
+    }
+
+    /// Regression for #6157/#6230: the auto-tap eligibility predicate must
+    /// classify a cost by validating the **whole** cost tree, not by matching a
+    /// single component. Lion's Eye Diamond activates with
+    /// `Composite[Discard{ selection: Chosen }, Sacrifice(SelfRef, 1)]`
+    /// (see `mana_abilities.rs` LED build) and exposes a
+    /// `WaitingFor::PayCost { kind: Discard }` prompt; auto-tap must not bypass
+    /// that discard choice. Before the fix, `cost_has_component`'s `any` match
+    /// on the self-sacrifice component wrongly classified LED as unambiguous
+    /// self-sacrifice, letting the auto-tap gate (`mana_sources.rs:1820`) and
+    /// the manual-payment exclusion (`mana_sources.rs:1281`) auto-select it.
+    /// Reusing `mana_abilities::cost_component_choice_free` (deny-by-default,
+    /// full-tree) rejects LED's `Discard` sibling while keeping Gold (bare
+    /// self-sacrifice) and Treasure (`{T}` + self-sacrifice) eligible.
+    #[test]
+    fn led_shaped_discard_sacrifice_stays_off_auto_tap() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope, TargetFilter};
+
+        let self_sac = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+
+        // Gold: bare "Sacrifice this token" — no player choice → auto-tap eligible.
+        let gold = Some(self_sac());
+        assert!(
+            has_unambiguous_self_sacrifice_component(&gold),
+            "Gold's bare self-sacrifice must remain auto-tap eligible"
+        );
+
+        // Treasure: "{T}, Sacrifice this artifact" — Tap is choice-free → eligible.
+        let treasure = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sac()],
+        });
+        assert!(
+            has_unambiguous_self_sacrifice_component(&treasure),
+            "Treasure's {{T}} + self-sacrifice must remain auto-tap eligible"
+        );
+
+        // Lion's Eye Diamond: "Discard your hand, Sacrifice Lion's Eye Diamond".
+        // The `Discard` sibling requires a player choice, so the whole cost is
+        // NOT unambiguous — it must stay on the manual-payment path and keep its
+        // discard prompt. This is the shape that was misclassified before the fix.
+        let led = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+                self_sac(),
+            ],
+        });
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&led),
+            "LED-shaped composite (Discard + self-sacrifice) must NOT be auto-tap \
+             eligible — its discard choice must not be bypassed"
+        );
+
+        // The same LED shape with the components reordered is still rejected: the
+        // whole-tree check does not depend on component position.
+        let led_reordered = Some(AbilityCost::Composite {
+            costs: vec![
+                self_sac(),
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+            ],
+        });
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&led_reordered),
+            "component order must not affect the whole-tree choice-free check"
+        );
     }
 
     #[test]
