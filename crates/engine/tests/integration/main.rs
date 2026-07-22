@@ -898,6 +898,7 @@ mod constellation_enters_with_choice;
 mod construct_cosmic_cube_second_draw_token;
 mod corrupted_resolve_counter_poisoned;
 mod costed_mana_abilities_no_recursion;
+mod costed_mana_ability_autotap_order;
 mod costed_mana_ability_demand_aware_autotap;
 mod craft_material_references;
 mod craterhoof_behemoth_dynamic_pump_2875;
