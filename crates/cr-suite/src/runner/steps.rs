@@ -1,8 +1,9 @@
-//! Apply declarative scenario steps.
+//! Apply declarative scenario steps through production engine APIs.
 
 use engine::game::scenario::GameRunner;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::player::PlayerId;
 
 use crate::assert::check_sbas_via_priority;
@@ -26,40 +27,24 @@ pub fn apply_step(
         ScenarioStep::PassBoth => {
             runner.pass_both_players();
         }
-        ScenarioStep::MarkDamage { creature, amount } => {
-            let id = ctx.handles.get(creature).ok_or_else(|| {
-                RunError::Step(format!("MarkDamage: unknown creature {creature:?}"))
-            })?;
-            let obj = runner
-                .state_mut()
-                .objects
-                .get_mut(id)
-                .ok_or_else(|| RunError::Step(format!("MarkDamage: missing object {id:?}")))?;
-            obj.damage_marked = obj.damage_marked.saturating_add(*amount);
-            // SBAs check after the next priority pass.
-            let _ = check_sbas_via_priority(runner);
+        ScenarioStep::CastLightningBolt {
+            spell,
+            target_player,
+            target_creature,
+        } => {
+            cast_lightning_bolt(
+                runner,
+                ctx,
+                spell,
+                *target_player,
+                target_creature.as_deref(),
+            )?;
         }
-        ScenarioStep::SetLife { player, life } => {
-            let pid = PlayerId(*player);
-            let p = runner
-                .state_mut()
-                .players
-                .iter_mut()
-                .find(|p| p.id == pid)
-                .ok_or_else(|| RunError::Step(format!("SetLife: missing player {player}")))?;
-            p.life = *life;
-            let _ = check_sbas_via_priority(runner);
-        }
-        ScenarioStep::DamagePlayer { player, amount } => {
-            let pid = PlayerId(*player);
-            let p = runner
-                .state_mut()
-                .players
-                .iter_mut()
-                .find(|p| p.id == pid)
-                .ok_or_else(|| RunError::Step(format!("DamagePlayer: missing player {player}")))?;
-            p.life = p.life.saturating_sub(*amount);
-            let _ = check_sbas_via_priority(runner);
+        ScenarioStep::ResolveTop => {
+            if runner.state().stack.is_empty() {
+                return Err(RunError::Step("ResolveTop: stack is empty".to_string()));
+            }
+            runner.resolve_top();
         }
         ScenarioStep::AdvanceUntilStackEmpty => {
             if !runner.state().stack.is_empty() {
@@ -70,5 +55,67 @@ pub fn apply_step(
             check_sbas_via_priority(runner).map_err(RunError::Assertion)?;
         }
     }
+    Ok(())
+}
+
+/// Cast Lightning Bolt through `GameAction::CastSpell` + target selection.
+///
+/// Mirrors `crates/engine/tests/integration/rules/sba.rs` so CR fixtures share
+/// the production damage pipeline (`Effect::DealDamage`).
+fn cast_lightning_bolt(
+    runner: &mut GameRunner,
+    ctx: &ScenarioContext,
+    spell: &str,
+    target_player: Option<u8>,
+    target_creature: Option<&str>,
+) -> Result<(), RunError> {
+    let bolt_id = *ctx.handles.get(spell).ok_or_else(|| {
+        RunError::Step(format!("CastLightningBolt: unknown spell handle {spell:?}"))
+    })?;
+    let bolt_card_id = runner
+        .state()
+        .objects
+        .get(&bolt_id)
+        .ok_or_else(|| RunError::Step(format!("CastLightningBolt: missing object {bolt_id:?}")))?
+        .card_id;
+
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: bolt_id,
+            card_id: bolt_card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .map_err(|e| RunError::Step(format!("CastSpell: {e}")))?;
+
+    if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+        let target = match (target_player, target_creature) {
+            (Some(p), None) => TargetRef::Player(PlayerId(p)),
+            (None, Some(creature)) => {
+                let id = ctx.handles.get(creature).ok_or_else(|| {
+                    RunError::Step(format!(
+                        "CastLightningBolt: unknown creature handle {creature:?}"
+                    ))
+                })?;
+                TargetRef::Object(*id)
+            }
+            (Some(_), Some(_)) => {
+                return Err(RunError::Step(
+                    "CastLightningBolt: specify target_player XOR target_creature".into(),
+                ));
+            }
+            (None, None) => {
+                return Err(RunError::Step(
+                    "CastLightningBolt: requires target_player or target_creature".into(),
+                ));
+            }
+        };
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![target],
+            })
+            .map_err(|e| RunError::Step(format!("SelectTargets: {e}")))?;
+    }
+
     Ok(())
 }

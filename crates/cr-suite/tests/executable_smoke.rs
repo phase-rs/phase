@@ -2,7 +2,8 @@
 
 use cr_suite::runner::run_scenario;
 use cr_suite::schema::{
-    AssertionSpec, CreatureSpec, PlayerSetup, ScenarioFile, ScenarioStatus, ScenarioStep, SetupSpec,
+    AssertionSpec, CreatureSpec, LightningBoltSpec, PlayerSetup, ScenarioFile, ScenarioStatus,
+    ScenarioStep, SetupSpec,
 };
 
 fn base_two_player(p0_life: i32, p1_life: i32) -> SetupSpec {
@@ -23,6 +24,7 @@ fn base_two_player(p0_life: i32, p1_life: i32) -> SetupSpec {
             },
         ],
         creatures: vec![],
+        lightning_bolts: vec![],
         seed: Some(42),
     }
 }
@@ -50,16 +52,31 @@ fn executable(
 }
 
 #[test]
-fn cr_704_5a_zero_life_loses() {
+fn cr_704_5a_bolt_to_zero_life_loses() {
+    let mut setup = base_two_player(20, 3);
+    setup.lightning_bolts.push(LightningBoltSpec {
+        id: "bolt".into(),
+        player: 0,
+    });
     let scenario = executable(
         "704.5a",
         704,
         "A player with 0 or less life loses the game.",
-        base_two_player(20, 0),
-        vec![ScenarioStep::CheckSbas],
-        vec![AssertionSpec::GameOver { winner: Some(0) }],
+        setup,
+        vec![
+            ScenarioStep::CastLightningBolt {
+                spell: "bolt".into(),
+                target_player: Some(1),
+                target_creature: None,
+            },
+            ScenarioStep::ResolveTop,
+        ],
+        vec![
+            AssertionSpec::PlayerLife { player: 1, life: 0 },
+            AssertionSpec::GameOver { winner: Some(0) },
+        ],
     );
-    run_scenario(&scenario).expect("704.5a should pass");
+    run_scenario(&scenario).expect("704.5a should pass via DealDamage");
 }
 
 #[test]
@@ -71,7 +88,6 @@ fn cr_704_5f_zero_toughness_dies() {
         name: "Zero Toughness".into(),
         power: 1,
         toughness: 0,
-        damage_marked: 0,
         keywords: vec![],
         summoning_sickness: false,
     });
@@ -89,7 +105,7 @@ fn cr_704_5f_zero_toughness_dies() {
 }
 
 #[test]
-fn cr_704_5g_lethal_damage_destroys() {
+fn cr_704_5g_bolt_lethal_destroys() {
     let mut setup = base_two_player(20, 20);
     setup.creatures.push(CreatureSpec {
         id: "bear".into(),
@@ -97,45 +113,54 @@ fn cr_704_5g_lethal_damage_destroys() {
         name: "Bear".into(),
         power: 2,
         toughness: 2,
-        damage_marked: 2,
         keywords: vec![],
         summoning_sickness: false,
+    });
+    setup.lightning_bolts.push(LightningBoltSpec {
+        id: "bolt".into(),
+        player: 0,
     });
     let scenario = executable(
         "704.5g",
         704,
         "Creature with lethal damage is destroyed.",
         setup,
-        vec![ScenarioStep::CheckSbas],
+        vec![
+            ScenarioStep::CastLightningBolt {
+                spell: "bolt".into(),
+                target_player: None,
+                target_creature: Some("bear".into()),
+            },
+            ScenarioStep::ResolveTop,
+        ],
         vec![AssertionSpec::CreatureInGraveyard {
             creature: "bear".into(),
         }],
     );
-    run_scenario(&scenario).expect("704.5g should pass");
+    run_scenario(&scenario).expect("704.5g should pass via DealDamage");
 }
 
 #[test]
-fn cr_119_1_starting_life_defaults() {
+fn cr_104_1_bolt_ends_game() {
+    let mut setup = base_two_player(20, 3);
+    setup.lightning_bolts.push(LightningBoltSpec {
+        id: "bolt".into(),
+        player: 0,
+    });
     let scenario = executable(
-        "119.1",
-        119,
-        "Each player begins the game with a starting life total of 20.",
-        base_two_player(20, 20),
-        vec![],
+        "104.1",
+        104,
+        "A game ends immediately when a player wins.",
+        setup,
         vec![
-            AssertionSpec::PlayerLife {
-                player: 0,
-                life: 20,
+            ScenarioStep::CastLightningBolt {
+                spell: "bolt".into(),
+                target_player: Some(1),
+                target_creature: None,
             },
-            AssertionSpec::PlayerLife {
-                player: 1,
-                life: 20,
-            },
-            AssertionSpec::GameNotOver,
-            AssertionSpec::PhaseIs {
-                phase: "PreCombatMain".into(),
-            },
+            ScenarioStep::ResolveTop,
         ],
+        vec![AssertionSpec::GameOver { winner: Some(0) }],
     );
-    run_scenario(&scenario).expect("119.1 should pass");
+    run_scenario(&scenario).expect("104.1 should pass via DealDamage");
 }

@@ -42,6 +42,19 @@ pub fn build_runner(setup: &SetupSpec) -> Result<(GameRunner, ScenarioContext), 
         }
     }
 
+    for bolt in &setup.lightning_bolts {
+        let pid = PlayerId(bolt.player);
+        // Production DealDamage path: GameScenario::add_bolt_to_hand builds
+        // Effect::DealDamage { amount: 3, target: Any } (same as engine SBA tests).
+        let id = scenario.add_bolt_to_hand(pid);
+        if handles.insert(bolt.id.clone(), id).is_some() {
+            return Err(RunError::Setup(format!(
+                "duplicate lightning_bolt handle {:?}",
+                bolt.id
+            )));
+        }
+    }
+
     Ok((scenario.build(), ScenarioContext { handles }))
 }
 
@@ -66,9 +79,6 @@ fn place_creature(
         builder.with_keyword(kw);
     }
 
-    if creature.damage_marked > 0 {
-        builder.with_damage_marked(creature.damage_marked);
-    }
     if creature.summoning_sickness {
         builder.with_summoning_sickness();
     }

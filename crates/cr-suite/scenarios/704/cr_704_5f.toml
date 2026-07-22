@@ -3,7 +3,7 @@ section = 704
 title = "State-Based Actions — CR 704.5f"
 status = "executable"
 text = "If a creature has toughness 0 or less, it's put into its owner's graveyard. Regeneration can't replace this event."
-notes = "Creature created at 0 toughness dies on SBA check."
+notes = "Board precondition: creature with toughness 0. Transition: CheckSbas via PassPriority (CR 704.3) — matches engine zero_toughness_creature_dies."
 
 [setup]
 phase = "PreCombatMain"

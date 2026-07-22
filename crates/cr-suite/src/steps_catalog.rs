@@ -19,19 +19,15 @@ pub const STEP_CATALOG: &[StepCatalogEntry] = &[
         cr_hooks: &["117.4"],
     },
     StepCatalogEntry {
-        action: "mark_damage",
-        description: "Add marked damage to a named creature handle, then check SBAs.",
-        cr_hooks: &["120.3", "704.5g"],
+        action: "cast_lightning_bolt",
+        description:
+            "Cast Lightning Bolt via GameAction::CastSpell + SelectTargets (Effect::DealDamage).",
+        cr_hooks: &["601", "120", "704.5a", "704.5g"],
     },
     StepCatalogEntry {
-        action: "set_life",
-        description: "Set a player's life total, then check SBAs.",
-        cr_hooks: &["119", "704.5a"],
-    },
-    StepCatalogEntry {
-        action: "damage_player",
-        description: "Reduce a player's life by amount (resolved damage), then check SBAs.",
-        cr_hooks: &["120.4", "704.5a"],
+        action: "resolve_top",
+        description: "Resolve the top stack object via GameRunner::resolve_top.",
+        cr_hooks: &["608"],
     },
     StepCatalogEntry {
         action: "advance_until_stack_empty",

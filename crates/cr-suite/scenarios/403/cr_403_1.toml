@@ -1,30 +1,6 @@
 rule = "403.1"
 section = 403
 title = "Battlefield — CR 403.1"
-status = "executable"
+status = "deferred"
 text = "Most of the area between the players represents the battlefield."
-notes = "Creature placed via setup remains on battlefield."
-
-[setup]
-phase = "PreCombatMain"
-seed = 42
-
-[[setup.players]]
-id = 0
-life = 20
-
-[[setup.players]]
-id = 1
-life = 20
-
-[[setup.creatures]]
-id = "soldier"
-player = 0
-name = "Soldier"
-power = 1
-toughness = 1
-
-[[assertions]]
-kind = "creature_zone"
-creature = "soldier"
-zone = "Battlefield"
+notes = "Would only assert a setup-placed creature. Defer until a zone-change transition (ETB / ChangeZone) is exercised."

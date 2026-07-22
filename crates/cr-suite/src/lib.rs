@@ -23,5 +23,6 @@ pub use loader::{load_scenario_file, load_scenarios, ScenarioLoadError};
 pub use report::{ScenarioReport, SuiteReport};
 pub use runner::{run_scenario, run_suite, RunFilter, RunOptions, ScenarioOutcome};
 pub use schema::{
-    AssertionSpec, CreatureSpec, PlayerSetup, ScenarioFile, ScenarioStatus, ScenarioStep, SetupSpec,
+    AssertionSpec, CreatureSpec, LightningBoltSpec, PlayerSetup, ScenarioFile, ScenarioStatus,
+    ScenarioStep, SetupSpec,
 };

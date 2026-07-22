@@ -14,15 +14,25 @@ Tracked in https://github.com/phase-rs/phase/issues/6343.
 
 ## What is committed
 
-This PR ships the **runner/schema/generator** plus a **small executable seed set**
-under `scenarios/` (life, damage, zones, phases, SBAs). The full CompRules
-skeleton corpus is **not** committed here — generate it mechanically and land it
-in a separate follow-up PR so review stays within file limits.
+This PR ships the **runner/schema/generator** plus a **small seed set** under
+`scenarios/`:
+
+- **Executable** fixtures drive production engine paths (`GameAction::CastSpell`
+  / `Effect::DealDamage` / SBA via priority) and assert discriminating
+  transitions (CR `104.1`, `704.5a`, `704.5f`, `704.5g`).
+- **Deferred** fixtures document follow-ups that would otherwise only assert
+  setup (starting life, phase placement, nonlethal damage without a 1-damage
+  spell step).
+
+The full CompRules skeleton corpus is **not** committed — generate it
+mechanically and land it in a separate follow-up PR:
 
 ```bash
-# After this crate merges: generate skeletons (preserves authored executables)
 cargo cr-suite --generate --update
 ```
+
+Direct `GameState` mutation is not a legal scenario step. Damage must go through
+`cast_lightning_bolt` + `resolve_top` (or a future production spell step).
 
 ## Commands
 

@@ -1,42 +1,6 @@
 rule = "120.3"
 section = 120
 title = "Damage — CR 120.3"
-status = "executable"
+status = "deferred"
 text = "Damage marked on a creature remains until it's removed or the creature leaves the battlefield."
-notes = "Mark nonlethal damage; creature stays on battlefield with damage marked."
-
-[setup]
-phase = "PreCombatMain"
-seed = 42
-
-[[setup.players]]
-id = 0
-life = 20
-
-[[setup.players]]
-id = 1
-life = 20
-
-[[setup.creatures]]
-id = "bear"
-player = 0
-name = "Bear"
-power = 2
-toughness = 2
-
-[[steps]]
-action = "mark_damage"
-creature = "bear"
-amount = 1
-
-[[assertions]]
-kind = "creature_on_battlefield"
-creature = "bear"
-
-[[assertions]]
-kind = "creature_damage"
-creature = "bear"
-damage = 1
-
-[[assertions]]
-kind = "game_not_over"
+notes = "Needs a production nonlethal DealDamage path (Lightning Bolt is always 3). Defer until the runner can cast a 1-damage Effect::DealDamage spell without direct GameState mutation."

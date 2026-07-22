@@ -63,6 +63,10 @@ pub struct SetupSpec {
     /// Battlefield creatures.
     #[serde(default)]
     pub creatures: Vec<CreatureSpec>,
+    /// Lightning Bolts placed into hand via the scenario harness
+    /// (`GameScenario::add_bolt_to_hand` — production `Effect::DealDamage`).
+    #[serde(default)]
+    pub lightning_bolts: Vec<LightningBoltSpec>,
     /// Optional RNG seed (defaults to 42).
     #[serde(default)]
     pub seed: Option<u64>,
@@ -70,6 +74,14 @@ pub struct SetupSpec {
 
 fn default_phase() -> String {
     "PreCombatMain".to_string()
+}
+
+/// A Lightning Bolt in hand, addressable by handle for cast steps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LightningBoltSpec {
+    /// Local handle referenced by cast steps (`"bolt"`).
+    pub id: String,
+    pub player: u8,
 }
 
 /// Per-player setup fields.
@@ -100,9 +112,6 @@ pub struct CreatureSpec {
     pub name: String,
     pub power: i32,
     pub toughness: i32,
-    /// Damage already marked on the creature before steps run.
-    #[serde(default)]
-    pub damage_marked: u32,
     /// Keyword names to grant (e.g. `"Flying"`).
     #[serde(default)]
     pub keywords: Vec<String>,
@@ -116,6 +125,9 @@ fn default_creature_name() -> String {
 }
 
 /// A single runner step.
+///
+/// Steps must drive production engine APIs (`GameAction` / `GameRunner` helpers).
+/// Direct `GameState` field writes are not allowed as scenario steps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ScenarioStep {
@@ -123,15 +135,20 @@ pub enum ScenarioStep {
     PassPriority,
     /// Pass priority for both players (AP then NAP).
     PassBoth,
-    /// Deal a fixed amount of damage to a named creature (direct mark + SBA check via pass).
-    MarkDamage { creature: String, amount: u32 },
-    /// Set a player's life total.
-    SetLife { player: u8, life: i32 },
-    /// Deal damage to a player by reducing life (simulates resolved damage effect).
-    DamagePlayer { player: u8, amount: i32 },
-    /// Advance until the stack is empty (no-op if empty).
+    /// Cast a Lightning Bolt from hand through the casting pipeline
+    /// (`GameAction::CastSpell` + target selection). Does not resolve.
+    CastLightningBolt {
+        spell: String,
+        #[serde(default)]
+        target_player: Option<u8>,
+        #[serde(default)]
+        target_creature: Option<String>,
+    },
+    /// Resolve the top stack object (`GameRunner::resolve_top`).
+    ResolveTop,
+    /// Advance until the stack is empty.
     AdvanceUntilStackEmpty,
-    /// Check state-based actions by passing priority once.
+    /// Check state-based actions by passing priority once (CR 704.3).
     CheckSbas,
 }
 
@@ -210,15 +227,26 @@ mod tests {
                     },
                     PlayerSetup {
                         id: 1,
-                        life: 0,
+                        life: 3,
                         hand: vec![],
                         library_top: vec![],
                     },
                 ],
                 creatures: vec![],
+                lightning_bolts: vec![LightningBoltSpec {
+                    id: "bolt".into(),
+                    player: 0,
+                }],
                 seed: Some(42),
             }),
-            steps: vec![ScenarioStep::CheckSbas],
+            steps: vec![
+                ScenarioStep::CastLightningBolt {
+                    spell: "bolt".into(),
+                    target_player: Some(1),
+                    target_creature: None,
+                },
+                ScenarioStep::ResolveTop,
+            ],
             assertions: vec![AssertionSpec::GameOver { winner: Some(0) }],
             meta: IndexMap::new(),
         };
