@@ -266,11 +266,11 @@ pub enum PaymentError {
 /// Typed failure while applying an already-selected exact pool removal.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub(crate) enum ExactManaRemovalError {
-    #[error("duplicate exact mana pip {0}")]
+    #[error("duplicate exact mana pip {0:?}")]
     DuplicatePip(ManaPipId),
-    #[error("missing exact mana pip {0}")]
+    #[error("missing exact mana pip {0:?}")]
     MissingPip(ManaPipId),
-    #[error("mismatched exact mana unit for pip {0}")]
+    #[error("mismatched exact mana unit for pip {0:?}")]
     MismatchedUnit(ManaPipId),
 }
 
