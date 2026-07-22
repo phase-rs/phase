@@ -6484,14 +6484,14 @@ mod tests {
         let actions = candidate_actions(&state);
         assert!(actions.iter().any(|candidate| {
             matches!(
-                candidate.action,
+                &candidate.action,
                 GameAction::TapLandForMana { selection }
                     if selection.source.object_id == island
             )
         }));
         assert!(!actions.iter().any(|candidate| {
             matches!(
-                candidate.action,
+                &candidate.action,
                 GameAction::TapLandForMana { selection }
                     if selection.source.object_id == blank_land
             )
