@@ -44847,6 +44847,130 @@ fn reef_worm_nested_token_cascade() {
     assert_eq!(name, "Kraken", "innermost token is the 9/9 Kraken");
 }
 
+/// The structural single-quote span parser must close at the LAST `'`, so a
+/// contraction or possessive INSIDE the ability (`can't`, `owner's`) stays
+/// content and never becomes the closing delimiter.
+#[test]
+fn opaque_single_quoted_span_closes_at_last_apostrophe() {
+    // Input: a phrase-anchored single-quoted ability containing two internal
+    // apostrophes and an internal list separator. The whole span must be one unit.
+    let input = " 'when this dies, if its owner's hand isn't empty, draw a card.'";
+    let (rest, span) = super::opaque_single_quoted_span::<nom::error::Error<&str>>(input)
+        .expect("must recognize the span");
+    assert_eq!(rest, "", "the whole span is consumed as one opaque unit");
+    assert!(
+        span.contains("owner's") && span.contains("isn't"),
+        "embedded apostrophes stay inside the span, got {span:?}"
+    );
+    // A bare possessive with no space-anchored opener is NOT a span opener.
+    assert!(
+        super::opaque_single_quoted_span::<nom::error::Error<&str>>("owner's turn").is_err(),
+        "a possessive apostrophe must not open a span"
+    );
+}
+
+/// CR 608.2d: The Reef Worm cascade must survive an embedded apostrophe in the
+/// nested single-quoted grant, BEFORE the internal `, create` separator. With the
+/// old first-apostrophe close, `opponent's` severed the span and re-exposed the
+/// inner `, create …`, splitting Whale and Kraken into siblings.
+#[test]
+fn nested_token_cascade_survives_embedded_apostrophe() {
+    let def = parse_effect_chain(
+        "create a 3/3 blue Fish creature token with \"When this token dies, create \
+         a 6/6 blue Whale creature token with 'When this token dies during your \
+         opponent's turn, create a 9/9 blue Kraken creature token.'\"",
+        AbilityKind::Spell,
+    );
+    // Fish must remain a single Token, not a ChooseOneOf/sequence.
+    let Effect::Token {
+        name,
+        static_abilities,
+        ..
+    } = &*def.effect
+    else {
+        panic!("Fish must stay one Token, got {:?}", def.effect);
+    };
+    assert_eq!(name, "Fish");
+    // The Fish's dies-trigger must create a Whale that itself carries a grant
+    // whose effect creates a Kraken — i.e. the apostrophe did not split them.
+    let whale_effect = static_abilities
+        .iter()
+        .flat_map(|sd| sd.modifications.iter())
+        .find_map(|m| match m {
+            crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                trigger.execute.as_ref().map(|e| &e.effect)
+            }
+            _ => None,
+        })
+        .expect("Fish carries a dies-trigger that creates the Whale");
+    let Effect::Token {
+        name: whale_name,
+        static_abilities: whale_statics,
+        ..
+    } = &**whale_effect
+    else {
+        panic!("Fish's trigger must create a Whale Token, got {whale_effect:?}");
+    };
+    assert_eq!(whale_name, "Whale");
+    let makes_kraken = whale_statics
+        .iter()
+        .flat_map(|sd| sd.modifications.iter())
+        .any(|m| {
+            matches!(
+                m,
+                crate::types::ability::ContinuousModification::GrantTrigger { trigger }
+                    if trigger.execute.as_ref().is_some_and(|e|
+                        matches!(&*e.effect, Effect::Token { name, .. } if name == "Kraken"))
+            )
+        });
+    assert!(
+        makes_kraken,
+        "the Whale must carry a grant that creates the Kraken — the embedded \
+         apostrophe must not have split them into siblings. Whale statics: {whale_statics:?}"
+    );
+}
+
+/// CR 111.2 + CR 608.2d: Production-path (`parse_oracle_text`) regression for
+/// Reef Worm's actual printed Oracle text, so the card ingestion path — not only
+/// `parse_effect_chain` — is proven to build the Fish → Whale → Kraken cascade.
+#[test]
+fn reef_worm_card_path_builds_cascade() {
+    let parsed = parse_oracle_text(
+        "When this creature dies, create a 3/3 blue Fish creature token with \"When \
+         this token dies, create a 6/6 blue Whale creature token with 'When this \
+         token dies, create a 9/9 blue Kraken creature token.'\"",
+        "Reef Worm",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let dies = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Reef Worm's dies-trigger must lower to a create-token effect");
+    // Fish → Whale → Kraken must all be present, nested, in the card-path parse.
+    let dump = format!("{dies:?}");
+    assert!(
+        dump.contains("Fish") && dump.contains("Whale") && dump.contains("Kraken"),
+        "all three cascade tokens must be present in the card-path parse"
+    );
+    assert!(
+        !dump.contains("ChooseOneOf"),
+        "the cascade must not lower to a modal ChooseOneOf"
+    );
+    // Whale must appear INSIDE the (double-quoted) Fish grant, and Kraken inside
+    // the (single-quoted) Whale grant — a structural nesting check: Kraken's
+    // GrantTrigger must be reachable only through Whale's.
+    let fish_idx = dump.find("Fish").unwrap();
+    let whale_idx = dump.find("Whale").unwrap();
+    let kraken_idx = dump.find("Kraken").unwrap();
+    assert!(
+        fish_idx < whale_idx && whale_idx < kraken_idx,
+        "cascade must nest outer→inner: Fish, then Whale, then Kraken"
+    );
+}
+
 /// CR 702.62a + CR 118.9: The Face of Boe's verbless "pay its suspend cost
 /// rather than its mana cost" rider must parse to the parameterized
 /// `KeywordCostOfCastSpell { Suspend }` alternative cost (broadened head

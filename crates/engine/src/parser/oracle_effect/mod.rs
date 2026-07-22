@@ -4698,14 +4698,13 @@ fn split_create_token_sequence<'a>(after_create: TextPair<'a>) -> Option<Vec<(&'
     // Disjunctive rejector — require a conjunctive "and <noun>" coordinator.
     nom_primitives::scan_preceded(after_create.lower, parse_token_sequence_conjunction)?;
 
-    // Opaque quoted spans: a double-quoted granted ability, and — for the
-    // depth-2 cascading-token case where the outer double quotes are already
-    // stripped — a single-quoted one, anchored on `" '"` so a possessive
-    // apostrophe (`owner's`, no preceding space) is never mistaken for an
-    // ability opener. Mirrors `split_choice_list_items`.
+    // Opaque quoted spans: a double-quoted granted ability, and — for the depth-2
+    // cascading-token case where the outer double quotes are already stripped — a
+    // single-quoted one via `opaque_single_quoted_span` (structural close). Mirrors
+    // `split_choice_list_items`.
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
-        recognize((tag(" '"), take_until("'"), tag("'"))),
+        opaque_single_quoted_span,
         recognize(preceded(not(parse_token_sequence_separator), anychar)),
     ));
     let item = recognize(many1(unit));
@@ -4837,6 +4836,33 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
     .parse(input)
 }
 
+/// Consume a single-quoted granted-ability span as one opaque unit, applying the
+/// structural pairing rule from [`token::find_anchored_single_quoted_span`]:
+///
+/// - the opener is anchored on `" '"` (a space then the quote), so a possessive
+///   apostrophe (`owner's`, never space-preceded) can never START a span; and
+/// - the closer is the LAST `'` in the input, so a contraction or possessive
+///   INSIDE the ability (`can't`, `owner's`) is content, not the close.
+///
+/// This matters at depth 2 of a cascading token (Reef Worm): the Fish's trigger
+/// effect is `create a … Whale token with '…, create a … Kraken token.'`, and a
+/// naive `take_until("'")` would close at the first embedded apostrophe and
+/// re-expose the inner `, create …` to the list splitter. Single quotes never
+/// nest in Oracle templating (depth 3 returns to double quotes), so the ability's
+/// close is unambiguously the final `'`.
+fn opaque_single_quoted_span<'a, E: nom::error::ParseError<&'a str>>(
+    input: &'a str,
+) -> nom::IResult<&'a str, &'a str, E> {
+    // Generic over the error type so both list splitters can share it: the choice
+    // splitter uses nom's default `Error`, the sequence splitter uses `OracleError`.
+    let (after_open, _) = tag::<_, _, E>(" '").parse(input)?;
+    let close = after_open
+        .rfind('\'')
+        .ok_or_else(|| nom::Err::Error(E::from_error_kind(input, nom::error::ErrorKind::Char)))?;
+    let consumed = input.len() - after_open.len() + close + '\''.len_utf8();
+    Ok((&input[consumed..], &input[..consumed]))
+}
+
 /// Split a disjunctive choice list into its item slices using nom combinators.
 /// Counter noun phrases and bare keyword names never contain a list separator,
 /// so a `separated_list1` over `parse_choice_list_separator` recovers each item
@@ -4847,21 +4873,15 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
 /// CR 608.2d + CR 113.3: A token-choice branch may carry a quoted granted ability
 /// whose text contains a `,`/`or` list separator — e.g. Reef Worm's nested
 /// `a 3/3 blue Fish creature token with "When this token dies, create a 6/6 blue
-/// Whale creature token with '…'"`. A double-quoted span is therefore consumed as
-/// one opaque unit so the splitter never severs a list item inside quoted ability
-/// text; otherwise the inner `, create …` is misread as additional choice branches
-/// (a single cascading token wrongly becomes a `ChooseOneOf` of distinct tokens).
-/// A double-quoted span is consumed as one opaque unit. When the outer double
-/// quotes have already been stripped — the depth-2 case of a cascading token
-/// (Reef Worm's Fish trigger creates a Whale token whose own ability is written
-/// in single quotes) — the nested span is single-quoted, so a single-quoted
-/// span is consumed opaquely too. It is anchored on `" '"` (space then quote):
-/// an ability-opening quote is always preceded by a space (`with '…'`), whereas
-/// a possessive apostrophe (`owner's`) never is, so possessives stay untouched.
+/// Whale creature token with '…'"`. A double-quoted span is consumed as one
+/// opaque unit so the splitter never severs a list item inside quoted ability
+/// text; a single-quoted span (the depth-2 nested grant) is consumed via
+/// [`opaque_single_quoted_span`], whose structural close preserves embedded
+/// apostrophes.
 fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
-        recognize((tag(" '"), take_until("'"), tag("'"))),
+        opaque_single_quoted_span,
         recognize(preceded(not(parse_choice_list_separator), anychar)),
     ));
     let item = recognize(many1(unit));
