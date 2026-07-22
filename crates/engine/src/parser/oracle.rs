@@ -3456,6 +3456,9 @@ impl<'a> DocEmitter<'a> {
         self.last_static = Some(lower_static_ir(&ir));
         self.emit_at(line, OracleNodeIr::Static(ir));
     }
+    fn replacement_ir_at(&mut self, line: usize, ir: ReplacementIr) {
+        self.emit_at(line, OracleNodeIr::Replacement(ir));
+    }
 
     /// Last-emitted node per category — the read-only peeks for
     /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
@@ -4856,7 +4859,10 @@ pub(crate) fn parse_oracle_ir(
             for __item in statics {
                 emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
-            emitter.replacement_at(item_line, replacement);
+            emitter.replacement_ir_at(
+                item_line,
+                ReplacementIr::from_definition(&static_line, replacement),
+            );
             i += 1;
             continue;
         }
