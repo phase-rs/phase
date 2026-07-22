@@ -22,102 +22,106 @@ expression: "&ir"
         "fragment": "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\""
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": null,
-            "properties": [
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "EquippedBy"
+                }
+              ]
+            },
+            "modifications": [
               {
-                "type": "EquippedBy"
-              }
-            ]
-          },
-          "modifications": [
-            {
-              "type": "GrantTrigger",
-              "trigger": {
-                "mode": "Attacks",
-                "execute": {
-                  "kind": "Spell",
-                  "effect": {
-                    "type": "SetTapState",
-                    "target": {
-                      "type": "Typed",
-                      "type_filters": [
-                        "Creature"
-                      ],
-                      "controller": "DefendingPlayer",
-                      "properties": []
-                    },
-                    "scope": {
-                      "type": "Single"
-                    },
-                    "state": {
-                      "type": "Tap"
-                    }
-                  },
-                  "cost": null,
-                  "sub_ability": {
+                "type": "GrantTrigger",
+                "trigger": {
+                  "mode": "Attacks",
+                  "execute": {
                     "kind": "Spell",
                     "effect": {
-                      "type": "Unimplemented",
-                      "name": "put",
-                      "description": "counters equal to the difference"
+                      "type": "SetTapState",
+                      "target": {
+                        "type": "Typed",
+                        "type_filters": [
+                          "Creature"
+                        ],
+                        "controller": "DefendingPlayer",
+                        "properties": []
+                      },
+                      "scope": {
+                        "type": "Single"
+                      },
+                      "state": {
+                        "type": "Tap"
+                      }
                     },
                     "cost": null,
-                    "sub_ability": null,
+                    "sub_ability": {
+                      "kind": "Spell",
+                      "effect": {
+                        "type": "Unimplemented",
+                        "name": "put",
+                        "description": "counters equal to the difference"
+                      },
+                      "cost": null,
+                      "sub_ability": null,
+                      "duration": null,
+                      "description": null,
+                      "target_prompt": null,
+                      "condition": {
+                        "type": "TargetHasKeywordInstead",
+                        "keyword": {
+                          "Unknown": "greater power than ~"
+                        }
+                      },
+                      "optional_targeting": false,
+                      "optional": false,
+                      "forward_result": false
+                    },
                     "duration": null,
                     "description": null,
                     "target_prompt": null,
-                    "condition": {
-                      "type": "TargetHasKeywordInstead",
-                      "keyword": {
-                        "Unknown": "greater power than ~"
-                      }
-                    },
+                    "condition": null,
                     "optional_targeting": false,
                     "optional": false,
                     "forward_result": false
                   },
-                  "duration": null,
-                  "description": null,
-                  "target_prompt": null,
-                  "condition": null,
-                  "optional_targeting": false,
+                  "valid_card": {
+                    "type": "SelfRef"
+                  },
+                  "origin": null,
+                  "destination": null,
+                  "trigger_zones": [
+                    "Battlefield"
+                  ],
+                  "phase": null,
                   "optional": false,
-                  "forward_result": false
-                },
-                "valid_card": {
-                  "type": "SelfRef"
-                },
-                "origin": null,
-                "destination": null,
-                "trigger_zones": [
-                  "Battlefield"
-                ],
-                "phase": null,
-                "optional": false,
-                "damage_kind": "Any",
-                "secondary": false,
-                "valid_target": null,
-                "valid_source": null,
-                "description": "Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.",
-                "constraint": null,
-                "condition": null,
-                "batched": false
+                  "damage_kind": "Any",
+                  "secondary": false,
+                  "valid_target": null,
+                  "valid_source": null,
+                  "description": "Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.",
+                  "constraint": null,
+                  "condition": null,
+                  "batched": false
+                }
               }
-            }
-          ],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\""
+            ],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\""
+          },
+          "source_text": "Equipped creature has \"Whenever ~ attacks, tap target creature defending player controls. If that creature has greater power than ~, put a number of +1/+1 counters on ~ equal to the difference.\"",
+          "body_ir": null
         }
       }
     },

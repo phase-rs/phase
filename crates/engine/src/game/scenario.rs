@@ -1774,6 +1774,7 @@ impl GameRunner {
             WaitingFor::SpecializeColor { .. } => "SpecializeColor",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
             WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",

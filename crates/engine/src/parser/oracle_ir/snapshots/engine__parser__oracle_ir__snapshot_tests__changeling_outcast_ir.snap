@@ -59,18 +59,22 @@ expression: "&ir"
         "fragment": "~ can't block and can't be blocked."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "CantBlock",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "CantBlock",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ can't block and can't be blocked."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "~ can't block and can't be blocked."
+          "source_text": "~ can't block and can't be blocked.",
+          "body_ir": null
         }
       }
     },
@@ -92,18 +96,22 @@ expression: "&ir"
         "fragment": "~ can't block and can't be blocked."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "CantBeBlocked",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "CantBeBlocked",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ can't block and can't be blocked."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "~ can't block and can't be blocked."
+          "source_text": "~ can't block and can't be blocked.",
+          "body_ir": null
         }
       }
     }

@@ -1025,7 +1025,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
     &UNSUPPORTED_PROTOCOL_CAPABILITIES
 }
 
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 18] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 19] = [
     UnsupportedCapability {
         code: "upstream.response-envelope-mismatch",
         area: "transport",
@@ -1133,6 +1133,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 18] = [
         area: "combat",
         reason: "The pinned protocol has no response shape for choosing the player, planeswalker, or battle attacked by an entering creature.",
         suggested_protocol_extension: "Add an entry-attack destination choice using the existing attack-target reference shape.",
+    },
+    UnsupportedCapability {
+        code: "local.zone-opponent-chooser-unsupported",
+        area: "prompts",
+        reason: "The pinned protocol has no typed choice for the controller picking which opponent makes a zone choice (CR 608.2d, e.g. Plargg and Nassari's 'an opponent chooses').",
+        suggested_protocol_extension: "Add a non-target opponent-picker choice carrying candidate player ids, mirroring the clash opponent selection shape.",
     },
 ];
 
@@ -1710,6 +1716,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         }
         GameAction::ChooseClashOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.clash-unsupported")
+        }
+        GameAction::ChooseZoneOpponentChooser { .. } => {
+            AvailableActionConversion::Unsupported("local.zone-opponent-chooser-unsupported")
         }
         GameAction::ChooseAnnouncingOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
@@ -4275,13 +4284,12 @@ mod protocol_wire_tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 18);
-
+        assert_eq!(capabilities.len(), 19);
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 18, "capability codes must be unique");
+        assert_eq!(codes.len(), 19, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

@@ -338,12 +338,16 @@ fn curse_of_shaken_faith_fires_on_second_spell() {
     );
 }
 
-/// Fraying Sanity: trigger fires at end step, mills X cards where X = cards
-/// put into graveyard this turn. We seed the graveyard with some cards first.
+/// Fraying Sanity (issue #5947): at each end step, enchanted player mills X
+/// cards where X is the number of cards put into their graveyard from anywhere
+/// this turn. Seed N owned GY puts, advance to the end step, and assert the
+/// enchanted player mills exactly N.
 #[test]
-fn fraying_sanity_fires_at_end_step() {
+fn fraying_sanity_mills_cards_put_into_graveyard_this_turn() {
+    use engine::types::game_state::WaitingFor;
+
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::Untap);
+    scenario.at_phase(Phase::PreCombatMain);
 
     let curse_id = {
         let mut builder =
@@ -353,7 +357,13 @@ fn fraying_sanity_fires_at_end_step() {
         builder.id()
     };
 
-    // Library padding — P1 needs lots of cards to mill.
+    // Cards that will be counted as "put into [enchanted player's] graveyard
+    // this turn" — owned by P1 (CR 404.1).
+    let gy_seeds: Vec<_> = (0..3)
+        .map(|i| scenario.add_creature(P1, &format!("Seed {i}"), 1, 1).id())
+        .collect();
+
+    // Library padding — P1 needs cards to mill.
     for _ in 0..30 {
         scenario.add_card_to_library_top(P0, "Plains");
         scenario.add_card_to_library_top(P1, "Island");
@@ -362,20 +372,92 @@ fn fraying_sanity_fires_at_end_step() {
     let mut runner = scenario.build();
     runner.state_mut().active_player = P0;
     runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
 
     attach_to_player(runner.state_mut(), curse_id, P1);
     evaluate_layers(runner.state_mut());
     reindex_object_triggers(runner.state_mut(), curse_id);
 
-    // Verify the curse is properly set up.
-    let curse_obj = runner.state().objects.get(&curse_id);
-    assert!(
-        curse_obj.is_some(),
-        "Fraying Sanity must be on the battlefield"
+    // Put the seeds into P1's graveyard so they populate zone_changes_this_turn.
+    for &id in &gy_seeds {
+        let mut events = Vec::new();
+        move_to_zone(runner.state_mut(), id, Zone::Graveyard, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        drain_order_triggers_with_identity(runner.state_mut());
+    }
+    // Clear any leftover stack from the dies moves — Fraying Sanity itself
+    // does not trigger on those zone changes (only at end step).
+    runner.advance_until_stack_empty();
+
+    let lib_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1")
+        .library
+        .len();
+    let p0_lib_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .expect("P0")
+        .library
+        .len();
+    let gy_before = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1")
+        .graveyard
+        .len();
+
+    // Advance to the end step of the active turn; Fraying Sanity fires for
+    // "each end step" and mills the enchanted player.
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+
+    let lib_after = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1")
+        .library
+        .len();
+    let p0_lib_after = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .expect("P0")
+        .library
+        .len();
+    let gy_after = runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P1)
+        .expect("P1")
+        .graveyard
+        .len();
+
+    let milled = lib_before.saturating_sub(lib_after);
+    assert_eq!(
+        milled, 3,
+        "CR 701.17a + CR 404.1: enchanted player must mill X = cards put into \
+         their graveyard this turn (expected 3, milled {milled}; \
+         lib {lib_before}→{lib_after}, gy {gy_before}→{gy_after})"
     );
     assert_eq!(
-        curse_obj.unwrap().attached_to.and_then(|h| h.as_player()),
-        Some(P1),
-        "Fraying Sanity must be attached to P1"
+        gy_after,
+        gy_before + milled,
+        "milled cards must land in the enchanted player's graveyard"
+    );
+    assert_eq!(
+        p0_lib_after, p0_lib_before,
+        "only the enchanted player should be milled"
     );
 }

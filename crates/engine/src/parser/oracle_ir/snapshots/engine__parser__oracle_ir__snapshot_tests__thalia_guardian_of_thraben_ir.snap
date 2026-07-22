@@ -59,42 +59,46 @@ expression: "&ir"
         "fragment": "Noncreature spells cost {1} more to cast."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": {
-            "ModifyCost": {
-              "mode": "Raise",
-              "amount": {
-                "type": "Cost",
-                "shards": [],
-                "generic": 1
-              },
-              "spell_filter": {
-                "type": "Typed",
-                "type_filters": [
-                  {
-                    "Non": "Creature"
-                  }
-                ],
-                "controller": null,
-                "properties": []
+        "Static": {
+          "definition": {
+            "mode": {
+              "ModifyCost": {
+                "mode": "Raise",
+                "amount": {
+                  "type": "Cost",
+                  "shards": [],
+                  "generic": 1
+                },
+                "spell_filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    {
+                      "Non": "Creature"
+                    }
+                  ],
+                  "controller": null,
+                  "properties": []
+                }
               }
-            }
+            },
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Card"
+              ],
+              "controller": null,
+              "properties": []
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Noncreature spells cost {1} more to cast."
           },
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Card"
-            ],
-            "controller": null,
-            "properties": []
-          },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Noncreature spells cost {1} more to cast."
+          "source_text": "Noncreature spells cost {1} more to cast.",
+          "body_ir": null
         }
       }
     }

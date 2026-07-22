@@ -201,6 +201,13 @@ pub enum GameAction {
     ChooseClashOpponent {
         opponent: PlayerId,
     },
+    /// CR 608.2d: The controller's choice of which opponent makes a resolving
+    /// "an opponent chooses …" zone selection, answering a pending
+    /// `WaitingFor::ChooseFromZoneOpponentChooser`. `opponent` must be one of
+    /// that prompt's `candidates`.
+    ChooseZoneOpponentChooser {
+        opponent: PlayerId,
+    },
     /// CR 608.2d + CR 700.3: "An opponent separates" — the controller's answer
     /// to `WaitingFor::SeparatePilesChooseOpponent`.
     ChoosePileOpponent {
@@ -1622,6 +1629,7 @@ impl GameAction {
             | GameAction::ChooseMutateMergeSide { .. }
             | GameAction::CipherEncode { .. }
             | GameAction::ChooseClashOpponent { .. }
+            | GameAction::ChooseZoneOpponentChooser { .. }
             | GameAction::ChoosePileOpponent { .. }
             | GameAction::ChooseAnnouncingOpponent { .. }
             | GameAction::ChooseAssistPlayer { .. }

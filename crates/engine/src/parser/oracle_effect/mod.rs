@@ -4698,8 +4698,13 @@ fn split_create_token_sequence<'a>(after_create: TextPair<'a>) -> Option<Vec<(&'
     // Disjunctive rejector — require a conjunctive "and <noun>" coordinator.
     nom_primitives::scan_preceded(after_create.lower, parse_token_sequence_conjunction)?;
 
+    // Opaque quoted spans: a double-quoted granted ability, and — for the depth-2
+    // cascading-token case where the outer double quotes are already stripped — a
+    // single-quoted one via `opaque_single_quoted_span` (structural close). Mirrors
+    // `split_choice_list_items`.
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
+        opaque_single_quoted_span,
         recognize(preceded(not(parse_token_sequence_separator), anychar)),
     ));
     let item = recognize(many1(unit));
@@ -4831,6 +4836,80 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
     .parse(input)
 }
 
+/// Recognize the text that may legally follow a single-quoted span's CLOSING
+/// quote inside a token-list item: end of input, the outer `"` delimiter,
+/// sentence punctuation, or a list-separator phrase. A plural possessive
+/// (`opponents' creatures`, `opponents' turns`) is instead followed by ordinary
+/// continuing prose, which matches none of these.
+fn single_quote_close_boundary(i: &str) -> bool {
+    i.is_empty()
+        || i.starts_with(['"', ',', '.'])
+        || alt((tag::<_, _, nom::error::Error<&str>>(" or "), tag(" and ")))
+            .parse(i)
+            .is_ok()
+}
+
+/// Consume a single-quoted granted-ability span as one opaque unit:
+///
+/// - the opener is anchored on `" '"` (a space then the quote), so a possessive
+///   apostrophe (`owner's`, never space-preceded) can never START a span; and
+/// - the closer is the first `'` that is not glued to a following alphanumeric
+///   (a contraction/singular possessive — `can't`, `owner's`) AND is either
+///   preceded by terminal punctuation (`.'` / `,'`) or followed by a close
+///   boundary ([`single_quote_close_boundary`]: end of input, `"`, punctuation,
+///   or a list-separator phrase). A PLURAL possessive (`opponents'`) fails both:
+///   it follows a letter and is followed by continuing prose (` creatures`,
+///   ` turns`). A bare-keyword close with no terminal punctuation
+///   (`…has prowess' or …`) is still a close: ` or ` is a boundary.
+///
+/// This matters at depth 2 of a cascading token (Reef Worm): the Fish's trigger
+/// effect is `create a … Whale token with '…, create a … Kraken token.'`, and a
+/// naive `take_until("'")` would close at the first embedded apostrophe and
+/// re-expose the inner `, create …` to the list splitter.
+///
+/// The close is deliberately ITEM-BOUNDED, unlike
+/// `token::find_anchored_single_quoted_span`'s last-`'` rule: that helper sees a
+/// single token's suffix where the final `'` is unambiguous, but this combinator
+/// runs inside a LIST splitter, where a tail-wide `rfind` would let the first
+/// span swallow the separator and a sibling item's own quoted grant. The one
+/// residual ambiguity is a possessive DIRECTLY followed by a separator word
+/// (`…all your opponents' or …`) — a dangling possessive that Oracle prose
+/// never prints.
+fn opaque_single_quoted_span<'a, E: nom::error::ParseError<&'a str>>(
+    input: &'a str,
+) -> nom::IResult<&'a str, &'a str, E> {
+    // Generic over the error type so both list splitters can share it: the choice
+    // splitter uses nom's default `Error`, the sequence splitter uses `OracleError`.
+    let (after_open, _) = tag::<_, _, E>(" '").parse(input)?;
+    // Structural close scan (char-level quote pairing, not parsing dispatch —
+    // same class as `strip_double_quoted_spans`' find('"')).
+    let mut search_from = 0;
+    let close = loop {
+        let Some(rel) = after_open[search_from..].find('\'') else {
+            return Err(nom::Err::Error(E::from_error_kind(
+                input,
+                nom::error::ErrorKind::Char,
+            )));
+        };
+        let idx = search_from + rel;
+        match after_open[idx + 1..].chars().next() {
+            // Contraction / singular possessive: `'` glued to a letter or digit.
+            Some(c) if c.is_ascii_alphanumeric() => search_from = idx + 1,
+            // A close is terminal-punctuation-preceded (`.'` / `,'`) or sits at
+            // an item boundary; anything else (a plural possessive with prose
+            // continuing after it) is span content.
+            _ if after_open[..idx].ends_with(['.', ','])
+                || single_quote_close_boundary(&after_open[idx + 1..]) =>
+            {
+                break idx;
+            }
+            _ => search_from = idx + 1,
+        }
+    };
+    let consumed = input.len() - after_open.len() + close + '\''.len_utf8();
+    Ok((&input[consumed..], &input[..consumed]))
+}
+
 /// Split a disjunctive choice list into its item slices using nom combinators.
 /// Counter noun phrases and bare keyword names never contain a list separator,
 /// so a `separated_list1` over `parse_choice_list_separator` recovers each item
@@ -4841,16 +4920,15 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
 /// CR 608.2d + CR 113.3: A token-choice branch may carry a quoted granted ability
 /// whose text contains a `,`/`or` list separator — e.g. Reef Worm's nested
 /// `a 3/3 blue Fish creature token with "When this token dies, create a 6/6 blue
-/// Whale creature token with '…'"`. A double-quoted span is therefore consumed as
-/// one opaque unit so the splitter never severs a list item inside quoted ability
-/// text; otherwise the inner `, create …` is misread as additional choice branches
-/// (a single cascading token wrongly becomes a `ChooseOneOf` of distinct tokens).
-/// Single quotes are only ever nested inside double quotes here, so handling the
-/// double-quoted span alone also covers them and leaves bare apostrophes
-/// (possessives such as "owner's") untouched.
+/// Whale creature token with '…'"`. A double-quoted span is consumed as one
+/// opaque unit so the splitter never severs a list item inside quoted ability
+/// text; a single-quoted span (the depth-2 nested grant) is consumed via
+/// [`opaque_single_quoted_span`], whose structural close preserves embedded
+/// apostrophes.
 fn split_choice_list_items(input: &str) -> Option<Vec<&str>> {
     let unit = alt((
         recognize((tag("\""), take_until("\""), tag("\""))),
+        opaque_single_quoted_span,
         recognize(preceded(not(parse_choice_list_separator), anychar)),
     ));
     let item = recognize(many1(unit));
@@ -18592,6 +18670,44 @@ fn lower_subject_predicate_ast(
                 }
                 return clause;
             }
+            // CR 608.2d: "An opponent chooses a nonland card exiled this way"
+            // (Plargg and Nassari) — `strip_subject_clause` peeled the
+            // "an opponent" subject and deconjugated the predicate to "choose
+            // a nonland card exiled this way", which the imperative layer
+            // lowered to `ChooseFromZone` with the default `Chooser::Controller`.
+            // The subject names the selecting player, not an affected object,
+            // so rebind the chooser to `Chooser::Opponent` (the same delegation
+            // `try_parse_return_opponent_choice_from_graveyard` encodes for
+            // "of an opponent's choice"). Matched narrowly on the bare
+            // single-opponent player filter the "an opponent" / "your opponent"
+            // subject arms produce (subject.rs `parse_subject_application`) —
+            // typed or property-carrying subjects fall through to the honesty
+            // gate below.
+            //
+            // The targeted form ("target opponent chooses …" — Forgotten Lore,
+            // Shrouded Lore) is deliberately NOT rebound: `parse_target` lowers
+            // "target opponent" to the same bare opponent filter, but the
+            // subject then carries `target: Some(_)` — the chooser is bound to
+            // a chosen target slot, not "an opponent of the controller's
+            // choice", and `Chooser::Opponent` cannot represent that binding.
+            // Gating on `subject.target.is_none()` keeps those cards on the
+            // honesty gate below — the same fall-through the exiled-this-way
+            // anaphor keeps for its targeted form (imperative.rs
+            // `try_parse_choose_exiled_anaphor`).
+            if let Effect::ChooseFromZone { chooser, .. } = &mut clause.effect {
+                if subject.target.is_none()
+                    && matches!(
+                        &subject.affected,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::Opponent)
+                                && tf.type_filters.is_empty()
+                                && tf.properties.is_empty()
+                    )
+                {
+                    *chooser = crate::types::ability::Chooser::Opponent;
+                    return clause;
+                }
+            }
             if matches!(
                 &clause.effect,
                 Effect::ChooseFromZone {
@@ -20283,6 +20399,53 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     })
 }
 
+/// CR 608.2g + CR 601.2 + CR 118.9: Parse the counted free-cast-window form
+/// `"up to N spell(s) from among (the|those) [other] [typed] cards exiled this
+/// way"` (the `"cast "` prefix and the `"without paying their mana cost(s)"`
+/// requirement are handled by the caller) and lower it to
+/// `Effect::FreeCastFromZones` with `zones = [Exile]`.
+///
+/// The filter is the `parse_from_among_exiled_this_way` anchor's output
+/// (`ExiledBySource` AND any typed leg), with one rewrite: when the typed leg
+/// carries `FilterProp::Another` ("the OTHER cards exiled this way"), the
+/// "other"-ness is relative to the card a PRIOR choose in the same chain
+/// selected (Plargg and Nassari: "An opponent chooses a nonland card exiled
+/// this way. You may cast up to two spells from among the other cards exiled
+/// this way") — not relative to the ability source. Rewrite `Another` →
+/// `Not(InTrackedSet(0))` (the sentinel the choose's resolution publishes its
+/// picks under), mirroring `rewrite_filter_prop_another_to_tracked_set` for
+/// the Day-of-the-Doctor "all other X" class.
+fn try_parse_counted_free_cast_from_exiled_this_way(rest: &str) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+    // CR 601.2: "up to N" — the counted bound. A fixed number only; variable
+    // counts ("up to X") have no concrete cap at parse time and fall through
+    // to the existing permission-based arms.
+    let (after_count, _) = tag::<_, _, E>("up to ").parse(rest).ok()?;
+    let (after_count, count) = nom_primitives::parse_number.parse(after_count).ok()?;
+    if count == 0 || count > u8::MAX as u32 {
+        return None;
+    }
+    // CR 601.2a: the "spells" noun — this window casts spells (a land card can
+    // never be cast, CR 305.1), so require the spell noun rather than "cards".
+    let (after_noun, _) = alt((tag::<_, _, E>(" spells "), tag(" spell ")))
+        .parse(after_count)
+        .ok()?;
+
+    let mut filter = parse_from_among_exiled_this_way(after_noun)?;
+    // CR 608.2c: "the OTHER cards exiled this way" — rewrite the
+    // source-relative `Another` into the tracked-set complement of the prior
+    // choose's picks (see doc comment).
+    rewrite_target_filter_another_to_tracked_set(&mut filter);
+
+    Some(Effect::FreeCastFromZones {
+        count: count as u8,
+        max_total_mv: None,
+        filter,
+        zones: vec![Zone::Exile],
+        exile_instead_of_graveyard: false,
+    })
+}
+
 /// CR 406.6 + CR 603.10a: Detect the `"from among cards exiled with [self-ref]"`
 /// anchor — the persistent per-source exile-link anaphor used by cards that
 /// reference their own tracked exile set from a later, independent ability
@@ -20845,6 +21008,30 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
         });
+    }
+    // CR 608.2g + CR 601.2 + CR 118.9: "cast up to N spells from among the
+    // [other] cards exiled this way without paying their mana costs" — a
+    // COUNTED free-cast window over the resolution's exile set (Plargg and
+    // Nassari; ruling 2021-04-16: "All the spells you cast due to the
+    // triggered ability are cast during the resolution of that ability. You
+    // can cast them in any order."). The counted "up to N" bound is a hard
+    // cast cap, so this must NOT lower to `CastFromZone` (a per-object
+    // permission grant with no shared budget): route it to
+    // `Effect::FreeCastFromZones`, whose interactive window already owns the
+    // "up to `count`" stop-early loop (Invoke Calamity machinery). Placed
+    // before the uncounted `parse_from_among_exiled_this_way` arm below so the
+    // counted form wins; uncounted forms (Etali Primal Conqueror's "cast any
+    // number") keep their existing lowering.
+    //
+    // CR 601.2 (strict-lowering rule): `Effect::FreeCastFromZones` carries no
+    // cast-constraint channel, so a parsed `constraint` (e.g. a timing rider)
+    // MUST NOT be silently dropped into an unconstrained window — gate this
+    // arm on `constraint.is_none()` and let constrained forms fall through to
+    // the arms that carry (or strictly reject) the constraint.
+    if mode == CardPlayMode::Cast && without_paying && constraint.is_none() {
+        if let Some(effect) = try_parse_counted_free_cast_from_exiled_this_way(rest) {
+            return Some(effect);
+        }
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
     // from among [the|those] [typed] cards exiled this way" — the article-`the`
@@ -25812,6 +25999,10 @@ fn parse_exile_pile_shuffle_cloak_ir(
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
                 object_source: Some(tracked_sentinel),
+                // CR 110.2a: "you exile ... then cloak them" — the cloaker
+                // controls the returned face-down permanents even for pile
+                // members they don't own.
+                enters_under: Some(ControllerRef::You),
             }),
             None,
             ClauseDisposition::Emit {

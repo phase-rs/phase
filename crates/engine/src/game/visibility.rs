@@ -1078,6 +1078,8 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 ref filter,
                 ref zones,
                 exile_instead_of_graveyard,
+                source,
+                ref member_pool,
             },
     } = state.waiting_for
     {
@@ -1091,6 +1093,14 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                     filter: filter.clone(),
                     zones: zones.clone(),
                     exile_instead_of_graveyard,
+                    source,
+                    // CR 400.2: the member pool can reference the same private
+                    // candidates (a hand/graveyard window would leak eligible
+                    // ids through it); redact it to placeholders exactly like
+                    // `candidates`. For Plargg's exile batch the ids are
+                    // public-zone cards, but the redaction is uniform — the
+                    // opponent-facing view never needs the pool.
+                    member_pool: member_pool.iter().map(|_| ObjectId(0)).collect(),
                 },
             };
         }
@@ -4803,6 +4813,8 @@ mod tests {
                 filter: crate::types::ability::TargetFilter::Any,
                 zones: vec![Zone::Graveyard, Zone::Hand],
                 exile_instead_of_graveyard: true,
+                source: crate::types::game_state::zero_object_id(),
+                member_pool: vec![hand_candidate],
             },
         };
 
@@ -4837,6 +4849,7 @@ mod tests {
                         remaining_casts,
                         remaining_mv_budget,
                         exile_instead_of_graveyard,
+                        member_pool,
                         ..
                     },
                 ..
@@ -4846,6 +4859,13 @@ mod tests {
                     "opponent must not see the controller's hand candidate id"
                 );
                 assert_eq!(candidates, vec![ObjectId(0)]);
+                // CR 400.2: the member pool is redacted exactly like the
+                // candidates — it references the same private ids.
+                assert!(
+                    !member_pool.contains(&hand_candidate),
+                    "opponent must not see the controller's hand id via the member pool"
+                );
+                assert_eq!(member_pool, vec![ObjectId(0)]);
                 assert_eq!(remaining_casts, 2);
                 assert_eq!(remaining_mv_budget, Some(6));
                 assert!(exile_instead_of_graveyard);

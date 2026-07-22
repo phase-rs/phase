@@ -606,6 +606,9 @@ pub(crate) enum ImperativeFamilyAst {
         target: TargetFilter,
         count: QuantityExpr,
         from_zone: Option<Zone>,
+        /// CR 110.2a: The instruction subject who cloaks — the controller on
+        /// entry for the cloaked card(s). Mirrors `Manifest.enters_under`.
+        enters_under: Option<ControllerRef>,
     },
     /// CR 406.3 + CR 701.20a: Turn an exiled face-down card face up via a
     /// resolving effect (not the morph special action). The Imprint "flip"

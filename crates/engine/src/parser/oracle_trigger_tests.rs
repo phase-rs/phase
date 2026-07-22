@@ -15031,6 +15031,66 @@ fn phase_trigger_enchanted_players_first_upkeep() {
     ));
 }
 
+/// CR 701.17a + CR 404.1 + CR 303.4b + CR 111.7 (issue #5947): Fraying Sanity —
+/// "At the beginning of each end step, enchanted player mills X cards, where X
+/// is the number of cards put into their graveyard from anywhere this turn."
+/// Must lower to `Effect::Mill` (not `Unimplemented { where_x_binding }`) with:
+///   - `target: AttachedTo` (the enchanted player)
+///   - `count: ZoneChangeCountThisTurn { from: None, to: Graveyard,
+///      filter: Owned{EnchantedPlayer} + NonToken }`
+#[test]
+fn fraying_sanity_mills_zone_change_count_this_turn() {
+    use crate::types::ability::{
+        ControllerRef, FilterProp, QuantityExpr, QuantityRef, TypedFilter,
+    };
+    use crate::types::zones::Zone;
+
+    let def = parse_trigger_line(
+        "At the beginning of each end step, enchanted player mills X cards, where X is \
+         the number of cards put into their graveyard from anywhere this turn.",
+        "Fraying Sanity",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    let execute = def.execute.as_ref().expect("execute");
+    // Duration must NOT steal the quantity's "this turn" suffix.
+    assert!(
+        execute.duration.is_none(),
+        "where-X's 'this turn' must not become UntilEndOfTurn duration, got {:?}",
+        execute.duration
+    );
+    match execute.effect.as_ref() {
+        Effect::Mill {
+            count,
+            target,
+            destination,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::AttachedTo,
+                "mill target must be the enchanted player"
+            );
+            assert_eq!(*destination, Zone::Graveyard);
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: None,
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Owned {
+                                controller: ControllerRef::EnchantedPlayer,
+                            },
+                            FilterProp::NonToken,
+                        ])),
+                    },
+                }
+            );
+        }
+        other => panic!("expected Mill with ZoneChangeCountThisTurn, got {other:?}"),
+    }
+}
+
 #[test]
 fn phase_trigger_each_opponents_upkeep() {
     let def = parse_trigger_line(
