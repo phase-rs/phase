@@ -1002,12 +1002,19 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             ScanMode::Conservative => Axes::CONSERVATIVE,
             ScanMode::LoopFirewall => {
                 let mut acc = scan_mana_production(produced, mode);
-                if let Some(t) = target {
-                    acc = acc.or(scan_target_filter(
-                        t,
-                        FilterReadContext::SnapshotOrEvent,
-                        mode,
-                    ));
+                // CR 601.2c: a mana target is role-tagged (recipient / count
+                // source). Scan EVERY declared role filter, mirroring the D5
+                // legacy scan (`ability_rw`) and the AI POISON scan
+                // (`ai_support::filter`) — a partial view here would let the
+                // loop firewall miss a target-derived axis.
+                if let Some(role) = target {
+                    for (_, filter) in role.declared_filters() {
+                        acc = acc.or(scan_target_filter(
+                            filter,
+                            FilterReadContext::SnapshotOrEvent,
+                            mode,
+                        ));
+                    }
                 }
                 acc
             }

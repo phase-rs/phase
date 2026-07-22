@@ -2363,6 +2363,7 @@ fn collect_target_slots_inner(
             acc.push(TargetSelectionSlot {
                 legal_targets,
                 optional: ability.optional_targeting,
+                chooser: None,
             });
         }
     } else if let Effect::Attach { attachment, target } = &ability.effect {
