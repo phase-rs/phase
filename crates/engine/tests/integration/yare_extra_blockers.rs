@@ -108,3 +108,65 @@ fn yare_extra_blockers_allow_three_attackers_blocked() {
         "ExtraBlockers(2) must allow blocking three attackers"
     );
 }
+
+#[test]
+fn two_extra_blocker_grants_are_cumulative_not_max() {
+    // CR 509.1b: two separate "can block an additional creature" effects on the
+    // same creature stack additively — e.g. two copies of Brave the Sands grant
+    // a limit of 1 (default) + 1 + 1 = 3, not max(1 + 1, 1 + 1) = 2.
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let attacker1 = create_creature(&mut state, PlayerId(0), "Attacker A", 2, 2);
+    let attacker2 = create_creature(&mut state, PlayerId(0), "Attacker B", 2, 2);
+    let attacker3 = create_creature(&mut state, PlayerId(0), "Attacker C", 2, 2);
+    let attacker4 = create_creature(&mut state, PlayerId(0), "Attacker D", 2, 2);
+    let blocker = create_creature(&mut state, PlayerId(1), "Defender", 2, 2);
+
+    // Two independent grants, each "an additional creature" (Some(1)).
+    let defs = &mut state.objects.get_mut(&blocker).unwrap().static_definitions;
+    defs.push(StaticDefinition::new(StaticMode::ExtraBlockers {
+        count: Some(1),
+    }));
+    defs.push(StaticDefinition::new(StaticMode::ExtraBlockers {
+        count: Some(1),
+    }));
+
+    state.combat = Some(CombatState {
+        attackers: vec![
+            AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+            AttackerInfo::attacking_player(attacker2, PlayerId(1)),
+            AttackerInfo::attacking_player(attacker3, PlayerId(1)),
+            AttackerInfo::attacking_player(attacker4, PlayerId(1)),
+        ],
+        ..Default::default()
+    });
+
+    // Fails before the fix: the limit is computed as max(2, 2) = 2, so this
+    // three-attacker block is rejected.
+    assert!(
+        validate_blockers(
+            &state,
+            &[
+                (blocker, attacker1),
+                (blocker, attacker2),
+                (blocker, attacker3),
+            ],
+        )
+        .is_ok(),
+        "two ExtraBlockers(1) grants must sum to a limit of 3 (1 default + 1 + 1)"
+    );
+
+    // Upper bound is exactly 3: a fourth simultaneous block is still illegal.
+    assert!(
+        validate_blockers(
+            &state,
+            &[
+                (blocker, attacker1),
+                (blocker, attacker2),
+                (blocker, attacker3),
+                (blocker, attacker4),
+            ],
+        )
+        .is_err(),
+        "two ExtraBlockers(1) grants cap the limit at 3, so a fourth block is illegal"
+    );
+}

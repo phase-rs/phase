@@ -1654,7 +1654,7 @@ pub fn validate_blockers_for_player(
                 .objects
                 .get(&blocker_id)
                 .ok_or_else(|| format!("Blocker {:?} not found during limit check", blocker_id))?;
-            // Find the best ExtraBlockers grant on this creature
+            // Sum every ExtraBlockers grant on this creature (CR 509.1b).
             let max_allowed = extra_block_limit(state, blocker);
             if num_blocked > max_allowed {
                 return Err(format!(
@@ -4941,17 +4941,21 @@ fn ring_bearer_unblockable_by_greater_power(
 /// Default is 1. ExtraBlockers { count: Some(n) } adds n (so 1+n). count: None = unlimited (u32::MAX).
 /// Multiple ExtraBlockers stack: the best (highest) limit wins.
 fn extra_block_limit(state: &GameState, blocker: &GameObject) -> u32 {
-    let mut max: u32 = 1;
+    // CR 509.1b: multiple "can block an additional creature" effects are
+    // cumulative — each grant raises the limit independently, so the additional
+    // counts SUM (default 1 + the sum of every grant's `n`). A single `None`
+    // grant ("any number of creatures") makes the limit unbounded.
+    let mut extra: u32 = 0;
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     for sd in super::functioning_abilities::active_static_definitions(state, blocker) {
         if let StaticMode::ExtraBlockers { count } = &sd.mode {
             match count {
                 None => return u32::MAX, // unlimited
-                Some(n) => max = max.max(1 + n),
+                Some(n) => extra = extra.saturating_add(*n),
             }
         }
     }
-    max
+    extra.saturating_add(1)
 }
 
 /// For each valid blocker, compute which attackers it can legally block.
