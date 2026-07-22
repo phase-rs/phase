@@ -1040,21 +1040,18 @@ async function cmdPublishLocked(): Promise<void> {
   );
 
   if (targets.size === 0) {
-    console.error(
+    throw new Error(
       "Usage: publish --thread=<id>[,<id>...] [--dry-run]\n" +
         "publish takes an explicit list of thread ids decided by the operator.",
     );
-    process.exit(1);
   }
 
   const items = readJsonl<TriageItem>(TRIAGE_ITEMS_PATH);
   if (items.length === 0) {
-    console.error(`No triage items at ${TRIAGE_ITEMS_PATH}. Run 'triage' first.`);
-    process.exit(1);
+    throw new Error(`No triage items at ${TRIAGE_ITEMS_PATH}. Run 'triage' first.`);
   }
   if (Bun.env.DISCORD_BOT_TOKEN === undefined) {
-    console.error("Error: DISCORD_BOT_TOKEN must be set in .env");
-    process.exit(1);
+    throw new Error("Error: DISCORD_BOT_TOKEN must be set in .env");
   }
 
   const state = await loadSyncState();
@@ -1076,7 +1073,15 @@ async function cmdPublishLocked(): Promise<void> {
 
   for (const threadId of targets) {
     const existing = published[threadId];
-    if (await isDiscordThreadHandled(threadId)) {
+    let isHandled = false;
+    try {
+      isHandled = await isDiscordThreadHandled(threadId);
+    } catch (err) {
+      console.error(`    failed (discord-handled-check): ${(err as Error).message}`);
+      failed++;
+      continue;
+    }
+    if (isHandled) {
       if (existing === undefined && !dryRun) {
         published[threadId] = {
           issue_number: 0,
