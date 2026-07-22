@@ -86,6 +86,9 @@
       "side": "The preview docks to the edge of the screen so it never covers the board.",
       "shift": "The preview only appears while you hold Shift, like Tabletop Simulator."
     },
+    "cardPreviewFooter": "Preview Information",
+    "showCardPreviewFooter": "Show information below card previews",
+    "cardPreviewFooterHint": "Includes the card name, available activated abilities, and keyboard hints. Alt still opens parse details when this is hidden.",
     "cardArtPreferences": "Card Art Preferences",
     "clearArtOverrides_one": "Clear All Art Overrides ({{count}})",
     "clearArtOverrides_other": "Clear All Art Overrides ({{count}})",

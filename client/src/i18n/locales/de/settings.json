@@ -86,6 +86,9 @@
       "side": "Die Vorschau dockt am Bildschirmrand an, sodass sie das Spielfeld nie verdeckt.",
       "shift": "Die Vorschau erscheint nur, solange du die Umschalttaste gedrückt hältst, wie bei Tabletop Simulator."
     },
+    "cardPreviewFooter": "Vorschauinformationen",
+    "showCardPreviewFooter": "Informationen unter Kartenvorschauen anzeigen",
+    "cardPreviewFooterHint": "Enthält Kartenname, verfügbare aktivierte Fähigkeiten und Tastaturhinweise. Alt öffnet weiterhin die Parsedetails, wenn dies ausgeblendet ist.",
     "cardArtPreferences": "Karten-Artwork-Einstellungen",
     "clearArtOverrides_one": "Alle Artwork-Überschreibungen aufheben ({{count}})",
     "clearArtOverrides_other": "Alle Artwork-Überschreibungen aufheben ({{count}})",

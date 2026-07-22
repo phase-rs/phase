@@ -1,0 +1,3390 @@
+{
+  "census": {
+    "base_commit": "a60993aeed7dfc54700c8eda535d5a7ad7430dd1",
+    "family_counts": {
+      "allocator": 171,
+      "event_emission": 710,
+      "information": 47,
+      "rng": 75,
+      "write": 2590
+    },
+    "gamestate_fields": 256,
+    "reachable_functions": 8707,
+    "schema": "cr733-p0-census/1",
+    "sha256": "c7791dddbbdd786e4b76e63432a6681c55b4d2f124723cc14b3bf4018e75a87e",
+    "site_count": 3593
+  },
+  "schema": "cr733-p0-rng-allocator-map/1",
+  "site_count": 246,
+  "sites": [
+    {
+      "consuming_authority": "crate::analysis::corpus::install_on_battlefield",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/analysis/corpus.rs",
+        "fn": "install_on_battlefield",
+        "line": 979,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::analysis::corpus::install_on_battlefield",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/analysis/corpus.rs",
+        "fn": "install_on_battlefield",
+        "line": 987,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::analysis::corpus::seed_subtype_creatures",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/analysis/corpus.rs",
+        "fn": "seed_subtype_creatures",
+        "line": 1422,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_targets_for_ability",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_targets_for_ability",
+        "line": 1344,
+        "pattern": "choose",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_targets_for_ability",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_targets_for_ability",
+        "line": 1344,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1413,
+        "pattern": "choose",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1413,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1417,
+        "pattern": "random_bool",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1417,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1443,
+        "pattern": "choose",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1443,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1453,
+        "pattern": "choose",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1453,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1457,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::ability_utils::random_select_modal_indices",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/ability_utils.rs",
+        "fn": "random_select_modal_indices",
+        "line": 1457,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting::apply_mana_spell_grants",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting.rs",
+        "fn": "apply_mana_spell_grants",
+        "line": 15055,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting::handle_activate_ability",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting.rs",
+        "fn": "handle_activate_ability",
+        "line": 17375,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting::handle_activate_ability",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting.rs",
+        "fn": "handle_activate_ability",
+        "line": 17376,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting::handle_activate_ability",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting.rs",
+        "fn": "handle_activate_ability",
+        "line": 17511,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting::handle_activate_ability",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting.rs",
+        "fn": "handle_activate_ability",
+        "line": 17512,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting_costs::push_ability_entry",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting_costs.rs",
+        "fn": "push_ability_entry",
+        "line": 4521,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::casting_costs::push_ability_entry",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/casting_costs.rs",
+        "fn": "push_ability_entry",
+        "line": 4522,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::companion::commit_companion_to_hand",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/companion.rs",
+        "fn": "commit_companion_to_hand",
+        "line": 541,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_object_from_card_face",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_object_from_card_face",
+        "line": 269,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_commander_from_card_face",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_commander_from_card_face",
+        "line": 498,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_attraction_deck_card",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_attraction_deck_card",
+        "line": 514,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_planar_deck_card",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_planar_deck_card",
+        "line": 545,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_scheme_deck_card",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_scheme_deck_card",
+        "line": 573,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_contraption_deck_card",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_contraption_deck_card",
+        "line": 599,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::create_signature_spell_from_card_face",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "create_signature_spell_from_card_face",
+        "line": 656,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::load_deck_into_state",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "load_deck_into_state",
+        "line": 966,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::load_deck_into_state",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "load_deck_into_state",
+        "line": 969,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::load_deck_into_state",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "load_deck_into_state",
+        "line": 973,
+        "pattern": "destructured-rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::shuffled_entry_faces",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "shuffled_entry_faces",
+        "line": 1001,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::deck_loading::shuffled_entry_faces",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/deck_loading.rs",
+        "fn": "shuffled_entry_faces",
+        "line": 1001,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::attach::attach_to",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/attach.rs",
+        "fn": "attach_to",
+        "line": 600,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::attach::attach_to_player",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/attach.rs",
+        "fn": "attach_to_player",
+        "line": 852,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::cascade::shuffle_to_bottom",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/cascade.rs",
+        "fn": "shuffle_to_bottom",
+        "line": 239,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::cascade::shuffle_to_bottom",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/cascade.rs",
+        "fn": "shuffle_to_bottom",
+        "line": 239,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::cast_copy_of_card::cast_one_copy",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/cast_copy_of_card.rs",
+        "fn": "cast_one_copy",
+        "line": 169,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::cast_copy_of_card::cast_one_copy",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/cast_copy_of_card.rs",
+        "fn": "cast_one_copy",
+        "line": 170,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::change_zone::shuffle_library",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/change_zone.rs",
+        "fn": "shuffle_library",
+        "line": 159,
+        "pattern": "destructured-rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::change_zone::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/change_zone.rs",
+        "fn": "resolve",
+        "line": 675,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::change_zone::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/change_zone.rs",
+        "fn": "resolve",
+        "line": 675,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::change_zone::resolve_all",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/change_zone.rs",
+        "fn": "resolve_all",
+        "line": 1685,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::change_zone::resolve_all",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/change_zone.rs",
+        "fn": "resolve_all",
+        "line": 1685,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::choose::resolve_random_in_chain",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/choose.rs",
+        "fn": "resolve_random_in_chain",
+        "line": 160,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::choose::resolve_random_in_chain",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/choose.rs",
+        "fn": "resolve_random_in_chain",
+        "line": 160,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::choose_from_zone::resolve_random_in_chain",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/choose_from_zone.rs",
+        "fn": "resolve_random_in_chain",
+        "line": 514,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::conjure::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/conjure.rs",
+        "fn": "resolve",
+        "line": 149,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::conjure::place_conjured_in_library",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/conjure.rs",
+        "fn": "place_conjured_in_library",
+        "line": 366,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::control_next_turn::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/control_next_turn.rs",
+        "fn": "resolve",
+        "line": 33,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::copy_spell::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/copy_spell.rs",
+        "fn": "resolve",
+        "line": 62,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::copy_spell::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/copy_spell.rs",
+        "fn": "resolve",
+        "line": 63,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::create_token_copy_from_pool::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/create_token_copy_from_pool.rs",
+        "fn": "resolve",
+        "line": 133,
+        "pattern": "choose",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::create_token_copy_from_pool::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/create_token_copy_from_pool.rs",
+        "fn": "resolve",
+        "line": 133,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::discard::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/discard.rs",
+        "fn": "resolve",
+        "line": 362,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::discard::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/discard.rs",
+        "fn": "resolve",
+        "line": 362,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::discover::shuffle_to_bottom",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/discover.rs",
+        "fn": "shuffle_to_bottom",
+        "line": 134,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::discover::shuffle_to_bottom",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/discover.rs",
+        "fn": "shuffle_to_bottom",
+        "line": 134,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::epic::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/epic.rs",
+        "fn": "resolve",
+        "line": 124,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::epic::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/epic.rs",
+        "fn": "resolve",
+        "line": 125,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::explore::continuation_for_remaining",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/explore.rs",
+        "fn": "continuation_for_remaining",
+        "line": 125,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::explore::continuation_for_remaining",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/explore.rs",
+        "fn": "continuation_for_remaining",
+        "line": 126,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::flip_coin::flip_through_replacement",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/flip_coin.rs",
+        "fn": "flip_through_replacement",
+        "line": 75,
+        "pattern": "random_bool",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::flip_coin::flip_through_replacement",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/flip_coin.rs",
+        "fn": "flip_through_replacement",
+        "line": 75,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::gift_delivery::create_gift_token",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/gift_delivery.rs",
+        "fn": "create_gift_token",
+        "line": 131,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::heist::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/heist.rs",
+        "fn": "resolve",
+        "line": 112,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::incubate::resolve",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/incubate.rs",
+        "fn": "resolve",
+        "line": 49,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::publish_tracked_set",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/mod.rs",
+        "fn": "publish_tracked_set",
+        "line": 4938,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::publish_tracked_set",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/mod.rs",
+        "fn": "publish_tracked_set",
+        "line": 4939,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::publish_fresh_tracked_set",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/mod.rs",
+        "fn": "publish_fresh_tracked_set",
+        "line": 4997,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::publish_fresh_tracked_set",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/mod.rs",
+        "fn": "publish_fresh_tracked_set",
+        "line": 4998,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::paradigm::cast_paradigm_copy",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/paradigm.rs",
+        "fn": "cast_paradigm_copy",
+        "line": 184,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::paradigm::cast_paradigm_copy",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/paradigm.rs",
+        "fn": "cast_paradigm_copy",
+        "line": 185,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::prepare::synthesize_prepared_copy_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/prepare.rs",
+        "fn": "synthesize_prepared_copy_object",
+        "line": 251,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::prepare::synthesize_prepared_copy_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/prepare.rs",
+        "fn": "synthesize_prepared_copy_object",
+        "line": 252,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::prepare::can_cast_prepared_copy_now_in_simulated_state",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/prepare.rs",
+        "fn": "can_cast_prepared_copy_now_in_simulated_state",
+        "line": 291,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::prepare::can_cast_prepared_copy_now_in_simulated_state",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/prepare.rs",
+        "fn": "can_cast_prepared_copy_now_in_simulated_state",
+        "line": 297,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::put_on_top::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/put_on_top.rs",
+        "fn": "resolve",
+        "line": 307,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::put_on_top::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/put_on_top.rs",
+        "fn": "resolve",
+        "line": 307,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::reveal_hand::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/reveal_hand.rs",
+        "fn": "resolve",
+        "line": 94,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::reveal_hand::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/reveal_hand.rs",
+        "fn": "resolve",
+        "line": 94,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::reveal_until::library_bottom_requests_in_random_order",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/reveal_until.rs",
+        "fn": "library_bottom_requests_in_random_order",
+        "line": 569,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::reveal_until::library_bottom_requests_in_random_order",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/reveal_until.rs",
+        "fn": "library_bottom_requests_in_random_order",
+        "line": 569,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::roll_die::roll_die",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/roll_die.rs",
+        "fn": "roll_die",
+        "line": 19,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::roll_die::roll_die",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/roll_die.rs",
+        "fn": "roll_die",
+        "line": 19,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::search_outside_game::put_sideboard_entry_into_game",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/search_outside_game.rs",
+        "fn": "put_sideboard_entry_into_game",
+        "line": 232,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::seek::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/seek.rs",
+        "fn": "resolve",
+        "line": 68,
+        "pattern": "shuffle",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::seek::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/seek.rs",
+        "fn": "resolve",
+        "line": 68,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::shuffle::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/shuffle.rs",
+        "fn": "resolve",
+        "line": 38,
+        "pattern": "destructured-rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::shuffle::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/shuffle.rs",
+        "fn": "resolve",
+        "line": 70,
+        "pattern": "destructured-rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::spellbook::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/spellbook.rs",
+        "fn": "resolve",
+        "line": 67,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::spellbook::resolve",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/effects/spellbook.rs",
+        "fn": "resolve",
+        "line": 67,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::token::apply_create_token_after_replacement_with_created_ids",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/token.rs",
+        "fn": "apply_create_token_after_replacement_with_created_ids",
+        "line": 827,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::token::reserve_liminal_token_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/token.rs",
+        "fn": "reserve_liminal_token_object",
+        "line": 1062,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::token::reserve_liminal_token_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/token.rs",
+        "fn": "reserve_liminal_token_object",
+        "line": 1063,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::token_copy::apply_copy_token_after_replacement_with_created_ids",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/token_copy.rs",
+        "fn": "apply_copy_token_after_replacement_with_created_ids",
+        "line": 530,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::effects::token_copy::apply_copy_token_after_replacement_with_created_ids",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/effects/token_copy.rs",
+        "fn": "apply_copy_token_after_replacement_with_created_ids",
+        "line": 657,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine::try_offer_object_growth_shortcut",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/engine.rs",
+        "fn": "try_offer_object_growth_shortcut",
+        "line": 2230,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine::push_keyword_action",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/engine.rs",
+        "fn": "push_keyword_action",
+        "line": 9766,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine::push_keyword_action",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/engine.rs",
+        "fn": "push_keyword_action",
+        "line": 9767,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine::start_game",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/engine.rs",
+        "fn": "start_game",
+        "line": 10324,
+        "pattern": "random_range",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine::start_game",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/engine.rs",
+        "fn": "start_game",
+        "line": 10324,
+        "pattern": "state.rng",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine_resolution_choices::handle_resolution_choice",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/engine_resolution_choices.rs",
+        "fn": "handle_resolution_choice",
+        "line": 5260,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine_resolution_choices::handle_resolution_choice",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/engine_resolution_choices.rs",
+        "fn": "handle_resolution_choice",
+        "line": 5261,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine_resolution_choices::finish_effect_zone_put_at_library_position",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/engine_resolution_choices.rs",
+        "fn": "finish_effect_zone_put_at_library_position",
+        "line": 6716,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::engine_resolution_choices::finish_effect_zone_put_at_library_position",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/engine_resolution_choices.rs",
+        "fn": "finish_effect_zone_put_at_library_position",
+        "line": 6717,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::match_flow::restart_between_games_with_starting_player",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/match_flow.rs",
+        "fn": "restart_between_games_with_starting_player",
+        "line": 354,
+        "pattern": "rng_seed",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::morph::turn_face_up",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/morph.rs",
+        "fn": "turn_face_up",
+        "line": 353,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::mulligan::start_mulligan",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/mulligan.rs",
+        "fn": "start_mulligan",
+        "line": 87,
+        "pattern": "destructured-rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::mulligan::shuffle_hand_into_library",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/mulligan.rs",
+        "fn": "shuffle_hand_into_library",
+        "line": 671,
+        "pattern": "destructured-rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::planechase::roll_planar_die",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/planechase.rs",
+        "fn": "roll_planar_die",
+        "line": 148,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::planechase::roll_planar_die",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/planechase.rs",
+        "fn": "roll_planar_die",
+        "line": 148,
+        "pattern": "state.rng",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::game::planeswalker::complete_loyalty_activation",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/planeswalker.rs",
+        "fn": "complete_loyalty_activation",
+        "line": 439,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::planeswalker::complete_loyalty_activation",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/planeswalker.rs",
+        "fn": "complete_loyalty_activation",
+        "line": 440,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::stickers::apply_selected_sticker",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/stickers.rs",
+        "fn": "apply_selected_sticker",
+        "line": 385,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::transform::transform_permanent",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/transform.rs",
+        "fn": "transform_permanent",
+        "line": 61,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3474,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3536,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3596,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3711,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3788,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3860,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::collect_pending_triggers_with_collection",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "collect_pending_triggers_with_collection",
+        "line": 3918,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::push_pending_trigger_to_stack_with_event_batch",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "push_pending_trigger_to_stack_with_event_batch",
+        "line": 5927,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::triggers::push_pending_trigger_to_stack_with_event_batch",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/triggers.rs",
+        "fn": "push_pending_trigger_to_stack_with_event_batch",
+        "line": 5928,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::visibility::filter_state_for_viewer",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/visibility.rs",
+        "fn": "filter_state_for_viewer",
+        "line": 107,
+        "pattern": "rng_seed",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::game::visibility::filter_state_for_viewer",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/visibility.rs",
+        "fn": "filter_state_for_viewer",
+        "line": 111,
+        "pattern": "rng_word_pos",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::create_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "create_object",
+        "line": 566,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::create_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "create_object",
+        "line": 567,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::move_to_zone",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "move_to_zone",
+        "line": 885,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::random_top_slot_index",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "random_top_slot_index",
+        "line": 1291,
+        "pattern": "random_range",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::doc::allocate",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/doc.rs",
+        "fn": "allocate",
+        "line": 606,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_item_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::doc::begin_item",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/doc.rs",
+        "fn": "begin_item",
+        "line": 756,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_item_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::doc::begin_item",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/doc.rs",
+        "fn": "begin_item",
+        "line": 757,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_item_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::effect_chain::followup",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/effect_chain.rs",
+        "fn": "followup",
+        "line": 548,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_clause_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::effect_chain::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/effect_chain.rs",
+        "fn": "new",
+        "line": 567,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_clause_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::effect_chain::locate",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/effect_chain.rs",
+        "fn": "locate",
+        "line": 604,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_clause_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::effect_chain::push",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/effect_chain.rs",
+        "fn": "push",
+        "line": 783,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_clause_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::parser::oracle_ir::effect_chain::push",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/parser/oracle_ir/effect_chain.rs",
+        "fn": "push",
+        "line": 794,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_clause_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::starter_decks::random_starter_deck",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/starter_decks.rs",
+        "fn": "random_starter_deck",
+        "line": 139,
+        "pattern": "random_range",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 10892,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 10897,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_logical_zone_change_group_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 10902,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 10928,
+        "pattern": "rng_seed",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 10938,
+        "pattern": "rng_word_pos",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 11108,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 11118,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_continuous_effect_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::deserialize",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "deserialize",
+        "line": 11239,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::abandon_all",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "abandon_all",
+        "line": 13231,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::with_next_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "with_next_frame_id",
+        "line": 13235,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::with_next_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "with_next_frame_id",
+        "line": 13238,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_frame_id",
+        "line": 13242,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_frame_id",
+        "line": 13243,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::push_with_replacement_applied_and_origin",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "push_with_replacement_applied_and_origin",
+        "line": 13312,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::push_with_replacement_applied_and_origin",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "push_with_replacement_applied_and_origin",
+        "line": 13313,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::validate",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "validate",
+        "line": 13378,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::validate",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "validate",
+        "line": 13381,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::push_draw_sequence_with_origin",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "push_draw_sequence_with_origin",
+        "line": 14426,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::push_draw_sequence_with_origin",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "push_draw_sequence_with_origin",
+        "line": 14436,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::push_draw_sequence_with_origin",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "push_draw_sequence_with_origin",
+        "line": 14436,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::push_draw_sequence_with_origin",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "push_draw_sequence_with_origin",
+        "line": 14441,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::take_completed_multi_draw_frame",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "take_completed_multi_draw_frame",
+        "line": 14617,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::take_completed_multi_draw_frame",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "take_completed_multi_draw_frame",
+        "line": 14617,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::take_completed_multi_draw_frame",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "take_completed_multi_draw_frame",
+        "line": 14641,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::abandon_active_replacement_tails",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "abandon_active_replacement_tails",
+        "line": 14752,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::abandon_active_replacement_tails",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "abandon_active_replacement_tails",
+        "line": 14764,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::allocate_logical_zone_change_group",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "allocate_logical_zone_change_group",
+        "line": 15021,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_logical_zone_change_group_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::allocate_logical_zone_change_group",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "allocate_logical_zone_change_group",
+        "line": 15022,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_logical_zone_change_group_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::allocate_logical_zone_change_group",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "allocate_logical_zone_change_group",
+        "line": 15022,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_logical_zone_change_group_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::capture_rng_word_pos",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "capture_rng_word_pos",
+        "line": 15047,
+        "pattern": "rng_word_pos",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::rehydrate_rng",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "rehydrate_rng",
+        "line": 15056,
+        "pattern": "rng_seed",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::rehydrate_rng",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "rehydrate_rng",
+        "line": 15057,
+        "pattern": "rng_word_pos",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::rehydrate_rng",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "rehydrate_rng",
+        "line": 15057,
+        "pattern": "set_word_pos",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_pip_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_pip_id",
+        "line": 15062,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_pip_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_pip_id",
+        "line": 15063,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_pip_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_pip_id",
+        "line": 15064,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::add_mana_to_pool",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "add_mana_to_pool",
+        "line": 15074,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::restamp_pool_pip_ids",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "restamp_pool_pip_ids",
+        "line": 15111,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15300,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15301,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_logical_zone_change_group_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15304,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15312,
+        "pattern": "rng_seed",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15313,
+        "pattern": "rng_word_pos",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15338,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15342,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_continuous_effect_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::new",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "new",
+        "line": 15358,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_timestamp",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_timestamp",
+        "line": 15573,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_timestamp",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_timestamp",
+        "line": 15574,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::next_timestamp",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "next_timestamp",
+        "line": 15575,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::add_transient_continuous_effect",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "add_transient_continuous_effect",
+        "line": 15793,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_continuous_effect_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::add_transient_continuous_effect",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "add_transient_continuous_effect",
+        "line": 15794,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_continuous_effect_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::add_transient_continuous_effect",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "add_transient_continuous_effect",
+        "line": 15795,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::normalize_for_loop",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "normalize_for_loop",
+        "line": 15984,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::normalize_for_loop",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "normalize_for_loop",
+        "line": 15985,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::normalize_for_loop",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "normalize_for_loop",
+        "line": 15988,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16521,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16522,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_logical_zone_change_group_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16523,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16531,
+        "pattern": "rng_seed",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16532,
+        "pattern": "rng_word_pos",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16533,
+        "pattern": "destructured-rng",
+        "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16552,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16556,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_continuous_effect_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::_gamestate_partition_is_total",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "_gamestate_partition_is_total",
+        "line": 16574,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16828,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16828,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16829,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16829,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_pip_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16835,
+        "pattern": "rng_seed",
+        "reachable": true
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16854,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16854,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16869,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::game_state::eq",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/game_state.rs",
+        "fn": "eq",
+        "line": 16869,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_tracked_set_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::matches",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "matches",
+        "line": 412,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::next_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "next_draw_sequence_frame_id",
+        "line": 428,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::next_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "next_draw_sequence_frame_id",
+        "line": 429,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::restore_next_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "restore_next_draw_sequence_frame_id",
+        "line": 432,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::restore_next_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "restore_next_draw_sequence_frame_id",
+        "line": 433,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::restore_next_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "restore_next_draw_sequence_frame_id",
+        "line": 433,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::observe_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "observe_draw_sequence_frame_id",
+        "line": 436,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::observe_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "observe_draw_sequence_frame_id",
+        "line": 437,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::observe_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "observe_draw_sequence_frame_id",
+        "line": 437,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::observe_draw_sequence_frame_id",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "observe_draw_sequence_frame_id",
+        "line": 437,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::recover_draw_sequence_allocator",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "recover_draw_sequence_allocator",
+        "line": 443,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::recover_draw_sequence_allocator",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "recover_draw_sequence_allocator",
+        "line": 447,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::recover_draw_sequence_allocator",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "recover_draw_sequence_allocator",
+        "line": 451,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::recover_draw_sequence_allocator",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "recover_draw_sequence_allocator",
+        "line": 451,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::recover_draw_sequence_allocator",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "recover_draw_sequence_allocator",
+        "line": 452,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::push_multi_draw",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "push_multi_draw",
+        "line": 1759,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::replace_active_multi_draw",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "replace_active_multi_draw",
+        "line": 1768,
+        "pattern": "next-id-alloc",
+        "reachable": false,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::push_inner",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "push_inner",
+        "line": 2177,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::replace_active",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "replace_active",
+        "line": 2247,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::install_adjacent_post_replacement_draw",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "install_adjacent_post_replacement_draw",
+        "line": 2269,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::validate",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "validate",
+        "line": 2335,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::validate",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "validate",
+        "line": 2335,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::from_value",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "from_value",
+        "line": 2608,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::from_value",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "from_value",
+        "line": 2610,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::into_frames",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "into_frames",
+        "line": 3202,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::into_frames",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "into_frames",
+        "line": 3202,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::into_frames",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "into_frames",
+        "line": 3218,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::into_frames",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "into_frames",
+        "line": 3234,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::into_frames",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "into_frames",
+        "line": 3252,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::canonicalize_legacy_resolution_state",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "canonicalize_legacy_resolution_state",
+        "line": 3260,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::types::resolution::project_frames_into_legacy_state",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/types/resolution.rs",
+        "fn": "project_frames_into_legacy_state",
+        "line": 3281,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_draw_sequence_frame_id"
+      }
+    }
+  ]
+}

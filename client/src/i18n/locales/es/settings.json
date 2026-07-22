@@ -86,6 +86,9 @@
       "side": "La vista previa se ancla al borde de la pantalla para que nunca tape el tablero.",
       "shift": "La vista previa solo aparece mientras mantienes pulsada la tecla Shift, como en Tabletop Simulator."
     },
+    "cardPreviewFooter": "Información de la vista previa",
+    "showCardPreviewFooter": "Mostrar información bajo las vistas previas",
+    "cardPreviewFooterHint": "Incluye el nombre de la carta, las habilidades activadas disponibles y los atajos de teclado. Alt sigue abriendo los detalles de análisis cuando está oculto.",
     "cardArtPreferences": "Preferencias de ilustración de cartas",
     "clearArtOverrides_one": "Borrar todas las anulaciones de ilustración ({{count}})",
     "clearArtOverrides_other": "Borrar todas las anulaciones de ilustración ({{count}})",

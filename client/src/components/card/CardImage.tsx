@@ -82,7 +82,7 @@ export function CardImage({
   // card-data queries even though their artwork resolved a moment later.
   const showArtFallback = !faceDown && !isLoading && (imageError || !src);
   const fallbackData = useEngineCardData(
-    showArtFallback && oracleText === undefined ? cardName : null,
+    showArtFallback && oracleText == null ? cardName : null,
   );
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 

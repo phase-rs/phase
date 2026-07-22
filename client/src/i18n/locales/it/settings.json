@@ -86,6 +86,9 @@
       "side": "L'anteprima si ancora al bordo dello schermo, così non copre mai il campo di battaglia.",
       "shift": "L'anteprima appare solo mentre tieni premuto il tasto Shift, come in Tabletop Simulator."
     },
+    "cardPreviewFooter": "Informazioni dell'anteprima",
+    "showCardPreviewFooter": "Mostra le informazioni sotto le anteprime delle carte",
+    "cardPreviewFooterHint": "Include il nome della carta, le abilità attivate disponibili e i suggerimenti da tastiera. Alt apre comunque i dettagli di analisi quando questa opzione è nascosta.",
     "cardArtPreferences": "Preferenze illustrazione carte",
     "clearArtOverrides_one": "Cancella tutte le sostituzioni di illustrazione ({{count}})",
     "clearArtOverrides_other": "Cancella tutte le sostituzioni di illustrazione ({{count}})",

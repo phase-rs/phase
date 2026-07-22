@@ -8976,6 +8976,8 @@ fn handle_resolution_cast_success(
             filter,
             zones,
             exile_instead_of_graveyard,
+            source,
+            member_pool,
         } => {
             if exile_instead_of_graveyard {
                 // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
@@ -8995,9 +8997,14 @@ fn handle_resolution_cast_success(
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
+                source,
                 &filter,
                 &zones,
                 budget_left,
+                // CR 607.2a: the re-offer stays confined to THIS resolution's
+                // "exiled this way" batch (Plargg and Nassari) — see the
+                // window's `member_pool` docs; empty means no restriction.
+                &member_pool,
             );
             // CR 608.2g: Finalize runs before the chosen card is removed from
             // its origin zone; it cannot be offered again while already cast.
@@ -9014,6 +9021,8 @@ fn handle_resolution_cast_success(
                     filter,
                     zones,
                     exile_instead_of_graveyard,
+                    source,
+                    member_pool,
                 },
             }))
         }
@@ -9818,7 +9827,7 @@ fn auto_tap_mana_sources_inner(
                 .objects
                 .get(&option.object_id)
                 .and_then(|obj| obj.abilities.get(ability_index))
-                .is_some_and(|ability| mana_sub_cost_of(&ability.cost).is_none())
+                .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
         });
         if option.atomic_combination.is_none()
             && option.mana_type == ManaType::Colorless
@@ -9971,6 +9980,22 @@ fn auto_tap_mana_sources_inner(
     }
 
     // Phase 3: activate each selected mana source.
+    //
+    // CR 601.2g permits mana-ability activation; CR 605.3b resolves it
+    // immediately; CR 605.3c prevents reactivation. Those rules do not prescribe
+    // this ordering. Engine scheduling policy: selected sources without a mana
+    // sub-cost resolve first, stably, so their mana is available to pay a later cost.
+    // This preserves the plan and `used_sources` reservation; it changes only order.
+    to_tap.sort_by_key(|option| {
+        option.ability_index.is_some_and(|ability_index| {
+            state
+                .objects
+                .get(&option.object_id)
+                .and_then(|object| object.abilities.get(ability_index))
+                .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_some())
+        })
+    });
+
     // Sources with an explicit ability delegate to resolve_mana_ability (the single
     // authority for cost payment — handles tap, sacrifice, and future cost types).
     // The basic-land-subtype fallback (ability_index: None) uses inline tap + produce.
@@ -10016,7 +10041,7 @@ fn auto_tap_mana_sources_inner(
                 // before resolving, so without this the sub-cost could grab a source
                 // the outer cost still needs. Unioning `used_sources` supersedes the
                 // prior `excluded.insert(option.object_id)`.
-                let sub_cost = mana_sub_cost_of(&ability_def.cost);
+                let sub_cost = mana_abilities::mana_sub_cost_of(&ability_def.cost);
                 let excluded_buf;
                 // CR 107.4b + CR 118.10: The outer cost's colored shards are
                 // reserved; computed once (only when a mana sub-cost is present, so
@@ -10185,17 +10210,6 @@ pub(crate) fn production_override_for_option(
         | crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
         | crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. }
         | crate::types::ability::ManaProduction::TriggerEventManaType => None,
-    }
-}
-
-fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
-    match cost {
-        Some(AbilityCost::Mana { cost }) => Some(cost),
-        Some(AbilityCost::Composite { costs }) => costs.iter().find_map(|sub| match sub {
-            AbilityCost::Mana { cost } => Some(cost),
-            _ => None,
-        }),
-        _ => None,
     }
 }
 

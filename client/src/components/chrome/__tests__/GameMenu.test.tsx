@@ -48,6 +48,22 @@ describe("GameMenu", () => {
     expect(onToggleMultiplayerBoardLayout).toHaveBeenCalledTimes(1);
   });
 
+  it("provides its own touch scroll region on short game viewports", () => {
+    renderGameMenu();
+
+    fireEvent.click(screen.getByRole("button", { name: "Game menu" }));
+    const menuPanel = screen.getByRole("button", { name: "Concede" }).closest(
+      '[aria-label="Game menu"]',
+    );
+
+    expect(menuPanel).toHaveClass(
+      "game-menu-scroll",
+      "overflow-y-auto",
+      "overscroll-contain",
+      "touch-pan-y",
+    );
+  });
+
   it("labels the legacy state with the split destination", () => {
     renderGameMenu({ multiplayerBoardLayout: "focused" });
 

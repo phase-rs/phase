@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { AbilityBlockKind, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
@@ -11,6 +12,7 @@ import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
@@ -84,6 +86,18 @@ interface CardPreviewProps {
    *  deck builder, where you browse many cards quickly and a full-screen
    *  takeover requiring a separate dismiss tap is too heavy. */
   mobileLayout?: "modal" | "compact";
+  /** Object id of the originating player-hand card. When its DOM marker is
+   *  present, desktop follow-mode previews grow out of that card and stay
+   *  bottom-anchored like Arena instead of following the pointer. */
+  handSourceObjectId?: number | null;
+}
+
+interface HandPreviewOrigin {
+  objectId: number;
+  bottom: number;
+  centerX: number;
+  rotation: number;
+  width: number;
 }
 
 export function CardPreview({
@@ -96,21 +110,70 @@ export function CardPreview({
   dockSide,
   onDismiss,
   mobileLayout = "modal",
+  handSourceObjectId,
 }: CardPreviewProps) {
-  if (!cardName) return null;
+  const [measuredHandOrigin, setMeasuredHandOrigin] = useState<{
+    objectId: number;
+    origin: HandPreviewOrigin | null;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!cardName || handSourceObjectId == null || typeof document === "undefined") {
+      setMeasuredHandOrigin(null);
+      return;
+    }
+
+    const source = document.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${handSourceObjectId}"]`,
+    );
+    // The same hand object can also render inside an overlay (most notably the
+    // mulligan screen) while the board's resting PlayerHand remains mounted
+    // underneath. Require the resting source to be hovered so overlays retain
+    // their normal preview instead of inheriting the hand-origin animation.
+    if (!source || !source.matches(":hover")) {
+      setMeasuredHandOrigin({ objectId: handSourceObjectId, origin: null });
+      return;
+    }
+
+    const rect = source.getBoundingClientRect();
+    const rotation = Number(source.dataset.handRotation);
+    setMeasuredHandOrigin({
+      objectId: handSourceObjectId,
+      origin: {
+        objectId: handSourceObjectId,
+        bottom: rect.bottom,
+        centerX: rect.left + rect.width / 2,
+        rotation: Number.isFinite(rotation) ? rotation : 0,
+        width: source.offsetWidth || rect.width,
+      },
+    });
+  }, [cardName, handSourceObjectId]);
+
+  const handMeasurementReady =
+    handSourceObjectId == null || measuredHandOrigin?.objectId === handSourceObjectId;
+  const handOrigin =
+    measuredHandOrigin && measuredHandOrigin.objectId === handSourceObjectId
+      ? measuredHandOrigin.origin
+      : null;
 
   return (
-    <CardPreviewInner
-      cardName={cardName}
-      backFaceName={backFaceName ?? null}
-      faceIndex={faceIndex}
-      position={position}
-      scryfallId={scryfallId}
-      sourcePrinting={sourcePrinting}
-      dockSide={dockSide}
-      onDismiss={onDismiss}
-      mobileLayout={mobileLayout}
-    />
+    <AnimatePresence>
+      {cardName && handMeasurementReady ? (
+        <CardPreviewInner
+          key={`${cardName}:${faceIndex ?? 0}:${scryfallId ?? ""}`}
+          cardName={cardName}
+          backFaceName={backFaceName ?? null}
+          faceIndex={faceIndex}
+          position={position}
+          scryfallId={scryfallId}
+          sourcePrinting={sourcePrinting}
+          dockSide={dockSide}
+          onDismiss={onDismiss}
+          mobileLayout={mobileLayout}
+          handOrigin={handOrigin}
+        />
+      ) : null}
+    </AnimatePresence>
   );
 }
 
@@ -124,6 +187,7 @@ function CardPreviewInner({
   dockSide,
   onDismiss,
   mobileLayout,
+  handOrigin,
 }: {
   cardName: string;
   backFaceName: string | null;
@@ -134,6 +198,7 @@ function CardPreviewInner({
   dockSide?: boolean;
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
+  handOrigin: HandPreviewOrigin | null;
 }) {
   const { t } = useTranslation("game");
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
@@ -195,6 +260,9 @@ function CardPreviewInner({
   const altHeld = useUiStore((s) => s.altHeld);
   const [ctrlHeld, setCtrlHeld] = useState(false);
   const isMobile = useIsMobile();
+  const shouldReduceMotion = useReducedMotion();
+  const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -241,9 +309,14 @@ function CardPreviewInner({
   const activeRotated = showOtherFace ? otherFaceImgResult.isRotated : isRotated;
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
-  const infoPanelHeight = showInfoPanel ? 120 : 0;
+  const handPreview = handOrigin != null && !position && !dockSide;
+  const infoPanelHeight = showCardPreviewFooter && showInfoPanel ? 120 : 0;
   const portraitPreviewWidth =
-    typeof window === "undefined" ? 472 : Math.min(Math.max(window.innerWidth * 0.26, 220), 472);
+    typeof window === "undefined"
+      ? handPreview ? 300 : 472
+      : handPreview
+        ? Math.min(Math.max(window.innerWidth * 0.18, 190), 300)
+        : Math.min(Math.max(window.innerWidth * 0.26, 220), 472);
   const previewWidth = activeRotated ? portraitPreviewWidth * 1.4 : portraitPreviewWidth;
   const previewHeight =
     (activeRotated
@@ -264,7 +337,13 @@ function CardPreviewInner({
   useEffect(() => {
     // `dockSide` keeps the preview pinned to `defaultDesktopStyle` (the
     // top-right rail) by skipping the cursor-follow positioning entirely.
-    if (typeof window === "undefined" || position || isMobile || dockSide) return undefined;
+    if (
+      typeof window === "undefined"
+      || position
+      || isMobile
+      || dockSide
+      || handOrigin
+    ) return undefined;
 
     pointerRef.current = lastPointerPosition;
 
@@ -341,6 +420,7 @@ function CardPreviewInner({
     altHeld,
     dockSide,
     gap,
+    handOrigin,
     isMobile,
     margin,
     position,
@@ -373,7 +453,6 @@ function CardPreviewInner({
         }
       : undefined;
 
-  // Mobile overlay mode: centered with backdrop
   if (isMobile) {
     return (
       <MobilePreviewOverlay
@@ -389,34 +468,104 @@ function CardPreviewInner({
     );
   }
 
-  const style: React.CSSProperties = position
-    ? (() => {
-        const estimatedWidth = Math.min(previewWidth, viewportWidth - margin * 2);
-        const estimatedHeight = Math.min(previewHeight, viewportHeight - margin * 2);
-        const unclampedLeft =
-          position.x > viewportWidth / 2
-            ? position.x - previewWidth - gap
-            : position.x + gap;
-        const unclampedTop = altHeld ? margin : position.y - estimatedHeight / 2;
+  const handPreviewLeft = handPreview
+    ? Math.min(
+        Math.max(margin, handOrigin.centerX - previewWidth / 2),
+        Math.max(margin, viewportWidth - previewWidth - margin),
+      )
+    : 0;
+  const handPreviewScale = handPreview
+    ? Math.min(1, Math.max(0.1, handOrigin.width / previewWidth))
+    : 1;
+  const handPreviewX = handPreview
+    ? handOrigin.centerX - (handPreviewLeft + previewWidth / 2)
+    : 0;
+  const handPreviewY = handPreview ? handOrigin.bottom - viewportHeight : 0;
 
-        return {
-          left: Math.min(
-            Math.max(margin, unclampedLeft),
-            Math.max(margin, viewportWidth - estimatedWidth - margin),
-          ),
-          top: Math.min(
-            Math.max(margin, unclampedTop),
-            Math.max(margin, viewportHeight - estimatedHeight - margin),
-          ),
-        };
-      })()
-    : defaultDesktopStyle;
+  const style: React.CSSProperties = handPreview
+    ? {
+        bottom: 0,
+        left: handPreviewLeft,
+      }
+    : position
+      ? (() => {
+          const estimatedWidth = Math.min(previewWidth, viewportWidth - margin * 2);
+          const estimatedHeight = Math.min(previewHeight, viewportHeight - margin * 2);
+          const unclampedLeft =
+            position.x > viewportWidth / 2
+              ? position.x - previewWidth - gap
+              : position.x + gap;
+          const unclampedTop = altHeld ? margin : position.y - estimatedHeight / 2;
+
+          return {
+            left: Math.min(
+              Math.max(margin, unclampedLeft),
+              Math.max(margin, viewportWidth - estimatedWidth - margin),
+            ),
+            top: Math.min(
+              Math.max(margin, unclampedTop),
+              Math.max(margin, viewportHeight - estimatedHeight - margin),
+            ),
+          };
+        })()
+      : defaultDesktopStyle;
+
+  const animatePreview = animationSpeedMultiplier > 0;
+  const movePreview = animatePreview && !shouldReduceMotion;
+  const transformOrigin = handPreview
+    ? "50% 100%"
+    : position && position.x <= viewportWidth / 2
+      ? "0% 50%"
+      : "100% 50%";
 
   return (
-    <div
+    <motion.div
       ref={previewRef}
-      className="fixed z-[100] pointer-events-none"
-      style={style}
+      className="fixed z-[100] pointer-events-none drop-shadow-[0_22px_28px_rgba(0,0,0,0.62)]"
+      style={{ ...style, transformOrigin }}
+      initial={
+        animatePreview
+          ? handPreview && movePreview
+            ? {
+                opacity: 1,
+                rotate: handOrigin.rotation,
+                scale: handPreviewScale,
+                x: handPreviewX,
+                y: handPreviewY,
+              }
+            : { opacity: 0, scale: movePreview ? 0.975 : 1, y: movePreview ? 6 : 0 }
+          : false
+      }
+      animate={{
+        opacity: 1,
+        rotate: 0,
+        scale: 1,
+        x: 0,
+        y: 0,
+        transition: {
+          duration: (
+            shouldReduceMotion ? 0.12 : handPreview ? 0.24 : 0.2
+          ) * animationSpeedMultiplier,
+          ease: [0.22, 1, 0.36, 1],
+        },
+      }}
+      exit={{
+        opacity: animatePreview && (!handPreview || !movePreview) ? 0 : 1,
+        rotate: handPreview && movePreview ? handOrigin.rotation : 0,
+        scale: handPreview && movePreview
+          ? handPreviewScale
+          : movePreview
+            ? 0.985
+            : 1,
+        x: handPreview && movePreview ? handPreviewX : 0,
+        y: handPreview && movePreview ? handPreviewY : movePreview ? 3 : 0,
+        transition: {
+          duration: (
+            shouldReduceMotion ? 0.08 : handPreview ? 0.18 : 0.15
+          ) * animationSpeedMultiplier,
+          ease: [0.4, 0, 1, 1],
+        },
+      }}
       data-card-preview
     >
       {altHeld && (frontParseDetails || engineFrontFace) ? (
@@ -434,6 +583,8 @@ function CardPreviewInner({
           cardName={displayName}
           classLevel={classLevel}
           showInfoPanel={showInfoPanel}
+          showFooter={showCardPreviewFooter}
+          compactDesktop={handPreview}
           obj={obj}
           showOtherFace={showOtherFace}
           otherFaceCost={obj?.back_face?.mana_cost ?? null}
@@ -450,7 +601,7 @@ function CardPreviewInner({
           debugObjectId={showDebugId && inspectedObjectId != null ? inspectedObjectId : null}
         />
       )}
-    </div>
+    </motion.div>
   );
 }
 
@@ -507,9 +658,9 @@ function MobilePreviewOverlay({
   const [flipped, setFlipped] = useState(false);
 
   // Compact layout: dismiss on the next tap or scroll anywhere, so no separate
-  // dismiss gesture is needed. Listeners attach on a deferred tick so the very
-  // tap that opened the preview doesn't immediately close it. Capture phase so
-  // scrolls inside the deck's own overflow container are caught too.
+  // dismiss gesture is needed.
+  // Listeners attach on a deferred tick so the very tap that opened a compact
+  // preview doesn't immediately close it. Capture phase catches nested scrolls.
   useEffect(() => {
     if (layout !== "compact") return undefined;
     const id = window.setTimeout(() => {
@@ -527,7 +678,7 @@ function MobilePreviewOverlay({
     };
   }, [layout, onDismiss]);
 
-  if (layout === "compact") {
+  if (layout !== "modal") {
     // Non-blocking peek: a smaller card, no dimming backdrop, click-through
     // container (taps fall through to the deck so the next card can be tapped
     // directly). The card itself dismisses on tap.
@@ -620,6 +771,8 @@ function CardImagePreview({
   cardName,
   classLevel,
   showInfoPanel,
+  showFooter,
+  compactDesktop,
   obj,
   showOtherFace,
   otherFaceCost,
@@ -635,6 +788,8 @@ function CardImagePreview({
   cardName: string;
   classLevel?: number | null;
   showInfoPanel?: boolean;
+  showFooter?: boolean;
+  compactDesktop?: boolean;
   obj: GameObject | null;
   showOtherFace?: boolean;
   otherFaceCost?: ManaCost | null;
@@ -659,22 +814,33 @@ function CardImagePreview({
     ? isRotated
       ? "h-[min(40vw,300px)] w-[min(56vw,420px)] max-h-[75vh] max-w-[84vw]"
       : "max-h-[75vh] w-[40vw] max-w-[300px]"
-    : isRotated
-      ? "h-[clamp(220px,26vw,472px)] w-[clamp(308px,36.4vw,661px)] max-h-[45vw] max-w-[80vh]"
-      : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
-  const containerClass = showInfoPanel
+    : compactDesktop
+      ? isRotated
+        ? "h-[clamp(190px,18vw,300px)] w-[clamp(266px,25.2vw,420px)] max-h-[36vw] max-w-[66vh]"
+        : "max-h-[66vh] max-w-[36vw] w-[clamp(190px,18vw,300px)]"
+      : isRotated
+        ? "h-[clamp(220px,26vw,472px)] w-[clamp(308px,36.4vw,661px)] max-h-[45vw] max-w-[80vh]"
+        : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
+  const renderInfoPanel = showFooter && showInfoPanel;
+  const containerClass = renderInfoPanel
     ? mobileMode
       ? isRotated
         ? "w-[min(56vw,420px)] max-w-[84vw]"
         : "w-[40vw] max-w-[300px]"
-      : isRotated
-        ? "w-[clamp(308px,36.4vw,661px)] max-w-[80vh]"
-        : "max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]"
+      : compactDesktop
+        ? isRotated
+          ? "w-[clamp(266px,25.2vw,420px)] max-w-[66vh]"
+          : "max-w-[36vw] w-[clamp(190px,18vw,300px)]"
+        : isRotated
+          ? "w-[clamp(308px,36.4vw,661px)] max-w-[80vh]"
+          : "max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]"
     : frameClass;
   const imageClass = isRotated
     ? mobileMode
       ? "absolute left-1/2 top-1/2 h-[min(56vw,420px)] w-[min(40vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-      : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
+      : compactDesktop
+        ? "absolute left-1/2 top-1/2 h-[clamp(266px,25.2vw,420px)] w-[clamp(190px,18vw,300px)] max-h-[66vh] max-w-[36vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
+        : "absolute left-1/2 top-1/2 h-[clamp(308px,36.4vw,661px)] w-[clamp(220px,26vw,472px)] max-h-[80vh] max-w-[42vw] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
     : `${frameClass} object-cover transition-transform duration-200${flip180 ? " rotate-180" : ""}`;
 
   // Use effective spell cost from engine if available (reflects alt costs, reductions),
@@ -730,7 +896,7 @@ function CardImagePreview({
   }
 
   return (
-    <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
+    <div className={`${containerClass} border border-gray-600 overflow-hidden shadow-2xl ${renderInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className={`${frameClass} relative rounded-[4%] overflow-hidden`}>
         {imgError || !src ? (
           <div
@@ -772,17 +938,17 @@ function CardImagePreview({
           </div>
         )}
       </div>
-      {showInfoPanel && obj && (
+      {renderInfoPanel && obj && (
         <CardInfoPanel
           obj={obj}
           altAvailable={altAvailable}
           activateLabels={activateLabels}
         />
       )}
-      {backFaceHint && (
+      {showFooter && backFaceHint && (
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
       )}
-      {!showInfoPanel && altAvailable && (
+      {showFooter && !showInfoPanel && altAvailable && (
         <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{t("preview.altParsedAbilities")}</div>
       )}
     </div>

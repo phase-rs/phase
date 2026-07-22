@@ -49,6 +49,7 @@ export default defineConfig({
     __CHANGELOG_META_URL__: JSON.stringify("/changelog-meta.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),
+    __ENGINE_WASM_URL__: "undefined",
     __DEFAULT_MULTIPLAYER_SERVER_URL__: JSON.stringify(
       process.env.DEFAULT_MULTIPLAYER_SERVER_URL || "wss://lobby.phase-rs.dev/ws",
     ),

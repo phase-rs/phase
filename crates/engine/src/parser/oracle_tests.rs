@@ -430,9 +430,12 @@ fn banewhip_punisher_destroy_creature_with_minus_counter() {
     );
 }
 
-/// CR 205.1b + CR 613.1d + CR 613.4b: Curious Colossus' ETB trigger uses
-/// one comma-list continuous effect: affected creatures lose abilities,
-/// gain a subtype, and get fixed base P/T indefinitely.
+/// CR 205.1b + CR 611.2a + CR 613.1d + CR 613.4b: Curious Colossus' ETB trigger
+/// uses one comma-list continuous effect: affected creatures lose abilities,
+/// gain a subtype, and get fixed base P/T indefinitely. The effect states no
+/// duration, so CR 611.2a makes it PERMANENT — the "in addition to its other
+/// types" additive type grant is stamped `Duration::Permanent` at parse time so
+/// it is not swept at cleanup (issue #5950).
 #[test]
 fn curious_colossus_base_pt_comma_list_has_no_unimplemented_trigger_tail() {
     let r = parse(
@@ -457,7 +460,11 @@ fn curious_colossus_base_pt_comma_list_has_no_unimplemented_trigger_tail() {
             duration,
             ..
         } => {
-            assert_eq!(*duration, None);
+            assert_eq!(
+                *duration,
+                Some(crate::types::ability::Duration::Permanent),
+                "CR 611.2a: no stated duration on an additive type grant → permanent"
+            );
             let mods: Vec<_> = static_abilities
                 .iter()
                 .flat_map(|s| s.modifications.iter())
@@ -22599,5 +22606,47 @@ fn standalone_spell_emblem_grant_parses_to_create_emblem() {
         create.len(),
         2,
         "emblem carries both outcome-lock statics, got {create:#?}"
+    );
+}
+
+/// T14b (BB-FU10 Step 3b). `quantity_ref_uses_filter_prop` asks a
+/// variant-agnostic question — "does any `TargetFilter` reachable from this
+/// quantity use `pred`?" — so the CR 608.2i look-back sibling must recurse into
+/// its filter instead of falling to `_ => false`.
+///
+/// REVERT-PROBE: remove the one-line or-group addition → the first assertion
+/// reads `false`, FAIL. The prop-free twin is the negative control that keeps the
+/// first assertion from passing on a "returns true for everything" bug.
+#[test]
+fn bbfu10_ledger_variant_reaches_filter_prop_scan() {
+    use crate::types::ability::{
+        FilterProp, PlayerScope, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    };
+
+    let pred = |p: &FilterProp| matches!(p, FilterProp::IsChosenCreatureType);
+    let with_prop = QuantityRef::BattlefieldEntriesThisTurn {
+        player: PlayerScope::Controller,
+        filter: TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::IsChosenCreatureType],
+        }),
+    };
+    let without_prop = QuantityRef::BattlefieldEntriesThisTurn {
+        player: PlayerScope::Controller,
+        filter: TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        }),
+    };
+
+    assert!(
+        super::quantity_ref_uses_filter_prop(&with_prop, &pred),
+        "CR 608.2i: the ledger variant's filter must be scanned for filter props",
+    );
+    assert!(
+        !super::quantity_ref_uses_filter_prop(&without_prop, &pred),
+        "negative control: a prop-free ledger filter must still read false",
     );
 }

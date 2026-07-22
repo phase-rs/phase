@@ -39,7 +39,10 @@ export function ManaCostPips({ cost, isReduced, size = "md", className = "" }: M
   return (
     <div className={`pointer-events-none ${className}`}>
       <div className={`relative flex ${s.gap}`}>
-        <div className={`absolute ${s.backdrop} rounded-full bg-gray-900/70`} />
+        <div
+          data-mana-cost-backdrop
+          className={`absolute ${s.backdrop} rounded-full bg-gray-900/70`}
+        />
         {shards.map((shard, i) => (
           <div
             key={i}

@@ -1,9 +1,10 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
@@ -46,11 +47,13 @@ function gameStateWithObject(object: GameObject) {
 
 afterEach(() => {
   cleanup();
+  document.querySelectorAll("[data-hand-card]").forEach((node) => node.remove());
   vi.clearAllMocks();
   Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
   Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: 768 });
   useGameStore.setState({ gameState: null, spellCosts: {}, legalActionsByObject: {} });
-  useUiStore.setState({ inspectedObjectId: null, altHeld: false });
+  usePreferencesStore.setState({ animationSpeedMultiplier: 1, showCardPreviewFooter: true });
+  useUiStore.getState().dismissPreview();
 });
 
 describe("CardPreview chosen attributes", () => {
@@ -63,6 +66,88 @@ describe("CardPreview chosen attributes", () => {
     expect(preview?.style.left).toBe("40px");
     expect(preview?.style.top).toBe("16px");
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
+  it("keeps the desktop preview mounted while its exit easing completes", async () => {
+    const { container, rerender } = render(
+      <CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />,
+    );
+
+    rerender(<CardPreview cardName={null} position={{ x: 20, y: 20 }} />);
+
+    expect(container.querySelector("[data-card-preview]")).not.toBeNull();
+    await waitFor(() => {
+      expect(container.querySelector("[data-card-preview]")).toBeNull();
+    });
+  });
+
+  it("anchors a hand preview to the viewport bottom and grows from its source card", () => {
+    const source = document.createElement("div");
+    source.dataset.handCard = "";
+    source.dataset.handRotation = "-4";
+    source.dataset.objectId = "101";
+    Object.defineProperty(source, "offsetWidth", { configurable: true, value: 120 });
+    source.matches = vi.fn((selector) => selector === ":hover");
+    source.getBoundingClientRect = () => ({
+      bottom: 748,
+      height: 168,
+      left: 220,
+      right: 340,
+      top: 580,
+      width: 120,
+      x: 220,
+      y: 580,
+      toJSON: () => ({}),
+    });
+    document.body.appendChild(source);
+
+    const { container } = render(
+      <CardPreview cardName="Pithing Needle" handSourceObjectId={101} />,
+    );
+
+    const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+    expect(preview).not.toBeNull();
+    expect(preview?.style.bottom).toBe("0px");
+    expect(preview?.style.transformOrigin).toBe("50% 100%");
+    expect(screen.getByAltText("Pithing Needle")).toHaveClass(
+      "w-[clamp(190px,18vw,300px)]",
+    );
+    source.remove();
+  });
+
+  it("uses the normal preview when the matching board hand card is not hovered", () => {
+    const source = document.createElement("div");
+    source.dataset.handCard = "";
+    source.dataset.objectId = "101";
+    source.matches = vi.fn(() => false);
+    document.body.appendChild(source);
+
+    const { container } = render(
+      <CardPreview cardName="Pithing Needle" handSourceObjectId={101} />,
+    );
+
+    const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+    expect(preview).not.toBeNull();
+    expect(preview?.style.bottom).toBe("");
+    expect(screen.getByAltText("Pithing Needle")).not.toHaveClass(
+      "w-[clamp(190px,18vw,300px)]",
+    );
+    source.remove();
+  });
+
+  it("hides the informational footer without hiding the card art", () => {
+    const object = battlefieldObject({
+      chosen_attributes: [{ type: "CardName", value: "Lightning Bolt" }],
+    });
+    useGameStore.setState({ gameState: gameStateWithObject(object), spellCosts: {} });
+    usePreferencesStore.setState({ showCardPreviewFooter: false });
+    useUiStore.setState({ inspectedObjectId: object.id, altHeld: false });
+
+    render(<CardPreview cardName="Pithing Needle" position={{ x: 20, y: 20 }} />);
+
+    expect(screen.getByAltText("Pithing Needle")).toBeInTheDocument();
+    expect(screen.queryByText("Chosen")).not.toBeInTheDocument();
+    expect(screen.queryByText("Card name: Lightning Bolt")).not.toBeInTheDocument();
   });
 
   it("shows a persisted chosen card name for a battlefield permanent", () => {

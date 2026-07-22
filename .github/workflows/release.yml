@@ -255,6 +255,30 @@ jobs:
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
+      - name: Compute content-addressed engine WASM filename
+        id: engine-wasm-hash
+        run: |
+          ENGINE_WASM_SHA256=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | awk '{print $1}')
+          ENGINE_WASM_HASH16=${ENGINE_WASM_SHA256:0:16}
+          echo "sha256=$ENGINE_WASM_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$ENGINE_WASM_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=engine_wasm_bg-$ENGINE_WASM_HASH16.wasm" >> "$GITHUB_OUTPUT"
+
+      - name: Upload engine WASM to R2
+        # The engine WASM is intentionally uncompressed: wasm-bindgen's
+        # cross-origin streaming initialization needs application/wasm, and the
+        # immutable content-addressed URL below is its cache key.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
+        run: |
+          npx wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
+            --file client/src/wasm/engine_wasm_bg.wasm \
+            --remote \
+            --content-type application/wasm \
+            --cache-control "public, max-age=31536000, immutable"
+
       - name: Build frontend
         env:
           # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
@@ -262,6 +286,7 @@ jobs:
           # WASM bundle to its content-addressed card-data forever.
           DATA_BASE_URL: "https://data.phase-rs.dev"
           CARD_DATA_URL: "https://data.phase-rs.dev/${{ steps.card-data-hash.outputs.filename }}"
+          ENGINE_WASM_URL: "https://data.phase-rs.dev/wasm/${{ steps.engine-wasm-hash.outputs.filename }}"
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Tagged production release: surfaces the "try the preview build" CTA
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
@@ -324,6 +349,7 @@ jobs:
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
           DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
         run: |
           BASE="https://data.phase-rs.dev"
           fail=0
@@ -345,6 +371,7 @@ jobs:
           }
           check "$CARD_DATA_FILENAME"
           check "$DRAFT_POOLS_FILENAME"
+          check "wasm/$ENGINE_WASM_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
@@ -503,6 +530,16 @@ jobs:
 
       - name: Inject Cloudflare Pages _headers
         run: cp client/deploy/cloudflare-pages/_headers dist/_headers
+
+      - name: Guard Cloudflare Pages asset size limit
+        shell: bash
+        run: |
+          oversized=$(find dist -type f -size +25M -print -quit)
+          if [ -n "$oversized" ]; then
+            size=$(du -h "$oversized" | awk '{print $1}')
+            echo "::error::Cloudflare Pages 25 MiB file limit exceeded: $oversized ($size)"
+            exit 1
+          fi
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4

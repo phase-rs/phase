@@ -1062,6 +1062,59 @@ pub fn strip_double_quoted_spans(text: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// Byte-length-preserving variant of [`strip_double_quoted_spans`]: masks the
+/// contents of every complete double-quoted span with ASCII spaces while keeping
+/// the total byte length identical to the input, so an offset found in the masked
+/// text maps directly onto the original. The quote characters are masked too. Use
+/// this when a scanner must ignore text inside a quoted granted ability but the
+/// caller slices the ORIGINAL string by the matched offset (e.g. resolution-time
+/// "unless … pays" extraction that returns the pre-`unless` effect text).
+///
+/// An unterminated quote passes the remainder through unchanged, mirroring
+/// [`strip_double_quoted_spans`] — so a legitimate resolution-level clause that
+/// follows a malformed span is still visible to the scanner.
+pub fn mask_double_quoted_spans_preserving_len(text: &str) -> Cow<'_, str> {
+    if text.find('"').is_none() {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        match remaining.find('"') {
+            None => {
+                out.push_str(remaining);
+                break;
+            }
+            Some(open) => {
+                out.push_str(&remaining[..open]);
+                let after_open = &remaining[open..];
+                match delimited(char::<_, OracleError<'_>>('"'), take_until("\""), char('"'))
+                    .parse(after_open)
+                {
+                    Ok((rest, _span)) => {
+                        // Replace the whole span (quotes + contents) with spaces
+                        // of the SAME byte length so downstream offsets are stable.
+                        let span_len = after_open.len() - rest.len();
+                        out.extend(std::iter::repeat_n(' ', span_len));
+                        remaining = rest;
+                    }
+                    Err(_) => {
+                        out.push_str(after_open);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    debug_assert_eq!(
+        out.len(),
+        text.len(),
+        "mask must preserve byte length for offset mapping"
+    );
+    Cow::Owned(out)
+}
+
 /// Scan `text` at word boundaries using `combinator`. Returns `(prefix, matched_start)` where
 /// `prefix` is the text before the first match and `matched_start` is the slice beginning at
 /// the matched position (combinator input pointer). Returns `None` if no match is found.
@@ -1176,6 +1229,57 @@ mod tests {
         let out = strip_double_quoted_spans(r#"a "b c" d"#);
         assert_eq!(out, "a   d");
         assert!(matches!(out, Cow::Owned(_)));
+    }
+
+    #[test]
+    fn mask_preserving_len_masks_span_and_keeps_byte_length() {
+        let input = r#"a "b c" d"#;
+        let out = mask_double_quoted_spans_preserving_len(input);
+        // Quotes + contents become spaces of equal length; surrounding text intact.
+        assert_eq!(out, "a       d");
+        assert_eq!(out.len(), input.len(), "byte length must be preserved");
+    }
+
+    #[test]
+    fn mask_preserving_len_no_quote_borrows_unchanged() {
+        let out = mask_double_quoted_spans_preserving_len("owner's creatures can't block");
+        assert!(matches!(out, Cow::Borrowed(_)));
+        assert_eq!(out, "owner's creatures can't block");
+    }
+
+    #[test]
+    fn mask_preserving_len_offset_maps_to_original() {
+        // A word after a quoted span must be findable at the SAME byte offset in
+        // both the mask and the original — the property the unless-extractor relies
+        // on to slice the original effect text.
+        let input = r#"destroy it "gains unless you pay {2}" unless its controller pays {1}"#;
+        let masked = mask_double_quoted_spans_preserving_len(input);
+        let outer = masked
+            // allow-noncombinator: test-only structural offset assertion on masked output.
+            .find("unless its controller")
+            .expect("outer unless in mask");
+        assert_eq!(
+            &input[outer..outer + "unless its controller".len()],
+            "unless its controller",
+            "offset in mask must index the same bytes in the original"
+        );
+        // The INNER unless is masked away.
+        assert_eq!(
+            masked.matches("unless").count(),
+            1,
+            "inner unless is masked"
+        );
+    }
+
+    #[test]
+    fn mask_preserving_len_unterminated_passes_through() {
+        // Mirror strip_double_quoted_spans: an unterminated quote leaves the
+        // remainder (including a following clause) visible.
+        let input = r#"destroy it unless you pay {1}. "unterminated"#;
+        let out = mask_double_quoted_spans_preserving_len(input);
+        // allow-noncombinator: test-only assertion that masking preserves the tail.
+        assert!(out.contains("unless you pay"), "outer clause stays visible");
+        assert_eq!(out.len(), input.len());
     }
 
     #[test]

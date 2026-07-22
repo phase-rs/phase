@@ -86,6 +86,9 @@
       "side": "A pré-visualização fixa-se na borda da tela para nunca cobrir o tabuleiro.",
       "shift": "A pré-visualização só aparece enquanto você segura a tecla Shift, como no Tabletop Simulator."
     },
+    "cardPreviewFooter": "Informações da pré-visualização",
+    "showCardPreviewFooter": "Mostrar informações sob as pré-visualizações das cartas",
+    "cardPreviewFooterHint": "Inclui o nome da carta, habilidades ativadas disponíveis e dicas de teclado. Alt ainda abre os detalhes de análise quando esta opção está oculta.",
     "cardArtPreferences": "Preferências de Arte das Cartas",
     "clearArtOverrides_one": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",

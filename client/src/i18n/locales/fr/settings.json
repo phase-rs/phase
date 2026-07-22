@@ -86,6 +86,9 @@
       "side": "L'aperçu s'ancre au bord de l'écran afin de ne jamais masquer le plateau.",
       "shift": "L'aperçu n'apparaît que tant que vous maintenez la touche Maj, comme dans Tabletop Simulator."
     },
+    "cardPreviewFooter": "Informations de l'aperçu",
+    "showCardPreviewFooter": "Afficher les informations sous les aperçus de cartes",
+    "cardPreviewFooterHint": "Inclut le nom de la carte, les capacités activées disponibles et les raccourcis clavier. Alt ouvre toujours les détails d'analyse lorsque cette option est masquée.",
     "cardArtPreferences": "Préférences d'illustration des cartes",
     "clearArtOverrides_one": "Effacer tous les remplacements d'illustration ({{count}})",
     "clearArtOverrides_other": "Effacer tous les remplacements d'illustration ({{count}})",

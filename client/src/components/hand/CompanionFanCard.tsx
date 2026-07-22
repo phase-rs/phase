@@ -18,6 +18,8 @@ interface CompanionFanCardProps {
   theme: ZoneTheme;
   rotation: number;
   arcOffset: number;
+  restingY: number;
+  hoverY: number;
   marginLeft: string | number;
   zIndex: number;
 }
@@ -38,6 +40,8 @@ const CompanionFanCard = memo(function CompanionFanCard({
   theme,
   rotation,
   arcOffset,
+  restingY,
+  hoverY,
   marginLeft,
   zIndex,
 }: CompanionFanCardProps) {
@@ -54,10 +58,10 @@ const CompanionFanCard = memo(function CompanionFanCard({
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 40 }}
-      animate={{ opacity: 1, y: 30 + arcOffset, rotate: rotation }}
+      initial={{ opacity: 0, y: restingY + 10 }}
+      animate={{ opacity: 1, y: restingY + arcOffset, rotate: rotation }}
       exit={{ opacity: 0, scale: 0.8 }}
-      whileHover={{ y: 20 + arcOffset, scale: 1.08, zIndex: 30 }}
+      whileHover={{ y: hoverY + arcOffset, scale: 1.08, zIndex: 30 }}
       whileDrag={{ scale: 1.05, zIndex: 9999 }}
       transition={{ duration: 0.25, layout: { duration: 0.15, delay: 0 } }}
       drag={canActivate}

@@ -202,6 +202,8 @@ export function PreferencesModal({
   const setCardPreviewMode = usePreferencesStore((s) => s.setCardPreviewMode);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs) ?? 0;
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
+  const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
+  const setShowCardPreviewFooter = usePreferencesStore((s) => s.setShowCardPreviewFooter);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -570,6 +572,23 @@ export function PreferencesModal({
                       </p>
                     </SettingGroup>
                   )}
+
+                  <SettingGroup label={t("visual.cardPreviewFooter")}>
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={showCardPreviewFooter}
+                        onChange={(e) => setShowCardPreviewFooter(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("visual.showCardPreviewFooter")}
+                      </span>
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.cardPreviewFooterHint")}
+                    </p>
+                  </SettingGroup>
 
                   <SettingGroup label={t("visual.cardArtPreferences")}>
                     <ArtChainEditor

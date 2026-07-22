@@ -43,44 +43,48 @@ expression: "&ir"
         "fragment": "Equipped creature gets +4/+4 and has vigilance and lifelink."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": null,
-            "properties": [
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "EquippedBy"
+                }
+              ]
+            },
+            "modifications": [
               {
-                "type": "EquippedBy"
+                "type": "AddPower",
+                "value": 4
+              },
+              {
+                "type": "AddToughness",
+                "value": 4
+              },
+              {
+                "type": "AddKeyword",
+                "keyword": "Vigilance"
+              },
+              {
+                "type": "AddKeyword",
+                "keyword": "Lifelink"
               }
-            ]
+            ],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Equipped creature gets +4/+4 and has vigilance and lifelink."
           },
-          "modifications": [
-            {
-              "type": "AddPower",
-              "value": 4
-            },
-            {
-              "type": "AddToughness",
-              "value": 4
-            },
-            {
-              "type": "AddKeyword",
-              "keyword": "Vigilance"
-            },
-            {
-              "type": "AddKeyword",
-              "keyword": "Lifelink"
-            }
-          ],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Equipped creature gets +4/+4 and has vigilance and lifelink."
+          "source_text": "Equipped creature gets +4/+4 and has vigilance and lifelink.",
+          "body_ir": null
         }
       }
     },

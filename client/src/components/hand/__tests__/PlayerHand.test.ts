@@ -10,6 +10,43 @@ import {
   isHandPermutation,
   VISIBLE_GAP_FRACTION,
 } from "../handInsertionSlot.ts";
+import {
+  HAND_FAN_HOVER_Y,
+  HAND_FAN_RESTING_Y,
+  handFanGeometry,
+  handFanVerticalMetrics,
+  playerHandFanSizingStyle,
+} from "../handFanPresentation.ts";
+
+describe("player hand fan presentation", () => {
+  it("uses the wide and shallow horizontal fan profile", () => {
+    const fan = handFanGeometry(8);
+
+    expect(fan.rotation(0)).toBeCloseTo(-12);
+    expect(fan.rotation(7)).toBeCloseTo(12);
+    expect(fan.arc(0)).toBeCloseTo(32);
+  });
+
+  it("caps a large hand to the viewport width budget", () => {
+    expect(playerHandFanSizingStyle(20)).toMatchObject({
+      "--hand-card-w": "min(calc(var(--card-w) * var(--hand-card-scale)), 16.73vw)",
+      "--hand-card-h": "calc(var(--hand-card-w) * 1.4)",
+    });
+  });
+
+  it("keeps resting cards lower than their hover position", () => {
+    expect(HAND_FAN_RESTING_Y).toBeGreaterThan(HAND_FAN_HOVER_Y);
+  });
+
+  it("scales the complete vertical fan depth for compact-height screens", () => {
+    const compactMetrics = handFanVerticalMetrics(true);
+    const compactFan = handFanGeometry(8, "--hand-card-w", compactMetrics.arcScale);
+
+    expect(compactMetrics.restingY).toBe(24);
+    expect(compactMetrics.hoverY).toBe(19);
+    expect(compactFan.arc(0)).toBeCloseTo(16);
+  });
+});
 
 const cardRects = [
   { objectId: 1, left: 0, width: 100 },

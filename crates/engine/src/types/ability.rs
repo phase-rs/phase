@@ -3149,6 +3149,22 @@ pub enum ResolutionCastSuccessAction {
         zones: Vec<Zone>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard: bool,
+        /// CR 406.6: Source object of the granting ability, threaded so
+        /// `ExiledBySource`-style filters (Plargg and Nassari) can rebuild the
+        /// re-offer candidate set against the right exile links. Zero sentinel
+        /// for saved states predating the field (graveyard/hand windows never
+        /// read it).
+        #[serde(default = "super::game_state::zero_object_id")]
+        source: super::identifiers::ObjectId,
+        /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch,
+        /// threaded from the window that offered the cast so the re-offer's
+        /// candidate set stays confined to the current resolution's exile
+        /// batch (Plargg and Nassari) rather than the source's complete live
+        /// linked-exile ledger. Empty means "no batch restriction" (Invoke
+        /// Calamity's graveyard/hand window; saved states predating the
+        /// field).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        member_pool: Vec<super::identifiers::ObjectId>,
     },
 }
 
@@ -5834,9 +5850,11 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
-    /// CR 403.3 + CR 608.2h: Count of battlefield entries this turn by the scoped
-    /// player matching `filter`, using `battlefield_entries_this_turn` snapshots
-    /// (lands that entered and later left still count). Smuggler's Share class:
+    /// CR 403.3 + CR 608.2h + CR 608.2i: Count of battlefield entries this turn by
+    /// the scoped player matching `filter`, using `battlefield_entries_this_turn`
+    /// snapshots. CR 608.2i is the look-back exception that makes a departed
+    /// permanent still count (lands that entered and later left still count).
+    /// Smuggler's Share class:
     /// "for each opponent who had two or more lands enter the battlefield under
     /// their control this turn."
     BattlefieldEntriesThisTurn {
@@ -12586,6 +12604,16 @@ pub enum Effect {
         /// object selection is the parent `ChooseFromZone`'s responsibility).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         object_source: Option<TargetFilter>,
+        /// CR 110.2a: Controller-on-entry override — the player instructed to
+        /// cloak puts the card onto the battlefield, so it enters under that
+        /// player's control (Etrata, Deadly Fugitive: the cloaker controls the
+        /// face-down card while the library owner keeps owning it). `None` =
+        /// the owner default, reserved for future third-person subjects ("its
+        /// controller cloaks ... their library"). Mirrors `Manifest.enters_under`
+        /// and resolves through the single `resolve_enters_under_player`
+        /// authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 406.3 + CR 701.20a: Turn a face-down card face up via a resolving effect (not the
     /// morph special action). Used by the Imprint "flip" cards — Clone Shell,
