@@ -1705,6 +1705,10 @@
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
   },
+  "zoneOpponentChooser": {
+    "title": "Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner die Wahl trifft."
+  },
   "pileOpponent": {
     "title": "Choose Opponent",
     "subtitle": "Choose which opponent separates the cards into piles."

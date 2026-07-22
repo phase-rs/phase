@@ -1203,6 +1203,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
 
+        // CR 608.2d: "an opponent chooses …" — the controller picks which
+        // opponent makes the zone choice; fall back to the first candidate.
+        WaitingFor::ChooseFromZoneOpponentChooser { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseZoneOpponentChooser { opponent }),
+
         // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
         // controller picks which opponent announces; fall back to the first.
         WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates

@@ -938,6 +938,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.graveyard_cast_permissions_used.clear();
     // CR 110.4 + CR 601.2a: Reset per-turn-per-permanent-type tracking (Muldrotha).
     state.graveyard_cast_permissions_used_per_type.clear();
+    // P1 retention policy (not a CR rule): the resolved-rules provenance
+    // journal only has consumers within a payment/announcement window, and a
+    // turn transition cannot begin with a payment in flight (the stack is
+    // empty, prompts are settled, and mana pools drained at step end per
+    // CR 106.4). Truncating here bounds journal growth to one turn until the
+    // CR 733 settlement consumer defines the real retention window.
+    state.resolved_rules_journal = Default::default();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
     // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn

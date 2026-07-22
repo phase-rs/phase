@@ -636,7 +636,7 @@ pub(super) fn handle_replacement_choice(
                             };
                             // CR 118.3a: stamp a stable pip id on pool entry so the unit
                             // can be pinned to direct payment.
-                            state.add_mana_to_pool(player_id, unit);
+                            let _ = state.add_mana_to_pool(player_id, unit);
                             events.push(GameEvent::ManaAdded {
                                 player_id,
                                 mana_type,

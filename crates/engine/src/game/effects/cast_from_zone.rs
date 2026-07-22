@@ -2247,7 +2247,7 @@ mod tests {
         // {1} generic. (If the override leaked the printed {5}, this could not pay
         // and the spell would not reach the stack.)
         for _ in 0..2 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 PlayerId(0),
                 ManaUnit::new(ManaType::Blue, suspended, false, Vec::new()),
             );

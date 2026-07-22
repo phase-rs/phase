@@ -394,7 +394,7 @@ pub fn apply_debug_action(
                 // produced mana. A bare `mana_pool.add` leaves the unstamped
                 // sentinel (`ManaPipId(0)`) on every unit, which makes all of
                 // them pin/unpin together in the manual-payment UI.
-                state.add_mana_to_pool(
+                let _ = state.add_mana_to_pool(
                     player_id,
                     crate::types::mana::ManaUnit::new(mana_type, ObjectId(0), false, vec![]),
                 );

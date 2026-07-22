@@ -213,7 +213,7 @@ fn visit_links_any(ability: &ResolvedAbility, pred: &dyn Fn(&ResolvedAbility) ->
     false
 }
 
-/// CR 605.3b: Resolve a triggered mana ability inline (stack-skipped).
+/// CR 605.4a: Resolve a triggered mana ability inline (stack-skipped).
 /// The ability's effect chain is executed immediately; mana additions land in the
 /// controller's pool before any player could respond.
 pub fn resolve_triggered_mana_ability_inline(
@@ -223,17 +223,53 @@ pub fn resolve_triggered_mana_ability_inline(
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
 ) {
-    let previous_trigger_event = state.current_trigger_event.clone();
-    let previous_mana_override = state.current_triggered_mana_override.take();
-    state.current_trigger_event = trigger_event.cloned();
-    // Forward the planned color override so `effects::mana::resolve` can produce
-    // the correct color for `AnyOneColor` triggered mana abilities (Fertile Ground)
-    // rather than defaulting to `color_options.first()`.
-    state.current_triggered_mana_override = color_override;
-    // Use the standard resolution entry so sub_ability chains resolve uniformly.
-    let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
-    state.current_triggered_mana_override = previous_mana_override;
-    state.current_trigger_event = previous_trigger_event;
+    // CR 603.3d: a triggered mana ability still resolves after its source has
+    // left its zone. Production paths carry exact identity via the Plan-04
+    // `trigger_source` context (captured at trigger time, LKI-safe); the
+    // object lookup covers pre-P04 callers whose source is still present.
+    // When neither is available (source gone AND no trigger context — only
+    // synthetic/legacy callers), no dedicated journal node is begun: produced
+    // mana falls back to the automatic Proposal attribution in
+    // `add_mana_to_pool`, preserving pip conservation without fabricating an
+    // exact incarnation identity.
+    let source = ability
+        .trigger_source
+        .as_ref()
+        .map(|context| context.identity.reference)
+        .or_else(|| {
+            state
+                .objects
+                .get(&ability.source_id)
+                .map(crate::types::ObjectIncarnationRef::from_object)
+        });
+    let node = source.map(|source| {
+        let caused_by = match trigger_event {
+            Some(
+                GameEvent::ManaAdded { source_id, .. } | GameEvent::TappedForMana { source_id, .. },
+            ) => state
+                .resolved_rules_journal
+                .latest_mana_producer_for_source(*source_id),
+            _ => None,
+        };
+        state.begin_triggered_mana_journal_node(
+            source,
+            ability.trigger_definition_ref.clone(),
+            caused_by,
+        )
+    });
+    state.with_optional_rules_execution_node(node, |state| {
+        let previous_trigger_event = state.current_trigger_event.clone();
+        let previous_mana_override = state.current_triggered_mana_override.take();
+        state.current_trigger_event = trigger_event.cloned();
+        // Forward the planned color override so `effects::mana::resolve` can produce
+        // the correct color for `AnyOneColor` triggered mana abilities (Fertile Ground)
+        // rather than defaulting to `color_options.first()`.
+        state.current_triggered_mana_override = color_override;
+        // Use the standard resolution entry so sub_ability chains resolve uniformly.
+        let _ = super::effects::resolve_ability_chain(state, ability, events, 0);
+        state.current_triggered_mana_override = previous_mana_override;
+        state.current_trigger_event = previous_trigger_event;
+    });
 }
 
 /// CR 605.2: Mana abilities don't use the stack — they can't be targeted, countered, or responded to.
@@ -306,10 +342,12 @@ pub(super) fn resolve_mana_ability_excluding(
                 .position(|ability| ability == ability_def)
         })
         .unwrap_or(usize::MAX);
+    let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     let pending = PendingManaAbility {
         player,
         source_id,
         ability_index,
+        rules_execution_node,
         ability_snapshot: Some(ability_def.clone()),
         color_override,
         // The direct resolver normally leaves its caller's waiting root
@@ -618,12 +656,14 @@ pub fn activate_mana_ability(
         &ability_def.activation_restrictions,
     )?;
 
+    let rules_execution_node = Some(state.begin_activated_mana_journal_node(source_id));
     advance_mana_ability_activation(
         state,
         PendingManaAbility {
             player,
             source_id,
             ability_index,
+            rules_execution_node,
             ability_snapshot: Some(ability_def.clone()),
             color_override,
             resume,
@@ -889,23 +929,28 @@ pub fn handle_choose_mana_color(
         .or_else(|| pending.ability_snapshot.clone())
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
 
-    produce_mana_from_ability(
-        state,
-        pending.source_id,
-        pending.player,
-        &ability_def,
-        events,
-        Some(override_value),
-        pending.chosen_x,
-        pending.cost_paid_object.clone(),
-    );
-    complete_mana_ability_activation(
-        state,
-        pending.source_id,
-        pending.ability_index,
-        pending.player,
-        events,
-    );
+    let node = pending
+        .rules_execution_node
+        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    state.with_rules_execution_node(node, |state| {
+        produce_mana_from_ability(
+            state,
+            pending.source_id,
+            pending.player,
+            &ability_def,
+            events,
+            Some(override_value),
+            pending.chosen_x,
+            pending.cost_paid_object.clone(),
+        );
+        complete_mana_ability_activation(
+            state,
+            pending.source_id,
+            pending.ability_index,
+            pending.player,
+            events,
+        );
+    });
 
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
 }
@@ -2540,6 +2585,21 @@ fn resume_mana_ability_root(
 fn continue_mana_ability_cost_payment(
     state: &mut GameState,
     pending: PendingManaAbility,
+    cursor: ManaAbilityCostCursor,
+    events: &mut Vec<GameEvent>,
+    cost_event_start: usize,
+) -> Result<WaitingFor, EngineError> {
+    let node = pending
+        .rules_execution_node
+        .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
+    state.with_rules_execution_node(node, |state| {
+        continue_mana_ability_cost_payment_in_node(state, pending, cursor, events, cost_event_start)
+    })
+}
+
+fn continue_mana_ability_cost_payment_in_node(
+    state: &mut GameState,
+    pending: PendingManaAbility,
     mut cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
@@ -3153,8 +3213,11 @@ fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType])
     let mut sim = pool.clone();
     // Simulation path — `None` context preserves the prior "can pool cover
     // this at all" semantics. Restriction-aware affordability is checked at
-    // the real payment site via `pay_mana_sub_cost`.
-    debit_cost_with_plan(&mut sim, cost, plan, None).ok()
+    // the real payment site via `pay_mana_sub_cost`; the simulated spent
+    // units are discarded (provenance is recorded only at the real site).
+    debit_cost_with_plan(&mut sim, cost, plan, None)
+        .ok()
+        .map(|_| ())
 }
 
 /// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
@@ -3171,10 +3234,10 @@ fn debit_cost_with_plan(
     cost: &ManaCost,
     plan: &[ManaType],
     ctx: Option<&PaymentContext<'_>>,
-) -> Result<(), mana_payment::PaymentError> {
+) -> Result<Vec<crate::types::mana::ManaUnit>, mana_payment::PaymentError> {
     use crate::types::mana::ManaCostShard;
     let ManaCost::Cost { shards, generic } = cost else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let mut plan_cursor = 0usize;
     let rewritten_shards: Vec<ManaCostShard> = shards
@@ -3209,7 +3272,7 @@ fn debit_cost_with_plan(
         // CR 118.3a: mana-ability activation sub-costs are not pinnable.
         &[],
     )
-    .map(|_| ())
+    .map(|(spent, _life)| spent)
 }
 
 /// Map a `ManaType` to the printed-shard variant that requires exactly that
@@ -3286,34 +3349,38 @@ fn pay_mana_sub_cost(
         source_subtypes: &source_subtypes,
         ability_tag: None,
     };
+    state.restamp_pool_pip_ids(player);
     let pool = &mut state.players[player.0 as usize].mana_pool;
-    let (spent, _life) = match hybrid_plan {
-        Some(plan) => debit_cost_with_plan(pool, cost, plan, Some(&ctx))
-            .map(|_| (Vec::new(), Vec::new()))
+    let spent = match hybrid_plan {
+        Some(plan) => debit_cost_with_plan(pool, cost, plan, Some(&ctx)).map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
+        })?,
+        None => {
+            mana_payment::pay_cost_with_demand_and_choices(
+                pool,
+                cost,
+                None,
+                Some(&ctx),
+                false,
+                None,
+                // CR 107.4f: same K'rrik-not-applicable rationale as above.
+                crate::types::mana::LifePaymentColors::EMPTY,
+                // CR 118.3a: mana-ability activation sub-costs are not pinnable.
+                &[],
+            )
             .map_err(|_| {
                 EngineError::ActionNotAllowed(
                     "Mana pool cannot cover mana ability cost".to_string(),
                 )
-            })?,
-        None => mana_payment::pay_cost_with_demand_and_choices(
-            pool,
-            cost,
-            None,
-            Some(&ctx),
-            false,
-            None,
-            // CR 107.4f: same K'rrik-not-applicable rationale as above.
-            crate::types::mana::LifePaymentColors::EMPTY,
-            // CR 118.3a: mana-ability activation sub-costs are not pinnable.
-            &[],
-        )
-        .map_err(|_| {
-            EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
-        })?,
+            })?
+            .0
+        }
     };
     if !spent.is_empty() || hybrid_plan.is_some() {
         state.layers_dirty.mark_full();
     }
+    let recipient = state.mana_payment_recipient(source_id, player);
+    state.record_mana_payment(player, recipient, &spent);
     // CR 605.3b: The player's mana pool mutation is the public signal; no
     // dedicated event exists for ability mana payments. The pool-diff is
     // surfaced via the standard state-update machinery.
@@ -7196,6 +7263,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -7298,6 +7366,7 @@ mod tests {
             source_id: source,
             ability_snapshot: None,
             ability_index: 0,
+            rules_execution_node: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -7507,6 +7576,7 @@ mod tests {
                 player: PlayerId(0),
                 source_id: source,
                 ability_index: 0,
+                rules_execution_node: None,
                 ability_snapshot: None,
                 color_override: None,
                 resume: ManaAbilityResume::Priority,
@@ -7739,6 +7809,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -7844,6 +7915,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -8747,6 +8819,7 @@ mod tests {
             player: PlayerId(0),
             source_id: ruins,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -9118,6 +9191,7 @@ mod tests {
             player: PlayerId(1),
             source_id: brushland,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -9682,6 +9756,7 @@ mod tests {
             player: PlayerId(0),
             source_id: source,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
             resume: ManaAbilityResume::Priority,
@@ -9754,6 +9829,7 @@ mod tests {
             player: PlayerId(0),
             source_id: altar,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Black)),
             resume: ManaAbilityResume::Priority,
@@ -9881,6 +9957,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,
@@ -9946,6 +10023,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Red)),
             resume: ManaAbilityResume::Priority,
@@ -10102,6 +10180,7 @@ mod tests {
             player: PlayerId(0),
             source_id: chain,
             ability_index: 0,
+            rules_execution_node: None,
             ability_snapshot: None,
             color_override: Some(ProductionOverride::SingleColor(ManaType::Green)),
             resume: ManaAbilityResume::Priority,

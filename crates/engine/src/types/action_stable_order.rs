@@ -171,6 +171,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseZoneOpponentChooser { opponent: a0 } => {
+            let GameAction::ChooseZoneOpponentChooser { opponent: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChoosePileOpponent { opponent: a0 } => {
             let GameAction::ChoosePileOpponent { opponent: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");

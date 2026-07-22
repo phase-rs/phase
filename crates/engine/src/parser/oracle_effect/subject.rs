@@ -2388,6 +2388,16 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
+    // CR 303.4b + CR 702.5a + CR 701.17a (issue #5947): "enchanted player"
+    // names the Aura's attached player host — `AttachedTo`, not a Typed
+    // EnchantedBy filter (which is object-only). Used by curse bodies such as
+    // Fraying Sanity's "enchanted player mills X cards".
+    if all_consuming(tag::<_, _, OracleError<'_>>("enchanted player"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return subject_filter_application(TargetFilter::AttachedTo, false);
+    }
     // "those creatures" / "those lands" — anaphoric reference to previous
     // targets. Maps to ParentTarget so the restriction applies to the same
     // objects.

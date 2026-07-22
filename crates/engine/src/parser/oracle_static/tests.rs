@@ -11306,6 +11306,52 @@ fn triarch_stalker_choose_opponent_persists_for_last_chosen_player_static() {
 }
 
 #[test]
+fn granted_static_reader_persists_last_chosen_player() {
+    // CR 607.2d + CR 613.1 + CR 608.2c: the document relation scan must see a
+    // granted static that is emitted through `OracleNodeIr::Static`, otherwise
+    // the preceding opponent choice would be incorrectly resolution-scoped.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChoiceType;
+
+    let parsed = parse_oracle_text(
+        "Targeting Relay — At the beginning of combat on your turn, choose an opponent.\nCreatures attacking the last chosen player have \"{T}: Add {C}.\"",
+        "Triarch Stalker",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Necron".to_string()],
+    );
+
+    assert!(
+        parsed.statics.iter().any(|s| matches!(
+            &s.affected,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Attacking {
+                defender: Some(ControllerRef::SourceChosenPlayer),
+            })
+        )),
+        "granted static must scope attackers by SourceChosenPlayer, got {:?}",
+        parsed.statics
+    );
+
+    let choose = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("expected a triggered choose ability");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::Opponent { .. },
+                persist: true,
+                ..
+            }
+        ),
+        "a granted static reader must persist the opponent choice, got {:?}",
+        choose.effect
+    );
+}
+
+#[test]
 fn choose_opponent_without_source_chosen_reference_does_not_persist() {
     // Targeted-pass regression: a "choose an opponent" trigger whose choice is
     // consumed WITHIN the same resolution (Ruhan — the forced attack reads the
