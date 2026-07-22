@@ -5057,7 +5057,10 @@ pub(crate) fn parse_oracle_ir(
                                 None,
                                 None,
                             ) {
-                                emitter.static_at(item_line, __item);
+                                emitter.static_ir_at(
+                                    item_line,
+                                    StaticIr::from_definition(&clause_dot, __item),
+                                );
                             }
                         }
                     }
@@ -5078,7 +5081,10 @@ pub(crate) fn parse_oracle_ir(
                                 None,
                                 None,
                             ) {
-                                emitter.static_at(item_line, __item);
+                                emitter.static_ir_at(
+                                    item_line,
+                                    StaticIr::from_definition(&clause_dot, __item),
+                                );
                             }
                         }
                     }
