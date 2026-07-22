@@ -499,13 +499,22 @@
     "clickToFocus": "kliknij, aby skupić"
   },
   "manaPool": {
+    "onlyForSpell": "Wydaj tylko na rzucanie czarów",
     "onlyForSpellType": "Wydaj tylko na rzucanie czarów określonego typu",
     "onlyForCreatureType": "Wydaj tylko na rzucenie czaru stwora wybranego typu",
     "onlyForTypeSpellsOrAbilities": "Wydaj tylko na czary lub zdolności określonego typu",
+    "onlyForTaggedActivation": "Wydaj tylko na aktywowanie zdolności określonego rodzaju",
     "onlyForSpellWithKeywordKind": "Wydaj tylko na rzucanie czarów z określonym słowem kluczowym",
     "onlyForSpellWithKeywordKindFromZone": "Wydaj tylko na rzucanie czarów ze słowem kluczowym z cmentarza",
+    "onlyForSpellWithManaValue": "Wydaj tylko na rzucanie czarów spełniających wymaganie wartości many",
+    "onlyForSpellMatchingCostCriteria": "Wydaj tylko na rzucanie czarów spełniających wymaganie kosztu",
+    "onlyForSpellWithColorCount": "Wydaj tylko na rzucanie czarów spełniających wymaganie liczby kolorów",
+    "onlyForSpellFromZone": "Wydaj tylko na rzucanie czarów z dozwolonej strefy",
+    "onlyForFaceDownSpell": "Wydaj tylko na rzucanie zakrytych czarów",
     "onlyForActivation": "Wydaj tylko na aktywowanie zdolności",
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
+    "onlyForAny": "Wydaj tylko na jedno z wymienionych zastosowań",
+    "onlyForSpecialAction": "Wydaj tylko na określoną akcję specjalną",
     "convokePayment": "Płatność Convoke",
     "grantsProperty": "Nadaje czarowi właściwość",
     "grantCantBeCountered": "Wydaj na ten czar, aby nie można było go skontrować"

@@ -1087,7 +1087,8 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     );
   });
 
-  // Regression guard: the wire must carry legalActionsByObject + spellCosts
+  // Regression guard: the wire must carry legalActionsByObject, spellCosts,
+  // and engine-authored mana-payment shortcut actions
   // across game_setup, state_update, and reconnect_ack. Dropping these fields
   // — even though the flat `legalActions` array still arrives — leaves guests
   // unable to click cards in their hand, because the frontend card-click
@@ -1097,7 +1098,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   // because those dispatch as plain GameActions, which is why the original
   // bug evaded detection for so long. This test locks in the fix at every
   // wire site so a future refactor cannot silently regress.
-  it("wire protocol round-trips legalActionsByObject + spellCosts on every send site", async () => {
+  it("wire protocol round-trips legal projections on every send site", async () => {
     // Seed the mocked engine's legal-actions response with non-empty
     // per-object grouping and spell costs. The host adapter is expected to
     // forward these verbatim to every guest via game_setup, state_update,
@@ -1109,6 +1110,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     const spellCosts = {
       "42": { generic: 1, colored: { R: 1 } },
     };
+    const manaPaymentShortcutActions: GameAction[] = [{ type: "PassPriority" }];
     // Cast via `unknown` because the hoisted mock's default return is inferred
     // as `{ actions: never[]; autoPassRecommended: boolean }`, which would
     // reject our richer payload. The adapter consumes the full
@@ -1128,6 +1130,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         { type: "PassPriority" },
       ],
       autoPassRecommended: false,
+      manaPaymentShortcutActions,
       legalActionsByObject,
       spellCosts,
     }));
@@ -1148,12 +1151,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         playerToken: string;
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
+        manaPaymentShortcutActions?: GameAction[];
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "game_setup",
     );
     expect(setup).toBeDefined();
     expect(setup!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(setup!.spellCosts).toEqual(spellCosts);
+    expect(setup!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
     const playerToken = setup!.playerToken;
 
     // ── state_update ───────────────────────────────────────────────────────
@@ -1165,12 +1170,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         type: "state_update";
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
+        manaPaymentShortcutActions?: GameAction[];
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "state_update",
     );
     expect(stateUpdate).toBeDefined();
     expect(stateUpdate!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(stateUpdate!.spellCosts).toEqual(spellCosts);
+    expect(stateUpdate!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
 
     // ── reconnect_ack ──────────────────────────────────────────────────────
     g1.simulateClose();
@@ -1188,12 +1195,14 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         type: "reconnect_ack";
         legalActionsByObject?: Record<string, unknown>;
         spellCosts?: Record<string, unknown>;
+        manaPaymentShortcutActions?: GameAction[];
       } =>
         typeof m === "object" && m !== null && (m as { type: string }).type === "reconnect_ack",
     );
     expect(ack).toBeDefined();
     expect(ack!.legalActionsByObject).toEqual(legalActionsByObject);
     expect(ack!.spellCosts).toEqual(spellCosts);
+    expect(ack!.manaPaymentShortcutActions).toEqual(manaPaymentShortcutActions);
   });
 
   it("keeps turn-controller auto-pass recommendations viewer-scoped on setup, update, and reconnect", async () => {
@@ -1346,6 +1355,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       events: [],
       legalActions: [],
       autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
     });
     await adapter.initializeGame();
 
@@ -1361,6 +1371,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       logEntries: pendingLogs,
       legalActions: [],
       autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
     });
     await expect(pendingSubmit).resolves.toEqual({
       events: pendingEvents,
@@ -1379,6 +1390,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       logEntries: unsolicitedLogs,
       legalActions: [],
       autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
     });
 
     // The engine pair now travels as one seq-stamped `EngineSnapshot`.
@@ -1419,6 +1431,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       events: [],
       legalActions: [],
       autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
     });
     await adapter.initializeGame();
 
@@ -1466,6 +1479,7 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
         events: [],
         legalActions: actions,
         autoPassRecommended: false,
+        manaPaymentShortcutActions: [],
       });
 
     const passPriority = [{ type: "PassPriority" }] as unknown as GameAction[];

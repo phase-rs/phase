@@ -330,7 +330,18 @@ mod tests {
             classify(
                 &priority,
                 &GameAction::TapLandForMana {
-                    object_id: ObjectId(0)
+                    selection: engine::types::mana::ManaSourceSelection {
+                        source: engine::types::identifiers::ObjectIncarnationRef {
+                            object_id: ObjectId(0),
+                            incarnation: 0,
+                        },
+                        ability_index: None,
+                        mana_type: engine::types::mana::ManaType::Green,
+                        atomic_combination: None,
+                        restrictions: Vec::new(),
+                        penalty: engine::types::mana::ManaSourcePenalty::None,
+                        taps_for_mana: Vec::new(),
+                    },
                 }
             ),
             DecisionKind::ActivateManaAbility

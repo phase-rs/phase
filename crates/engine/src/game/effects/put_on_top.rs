@@ -235,6 +235,7 @@ pub fn resolve(
                     library_position: Some(position.clone()),
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -285,6 +286,7 @@ pub fn resolve(
             library_position: Some(position.clone()),
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
         return Ok(());
     }

@@ -292,6 +292,9 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mana_payment_shortcut_actions: Vec<GameAction>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         spell_costs: HashMap<ObjectId, ManaCost>,
         /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
@@ -325,6 +328,9 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mana_payment_shortcut_actions: Vec<GameAction>,
         #[serde(default)]
         eliminated_players: Vec<PlayerId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -506,7 +512,13 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::format::GameFormat;
+    use engine::types::game_state::ProductionOverride;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{
+        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+    };
     use serde_json::Value;
 
     fn load_fixture(path: &str) -> Value {
@@ -556,14 +568,34 @@ mod tests {
 
     #[test]
     fn client_message_action_roundtrips() {
+        let action = GameAction::TapLandForMana {
+            selection: ManaSourceSelection {
+                source: ObjectIncarnationRef::of(ObjectId(7), 3),
+                ability_index: None,
+                mana_type: ManaType::Green,
+                atomic_combination: None,
+                restrictions: Vec::new(),
+                penalty: ManaSourcePenalty::None,
+                taps_for_mana: vec![TapsForManaSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(9), 2),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                    production_override: ProductionOverride::SingleColor(ManaType::Red),
+                }],
+            },
+        };
         let msg = ClientMessage::Action {
-            action: GameAction::PassPriority,
+            action: action.clone(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::Action { action } => {
-                assert_eq!(action, GameAction::PassPriority);
+            ClientMessage::Action {
+                action: restored_action,
+            } => {
+                assert_eq!(restored_action, action);
             }
             _ => panic!("wrong variant"),
         }
@@ -873,6 +905,7 @@ mod tests {
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
             legal_actions: vec![GameAction::PassPriority],
             auto_pass_recommended: false,
+            mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
             derived: Default::default(),
@@ -908,6 +941,7 @@ mod tests {
             player_names: vec![],
             legal_actions: vec![],
             auto_pass_recommended: false,
+            mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
             derived: Default::default(),

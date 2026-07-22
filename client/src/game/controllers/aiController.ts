@@ -2,7 +2,7 @@ import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constan
 import { useGameStore } from "../../stores/gameStore";
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
-import { pressureMultiplier, STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
+import { pressureMultiplier } from "../../utils/stackPressure";
 import { effectiveStackPressure } from "../../utils/stackThroughput";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
@@ -75,6 +75,17 @@ export function createAIController(config: AIControllerConfig): AIController {
   let pending = false;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let unsubscribe: (() => void) | null = null;
+  let attemptGeneration = 0;
+
+  interface AIAttempt {
+    generation: number;
+    gameSessionGeneration: number;
+    waitingForFingerprint: string;
+    playerId: number;
+    isPriority: boolean;
+  }
+
+  let currentAttempt: AIAttempt | null = null;
 
   // Failure tracking on the same WaitingFor state to break infinite loops.
   // `MAX_CONSECUTIVE_FAILURES` gates the normal→fallback transition; the
@@ -129,6 +140,75 @@ export function createAIController(config: AIControllerConfig): AIController {
     return null;
   }
 
+  function authorizedAiPlayer(
+    waitingFor: WaitingFor,
+    state: GameState,
+  ): number | null {
+    const mulliganPid = aiPendingForMulligan(
+      waitingFor as { type: string; data?: { pending?: { player: number }[] } },
+    );
+    if (mulliganPid !== null) return mulliganPid;
+    if (
+      waitingFor.type === "MulliganDecision" ||
+      waitingFor.type === "OpeningHandBottomCards"
+    ) {
+      return null;
+    }
+    if (
+      !("data" in waitingFor) ||
+      !waitingFor.data ||
+      (!("player" in waitingFor.data) &&
+        waitingFor.type !== "LoopShortcut" &&
+        waitingFor.type !== "PrecastCopyShortcutOffer")
+    ) {
+      return null;
+    }
+    return state.priority_player === PLAYER_ID ? null : state.priority_player;
+  }
+
+  function beginAttempt(waitingFor: WaitingFor, playerId: number): AIAttempt {
+    const store = useGameStore.getState();
+    const attempt: AIAttempt = {
+      generation: ++attemptGeneration,
+      gameSessionGeneration: store.gameSessionGeneration,
+      waitingForFingerprint: waitingForFingerprint(waitingFor),
+      playerId,
+      isPriority: waitingFor.type === "Priority",
+    };
+    currentAttempt = attempt;
+    pending = true;
+    return attempt;
+  }
+
+  function isAttemptCurrent(attempt: AIAttempt): boolean {
+    if (!active || attempt.generation !== attemptGeneration) return false;
+    const store = useGameStore.getState();
+    if (store.gameSessionGeneration !== attempt.gameSessionGeneration) return false;
+    const state = store.gameState;
+    const waitingFor = state?.waiting_for ?? null;
+    if (!state || !waitingFor) return false;
+    if (waitingForFingerprint(waitingFor) !== attempt.waitingForFingerprint) return false;
+    if (authorizedAiPlayer(waitingFor, state) !== attempt.playerId) return false;
+    return !attempt.isPriority || !store.isResolvingAll;
+  }
+
+  function finishAttempt(attempt: AIAttempt): boolean {
+    if (attempt.generation !== attemptGeneration) return false;
+    currentAttempt = null;
+    pending = false;
+    return true;
+  }
+
+  function invalidateAttempt(): void {
+    attemptGeneration++;
+    currentAttempt = null;
+    pending = false;
+    if (timeoutId != null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+  }
+
   function checkAndSchedule() {
     if (!active || pending) return;
 
@@ -142,70 +222,18 @@ export function createAIController(config: AIControllerConfig): AIController {
 
     // CR 103.5: Simultaneous mulligan — pending may contain multiple players;
     // route to the first AI seat that still owes a decision/bottom selection.
-    // For all other states, use the single-player `data.player` path.
-    let waitingPlayerId: number;
+    // For all other states, the engine-authored `priority_player` is the
+    // authorized submitter, including controlled turns (CR 723.5).
     const mulliganPid = aiPendingForMulligan(
       waitingFor as { type: string; data?: { pending?: { player: number }[] } },
     );
-    if (mulliganPid !== null) {
-      waitingPlayerId = mulliganPid;
-    } else if (
-      waitingFor.type === "MulliganDecision" ||
-      waitingFor.type === "OpeningHandBottomCards"
-    ) {
-      // Local human is pending (or no AI players left in pending) — do nothing.
-      return;
-    } else {
-      // Check if it's an AI player's turn — any non-human player is AI.
-      // This is dynamic rather than gating on a static set so that
-      // restoreGameState (debug panel import) with a different player count
-      // works without rebuilding the controller.
-      if (
-        !("data" in waitingFor) ||
-        !waitingFor.data ||
-        // CR 732.2a: shortcut offers carry `proposer`, not `player`; route both
-        // legacy and finite pre-cast offers via the engine-derived
-        // `priority_player` like every `player in` state.
-        (!("player" in waitingFor.data) &&
-          waitingFor.type !== "LoopShortcut" &&
-          waitingFor.type !== "PrecastCopyShortcutOffer")
-      )
-        return;
-      // CR 723.5: Under a turn-control effect (Emrakul, the Promised End /
-      // Worst Fears / Mindslaver) the seat that must *submit* this decision is
-      // the authorized submitter, NOT the semantic acting player
-      // (`waiting_for.data.player`, which is the controlled seat). The engine is
-      // the single authority for this and re-derives `priority_player` to the
-      // authorized submitter (see `game/public_state.rs`
-      // `sync_priority_player_from_waiting_for`). Driving the AI off
-      // `data.player` would dispatch as the controlled seat, which the engine
-      // rejects with `WrongPlayer` — the controller then burns through its
-      // failure budget and hard-stops via `notifyEngineLost`, which surfaced as
-      // a game crash when a human gained control of an AI's turn (#2012).
-      //
-      // Using the authorized submitter keeps the AI silent while a human
-      // controls the turn (submitter is the human → bail), and makes the AI act
-      // as the controller seat when an AI gains control of another seat's turn.
-      // In games with no turn-control effect, `priority_player === data.player`
-      // for every single-acting state, so this is a no-op.
-      waitingPlayerId = state.priority_player;
-      if (waitingPlayerId === PLAYER_ID) return;
-    }
+    const waitingPlayerId = authorizedAiPlayer(waitingFor, state);
+    if (waitingPlayerId === null) return;
 
-    // Stack-pressure deferral applies ONLY to discretionary Priority decisions.
-    // Under pressure the batch-resolve path (gameLoopController → dispatchResolveAll
-    // → engine `resolve_all`) drains the stack by passing priority, so the AI
-    // controller steps aside to avoid racing it. But `resolve_all` is a
-    // priority-only loop: it breaks the instant `waiting_for` leaves Priority
-    // (engine-wasm/src/lib.rs) and hands any mandatory mid-resolution choice
-    // (EffectZoneChoice, ChooseManaColor, scry/surveil, discard, resolution
-    // targeting, …) back to the frontend. Those choices belong to THIS controller
-    // and are exactly what lets the stack drain. Deferring them on stack size
-    // deadlocks the game: stack ≥ 10 → AI won't choose → stack never shrinks →
-    // batch path never restarts (it only fires on Priority). So skip only when
-    // the AI's pending decision is Priority itself.
-    const stackLen = state.stack?.length ?? 0;
-    if (waitingFor.type === "Priority" && stackLen >= STACK_PRESSURE_ELEVATED) return;
+    // Resolve All is an explicit, user-started owner of Priority passing. The
+    // AI only steps aside while that session is actually active; stack depth is
+    // never consent. Mandatory non-Priority decisions continue normally.
+    if (waitingFor.type === "Priority" && useGameStore.getState().isResolvingAll) return;
 
     // Reset failure counters when the WaitingFor state changes (type or player).
     // `consecutiveFailures` gates normal→fallback escalation; `totalFailures`
@@ -238,12 +266,9 @@ export function createAIController(config: AIControllerConfig): AIController {
         `AI stuck: ${MAX_CONSECUTIVE_FAILURES} consecutive failures on ${waitingFor.type}, dispatching fallback`,
         "warn",
       );
-      // Guard against re-entry: set pending so subscription callbacks during
-      // the fallback dispatch don't trigger another fallback cascade.
-      pending = true;
-      runEscapeFallback(waitingFor, waitingPlayerId).finally(() => {
-        pending = false;
-        if (active) checkAndSchedule();
+      const attempt = beginAttempt(waitingFor, waitingPlayerId);
+      runEscapeFallback(waitingFor, waitingPlayerId, attempt).finally(() => {
+        if (finishAttempt(attempt) && active) checkAndSchedule();
       });
       return;
     }
@@ -274,16 +299,20 @@ export function createAIController(config: AIControllerConfig): AIController {
   async function runEscapeFallback(
     waitingFor: WaitingFor,
     waitingPlayerId: number,
+    attempt: AIAttempt,
   ): Promise<void> {
     const state = useGameStore.getState().gameState;
-    if (!state) return;
+    if (!state || !isAttemptCurrent(attempt)) return;
     try {
       const fallback = await pickEscapeAction(waitingFor, state);
+      if (!isAttemptCurrent(attempt)) return;
       await dispatchAction(fallback, waitingPlayerId);
+      if (!isAttemptCurrent(attempt)) return;
       consecutiveFailures = 0;
       totalFailures = 0;
       lastDispatchError = null;
     } catch (e) {
+      if (!isAttemptCurrent(attempt)) return;
       consecutiveFailures++;
       totalFailures++;
       lastDispatchError = e instanceof Error ? e.message : String(e);
@@ -296,7 +325,6 @@ export function createAIController(config: AIControllerConfig): AIController {
 
   function scheduleAction(playerId: number) {
     if (pending) return;
-    pending = true;
 
     // Start computing immediately — in parallel with the artificial delay.
     // This turns additive latency (delay + compute) into max(delay, compute),
@@ -307,7 +335,8 @@ export function createAIController(config: AIControllerConfig): AIController {
     const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
     const waitingForType = gameState?.waiting_for?.type;
     const scheduledWaitingFor = gameState?.waiting_for ?? null;
-    const scheduledWaitingForFingerprint = waitingForFingerprint(scheduledWaitingFor);
+    if (!scheduledWaitingFor) return;
+    const attempt = beginAttempt(scheduledWaitingFor, playerId);
     const actionPromise: Promise<GameAction | null> = Promise.resolve(
       adapter?.getAiAction(difficulty, playerId, waitingForType) ?? null,
     );
@@ -321,31 +350,29 @@ export function createAIController(config: AIControllerConfig): AIController {
     const isMulligan =
       waitingForType === "MulliganDecision" ||
       waitingForType === "OpeningHandBottomCards";
-    // Collapse the humanization delay under stack pressure. The depth-based skip
-    // gate (checkAndSchedule) only fires at Elevated depth, which a 0↔1 trigger
-    // loop never reaches — so without this the AI pays a full 500–900ms beat on
-    // every oscillation cycle. Rate-driven pressure shrinks it (Rapid → ~75ms).
+    // Stack pressure scales only the artificial humanization delay; it never
+    // owns or skips the AI decision. Rate-driven pressure keeps low-depth,
+    // high-churn loops from paying a full 500–900ms beat on every cycle
+    // (Rapid → ~75ms).
     const stackLen = gameState?.stack?.length ?? 0;
     const baseDelay = isMulligan ? 0 : AI_BASE_DELAY_MS + Math.random() * AI_DELAY_VARIANCE_MS;
     const delay = Math.round(baseDelay * pressureMultiplier(effectiveStackPressure(stackLen)));
     timeoutId = setTimeout(async () => {
       timeoutId = null;
-      if (!active) {
-        pending = false;
-        return;
-      }
       let failed = false;
       try {
         let action: GameAction | null;
         try {
           action = await actionPromise;
         } catch (err) {
+          if (!isAttemptCurrent(attempt)) return;
           // Engine panic: re-running the same AI search against the same
           // (deterministic) state will re-panic. This is the path the
           // user-reported "ai-getAction-retry" came from — short-circuit
           // with the captured panic so the modal can show the real cause.
           if (isEnginePanic(err)) {
             await routePanic("ai-getAction-panic", err.panic);
+            if (!isAttemptCurrent(attempt)) return;
             throw err;
           }
           if (!isStateLost(err)) throw err;
@@ -355,35 +382,40 @@ export function createAIController(config: AIControllerConfig): AIController {
           // restoreState silently failed in the worker), escalate to the
           // user-prompt path.
           debugLog("AI getAiAction hit STATE_LOST; attempting rehydrate", "warn");
+          if (!isAttemptCurrent(attempt)) return;
           const recovered = await attemptStateRehydrate();
+          if (!isAttemptCurrent(attempt)) return;
           if (!recovered) {
             notifyEngineLost("ai-getAction");
             throw err;
           }
           try {
+            if (!isAttemptCurrent(attempt)) return;
             action = await adapter!.getAiAction(difficulty, playerId, waitingForType);
           } catch (retryErr) {
+            if (!isAttemptCurrent(attempt)) return;
             if (isEnginePanic(retryErr)) {
               await routePanic("ai-getAction-retry-panic", retryErr.panic);
+              if (!isAttemptCurrent(attempt)) return;
             } else {
               notifyEngineLost("ai-getAction-retry");
             }
             throw retryErr;
           }
         }
-        // Re-check active after await — the AI computation may have completed
-        // after stop() was called, and dispatching a stale action from the old
-        // game into a new game session would corrupt state.
-        if (!active) return;
-        const currentGameState = useGameStore.getState().gameState;
-        const currentWaitingFor = currentGameState?.waiting_for ?? null;
-        if (waitingForFingerprint(currentWaitingFor) !== scheduledWaitingForFingerprint) {
+        // Re-check the complete attempt identity after every await. A matching
+        // WaitingFor payload in a new game/session is still stale, as is a
+        // Priority action computed before Resolve All took ownership.
+        if (!isAttemptCurrent(attempt)) {
+          const currentWaitingFor = useGameStore.getState().gameState?.waiting_for ?? null;
           debugLog(
             `AI ignored stale ${action?.type ?? "action"} for player ${playerId + 1}: waitingFor changed from ${waitingForDebugLabel(scheduledWaitingFor)} to ${waitingForDebugLabel(currentWaitingFor)}`,
             "info",
           );
           return;
         }
+        const currentGameState = useGameStore.getState().gameState;
+        const currentWaitingFor = currentGameState?.waiting_for ?? null;
         if (action == null) {
           debugLog(
             `AI getAiAction returned null for player ${playerId} (waitingFor: ${currentWaitingFor?.type ?? "none"}), dispatching legal-action fallback`,
@@ -391,7 +423,7 @@ export function createAIController(config: AIControllerConfig): AIController {
           );
           const waitingFor = currentWaitingFor;
           if (waitingFor != null) {
-            await runEscapeFallback(waitingFor, playerId);
+            await runEscapeFallback(waitingFor, playerId, attempt);
           } else {
             failed = true;
           }
@@ -406,28 +438,36 @@ export function createAIController(config: AIControllerConfig): AIController {
         // dispatching as the human here would be rejected.
         // dispatch.ts has its own STATE_LOST recovery; any error that reaches
         // here after that retry is genuinely unrecoverable for this attempt.
+        if (!isAttemptCurrent(attempt)) return;
         await dispatchAction(action, playerId);
+        if (!isAttemptCurrent(attempt)) return;
         // Successful dispatch — reset both failure counters
         consecutiveFailures = 0;
         totalFailures = 0;
         lastDispatchError = null;
       } catch (e) {
+        if (!isAttemptCurrent(attempt)) return;
         lastDispatchError = e instanceof Error ? e.message : String(e);
         debugLog(`AI error choosing action: ${lastDispatchError}`);
         failed = true;
       } finally {
-        if (failed) {
-          consecutiveFailures++;
-          totalFailures++;
+        if (finishAttempt(attempt)) {
+          if (failed) {
+            consecutiveFailures++;
+            totalFailures++;
+          }
+          if (active) checkAndSchedule();
         }
-        pending = false;
-        if (active) checkAndSchedule();
       }
     }, delay);
   }
 
   function start() {
     active = true;
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
     debugLog(`AI controller started (configured seats: [${[...aiPlayerIds].join(",")}], dynamic for all non-human)`, "warn");
     // Event-driven design: subscribe to WaitingFor changes and let each
     // seat's turn naturally surface via the store. This means reconnect
@@ -436,10 +476,43 @@ export function createAIController(config: AIControllerConfig): AIController {
     // controller supervises. No per-seat iteration needed; the bug that
     // previously stalled P3/P4 was caused by `getAiAction` accepting a
     // default `playerId` elsewhere, not by this loop.
+    let observedWaitingFor = useGameStore.getState().waitingFor;
+    let observedSessionGeneration = useGameStore.getState().gameSessionGeneration;
+    let observedResolveAll = useGameStore.getState().isResolvingAll;
     unsubscribe = useGameStore.subscribe(
-      (s) => s.waitingFor,
+      (s) => s,
       () => {
-        if (active) checkAndSchedule();
+        if (!active) return;
+        const store = useGameStore.getState();
+        const waitingForChanged = store.waitingFor !== observedWaitingFor;
+        const sessionChanged = store.gameSessionGeneration !== observedSessionGeneration;
+        const resolveAllStarted = store.isResolvingAll && !observedResolveAll;
+        const resolveAllEnded = !store.isResolvingAll && observedResolveAll;
+
+        observedWaitingFor = store.waitingFor;
+        observedSessionGeneration = store.gameSessionGeneration;
+        observedResolveAll = store.isResolvingAll;
+
+        if (waitingForChanged || sessionChanged) {
+          invalidateAttempt();
+          // A new snapshot gets a fresh failure budget even for an A→A
+          // transition whose serialized WaitingFor payload is identical.
+          lastWaitingForKey = null;
+        } else if (resolveAllStarted && currentAttempt?.isPriority) {
+          invalidateAttempt();
+        }
+
+        // Resolve All owns Priority while active. Mandatory non-Priority
+        // decisions continue, and ending Resolve All schedules exactly once.
+        if (
+          resolveAllEnded ||
+          waitingForChanged ||
+          sessionChanged ||
+          !store.isResolvingAll ||
+          store.gameState?.waiting_for?.type !== "Priority"
+        ) {
+          checkAndSchedule();
+        }
       },
     );
     checkAndSchedule();
@@ -447,11 +520,7 @@ export function createAIController(config: AIControllerConfig): AIController {
 
   function stop() {
     active = false;
-    if (timeoutId != null) {
-      clearTimeout(timeoutId);
-      timeoutId = null;
-    }
-    pending = false;
+    invalidateAttempt();
   }
 
   function dispose() {

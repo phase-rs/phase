@@ -1667,12 +1667,12 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
                 produced_mana: None,
             }),
         }),
-        GameAction::TapLandForMana { object_id } => {
+        GameAction::TapLandForMana { selection } => {
             AvailableActionConversion::Available(AvailableAction {
                 id,
                 kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
-                    card_id: encode_object_id(*object_id),
-                    ability_index: 0,
+                    card_id: encode_object_id(selection.source.object_id),
+                    ability_index: selection.ability_index.unwrap_or(0),
                     description: "Activate mana ability".to_string(),
                     is_mana_ability: true,
                     cost: None,

@@ -381,10 +381,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);

@@ -28093,6 +28093,156 @@ fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
     ));
 }
 
+/// CR 601.2b + CR 110.4 + CR 702.138a: Electing a Muldrotha-class permission from a
+/// multi-variant cast menu must preserve the subsequent permanent-type slot
+/// choice. The selected slot, rather than another carried permanent type, is
+/// consumed when the spell is finalized.
+#[test]
+fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
+    let mut state = setup_game_at_main_phase();
+    let player = PlayerId(0);
+    let source = create_object(
+        &mut state,
+        CardId(28_100),
+        player,
+        "Muldrotha, the Gravetide".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::OncePerTurnPerPermanentType,
+                play_mode: CardPlayMode::Play,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+            })
+            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
+        );
+
+    let spell = create_object(
+        &mut state,
+        CardId(28_101),
+        player,
+        "Escaping Artifact Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let card_id = state.objects[&spell].card_id;
+    {
+        let object = state.objects.get_mut(&spell).unwrap();
+        object.card_types.core_types = vec![CoreType::Artifact, CoreType::Creature];
+        object.base_card_types = object.card_types.clone();
+        object.mana_cost = ManaCost::generic(0);
+        object.base_mana_cost = object.mana_cost.clone();
+        let escape = Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(0),
+                },
+                AbilityCost::Exile {
+                    count: 3,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        }));
+        object.keywords.push(escape.clone());
+        object.base_keywords.push(escape);
+    }
+    for index in 0..3 {
+        create_object(
+            &mut state,
+            CardId(28_102 + index),
+            player,
+            format!("Escape Fodder {index}"),
+            Zone::Graveyard,
+        );
+    }
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("multiple graveyard casting methods should be offered");
+    let permission_index = match &result.waiting_for {
+        WaitingFor::CastingVariantChoice { options, .. } => options
+            .iter()
+            .position(|option| {
+                matches!(
+                    option.variant,
+                    CastingVariant::GraveyardPermission { source: elected, .. }
+                        if elected == source
+                )
+            })
+            .expect("Muldrotha permission should be an offered variant"),
+        other => panic!("expected CastingVariantChoice, got {other:?}"),
+    };
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseCastingVariant {
+            index: permission_index,
+        },
+    )
+    .expect("choosing the Muldrotha permission should request its slot");
+    match &result.waiting_for {
+        WaitingFor::ChoosePermanentTypeSlot {
+            source: elected,
+            available_slots,
+            ..
+        } => {
+            assert_eq!(*elected, source);
+            assert_eq!(available_slots, &[CoreType::Artifact, CoreType::Creature]);
+        }
+        other => panic!("expected ChoosePermanentTypeSlot, got {other:?}"),
+    }
+
+    let error = apply_as_current(
+        &mut state,
+        GameAction::ChoosePermanentTypeSlot {
+            slot: CoreType::Enchantment,
+        },
+    )
+    .expect_err("a slot absent from the live prompt must be rejected");
+    assert!(matches!(error, EngineError::InvalidAction(_)));
+    assert!(
+        state.stack.is_empty(),
+        "a hostile slot must not cast the spell"
+    );
+    assert!(
+        state.graveyard_cast_permissions_used_per_type.is_empty(),
+        "a hostile slot must not consume any permission"
+    );
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChoosePermanentTypeSlot {
+            slot: CoreType::Creature,
+        },
+    )
+    .expect("the selected Muldrotha slot should complete the cast");
+
+    assert!(state.stack.iter().any(|entry| entry.source_id == spell));
+    assert!(state
+        .graveyard_cast_permissions_used_per_type
+        .contains(&(source, CoreType::Creature)));
+    assert!(
+        !state
+            .graveyard_cast_permissions_used_per_type
+            .contains(&(source, CoreType::Artifact)),
+        "the unselected Artifact slot must remain available"
+    );
+}
+
 #[test]
 fn retrace_cast_discards_only_land_then_pushes_spell_with_retrace_variant() {
     let mut state = setup_game_at_main_phase();
@@ -45496,7 +45646,7 @@ use crate::types::mana::ManaPipId;
 /// `add_mana_to_pool` so every seeded unit is stamped distinctly (a direct
 /// `pool.add` would leave the sentinel `ManaPipId(0)` and pins would collide).
 fn seed_unit(state: &mut GameState, player: PlayerId, unit: ManaUnit) -> ManaPipId {
-    state.add_mana_to_pool(player, unit);
+    let _ = state.add_mana_to_pool(player, unit);
     state
         .players
         .iter()

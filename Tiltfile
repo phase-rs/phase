@@ -190,8 +190,8 @@ local_resource('test-frontend',
 # also gives it its own build lock, so it never queues behind the native test
 # builds. Cost: a second debug tree on disk (reclaimed by cargo-sweep).
 local_resource('clippy',
-    cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings',
-    deps = ['crates/'],
+    cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check',
+    deps = ['crates/', 'client/src/adapter/generated/interaction/index.ts', 'scripts/check-interaction-bindings.sh'],
     ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
     allow_parallel = True,

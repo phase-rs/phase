@@ -20,6 +20,7 @@ use crate::types::game_state::{
     PayableResource, PendingMulliganAction, TargetSelectionSlot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
+use crate::types::interaction::MAX_INTERACTION_LIST_LEN;
 use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
@@ -43,8 +44,24 @@ pub enum TacticalClass {
 
 #[derive(Debug, Clone)]
 pub struct ActionMetadata {
+    /// Player whose game decision this candidate answers. This remains stable
+    /// when `actor` is remapped to a turn/search decision controller.
+    pub semantic_owner: Option<PlayerId>,
     pub actor: Option<PlayerId>,
     pub tactical_class: TacticalClass,
+}
+
+impl ActionMetadata {
+    /// Constructs metadata for the ordinary case where the authenticated actor
+    /// owns the game decision. Authorization remapping may later change only
+    /// `actor`, while `semantic_owner` remains stable.
+    pub const fn for_actor(actor: Option<PlayerId>, tactical_class: TacticalClass) -> Self {
+        Self {
+            semantic_owner: actor,
+            actor,
+            tactical_class,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2391,9 +2408,16 @@ pub fn candidate_actions_broad_with_probe(
                     .collect()
             }
         }
-        // CR 702.21a: Ward sacrifice cost — choose a permanent.
+        // CR 702.21a: Ward may require either one permanent or an
+        // aggregate-power set. The
+        // aggregate form uses the same deterministic,
+        // non-combinatorial threshold witness exposed to the interaction
+        // contract, so AI and human progress detection cannot disagree.
         WaitingFor::WardSacrificeChoice {
-            player, permanents, ..
+            player,
+            permanents,
+            min_total_power,
+            ..
         } => {
             if permanents.is_empty() {
                 vec![candidate(
@@ -2401,6 +2425,16 @@ pub fn candidate_actions_broad_with_probe(
                     TacticalClass::Selection,
                     Some(*player),
                 )]
+            } else if let Some(threshold) = min_total_power {
+                power_threshold_witness(state, permanents, *threshold)
+                    .map(|cards| {
+                        vec![candidate(
+                            GameAction::SelectCards { cards },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )]
+                    })
+                    .unwrap_or_default()
             } else {
                 permanents
                     .iter()
@@ -3219,11 +3253,79 @@ pub fn candidate_actions_broad_with_probe(
     actions
 }
 
+/// Return one deterministic non-empty sacrifice subset whose signed current
+/// power reaches the threshold. Taking greatest power first is complete for an
+/// at-least constraint: once the remaining powers are non-positive they cannot
+/// make an unsatisfied total larger. IDs break equal-power ties for stable
+/// projections.
+pub(crate) fn power_threshold_witness(
+    state: &GameState,
+    eligible: &[crate::types::identifiers::ObjectId],
+    threshold: i32,
+) -> Option<Vec<crate::types::identifiers::ObjectId>> {
+    let mut objects: Vec<_> = eligible
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .filter(|id| state.objects.contains_key(id))
+        .map(|id| {
+            (
+                id,
+                crate::game::sacrifice::selected_total_power(state, std::slice::from_ref(&id)),
+            )
+        })
+        .collect();
+    objects.sort_by(|a, b| b.1.cmp(&a.1).then(a.0 .0.cmp(&b.0 .0)));
+
+    let mut total = 0i32;
+    let mut chosen = Vec::new();
+    for (id, power) in objects {
+        if power <= 0 && !chosen.is_empty() {
+            break;
+        }
+        if chosen.len() == MAX_INTERACTION_LIST_LEN {
+            return None;
+        }
+        chosen.push(id);
+        total += power;
+        if total >= threshold {
+            return Some(chosen);
+        }
+    }
+    None
+}
+
 pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     candidate_actions_with_probe(state, None)
 }
 
 pub fn candidate_actions_with_probe(
+    state: &GameState,
+    probe: Option<&casting::PriorityCastProbe>,
+) -> Vec<CandidateAction> {
+    let mut actions = semantic_candidate_actions_with_probe(state, probe);
+    authorize_candidate_actors(state, &mut actions);
+    actions
+}
+
+pub(crate) fn candidate_actions_for_semantic_owner_with_probe(
+    state: &GameState,
+    semantic_owner: PlayerId,
+    probe: Option<&casting::PriorityCastProbe>,
+) -> Vec<CandidateAction> {
+    let mut actions = semantic_candidate_actions_with_probe(state, probe);
+    actions.retain(|action| {
+        action
+            .metadata
+            .semantic_owner
+            .is_none_or(|actor| actor == semantic_owner)
+    });
+    authorize_candidate_actors(state, &mut actions);
+    actions
+}
+
+fn semantic_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
@@ -3243,13 +3345,15 @@ pub fn candidate_actions_with_probe(
         }
     }
 
-    for action in &mut actions {
+    actions
+}
+
+fn authorize_candidate_actors(state: &GameState, actions: &mut [CandidateAction]) {
+    for action in actions {
         action.metadata.actor = action.metadata.actor.map(|player| {
             crate::game::turn_control::authorized_submitter_for_player(state, player)
         });
     }
-
-    actions
 }
 
 fn candidate(
@@ -3259,10 +3363,7 @@ fn candidate(
 ) -> CandidateAction {
     CandidateAction {
         action,
-        metadata: ActionMetadata {
-            actor,
-            tactical_class,
-        },
+        metadata: ActionMetadata::for_actor(actor, tactical_class),
     }
 }
 
@@ -4520,7 +4621,7 @@ fn bottom_card_actions(
 // Note: UntapLandForMana is intentionally omitted — it is a human-only undo action.
 // AI never populates lands_tapped_for_mana, so the handler would reject it anyway.
 fn mana_tap_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction> {
-    super::activatable_object_mana_actions_for_player(state, player)
+    mana_sources::activatable_mana_actions_for_player(state, player)
         .into_iter()
         .map(|action| candidate(action, TacticalClass::Mana, Some(player)))
         .collect()
@@ -6069,6 +6170,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         let actions = candidate_actions_broad(&state);
@@ -6400,14 +6502,16 @@ mod tests {
         let actions = candidate_actions(&state);
         assert!(actions.iter().any(|candidate| {
             matches!(
-                candidate.action,
-                GameAction::TapLandForMana { object_id } if object_id == island
+                &candidate.action,
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == island
             )
         }));
         assert!(!actions.iter().any(|candidate| {
             matches!(
-                candidate.action,
-                GameAction::TapLandForMana { object_id } if object_id == blank_land
+                &candidate.action,
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == blank_land
             )
         }));
     }
@@ -6448,7 +6552,7 @@ mod tests {
             },
         )));
         // Floated mana that a pin could target — must still not surface a pin action.
-        state.add_mana_to_pool(
+        let _ = state.add_mana_to_pool(
             PlayerId(0),
             crate::types::mana::ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()),
         );

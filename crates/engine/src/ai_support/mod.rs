@@ -28,6 +28,7 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
@@ -50,6 +51,22 @@ pub use filter::{
 /// dropped by a cheap filter.
 pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     validated_candidate_actions_with_probe(state, None)
+}
+
+/// Return legal candidates owned by one semantic decision-maker. Candidates
+/// without an actor remain shared; actor-bearing candidates are validated as
+/// that owner's authorized submitter before this filter is applied.
+pub fn validated_candidate_actions_for_semantic_owner(
+    state: &GameState,
+    semantic_owner: PlayerId,
+) -> Vec<CandidateAction> {
+    let pipeline = FilterPipeline::default_pipeline();
+    let mut actions = pipeline.apply(
+        state,
+        candidates::candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None),
+    );
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
 }
 
 pub fn validated_candidate_actions_with_probe(
@@ -151,7 +168,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::Transform { object_id })
         | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
-        | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::TapLandForMana {
+                selection:
+                    crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef { object_id, .. },
+                        ..
+                    },
+            },
+        )
         | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
         | (
             WaitingFor::Priority { .. },
@@ -648,15 +674,33 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _, cards, ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, Some(1)),
+        (
             WaitingFor::WardSacrificeChoice {
                 player: _,
                 permanents: cards,
+                min_total_power,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
+        ) => {
+            selection_mismatch(
+                chosen,
+                cards,
+                if min_total_power.is_some() {
+                    None
+                } else {
+                    Some(1)
+                },
+            ) || min_total_power.is_some_and(|threshold| {
+                chosen
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .map(|object| object.power.unwrap_or(0))
+                    .sum::<i32>()
+                    < threshold
+            })
+        }
         (
             WaitingFor::ManifestDreadChoice {
                 player: _, cards, ..
@@ -933,14 +977,14 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
 
-    activatable_object_mana_actions_for_player(state, player)
+    mana_sources::activatable_mana_actions_for_player(state, player)
         .iter()
         .any(|action| match action {
-            GameAction::TapLandForMana { object_id } => {
+            GameAction::TapLandForMana { selection } => {
                 tap_land_action_would_queue_non_mana_trigger(
                     state,
                     player,
-                    *object_id,
+                    selection.source.object_id,
                     &aura_sources,
                     &mana_activation_gates,
                 )
@@ -1202,7 +1246,7 @@ fn beneficial_mana_tap_trigger_hold(
         // component is trivially satisfied); an `ActivateAbility` may be a
         // non-tap mana ability, so consult the ability's cost.
         let mana_source = match action {
-            GameAction::TapLandForMana { object_id } => *object_id,
+            GameAction::TapLandForMana { selection } => selection.source.object_id,
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -1719,6 +1763,34 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     (actions, spell_costs, grouped)
 }
 
+/// Engine-authored action sequence for the "tap all lands" mana-payment shortcut.
+///
+/// This is presentation policy, not a new game action: preserve battlefield order
+/// and include a source only when it has exactly one legal land-mana action. A
+/// source with multiple legal mana rows is deliberately omitted because choosing
+/// among them is a player decision, not a deterministic shortcut.
+pub fn mana_payment_shortcut_actions(
+    state: &GameState,
+    legal_actions_by_object: &HashMap<ObjectId, Vec<GameAction>>,
+) -> Vec<GameAction> {
+    if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+        return Vec::new();
+    }
+
+    state
+        .battlefield
+        .iter()
+        .filter_map(|object_id| {
+            let mut options = legal_actions_by_object
+                .get(object_id)?
+                .iter()
+                .filter(|action| matches!(action, GameAction::TapLandForMana { .. }));
+            let action = options.next()?;
+            options.next().is_none().then(|| action.clone())
+        })
+        .collect()
+}
+
 /// Returns `legal_actions_full` scoped to a specific viewer. Empty tuple if
 /// `viewer` is not the player currently expected to act.
 ///
@@ -1818,113 +1890,7 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    activatable_object_mana_actions_for_player(state, player)
-}
-
-fn can_use_tap_land_shortcut(
-    state: &GameState,
-    object_id: ObjectId,
-    option: &mana_sources::ManaSourceOption,
-) -> bool {
-    if option.atomic_combination.is_some() {
-        return false;
-    }
-    let Some(ability_index) = option.ability_index else {
-        return true;
-    };
-    state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
-        .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
-}
-
-pub(super) fn activatable_object_mana_actions_for_player(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<GameAction> {
-    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
-    // every land in this board-global sweep, so compute it once instead of
-    // re-scanning the whole battlefield per land inside `land_mana_options`.
-    let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
-    let mut actions = Vec::new();
-    for &obj_id in &state.battlefield {
-        let Some(obj) = state.objects.get(&obj_id) else {
-            continue;
-        };
-        if obj.controller != player {
-            continue;
-        }
-
-        let mut handled_indices = HashSet::new();
-        if obj.card_types.core_types.contains(&CoreType::Land) {
-            let options = mana_sources::activatable_land_mana_options_indexed_gated(
-                state,
-                obj_id,
-                player,
-                &aura_sources,
-                &mana_activation_gates,
-            );
-            if options.len() == 1
-                && options
-                    .first()
-                    .is_some_and(|option| can_use_tap_land_shortcut(state, obj_id, option))
-            {
-                actions.push(GameAction::TapLandForMana { object_id: obj_id });
-                if let Some(ability_index) = options[0].ability_index {
-                    handled_indices.insert(ability_index);
-                }
-            } else {
-                for option in options {
-                    if let Some(ability_index) = option.ability_index {
-                        if handled_indices.insert(ability_index) {
-                            actions.push(GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        for (idx, ability) in obj.abilities.iter().enumerate() {
-            if handled_indices.contains(&idx) {
-                continue;
-            }
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                continue;
-            }
-            // CR 302.6 + CR 602.5a: Only tap-cost abilities are gated by tapped state and
-            // summoning sickness. Free or mana-cost-only mana abilities are always
-            // activatable. The summoning-sickness check honors the
-            // CanActivateAbilitiesAsThoughHaste static (Tyvar) via the shared predicate.
-            if mana_sources::has_tap_component(&ability.cost)
-                && (obj.tapped
-                    || crate::game::restrictions::summoning_sick_for_tap_ability(state, obj))
-            {
-                continue;
-            }
-            // CR 605.3b: Activation restrictions still apply to mana abilities.
-            if mana_sources::activation_condition_satisfied(state, player, obj_id, idx, ability)
-                && mana_abilities::can_activate_mana_ability_now_gated(
-                    state,
-                    player,
-                    obj_id,
-                    idx,
-                    ability,
-                    &mana_activation_gates,
-                )
-            {
-                actions.push(GameAction::ActivateAbility {
-                    source_id: obj_id,
-                    ability_index: idx,
-                });
-            }
-        }
-    }
-    actions
+    mana_sources::activatable_mana_actions_for_player(state, player)
 }
 
 #[cfg(test)]
@@ -2119,6 +2085,18 @@ mod tests {
             .subtypes
             .extend(subtypes.iter().map(|subtype| (*subtype).to_string()));
         id
+    }
+
+    fn bucket_has_tap_land(
+        grouped: &HashMap<ObjectId, Vec<GameAction>>,
+        object_id: ObjectId,
+    ) -> bool {
+        grouped.get(&object_id).is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == object_id)
+            })
+        })
     }
 
     fn add_fixed_mana_ability(
@@ -2755,41 +2733,27 @@ mod tests {
         let (flat, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            !bucket_has(
-                &grouped,
-                fetch,
-                &GameAction::TapLandForMana { object_id: fetch },
-            ),
+            !bucket_has_tap_land(&grouped, fetch),
             "fetch land with no mana-producing subtype or explicit mana ability must not be tappable"
         );
         assert!(
-            bucket_has(
-                &grouped,
-                forest,
-                &GameAction::TapLandForMana { object_id: forest },
-            ),
+            bucket_has_tap_land(&grouped, forest),
             "subtype-only basic land fallback must remain tappable"
         );
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: blue_idx,
-            },
-        ));
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: black_idx,
-            },
-        ));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(blue_idx))
+        )));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(black_idx))
+        )));
         assert!(
             !flat
                 .iter()
-                .any(|action| matches!(action, GameAction::TapLandForMana { object_id } if *object_id == forest)),
+                .any(|action| matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == forest)),
             "flat legal actions stay free of land mana actions"
         );
         assert!(
@@ -2798,6 +2762,33 @@ mod tests {
                 .any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == dual)),
             "flat legal actions stay free of explicit mana abilities"
         );
+    }
+
+    #[test]
+    fn mana_payment_shortcut_preserves_battlefield_order_and_omits_ambiguous_sources() {
+        let mut state = setup_priority();
+        let forest = create_land(&mut state, "Forest", &["Forest"]);
+        let dual = create_land(&mut state, "Underground Sea", &[]);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Blue);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Black);
+        let mountain = create_land(&mut state, "Mountain", &["Mountain"]);
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        let shortcut = super::mana_payment_shortcut_actions(&state, &grouped);
+        let sources: Vec<_> = shortcut
+            .iter()
+            .map(|action| match action {
+                GameAction::TapLandForMana { selection } => selection.source.object_id,
+                other => panic!("unexpected shortcut action: {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(sources, vec![forest, mountain]);
     }
 
     #[test]
@@ -2913,14 +2904,11 @@ mod tests {
         let (_, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            bucket_has(
-                &grouped,
-                skycloud,
-                &GameAction::ActivateAbility {
-                    source_id: skycloud,
-                    ability_index: 0,
-                },
-            ),
+            grouped.get(&skycloud).is_some_and(|actions| actions.iter().any(
+                |action| matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == skycloud
+                        && selection.ability_index == Some(0))
+            )),
             "Skycloud Expanse should be manually activatable when another mana source can pay its {{1}} cost",
         );
     }
@@ -3037,11 +3025,7 @@ mod tests {
             let (_, _, grouped) = legal_actions_full(&state);
 
             assert!(
-                bucket_has(
-                    &grouped,
-                    forest,
-                    &GameAction::TapLandForMana { object_id: forest },
-                ),
+                bucket_has_tap_land(&grouped, forest),
                 "mana actions must be exposed during {:?}",
                 state.waiting_for
             );
@@ -5079,7 +5063,8 @@ mod tests {
         assert!(
             land_actions.iter().any(|action| matches!(
                 action,
-                GameAction::TapLandForMana { object_id } if *object_id == land_id
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == land_id
             )),
             "expected TapLandForMana in grouped actions, got {land_actions:?}"
         );
@@ -5101,11 +5086,16 @@ mod tests {
         );
         assert_eq!(state.objects[&land_id].abilities.len(), 2);
 
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .expect("TapLandForMana must succeed when flash ability is also legal");
+        let tap_action = land_actions
+            .iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == land_id)
+            })
+            .cloned()
+            .expect("land must expose semantic mana action");
+        apply_as_current(&mut state, tap_action)
+            .expect("TapLandForMana must succeed when flash ability is also legal");
         assert!(
             state.objects[&land_id].tapped,
             "Emergence Zone should be tapped after TapLandForMana"

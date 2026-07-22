@@ -833,13 +833,19 @@ pub(crate) fn tap_permanent_for_cost(
             "This permanent can't become tapped".to_string(),
         ));
     }
-    if let Some(obj) = state.objects.get_mut(&id) {
-        obj.tapped = true;
+    if crate::game::object_state::resolve_and_apply_object_edit(
+        state,
+        id,
+        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+        true,
+    )
+    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        events.push(GameEvent::PermanentTapped {
+            object_id: id,
+            caused_by: None,
+        });
     }
-    events.push(GameEvent::PermanentTapped {
-        object_id: id,
-        caused_by: None,
-    });
     Ok(())
 }
 

@@ -782,7 +782,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; player_names?: string[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string; events?: GameEvent[] };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -799,6 +799,7 @@ export class WebSocketAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
           },
@@ -842,7 +843,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
+        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; mana_payment_shortcut_actions?: GameAction[]; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -852,6 +853,7 @@ export class WebSocketAdapter implements EngineAdapter {
           {
             actions: data.legal_actions ?? [],
             autoPassRecommended: data.auto_pass_recommended ?? false,
+            manaPaymentShortcutActions: data.mana_payment_shortcut_actions ?? [],
             spellCosts: data.spell_costs,
             legalActionsByObject: data.legal_actions_by_object,
           },

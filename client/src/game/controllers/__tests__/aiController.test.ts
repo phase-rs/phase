@@ -1,7 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameState, LegalActionsResult, WaitingFor } from "../../../adapter/types";
-import { buildGameState, buildPriorityWaitingFor } from "../../../test/factories/gameStateFactory";
+import {
+  AdapterError,
+  AdapterErrorCode,
+  type GameAction,
+  type GameState,
+  type LegalActionsResult,
+  type WaitingFor,
+} from "../../../adapter/types";
+import { buildGameState, buildPriorityWaitingFor, buildStackEntry } from "../../../test/factories/gameStateFactory";
 
 /**
  * Regression test for issue #484 (P0 AI softlock).
@@ -27,11 +34,16 @@ vi.mock("../../dispatch", () => ({
 }));
 
 const notifyEngineLost = vi.fn();
+const attemptStateRehydrate = vi.fn(async () => false);
+const isEnginePanic = vi.fn((err: unknown) => (
+  err instanceof AdapterError && err.code === AdapterErrorCode.ENGINE_PANIC
+));
+const routePanic = vi.fn<(reason: string, panic?: string) => Promise<void>>(async () => {});
 vi.mock("../../engineRecovery", () => ({
   notifyEngineLost: (...args: unknown[]) => notifyEngineLost(...args),
-  attemptStateRehydrate: vi.fn(async () => false),
-  isEnginePanic: () => false,
-  routePanic: vi.fn(async () => {}),
+  attemptStateRehydrate: () => attemptStateRehydrate(),
+  isEnginePanic: (err: unknown) => isEnginePanic(err),
+  routePanic: (reason: string, panic?: string) => routePanic(reason, panic),
 }));
 
 vi.mock("../../debugLog", () => ({
@@ -45,12 +57,20 @@ let storeState: {
   gameState: GameState | null;
   waitingFor: WaitingFor | null;
   adapter: unknown;
+  gameSessionGeneration?: number;
+  isResolvingAll?: boolean;
 };
+let storeSubscriber: (() => void) | null = null;
 
 vi.mock("../../../stores/gameStore", () => ({
   useGameStore: {
     getState: () => storeState,
-    subscribe: () => () => {},
+    subscribe: (_selector: unknown, callback: () => void) => {
+      storeSubscriber = callback;
+      return () => {
+        if (storeSubscriber === callback) storeSubscriber = null;
+      };
+    },
   },
 }));
 
@@ -127,6 +147,39 @@ async function flushMicrotasks() {
     await Promise.resolve();
   }
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((r, j) => {
+    resolve = r;
+    reject = j;
+  });
+  return { promise, resolve, reject };
+}
+
+function stateLostError(): AdapterError {
+  return new AdapterError(AdapterErrorCode.STATE_LOST, "engine state lost", true);
+}
+
+function enginePanicError(): AdapterError {
+  return new AdapterError(AdapterErrorCode.ENGINE_PANIC, "engine panic", false, "panic payload");
+}
+
+beforeEach(() => {
+  attemptStateRehydrate.mockReset();
+  attemptStateRehydrate.mockResolvedValue(false);
+  isEnginePanic.mockReset();
+  isEnginePanic.mockImplementation((err: unknown) => (
+    err instanceof AdapterError && err.code === AdapterErrorCode.ENGINE_PANIC
+  ));
+  routePanic.mockReset();
+  routePanic.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  storeSubscriber = null;
+});
 
 describe("aiController stuck-fallback (issue #484)", () => {
   beforeEach(() => {
@@ -609,6 +662,325 @@ describe("aiController turn-control authorization (issue #2012)", () => {
     // Dispatched as the controller seat (1), never as the controlled human (0).
     expect(dispatchAction.mock.calls.every(([, playerId]) => playerId === 1)).toBe(true);
 
+    controller.dispose();
+  });
+});
+
+describe("aiController Resolve All ownership", () => {
+  const PASS: GameAction = { type: "PassPriority" };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dispatchAction.mockReset();
+    notifyEngineLost.mockReset();
+    vi.mocked(debugLog).mockReset();
+    storeSubscriber = null;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function priorityState(stackSize = 0): GameState {
+    return buildGameState({
+      waiting_for: buildPriorityWaitingFor({ data: { player: 1 } }),
+      stack: Array.from({ length: stackSize }, () => buildStackEntry()),
+      priority_player: 1,
+      active_player: 1,
+    });
+  }
+
+  it("acts at elevated stack depth when Resolve All is not active", async () => {
+    const state = priorityState(10);
+    const getAiAction = vi.fn(async () => PASS);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 11,
+      isResolvingAll: false,
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+
+    expect(getAiAction).toHaveBeenCalled();
+    expect(dispatchAction).toHaveBeenCalledWith(PASS, 1);
+    controller.dispose();
+  });
+
+  it("schedules Priority exactly once when an explicit Resolve All session ends", () => {
+    const state = priorityState();
+    const getAiAction = vi.fn(async () => PASS);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 12,
+      isResolvingAll: true,
+    };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    expect(getAiAction).not.toHaveBeenCalled();
+
+    storeState = { ...storeState, isResolvingAll: false };
+    storeSubscriber?.();
+    storeSubscriber?.();
+
+    expect(getAiAction).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
+  it("drops a Priority result computed before Resolve All took ownership", async () => {
+    const state = priorityState();
+    const result = deferred<GameAction | null>();
+    const getAiAction = vi.fn(() => result.promise);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 13,
+      isResolvingAll: false,
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    storeState = { ...storeState, isResolvingAll: true };
+    storeSubscriber?.();
+    result.resolve(PASS);
+    await flushMicrotasks();
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not rehydrate or escalate a delayed STATE_LOST after Resolve All starts", async () => {
+    const state = priorityState();
+    const result = deferred<GameAction | null>();
+    const getAiAction = vi.fn(() => result.promise);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 31,
+      isResolvingAll: false,
+    };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    storeState = { ...storeState, isResolvingAll: true };
+    storeSubscriber?.();
+    result.reject(stateLostError());
+    await flushMicrotasks();
+
+    expect(attemptStateRehydrate).not.toHaveBeenCalled();
+    expect(routePanic).not.toHaveBeenCalled();
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not escalate when Resolve All invalidates an in-flight STATE_LOST recovery", async () => {
+    const state = priorityState();
+    const recovery = deferred<boolean>();
+    attemptStateRehydrate.mockReturnValueOnce(recovery.promise);
+    const getAiAction = vi.fn(async () => {
+      throw stateLostError();
+    });
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 32,
+      isResolvingAll: false,
+    };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(attemptStateRehydrate).toHaveBeenCalledTimes(1);
+
+    storeState = { ...storeState, isResolvingAll: true };
+    storeSubscriber?.();
+    recovery.resolve(false);
+    await flushMicrotasks();
+
+    expect(routePanic).not.toHaveBeenCalled();
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not route a delayed engine panic from an identical old-session prompt", async () => {
+    const state = priorityState();
+    const oldResult = deferred<GameAction | null>();
+    const newResult = deferred<GameAction | null>();
+    const getAiAction = vi
+      .fn<() => Promise<GameAction | null>>()
+      .mockReturnValueOnce(oldResult.promise)
+      .mockReturnValueOnce(newResult.promise);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 40,
+      isResolvingAll: false,
+    };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    storeState = { ...storeState, gameSessionGeneration: 41 };
+    storeSubscriber?.();
+    oldResult.reject(enginePanicError());
+    await flushMicrotasks();
+
+    expect(getAiAction).toHaveBeenCalledTimes(2);
+    expect(attemptStateRehydrate).not.toHaveBeenCalled();
+    expect(routePanic).not.toHaveBeenCalled();
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it("does not route a retry panic after a new session supersedes the recovery", async () => {
+    const state = priorityState();
+    const retryResult = deferred<GameAction | null>();
+    const replacementResult = deferred<GameAction | null>();
+    attemptStateRehydrate.mockResolvedValueOnce(true);
+    const getAiAction = vi
+      .fn<() => Promise<GameAction | null>>()
+      .mockRejectedValueOnce(stateLostError())
+      .mockReturnValueOnce(retryResult.promise)
+      .mockReturnValueOnce(replacementResult.promise);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 50,
+      isResolvingAll: false,
+    };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+    expect(getAiAction).toHaveBeenCalledTimes(2);
+
+    storeState = { ...storeState, gameSessionGeneration: 51 };
+    storeSubscriber?.();
+    retryResult.reject(enginePanicError());
+    await flushMicrotasks();
+
+    expect(getAiAction).toHaveBeenCalledTimes(3);
+    expect(attemptStateRehydrate).toHaveBeenCalledTimes(1);
+    expect(routePanic).not.toHaveBeenCalled();
+    expect(notifyEngineLost).not.toHaveBeenCalled();
+    expect(dispatchAction).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
+  it.each(["stop", "dispose"] as const)(
+    "%s invalidates an AI promise that settles afterward",
+    async (method) => {
+      const state = priorityState();
+      const result = deferred<GameAction | null>();
+      const getAiAction = vi.fn(() => result.promise);
+      storeState = {
+        gameState: state,
+        waitingFor: state.waiting_for,
+        adapter: { getAiAction, getLegalActions: vi.fn() },
+        gameSessionGeneration: 14,
+        isResolvingAll: false,
+      };
+      dispatchAction.mockResolvedValue(undefined);
+
+      const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+      controller.start();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      controller[method]();
+      result.resolve(PASS);
+      await flushMicrotasks();
+
+      expect(dispatchAction).not.toHaveBeenCalled();
+      if (method === "stop") controller.dispose();
+    },
+  );
+
+  it("keeps a newer attempt pending when an identical old-session attempt settles", async () => {
+    const state = priorityState();
+    const oldResult = deferred<GameAction | null>();
+    const newResult = deferred<GameAction | null>();
+    const getAiAction = vi
+      .fn<() => Promise<GameAction | null>>()
+      .mockReturnValueOnce(oldResult.promise)
+      .mockReturnValueOnce(newResult.promise);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 20,
+      isResolvingAll: false,
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    storeState = { ...storeState, gameSessionGeneration: 21 };
+    storeSubscriber?.();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    oldResult.resolve(PASS);
+    await flushMicrotasks();
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(getAiAction).toHaveBeenCalledTimes(2);
+
+    newResult.resolve(PASS);
+    await flushMicrotasks();
+
+    expect(dispatchAction).toHaveBeenCalledTimes(1);
+    expect(dispatchAction).toHaveBeenCalledWith(PASS, 1);
+    controller.dispose();
+  });
+
+  it("continues mandatory non-Priority decisions while Resolve All unwinds", async () => {
+    const state = castOfferState();
+    const decline: GameAction = {
+      type: "CascadeChoice",
+      data: { choice: { type: "Decline" } },
+    };
+    const getAiAction = vi.fn(async () => decline);
+    storeState = {
+      gameState: state,
+      waitingFor: state.waiting_for,
+      adapter: { getAiAction, getLegalActions: vi.fn() },
+      gameSessionGeneration: 30,
+      isResolvingAll: true,
+    };
+    dispatchAction.mockResolvedValue(undefined);
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await flushMicrotasks();
+
+    expect(getAiAction).toHaveBeenCalledWith("Medium", 1, "CastOffer");
+    expect(dispatchAction).toHaveBeenCalledWith(decline, 1);
     controller.dispose();
   });
 });

@@ -21,6 +21,28 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit}
 use crate::types::statics::{CastFrequency, StaticMode};
 use crate::types::TriggerMode;
 
+fn tap_land_action(state: &GameState, object_id: ObjectId) -> GameAction {
+    let player = state
+        .waiting_for
+        .acting_player()
+        .expect("tap-land test requires one acting player");
+    super::mana_sources::activatable_mana_actions_for_player(state, player)
+        .into_iter()
+        .find(|action| {
+            matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == object_id)
+        })
+        .expect("land must expose a semantic mana action")
+}
+
+fn apply_tap_land_as_current(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> Result<ActionResult, EngineError> {
+    let action = tap_land_action(state, object_id);
+    apply_as_current(state, action)
+}
+
 /// Create a simple test ability definition.
 fn make_draw_ability(num_cards: u32) -> AbilityDefinition {
     AbilityDefinition::new(
@@ -4228,11 +4250,7 @@ fn tap_land_for_mana_produces_correct_color() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    let result = apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
@@ -4287,11 +4305,7 @@ fn tap_land_for_mana_uses_priority_player_during_opponents_turn() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    let result = apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
@@ -4342,11 +4356,7 @@ fn tapped_lands_produce_distinct_pip_ids() {
     }
 
     for land_id in land_ids {
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .unwrap();
+        apply_tap_land_as_current(&mut state, land_id).unwrap();
     }
 
     let ids: Vec<u64> = state.players[0]
@@ -4426,7 +4436,7 @@ fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
 
     // Tap the Forest. Land emits {G}; aura's trigger fires via
     // run_post_action_pipeline and adds another {G}.
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+    apply_tap_land_as_current(&mut state, forest).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -4451,7 +4461,7 @@ fn untap_land_for_mana_refunds_aura_bonus_no_infinite_mana() {
 
     // Re-tap and re-untap to verify no compounding across cycles.
     for _ in 0..3 {
-        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+        apply_tap_land_as_current(&mut state, forest).unwrap();
         assert_eq!(state.players[0].mana_pool.total(), 2);
         apply_as_current(
             &mut state,
@@ -5009,7 +5019,7 @@ fn vorinclex_mana_doubling_trigger_fires_on_tap() {
     }
 
     // Tap the Forest — should produce {G} (land) + {G} (Vorinclex doubler).
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+    apply_tap_land_as_current(&mut state, forest).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -5091,14 +5101,7 @@ fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
     }
 
     // Opponent taps the Forest
-    apply(
-        &mut state,
-        PlayerId(1),
-        GameAction::TapLandForMana {
-            object_id: opp_forest,
-        },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, opp_forest).unwrap();
     // The trigger should have been placed on the stack.
     assert!(
         !state.stack.is_empty() || !state.transient_continuous_effects.is_empty(),
@@ -5148,21 +5151,18 @@ fn tap_land_rejects_already_tapped() {
         let obj = state.objects.get_mut(&land_id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
         obj.card_types.subtypes.push("Forest".to_string());
-        obj.tapped = true;
     }
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    );
+    let action = tap_land_action(&state, land_id);
+    state.objects.get_mut(&land_id).unwrap().tapped = true;
+    let before = state.clone();
+    let result = apply_as_current(&mut state, action);
 
     assert!(result.is_err());
+    assert_eq!(state, before, "hostile stale mana action must be pure");
 }
 
 #[test]
-fn multi_mana_land_rejects_tap_land_for_mana() {
-    // Dual lands with multiple mana abilities must use ActivateAbility to
-    // select which color — TapLandForMana is ambiguous for multi-option lands.
+fn multi_mana_land_exposes_one_semantic_action_per_option() {
     let mut state = setup_game_at_main_phase();
 
     let dual_id = create_object(
@@ -5209,14 +5209,17 @@ fn multi_mana_land_rejects_tap_land_for_mana() {
         );
     }
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: dual_id },
-    );
-    assert!(
-        result.is_err(),
-        "TapLandForMana should reject multi-mana lands"
-    );
+    let actions: Vec<_> =
+        super::mana_sources::activatable_mana_actions_for_player(&state, PlayerId(0))
+            .into_iter()
+            .filter(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+        if selection.source.object_id == dual_id)
+            })
+            .collect();
+    assert_eq!(actions.len(), 2);
+    apply_as_current(&mut state, actions[0].clone()).unwrap();
+    assert!(state.objects[&dual_id].tapped);
 }
 
 #[test]
@@ -5649,13 +5652,7 @@ fn full_turn_integration_with_mulligan() {
         .unwrap();
 
     // Tap land for mana
-    let _result = apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana {
-            object_id: land_on_bf,
-        },
-    )
-    .unwrap();
+    let _result = apply_tap_land_as_current(&mut state, land_on_bf).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -8009,27 +8006,24 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
         .expect("Holdout Settlement should expose legal mana actions");
     assert!(holdout_actions.iter().any(|action| matches!(
         action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 0
-        } if *source_id == holdout
+        GameAction::TapLandForMana { selection }
+            if selection.source.object_id == holdout && selection.ability_index == Some(0)
     )));
-    assert!(holdout_actions.iter().any(|action| matches!(
-        action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 1
-        } if *source_id == holdout
-    )));
+    let green_action = holdout_actions
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == holdout
+                        && selection.ability_index == Some(1)
+                        && selection.mana_type == ManaType::Green
+            )
+        })
+        .cloned()
+        .expect("Holdout Settlement should expose its semantic green mana action");
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ActivateAbility {
-            source_id: holdout,
-            ability_index: 1,
-        },
-    )
-    .unwrap();
+    let result = apply_as_current(&mut state, green_action).unwrap();
 
     match result.waiting_for {
         WaitingFor::PayCost {
@@ -8058,28 +8052,12 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
     .unwrap();
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ChooseManaColor {
-            player: PlayerId(0),
-            ..
-        }
-    ));
-    assert!(state.objects.get(&holdout).unwrap().tapped);
-    assert!(state.objects.get(&creature).unwrap().tapped);
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ChooseManaColor {
-            choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        },
-    )
-    .unwrap();
-    assert!(matches!(
-        result.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }
     ));
+    assert!(state.objects.get(&holdout).unwrap().tapped);
+    assert!(state.objects.get(&creature).unwrap().tapped);
     assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
 }
 
@@ -8632,11 +8610,7 @@ fn tap_land_records_in_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     let tracked = &state.lands_tapped_for_mana[&PlayerId(0)];
     assert!(tracked.contains(&land_id));
@@ -8647,11 +8621,7 @@ fn untap_land_removes_mana_and_untaps() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(state.objects[&land_id].tapped);
     assert_eq!(
         state.players[0]
@@ -8691,8 +8661,8 @@ fn untap_one_of_two_tapped_lands_preserves_other() {
     let land1 = create_forest(&mut state, PlayerId(0));
     let land2 = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land1 }).unwrap();
-    apply_as_current(&mut state, GameAction::TapLandForMana { object_id: land2 }).unwrap();
+    apply_tap_land_as_current(&mut state, land1).unwrap();
+    apply_tap_land_as_current(&mut state, land2).unwrap();
     assert_eq!(
         state.players[0]
             .mana_pool
@@ -8726,11 +8696,7 @@ fn untap_rejects_when_mana_already_spent() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
 
     state.players[0].mana_pool.spend(ManaType::Green);
     assert_eq!(state.players[0].mana_pool.total(), 0);
@@ -8747,11 +8713,7 @@ fn pass_priority_clears_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let land_id = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(!state.lands_tapped_for_mana.is_empty());
 
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
@@ -8763,13 +8725,7 @@ fn play_land_clears_lands_tapped_for_mana() {
     let mut state = setup_game_at_main_phase();
     let tapped_land = create_forest(&mut state, PlayerId(0));
 
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana {
-            object_id: tapped_land,
-        },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, tapped_land).unwrap();
     assert!(!state.lands_tapped_for_mana.is_empty());
 
     let hand_land = create_object(
@@ -8870,11 +8826,7 @@ fn untap_during_mana_payment_returns_mana_payment() {
     }) = &result
     {
         // Tap the land during ManaPayment
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .unwrap();
+        apply_tap_land_as_current(&mut state, land_id).unwrap();
         assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
         // Untap it — should return ManaPayment, not Priority
@@ -8900,11 +8852,7 @@ fn zone_change_removes_stale_tracking() {
     let land_id = create_forest(&mut state, PlayerId(0));
 
     // Tap the land
-    apply_as_current(
-        &mut state,
-        GameAction::TapLandForMana { object_id: land_id },
-    )
-    .unwrap();
+    apply_tap_land_as_current(&mut state, land_id).unwrap();
     assert!(state.lands_tapped_for_mana[&PlayerId(0)].contains(&land_id));
 
     // Move the land to graveyard (e.g., destroyed)

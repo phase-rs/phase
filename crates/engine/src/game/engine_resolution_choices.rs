@@ -2398,14 +2398,28 @@ pub(super) fn handle_resolution_choice(
                 }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                        if p.energy < amount {
+                    if let Some(energy) = state
+                        .players
+                        .iter()
+                        .find(|candidate| candidate.id == player)
+                        .map(|candidate| candidate.energy)
+                    {
+                        if energy < amount {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {:?} has {} energy, cannot pay {}",
-                                player, p.energy, amount
+                                player, energy, amount
                             )));
                         }
-                        p.energy -= amount;
+                        if amount > 0 {
+                            state
+                                .resolve_and_apply_player_edit(
+                                    player,
+                                    crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                                        delta: -(amount as i32),
+                                    },
+                                )
+                                .expect("preflighted resolution energy payment must apply");
+                        }
                         events.push(GameEvent::EnergyChanged {
                             player,
                             delta: -(amount as i32),
@@ -4344,6 +4358,7 @@ pub(super) fn handle_resolution_choice(
                 library_position,
                 is_cost_payment,
                 enters_modified_if,
+                duration,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -4680,7 +4695,13 @@ pub(super) fn handle_resolution_choice(
                             enters_attacking,
                             enter_with_counters: per_obj_enter_counters,
                             conditional_enter_with_counters: vec![],
-                            duration: None,
+                            // CR 611.2a + CR 610.3: the duration carried across
+                            // the `EffectZoneChoice` round-trip — an
+                            // "exile ... until ~ leaves the battlefield" move
+                            // must keep its bound on the interactive
+                            // multi-candidate path, not just the
+                            // single-candidate shortcut (issue #4235 review).
+                            duration: duration.clone(),
                             track_exiled_by_source,
                             // CR 708.2a + CR 708.3: thread the face-down profile that
                             // was carried across the `EffectZoneChoice` round-trip into
@@ -5102,6 +5123,10 @@ pub(super) fn handle_resolution_choice(
                         enters_attacking,
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
+                        // CR 118.3: cost-payment exile is unbounded — no
+                        // "until ..." duration idiom pays a cost, so the
+                        // round-trip `duration` (always `None` for `PayCost`
+                        // producers) is deliberately not threaded here.
                         duration: None,
                         track_exiled_by_source,
                         face_down_profile: face_down_profile.clone(),
