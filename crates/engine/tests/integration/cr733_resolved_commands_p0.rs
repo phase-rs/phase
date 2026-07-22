@@ -6,6 +6,8 @@ use std::process::Command;
 use serde_json::Value;
 
 const AUTHORITY_MATRIX: &str = include_str!("../fixtures/cr733/authority_matrix.json");
+const WRITE_SITE_CLASSIFICATIONS: &str =
+    include_str!("../fixtures/cr733/blocked_write_sites.json");
 
 #[test]
 fn cr733_authority_matrix_covers_the_fresh_write_census() {
@@ -15,6 +17,29 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
         .as_array()
         .expect("CR733 authority matrix must contain a fields array");
 
+    let site_classifications: Value = serde_json::from_str(WRITE_SITE_CLASSIFICATIONS)
+        .expect("CR733 write-site classification fixture must be valid JSON");
+    let classified_sites = site_classifications["sites"]
+        .as_array()
+        .expect("CR733 write-site classification fixture must contain a sites array");
+    let clone_provenance = site_classifications["clone_provenance"]
+        .as_array()
+        .expect("CR733 write-site classification fixture must contain clone provenance");
+    let clone_site_ids: BTreeSet<_> = clone_provenance
+        .iter()
+        .flat_map(|entry| {
+            entry["site_ids"]
+                .as_array()
+                .expect("each clone-provenance entry must contain site IDs")
+        })
+        .map(|site_id| {
+            site_id
+                .as_str()
+                .expect("each clone-provenance site ID must be a string")
+                .to_owned()
+        })
+        .collect();
+
     let mut matrix_field_counts = BTreeMap::new();
     for entry in matrix_fields {
         let field = entry["field"]
@@ -23,6 +48,107 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
         *matrix_field_counts
             .entry(field.to_owned())
             .or_insert(0_usize) += 1;
+
+        match entry["classification"]
+            .as_str()
+            .expect("each CR733 authority-matrix entry must have a classification")
+        {
+            "proposed_authority" => {
+                assert!(
+                    entry["final_authority"].as_str().is_some(),
+                    "proposed authority {field:?} must name its final P2 seam"
+                );
+                assert!(
+                    entry["command_family"].as_str().is_some(),
+                    "proposed authority {field:?} must name its command family"
+                );
+                assert!(
+                    entry["command_scopes"]
+                        .as_array()
+                        .is_some_and(|scopes| !scopes.is_empty()),
+                    "proposed authority {field:?} must name at least one semantic scope"
+                );
+                assert!(
+                    entry["composition_policy"].as_str().is_some(),
+                    "proposed authority {field:?} must state its composition policy"
+                );
+            }
+            "out_of_closure_clone" => {
+                assert!(
+                    entry["clone_site_ids"]
+                        .as_array()
+                        .is_some_and(|sites| !sites.is_empty()),
+                    "out-of-closure field {field:?} must name its discarded clone sites"
+                );
+                assert!(
+                    entry["provenance_ref"].as_str().is_some(),
+                    "out-of-closure field {field:?} must point to clone provenance evidence"
+                );
+            }
+            "derived" => {
+                assert!(
+                    entry["rebuild_entry"].as_str().is_some(),
+                    "derived field {field:?} must name its rebuild entry"
+                );
+            }
+            "blocked" => {
+                assert!(
+                    entry["blocker_reason"].as_str().is_some(),
+                    "blocked field {field:?} must state its narrowed hard-stop reason"
+                );
+            }
+            "out_of_reachable_closure" => {}
+            unexpected => panic!(
+                "CR733 authority matrix field {field:?} has unsupported classification {unexpected:?}"
+            ),
+        }
+    }
+
+    for site in classified_sites {
+        let field = site["field"]
+            .as_str()
+            .expect("each CR733 write-site record must name its field");
+        match site["classification"]
+            .as_str()
+            .expect("each CR733 write-site record must have a classification")
+        {
+            "proposed_authority" => {
+                assert!(
+                    matrix_field_counts.contains_key(field),
+                    "proposed write site for {field:?} must have a matrix field"
+                );
+            }
+            "out_of_closure_clone" => {
+                assert_eq!(
+                    site["reroute_required"].as_bool(),
+                    Some(false),
+                    "discarded clone site for {field:?} must not be rerouted by P2"
+                );
+                let site_id = format!(
+                    "{}:{}:{}:{}",
+                    site["file"]
+                        .as_str()
+                        .expect("discarded clone site must name its file"),
+                    site["line"]
+                        .as_u64()
+                        .expect("discarded clone site must name its line"),
+                    site["fn"]
+                        .as_str()
+                        .expect("discarded clone site must name its enclosing function"),
+                    site["pattern"]
+                        .as_str()
+                        .expect("discarded clone site must name its write pattern"),
+                );
+                assert!(
+                    clone_site_ids.contains(&site_id),
+                    "discarded clone site {site_id:?} must have source-read provenance"
+                );
+            }
+            "derived" | "blocked" => {}
+            unexpected => panic!(
+                "CR733 write-site record for {field:?} has unsupported classification {unexpected:?}"
+            ),
+        }
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
