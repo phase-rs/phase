@@ -1,0 +1,5 @@
+rule = "115.2"
+section = 115
+title = "Targets — CR 115.2"
+status = "skeleton"
+text = "Only permanents are legal targets for spells and abilities, unless a spell or ability (a) specifies that it can target an object in another zone or a player, or (b) targets an object that can’t exist on the battlefield, such as a spell or ability. See also rule 115.4."

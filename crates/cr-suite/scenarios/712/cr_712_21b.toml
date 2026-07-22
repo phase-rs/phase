@@ -1,0 +1,5 @@
+rule = "712.21b"
+section = 712
+title = "Double-Faced Cards — CR 712.21b"
+status = "skeleton"
+text = "If a player exiles a melded permanent, that player determines the relative timestamp order of the two cards at that time. This is an exception to the procedure described in rule 613.7m."

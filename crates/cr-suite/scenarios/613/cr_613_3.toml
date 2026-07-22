@@ -1,0 +1,5 @@
+rule = "613.3"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.3"
+status = "skeleton"
+text = "Within layers 2–6, apply effects from characteristic-defining abilities first (see rule 604.3), then all other effects in timestamp order (see rule 613.7). Note that dependency may alter the order in which effects are applied within a layer. (See rule 613.8.)"

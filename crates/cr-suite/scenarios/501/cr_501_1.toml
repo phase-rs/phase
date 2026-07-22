@@ -1,0 +1,5 @@
+rule = "501.1"
+section = 501
+title = "Beginning Phase — CR 501.1"
+status = "skeleton"
+text = "The beginning phase consists of three steps, in this order: untap, upkeep, and draw."

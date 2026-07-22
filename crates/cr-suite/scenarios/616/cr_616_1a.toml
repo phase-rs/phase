@@ -1,0 +1,5 @@
+rule = "616.1a"
+section = 616
+title = "Interaction of Replacement and/or Prevention Effects — CR 616.1a"
+status = "skeleton"
+text = "If any of the replacement and/or prevention effects are self-replacement effects (see rule 614.15), one of them must be chosen. If not, proceed to rule 616.1b."

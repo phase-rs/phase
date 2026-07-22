@@ -1,0 +1,5 @@
+rule = "508.1g"
+section = 508
+title = "Declare Attackers Step — CR 508.1g"
+status = "skeleton"
+text = "If there are any optional costs to attack with the chosen creatures (expressed as costs a player may pay “as” a creature attacks), the active player chooses which, if any, they will pay."

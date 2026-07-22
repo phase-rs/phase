@@ -1,0 +1,5 @@
+rule = "712.20"
+section = 712
+title = "Double-Faced Cards — CR 712.20"
+status = "skeleton"
+text = "If a double-faced card would have an “As [this permanent] transforms . . .” ability after it transforms or converts, that ability is applied while that permanent is transforming or converting, not afterward."

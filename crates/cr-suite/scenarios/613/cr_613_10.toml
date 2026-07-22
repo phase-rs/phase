@@ -1,0 +1,5 @@
+rule = "613.10"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.10"
+status = "skeleton"
+text = "Some continuous effects affect players rather than objects. For example, an effect might give a player protection from red. All such effects are applied in timestamp order after the determination of objects’ characteristics. See also the rules for timestamp order and dependency (rules 613.7 and 613.8)."

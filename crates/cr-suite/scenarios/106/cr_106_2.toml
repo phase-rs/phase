@@ -1,0 +1,5 @@
+rule = "106.2"
+section = 106
+title = "Mana — CR 106.2"
+status = "skeleton"
+text = "Mana is represented by mana symbols (see rule 107.4). Mana symbols also represent mana costs (see rule 202)."

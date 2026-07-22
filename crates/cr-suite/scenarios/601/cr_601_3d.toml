@@ -1,0 +1,5 @@
+rule = "601.3d"
+section = 601
+title = "Casting Spells — CR 601.3d"
+status = "skeleton"
+text = "If a spell would have flash only if certain conditions are met, its controller may begin to cast that spell as though it had flash if those conditions are met."

@@ -1,0 +1,5 @@
+rule = "800.4i"
+section = 800
+title = "General (Multiplayer Rules) — CR 800.4i"
+status = "skeleton"
+text = "If an effect requires information about a specific player, the effect uses the current information about that player if they are still in the game; otherwise, the effect uses the last known information about that player before they left the game. If an effect requires information from the game about actions players have taken, the effect can find actions that were taken by a player who has left the game."

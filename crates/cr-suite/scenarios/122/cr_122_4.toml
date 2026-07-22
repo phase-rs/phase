@@ -1,0 +1,5 @@
+rule = "122.4"
+section = 122
+title = "Counters — CR 122.4"
+status = "skeleton"
+text = "If a permanent with an ability that says it can’t have more than N counters of a certain kind on it has more than N counters of that kind on it, all but N of those counters are removed from it as a state-based action. See rule 704."

@@ -1,0 +1,5 @@
+rule = "115.9c"
+section = 115
+title = "Targets — CR 115.9c"
+status = "skeleton"
+text = "An object that looks for a “[spell or ability] that targets only [something]” checks the number of different objects or players that were chosen as targets of that spell or ability when it was put on the stack (as modified by effects that changed those targets), not the number of those objects or players that are currently legal targets. If that number is one (even if the spell or ability targets that object or player multiple times), the current state of that spell or ability’s target is checked as described in rule 115.9b."

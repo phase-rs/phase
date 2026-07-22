@@ -1,0 +1,5 @@
+rule = "106.6"
+section = 106
+title = "Mana — CR 106.6"
+status = "skeleton"
+text = "Some spells or abilities that produce mana restrict how that mana can be spent, have an additional effect that affects the spell or ability that mana is spent on, or create a delayed triggered ability (see rule 603.7a) that triggers when that mana is spent. This doesn’t affect the mana’s type."

@@ -1,0 +1,5 @@
+rule = "702.145f"
+section = 702
+title = "Keyword Abilities — CR 702.145f"
+status = "skeleton"
+text = "Any time a player controls a permanent that is back face up with nightbound and it’s day, that player transforms that permanent. This happens immediately and isn’t a state-based action."

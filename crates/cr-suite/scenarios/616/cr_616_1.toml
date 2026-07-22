@@ -1,0 +1,5 @@
+rule = "616.1"
+section = 616
+title = "Interaction of Replacement and/or Prevention Effects — CR 616.1"
+status = "skeleton"
+text = "If two or more replacement and/or prevention effects are attempting to modify the way an event affects an object or player, the affected object’s controller (or its owner if it has no controller) or the affected player chooses one to apply, following the steps listed below. If two or more players have to make these choices at the same time, choices are made in APNAP order (see rule 101.4)."

@@ -1,0 +1,5 @@
+rule = "729.3"
+section = 729
+title = "Daybound and Nightbound — CR 729.3"
+status = "skeleton"
+text = "Because each player draws seven cards when a game begins, any player with fewer than seven cards in their deck will lose the subgame when state-based actions are checked during the upkeep step of the first turn, regardless of any mulligans that player takes. (See rule 704, “State-Based Actions.”)"

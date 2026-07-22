@@ -1,0 +1,5 @@
+rule = "724.1a"
+section = 724
+title = "The Initiative — CR 724.1a"
+status = "skeleton"
+text = "If there are any triggered abilities that triggered before this process began but haven’t been put onto the stack yet, those abilities cease to exist. They won’t be put onto the stack. This rule does not apply to abilities that trigger during this process (see rule 724.1f)."

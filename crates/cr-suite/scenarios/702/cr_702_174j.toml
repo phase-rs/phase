@@ -1,0 +1,5 @@
+rule = "702.174j"
+section = 702
+title = "Keyword Abilities — CR 702.174j"
+status = "skeleton"
+text = "For instant and sorcery spells, the effect of a gift ability always happens before any other spell abilities of the card. If the spell is countered or otherwise leaves the stack before resolving, the gift effect doesn’t happen."

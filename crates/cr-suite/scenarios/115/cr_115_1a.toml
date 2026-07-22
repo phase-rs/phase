@@ -1,0 +1,5 @@
+rule = "115.1a"
+section = 115
+title = "Targets — CR 115.1a"
+status = "skeleton"
+text = "An instant or sorcery spell is targeted if its spell ability identifies something it will affect by using the phrase “target [something],” where the “something” is a phrase that describes an object and/or player. The target(s) are chosen as the spell is cast; see rule 601.2c. (If an activated or triggered ability of an instant or sorcery uses the word target, that ability is targeted, but the spell is not.)"

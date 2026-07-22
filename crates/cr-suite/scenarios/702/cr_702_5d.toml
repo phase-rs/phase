@@ -1,0 +1,5 @@
+rule = "702.5d"
+section = 702
+title = "Keyword Abilities — CR 702.5d"
+status = "skeleton"
+text = "Auras that can enchant a player can target and be attached to players. Such Auras can’t target permanents and can’t be attached to permanents."

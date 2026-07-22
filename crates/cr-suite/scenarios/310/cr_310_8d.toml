@@ -1,0 +1,5 @@
+rule = "310.8d"
+section = 310
+title = "Battles — CR 310.8d"
+status = "skeleton"
+text = "If a battle’s protector is a different player than its controller, all rules and effects that refer to the “defending player” relative to a battle that is being attacked refer to that battle’s protector rather than its controller. See rule 508.5."

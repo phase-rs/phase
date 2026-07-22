@@ -1,0 +1,5 @@
+rule = "113.9"
+section = 113
+title = "Abilities — CR 113.9"
+status = "skeleton"
+text = "Activated and triggered abilities on the stack aren’t spells, and therefore can’t be countered by anything that counters only spells. Activated and triggered abilities on the stack can be countered by effects that specifically counter abilities. Static abilities don’t use the stack and thus can’t be countered at all."

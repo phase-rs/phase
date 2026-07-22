@@ -1,0 +1,5 @@
+rule = "731.2b"
+section = 731
+title = "Controlling Another Player — CR 731.2b"
+status = "skeleton"
+text = "If it’s night, and previous turn’s active player cast two or more spells during the previous turn, it becomes day. Multiplayer games using the shared team turns option (see rule 805) use a modified rule: if it’s night and any player from the previous turn’s active team cast two or more spells during that turn, it becomes day."

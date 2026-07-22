@@ -1,0 +1,5 @@
+rule = "702.11h"
+section = 702
+title = "Keyword Abilities — CR 702.11h"
+status = "skeleton"
+text = "Multiple instances of the same hexproof ability on the same permanent or player are redundant."

@@ -1,0 +1,5 @@
+rule = "800.4m"
+section = 800
+title = "General (Multiplayer Rules) — CR 800.4m"
+status = "skeleton"
+text = "When a player leaves the game, any continuous effects with durations that last until that player’s next turn or until a specific point in that turn will last until that turn would have begun. They neither expire immediately nor last indefinitely."

@@ -1,0 +1,5 @@
+rule = "208.2a"
+section = 208
+title = "Power/Toughness — CR 208.2a"
+status = "skeleton"
+text = "The card may have a characteristic-defining ability that sets its power and/or toughness according to some stated condition. (See rule 604.3.) Such an ability is worded “[This creature’s] [power or toughness] is equal to . . .” or “[This creature’s] power and toughness are each equal to . . .” This ability functions everywhere, even outside the game. If the ability needs to use a number that can’t be determined, including inside a calculation, use 0 instead of that number."

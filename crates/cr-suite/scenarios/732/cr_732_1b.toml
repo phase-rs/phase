@@ -1,0 +1,5 @@
+rule = "732.1b"
+section = 732
+title = "Ending the Turn — CR 732.1b"
+status = "skeleton"
+text = "Occasionally the game gets into a state in which a set of actions could be repeated indefinitely (thus creating a “loop”). In that case, the shortcut rules can be used to determine how many times those actions are repeated without having to actually perform them, and how the loop is broken."

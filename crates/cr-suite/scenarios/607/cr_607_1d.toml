@@ -1,0 +1,5 @@
+rule = "607.1d"
+section = 607
+title = "Linked Abilities — CR 607.1d"
+status = "skeleton"
+text = "Abilities printed on two objects can be linked if one object is a token, emblem, or nontoken permanent and the second object was the source of the ability that either created the token or emblem or put that nontoken permanent onto the battlefield. In these cases, the abilities fit the criteria listed for one of the different kinds of linked abilities in rule 607.2 except they are printed on two objects rather than one."

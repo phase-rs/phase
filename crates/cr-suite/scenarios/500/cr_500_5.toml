@@ -1,0 +1,5 @@
+rule = "500.5"
+section = 500
+title = "General (Turn Structure) — CR 500.5"
+status = "skeleton"
+text = "As a step or phase ends, if there are effects that last until the end of that step or phase, those effects expire. Then any unspent mana left in a player’s mana pool empties. This is a turn-based action that doesn’t use the stack (see rule 703.4q)."

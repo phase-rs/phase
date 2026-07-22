@@ -1,0 +1,5 @@
+rule = "730.2b"
+section = 730
+title = "Miscellaneous — CR 730.2b"
+status = "skeleton"
+text = "As an object merges with a permanent, that object leaves its previous zone and becomes part of an object on the battlefield, but the resulting permanent isn’t considered to have just entered the battlefield."

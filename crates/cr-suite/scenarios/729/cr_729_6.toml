@@ -1,0 +1,5 @@
+rule = "729.6"
+section = 729
+title = "Daybound and Nightbound — CR 729.6"
+status = "skeleton"
+text = "A subgame can be created within a subgame. The existing subgame becomes the main game in relation to the new subgame."

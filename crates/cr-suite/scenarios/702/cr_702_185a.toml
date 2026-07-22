@@ -1,0 +1,5 @@
+rule = "702.185a"
+section = 702
+title = "Keyword Abilities — CR 702.185a"
+status = "skeleton"
+text = "Warp represents two static abilities that function while the card with warp is on the stack, one of which may create a delayed triggered ability. “Warp [cost]” means “You may cast this card from your hand by paying [cost] rather than its mana cost” and “If this spell’s warp cost was paid, exile the permanent this spell becomes at the beginning of the next end step. Its owner may cast this card after the current turn has ended for as long as it remains exiled.” Casting a spell for its warp cost follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."

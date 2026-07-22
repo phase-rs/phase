@@ -1,0 +1,5 @@
+rule = "303.4c"
+section = 303
+title = "Enchantments — CR 303.4c"
+status = "skeleton"
+text = "If an Aura is enchanting an illegal object or player as defined by its enchant ability and other applicable effects, the object it was attached to no longer exists, or the player it was attached to has left the game, the Aura is put into its owner’s graveyard. (This is a state-based action. See rule 704.)"

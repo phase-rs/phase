@@ -1,0 +1,5 @@
+rule = "614.1c"
+section = 614
+title = "Replacement Effects — CR 614.1c"
+status = "skeleton"
+text = "Effects that read “[This permanent] enters with . . . ,” “As [this permanent] enters . . . ,” or “[This permanent] enters as . . . “ are replacement effects."

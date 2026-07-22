@@ -1,0 +1,5 @@
+rule = "712.4a"
+section = 712
+title = "Double-Faced Cards — CR 712.4a"
+status = "skeleton"
+text = "One card in each meld pair has an ability that exiles both that object and its counterpart and melds them. To meld the two cards in a meld pair, put them onto the battlefield with their back faces up and combined (see rule 701.42, “Meld”). The resulting permanent is a single object represented by two cards."

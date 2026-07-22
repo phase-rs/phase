@@ -1,0 +1,5 @@
+rule = "700.8a"
+section = 700
+title = "General (Additional Rules) — CR 700.8a"
+status = "skeleton"
+text = "If a spell, ability, or effect needs to determine the number of creatures in a player’s party, the calculation of that number is performed automatically by the game and results in a number between zero and four. Players don’t declare which specific creatures they control are in their party for such an effect."

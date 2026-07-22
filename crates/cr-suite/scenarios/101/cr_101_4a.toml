@@ -1,0 +1,5 @@
+rule = "101.4a"
+section = 101
+title = "The Magic Golden Rules — CR 101.4a"
+status = "skeleton"
+text = "If an effect has each player choose a card in a hidden zone, such as their hand or library, those cards may remain face down as they’re chosen. However, each player must clearly indicate which face-down card they are choosing."

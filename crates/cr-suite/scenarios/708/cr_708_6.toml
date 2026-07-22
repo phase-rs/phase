@@ -1,0 +1,5 @@
+rule = "708.6"
+section = 708
+title = "Face-Down Spells and Permanents — CR 708.6"
+status = "skeleton"
+text = "If you control multiple face-down spells or face-down permanents, you must ensure at all times that your face-down spells and permanents can be easily differentiated from each other. This includes, but is not limited to, knowing what ability or rules caused the permanents to be face down, the order spells were cast, the order that face-down permanents entered the battlefield, which creature(s) attacked last turn, and any other differences between face-down spells or permanents. Common methods for distinguishing between face-down objects include using counters or dice to mark the different objects, or clearly placing those objects in order on the table."

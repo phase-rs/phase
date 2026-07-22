@@ -1,0 +1,32 @@
+rule = "104.1"
+section = 104
+title = "Ending the Game — CR 104.1"
+status = "executable"
+text = "A game ends immediately when a player wins / when the game is a draw."
+notes = "DamagePlayer to 0 life then SBA → GameOver."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 3
+
+[[steps]]
+action = "damage_player"
+player = 1
+amount = 3
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = 0
+
+[[assertions]]
+kind = "game_over"
+winner = 0

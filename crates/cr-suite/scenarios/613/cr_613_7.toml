@@ -1,0 +1,5 @@
+rule = "613.7"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.7"
+status = "skeleton"
+text = "Within a layer or sublayer, determining which order effects are applied in is usually done using a timestamp system. An effect with an earlier timestamp is applied before an effect with a later timestamp."

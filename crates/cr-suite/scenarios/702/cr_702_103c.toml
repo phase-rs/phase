@@ -1,0 +1,5 @@
+rule = "702.103c"
+section = 702
+title = "Keyword Abilities — CR 702.103c"
+status = "skeleton"
+text = "If a bestowed Aura spell is copied, the copy is also a bestowed Aura spell. Any rule that refers to a spell cast bestowed applies to the copy as well."

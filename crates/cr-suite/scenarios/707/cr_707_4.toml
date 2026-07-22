@@ -1,0 +1,5 @@
+rule = "707.4"
+section = 707
+title = "Copying Objects — CR 707.4"
+status = "skeleton"
+text = "Some effects cause a permanent that’s copying a permanent to copy a different object while remaining on the battlefield. The change doesn’t cause enters-the-battlefield or leaves-the-battlefield abilities to trigger. This also doesn’t change any noncopy effects presently affecting the permanent."

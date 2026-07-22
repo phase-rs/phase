@@ -1,0 +1,5 @@
+rule = "111.10f"
+section = 111
+title = "Tokens — CR 111.10f"
+status = "skeleton"
+text = "A Clue token is a colorless Clue artifact token with “{2}, Sacrifice this token: Draw a card.”"

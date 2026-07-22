@@ -1,0 +1,5 @@
+rule = "118.8d"
+section = 118
+title = "Costs — CR 118.8d"
+status = "skeleton"
+text = "Additional costs don’t change a spell’s mana cost, only what its controller has to pay to cast it. Spells and abilities that ask for that spell’s mana cost still see the original value."

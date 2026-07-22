@@ -1,0 +1,5 @@
+rule = "608.2j"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.2j"
+status = "skeleton"
+text = "If an effect refers to certain characteristics, it checks only for the value of the specified characteristics, regardless of any related ones an object may also have."

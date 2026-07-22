@@ -1,0 +1,5 @@
+rule = "111.10s"
+section = 111
+title = "Tokens — CR 111.10s"
+status = "skeleton"
+text = "A Map token is a colorless Map artifact token with “{1}, {T}, Sacrifice this token: Target creature you control explores. Activate only as a sorcery.” See rule 701.44, “Explore.”"

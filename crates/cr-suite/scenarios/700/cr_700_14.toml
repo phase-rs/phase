@@ -1,0 +1,5 @@
+rule = "700.14"
+section = 700
+title = "General (Additional Rules) — CR 700.14"
+status = "skeleton"
+text = "Some abilities trigger “Whenever you expend N.” A player expends N if they pay a cost to cast a spell and the amount of mana that player spent this turn to cast spells prior to paying that cost was less than N and became at least N after paying that cost."

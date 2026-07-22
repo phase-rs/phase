@@ -1,0 +1,5 @@
+rule = "702.181a"
+section = 702
+title = "Keyword Abilities — CR 702.181a"
+status = "skeleton"
+text = "Mobilize is a triggered ability. “Mobilize N” means “Whenever this creature attacks, create N 1/1 red Warrior creature tokens. Those tokens enter tapped and attacking. Sacrifice them at the beginning of the next end step.”"

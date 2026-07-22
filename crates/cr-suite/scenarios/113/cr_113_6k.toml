@@ -1,0 +1,5 @@
+rule = "113.6k"
+section = 113
+title = "Abilities — CR 113.6k"
+status = "skeleton"
+text = "A trigger condition that can’t trigger from the battlefield functions in all zones it can trigger from. Other trigger conditions of the same triggered ability may function in different zones."

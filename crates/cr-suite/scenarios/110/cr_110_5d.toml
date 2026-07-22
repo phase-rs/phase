@@ -1,0 +1,5 @@
+rule = "110.5d"
+section = 110
+title = "Permanents — CR 110.5d"
+status = "skeleton"
+text = "Only permanents have status. Cards not on the battlefield do not. Although an exiled card may be face down, this has no correlation to the face-down status of a permanent. Similarly, cards not on the battlefield are neither tapped nor untapped, regardless of their physical state."

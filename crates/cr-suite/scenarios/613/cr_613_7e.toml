@@ -1,0 +1,5 @@
+rule = "613.7e"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.7e"
+status = "skeleton"
+text = "An Aura, Equipment, or Fortification receives a new timestamp each time it becomes attached to an object or player."

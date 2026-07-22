@@ -1,0 +1,5 @@
+rule = "303.4j"
+section = 303
+title = "Enchantments — CR 303.4j"
+status = "skeleton"
+text = "If an effect attempts to attach an Aura on the battlefield to an object or player it can’t legally enchant, the Aura doesn’t move."

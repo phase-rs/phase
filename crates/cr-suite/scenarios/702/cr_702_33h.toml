@@ -1,0 +1,5 @@
+rule = "702.33h"
+section = 702
+title = "Keyword Abilities — CR 702.33h"
+status = "skeleton"
+text = "Sticker kicker is a keyword ability that represents a kicker ability and an ability that imposes an additional cost if the spell is kicked. “Sticker kicker [cost]” means “Kicker [cost]” and “As an additional cost to cast this spell, if it’s kicked, you get a ticket counter and you may put a sticker on this spell.”"

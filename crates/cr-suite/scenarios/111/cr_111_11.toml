@@ -1,0 +1,5 @@
+rule = "111.11"
+section = 111
+title = "Tokens — CR 111.11"
+status = "skeleton"
+text = "If an effect instructs a player to create a token by name, doesn’t define any other characteristics for that token, and the name is not one of the types in the list of predefined tokens above, that player uses the card with that name in the Oracle card reference to determine the characteristics of that token."

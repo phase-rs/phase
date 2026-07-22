@@ -1,0 +1,5 @@
+rule = "605.4a"
+section = 605
+title = "Mana Abilities — CR 605.4a"
+status = "skeleton"
+text = "A triggered mana ability doesn’t go on the stack, so it can’t be targeted, countered, or otherwise responded to. Rather, it resolves immediately after the mana ability that triggered it, without waiting for priority."

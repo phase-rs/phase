@@ -1,0 +1,5 @@
+rule = "107.16a"
+section = 107
+title = "Numbers and Symbols — CR 107.16a"
+status = "skeleton"
+text = "“[Cost]: Level N — [Abilities]” means “[Cost]: This Class’s level becomes N. Activate only if this Class is level N-1 and only as a sorcery” and “As long as this Class is level N or greater, it has [abilities].”"

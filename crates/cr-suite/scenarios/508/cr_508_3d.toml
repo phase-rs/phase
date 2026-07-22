@@ -1,0 +1,5 @@
+rule = "508.3d"
+section = 508
+title = "Declare Attackers Step — CR 508.3d"
+status = "skeleton"
+text = "An ability that reads “Whenever [a player] attacks, . . .” triggers if one or more creatures that player controls are declared as attackers."

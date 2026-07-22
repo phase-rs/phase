@@ -1,0 +1,5 @@
+rule = "310.11"
+section = 310
+title = "Battles — CR 310.11"
+status = "skeleton"
+text = "All currently existing battles have the subtype Siege. Sieges are subject to special rules."

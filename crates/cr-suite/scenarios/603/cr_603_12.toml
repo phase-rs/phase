@@ -1,0 +1,5 @@
+rule = "603.12"
+section = 603
+title = "Handling Triggered Abilities — CR 603.12"
+status = "skeleton"
+text = "A resolving spell or ability may allow or instruct a player to take an action and create a triggered ability that triggers “when [a player] [does or doesn’t]” take that action or “when [something happens] this way.” These reflexive triggered abilities follow the rules for delayed triggered abilities (see rule 603.7), except that they’re checked immediately after being created and trigger based on whether the trigger event or events occurred earlier during the resolution of the spell or ability that created them."

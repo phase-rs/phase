@@ -1,0 +1,5 @@
+rule = "702.77a"
+section = 702
+title = "Keyword Abilities — CR 702.77a"
+status = "skeleton"
+text = "Reinforce is an activated ability that functions only while the card with reinforce is in a player’s hand. “Reinforce N—[cost]” means “[Cost], Discard this card: Put N +1/+1 counters on target creature.”"

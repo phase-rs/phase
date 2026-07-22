@@ -1,0 +1,5 @@
+rule = "115.1b"
+section = 115
+title = "Targets — CR 115.1b"
+status = "skeleton"
+text = "Aura spells are always targeted. An Aura’s target is specified by its enchant keyword ability (see rule 702.5, “Enchant”). The target is chosen as the spell is cast; see rule 601.2c. An Aura permanent doesn’t target anything; only the spell is targeted. (An activated or triggered ability of an Aura permanent can also be targeted.)"

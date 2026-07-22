@@ -1,0 +1,5 @@
+rule = "706.2a"
+section = 706
+title = "Rolling a Die — CR 706.2a"
+status = "skeleton"
+text = "Modifiers may be optional and/or have associated costs. If a modifier has an associated mana cost, the player who rolled has the chance to activate mana abilities before applying it."

@@ -1,0 +1,5 @@
+rule = "731.2c"
+section = 731
+title = "Controlling Another Player — CR 731.2c"
+status = "skeleton"
+text = "If it’s neither day nor night, this check doesn’t happen and it remains neither."

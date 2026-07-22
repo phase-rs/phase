@@ -1,0 +1,5 @@
+rule = "616.1g"
+section = 616
+title = "Interaction of Replacement and/or Prevention Effects — CR 616.1g"
+status = "skeleton"
+text = "While following the steps in 616.1a–f, one replacement or prevention effect may apply to an event, and another may apply to an event contained within the first event. In this case, the second effect can’t be chosen until after the first effect has been chosen."

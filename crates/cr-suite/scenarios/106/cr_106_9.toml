@@ -1,0 +1,5 @@
+rule = "106.9"
+section = 106
+title = "Mana — CR 106.9"
+status = "skeleton"
+text = "If an effect would add mana represented by a Phyrexian mana symbol to a player’s mana pool, one mana of the color of that symbol is added to that player’s mana pool."

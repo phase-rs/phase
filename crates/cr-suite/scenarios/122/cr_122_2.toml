@@ -1,0 +1,5 @@
+rule = "122.2"
+section = 122
+title = "Counters — CR 122.2"
+status = "skeleton"
+text = "Counters on an object are not retained if that object moves from one zone to another. The counters are not “removed”; they simply cease to exist. See rule 400.7."

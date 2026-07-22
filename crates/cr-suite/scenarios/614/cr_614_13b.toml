@@ -1,0 +1,5 @@
+rule = "614.13b"
+section = 614
+title = "Replacement Effects — CR 614.13b"
+status = "skeleton"
+text = "The same object can’t be chosen to change zones more than once when applying replacement effects that modify how one or more permanents enter the battlefield."

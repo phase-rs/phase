@@ -1,0 +1,5 @@
+rule = "730.1"
+section = 730
+title = "Miscellaneous — CR 730.1"
+status = "skeleton"
+text = "One keyword causes an object to merge with a permanent. See rule 702.140, “Mutate.”"

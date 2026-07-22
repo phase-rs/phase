@@ -1,0 +1,5 @@
+rule = "115.7f"
+section = 115
+title = "Targets — CR 115.7f"
+status = "skeleton"
+text = "A spell or ability may “divide” or “distribute” an effect (such as damage or counters) among one or more targets. When changing targets or choosing new targets for that spell or ability, the original division can’t be changed."

@@ -1,0 +1,5 @@
+rule = "723.1"
+section = 723
+title = "The Monarch — CR 723.1"
+status = "skeleton"
+text = "Some cards allow a player to control another player during that player’s next turn. This effect applies to the next turn that the affected player actually takes. The affected player is controlled during the entire turn; the effect doesn’t end until the beginning of the next turn."

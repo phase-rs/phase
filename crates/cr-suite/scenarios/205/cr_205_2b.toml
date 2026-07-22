@@ -1,0 +1,5 @@
+rule = "205.2b"
+section = 205
+title = "Type Line — CR 205.2b"
+status = "skeleton"
+text = "Some objects have more than one card type (for example, an artifact creature). Such objects satisfy the criteria for any effect that applies to any of their card types."

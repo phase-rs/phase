@@ -1,0 +1,5 @@
+rule = "702.158d"
+section = 702
+title = "Keyword Abilities — CR 702.158d"
+status = "skeleton"
+text = "Some abilities include an instruction to choose a sector along with an instruction to perform an action on each creature in that sector. To do this, choose one of the three sector designations, then perform that action on each creature with that sector designation."

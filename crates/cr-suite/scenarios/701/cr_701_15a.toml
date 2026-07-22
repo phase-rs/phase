@@ -1,0 +1,5 @@
+rule = "701.15a"
+section = 701
+title = "Keyword Actions — CR 701.15a"
+status = "skeleton"
+text = "Certain spells and abilities can goad a creature. Until the next turn of the controller of that spell or ability, that creature is goaded."

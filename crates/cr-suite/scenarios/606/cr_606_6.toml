@@ -1,0 +1,5 @@
+rule = "606.6"
+section = 606
+title = "Loyalty Abilities — CR 606.6"
+status = "skeleton"
+text = "A loyalty ability with a negative loyalty cost, taking into account any additional costs, can’t be activated unless the permanent has at least that many loyalty counters on it."

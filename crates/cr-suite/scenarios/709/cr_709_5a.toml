@@ -1,0 +1,5 @@
+rule = "709.5a"
+section = 709
+title = "Split Cards — CR 709.5a"
+status = "skeleton"
+text = "Each half of a split card with a shared type line shares the types and subtypes listed on that card’s shared type line."

@@ -1,0 +1,5 @@
+rule = "509.1b"
+section = 509
+title = "Declare Blockers Step — CR 509.1b"
+status = "skeleton"
+text = "The defending player checks each creature they control to see whether it’s affected by any restrictions (effects that say a creature can’t block, or that it can’t block unless some condition is met). If any restrictions are being disobeyed, the declaration of blockers is illegal."

@@ -1,0 +1,5 @@
+rule = "205.3p"
+section = 205
+title = "Type Line — CR 205.3p"
+status = "skeleton"
+text = "One dungeon card (Undercity) has a subtype; this subtype is called a dungeon type. That dungeon type is Undercity."

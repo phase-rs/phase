@@ -1,0 +1,5 @@
+rule = "701.8a"
+section = 701
+title = "Keyword Actions — CR 701.8a"
+status = "skeleton"
+text = "To destroy a permanent, move it from the battlefield to its owner’s graveyard."

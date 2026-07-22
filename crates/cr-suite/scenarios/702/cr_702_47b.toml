@@ -1,0 +1,5 @@
+rule = "702.47b"
+section = 702
+title = "Keyword Abilities — CR 702.47b"
+status = "skeleton"
+text = "You can’t choose to use a splice ability if you can’t make the required choices (targets, etc.) for that card’s rules text. You can’t splice any one card onto the same spell more than once. If you’re splicing more than one card onto a spell, reveal them all at once and choose the order in which their effects will happen. The effects of the main spell must happen first."

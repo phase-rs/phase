@@ -1,0 +1,5 @@
+rule = "117.2c"
+section = 117
+title = "Timing and Priority — CR 117.2c"
+status = "skeleton"
+text = "Turn-based actions happen automatically when certain steps or phases begin. They’re dealt with before a player would receive priority. See rule 117.3a. Turn-based actions also happen automatically when each step and phase ends; no player receives priority afterward. See rule 703, “Turn-Based Actions.”"

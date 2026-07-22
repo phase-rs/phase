@@ -1,0 +1,5 @@
+rule = "115.1c"
+section = 115
+title = "Targets — CR 115.1c"
+status = "skeleton"
+text = "An activated ability is targeted if it identifies something it will affect by using the phrase “target [something],” where the “something” is a phrase that describes an object and/or player. The target(s) are chosen as the ability is activated; see rule 602.2b."

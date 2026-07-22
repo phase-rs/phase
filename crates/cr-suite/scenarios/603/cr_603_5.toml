@@ -1,0 +1,5 @@
+rule = "603.5"
+section = 603
+title = "Handling Triggered Abilities — CR 603.5"
+status = "skeleton"
+text = "Some triggered abilities’ effects are optional (they contain “may,” as in “At the beginning of your upkeep, you may draw a card”). These abilities go on the stack when they trigger, regardless of whether their controller intends to exercise the ability’s option or not. The choice is made when the ability resolves. Likewise, triggered abilities that have an effect “unless” something is true or a player chooses to do something will go on the stack normally; the “unless” part of the ability is dealt with when the ability resolves."

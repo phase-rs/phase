@@ -1,0 +1,5 @@
+rule = "119.5"
+section = 119
+title = "Life — CR 119.5"
+status = "skeleton"
+text = "If an effect sets a player’s life total to a specific number, the player gains or loses the necessary amount of life to end up with the new total."

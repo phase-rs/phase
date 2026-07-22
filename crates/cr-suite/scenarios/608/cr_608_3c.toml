@@ -1,0 +1,5 @@
+rule = "608.3c"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.3c"
+status = "skeleton"
+text = "If the object that’s resolving is an Aura spell, it becomes a permanent and is put onto the battlefield under the control of the spell’s controller attached to the player or object it was targeting."

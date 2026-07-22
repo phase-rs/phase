@@ -1,0 +1,5 @@
+rule = "201.2"
+section = 201
+title = "Name — CR 201.2"
+status = "skeleton"
+text = "A card’s name is always considered to be the English version of its name, regardless of printed language."

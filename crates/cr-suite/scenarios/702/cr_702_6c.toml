@@ -1,0 +1,5 @@
+rule = "702.6c"
+section = 702
+title = "Keyword Abilities — CR 702.6c"
+status = "skeleton"
+text = "Equip abilities may further restrict what creatures may be chosen as legal targets. Such restrictions usually appear in the form “Equip [quality]” or “Equip [quality] creature.” These equip abilities may legally target only a creature that’s controlled by the player activating the ability and that has the chosen quality. Additional restrictions for an equip ability don’t restrict what the Equipment may be attached to."

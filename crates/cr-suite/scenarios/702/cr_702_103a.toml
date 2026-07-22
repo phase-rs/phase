@@ -1,0 +1,5 @@
+rule = "702.103a"
+section = 702
+title = "Keyword Abilities — CR 702.103a"
+status = "skeleton"
+text = "Bestow represents a static ability that functions in any zone from which you could play the card it’s on. “Bestow [cost]” means “As you cast this spell, you may choose to cast it bestowed. If you do, you pay [cost] rather than its mana cost.” Casting a spell using its bestow ability follows the rules for paying alternative costs (see 601.2b and 601.2f–h)."

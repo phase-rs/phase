@@ -1,0 +1,5 @@
+rule = "701.42b"
+section = 701
+title = "Keyword Actions — CR 701.42b"
+status = "skeleton"
+text = "Only two cards belonging to the same meld pair can be melded. Tokens, cards that aren’t meld cards, or meld cards that don’t form a meld pair can’t be melded."

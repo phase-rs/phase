@@ -1,0 +1,5 @@
+rule = "702.167b"
+section = 702
+title = "Keyword Abilities — CR 702.167b"
+status = "skeleton"
+text = "If an object in the [materials] of a craft ability is described using only a card type or subtype without the word “card,” it refers to either a permanent on the battlefield that is that type or subtype or a card in a graveyard that is that type or subtype. This is an exception to rule 109.2."

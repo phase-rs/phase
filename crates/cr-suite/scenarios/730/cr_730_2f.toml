@@ -1,0 +1,5 @@
+rule = "730.2f"
+section = 730
+title = "Miscellaneous — CR 730.2f"
+status = "skeleton"
+text = "If a merged permanent is turned face down, each face-up component that represents it is turned face down. If a face-down merged permanent is turned face up, each face-down component that represents it is turned face up."

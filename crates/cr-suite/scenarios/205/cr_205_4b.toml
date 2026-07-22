@@ -1,0 +1,5 @@
+rule = "205.4b"
+section = 205
+title = "Type Line — CR 205.4b"
+status = "skeleton"
+text = "An object’s supertype is independent of its card type and subtype, even though some supertypes are closely identified with specific card types. Changing an object’s card types or subtypes won’t change its supertypes. Changing an object’s supertypes won’t change its card types or subtypes. When an object gains or loses a supertype, it retains any other supertypes it had."

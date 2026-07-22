@@ -1,0 +1,5 @@
+rule = "205.2a"
+section = 205
+title = "Type Line — CR 205.2a"
+status = "skeleton"
+text = "The card types are artifact, battle, conspiracy, creature, dungeon, enchantment, instant, kindred, land, phenomenon, plane, planeswalker, scheme, sorcery, and vanguard. See section 3, “Card Types.”"

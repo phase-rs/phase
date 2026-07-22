@@ -1,0 +1,5 @@
+rule = "121.4"
+section = 121
+title = "Drawing a Card — CR 121.4"
+status = "skeleton"
+text = "A player who attempts to draw a card from a library with no cards in it loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"

@@ -1,0 +1,5 @@
+rule = "111.10"
+section = 111
+title = "Tokens — CR 111.10"
+status = "skeleton"
+text = "Some effects instruct a player to create a predefined token. These effects use the definition below to determine the characteristics the token is created with. The effect that creates a predefined token may also modify or add to the predefined characteristics."

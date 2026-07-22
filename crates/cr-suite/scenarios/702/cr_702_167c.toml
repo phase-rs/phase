@@ -1,0 +1,5 @@
+rule = "702.167c"
+section = 702
+title = "Keyword Abilities — CR 702.167c"
+status = "skeleton"
+text = "An ability of a permanent may refer to the exiled cards used to craft it. This refers to cards in exile that were exiled to pay the activation cost of the craft ability that put this permanent onto the battlefield."

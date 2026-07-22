@@ -1,0 +1,5 @@
+rule = "400.7e"
+section = 400
+title = "General (Zones) — CR 400.7e"
+status = "skeleton"
+text = "Abilities that trigger when an object moves from one zone to another (for example, “When this Aura is put into a graveyard from the battlefield”) can find the new object that it became in the zone it moved to when the ability triggered, if that zone is a public zone."

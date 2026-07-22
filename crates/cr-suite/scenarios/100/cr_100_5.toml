@@ -1,0 +1,5 @@
+rule = "100.5"
+section = 100
+title = "General — CR 100.5"
+status = "skeleton"
+text = "If a deck must contain at least a certain number of cards, that number is referred to as a minimum deck size. There is no maximum deck size for non-Commander decks."

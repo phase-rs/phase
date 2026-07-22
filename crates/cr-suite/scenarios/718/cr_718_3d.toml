@@ -1,0 +1,5 @@
+rule = "718.3d"
+section = 718
+title = "Prototype Cards — CR 718.3d"
+status = "skeleton"
+text = "If a permanent that was a prototyped spell is copied, the copy has the alternative power, toughness, and mana cost characteristics of the permanent and not the normal power and toughness characteristics of the card that represents that permanent. Any rule or effect that refers to a permanent that was a prototyped spell refers to the copy as well."

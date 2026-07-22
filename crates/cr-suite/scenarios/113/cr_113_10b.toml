@@ -1,0 +1,5 @@
+rule = "113.10b"
+section = 113
+title = "Abilities — CR 113.10b"
+status = "skeleton"
+text = "Effects that remove an ability remove all instances of it."

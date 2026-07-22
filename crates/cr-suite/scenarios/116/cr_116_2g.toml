@@ -1,0 +1,5 @@
+rule = "116.2g"
+section = 116
+title = "Special Actions — CR 116.2g"
+status = "skeleton"
+text = "A player who has chosen a companion may pay {3} to put that card from outside the game into their hand. This is a special action. A player can take this action any time they have priority and the stack is empty during a main phase of their turn, but only if they haven’t done so yet this game. (See rule 702.139, “Companion.”)"

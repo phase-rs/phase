@@ -1,0 +1,5 @@
+rule = "107.15a"
+section = 107
+title = "Numbers and Symbols — CR 107.15a"
+status = "skeleton"
+text = "“{rN}—[Effect]” means “When one or more lore counters are put onto this Saga, if the number of lore counters on it was less than N and became at least N, [effect].”"

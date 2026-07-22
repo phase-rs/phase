@@ -1,0 +1,5 @@
+rule = "202.3a"
+section = 202
+title = "Mana Cost and Color — CR 202.3a"
+status = "skeleton"
+text = "The mana value of an object with no mana cost is 0, unless that object is the back face of a nonmodal double-faced permanent or spell, or it is a melded permanent."

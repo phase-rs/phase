@@ -1,0 +1,5 @@
+rule = "107.3f"
+section = 107
+title = "Numbers and Symbols — CR 107.3f"
+status = "skeleton"
+text = "Sometimes X appears in the text of a spell or ability but not in a mana cost, alternative cost, additional cost, or activation cost. If the value of X isn’t defined, the controller of the spell or ability chooses the value of X at the appropriate time (either as it’s put on the stack or as it resolves)."

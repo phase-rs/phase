@@ -1,0 +1,5 @@
+rule = "118.3"
+section = 118
+title = "Costs — CR 118.3"
+status = "skeleton"
+text = "A player can’t pay a cost without having the necessary resources to pay it fully. For example, a player with only 1 life can’t pay a cost of 2 life, and a permanent that’s already tapped can’t be tapped to pay a cost. See rule 202, “Mana Cost and Color,” and rule 602, “Activating Activated Abilities.”"

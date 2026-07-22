@@ -1,0 +1,5 @@
+rule = "403.4"
+section = 403
+title = "Battlefield — CR 403.4"
+status = "skeleton"
+text = "Whenever a permanent enters the battlefield, it becomes a new object and has no relationship to any previous permanent represented by the same card, except for the cases listed in rule 400.7. (This is also true for any objects entering any zone.)"

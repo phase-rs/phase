@@ -1,0 +1,5 @@
+rule = "120.4c"
+section = 120
+title = "Damage — CR 120.4c"
+status = "skeleton"
+text = "Third, damage that’s been dealt is processed into its results, as modified by replacement effects that interact with those results (such as life loss or counters)."

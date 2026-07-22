@@ -1,0 +1,5 @@
+rule = "702.96b"
+section = 702
+title = "Keyword Abilities — CR 702.96b"
+status = "skeleton"
+text = "If a player chooses to pay the overload cost of a spell, that spell won’t require any targets. It may affect objects that couldn’t be chosen as legal targets if the spell were cast without its overload cost being paid."

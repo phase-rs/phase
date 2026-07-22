@@ -1,0 +1,5 @@
+rule = "511.3"
+section = 511
+title = "End of Combat Step — CR 511.3"
+status = "skeleton"
+text = "As soon as the end of combat step ends, all creatures, battles, and planeswalkers are removed from combat. After the end of combat step ends, the combat phase is over and the postcombat main phase begins (see rule 505)."

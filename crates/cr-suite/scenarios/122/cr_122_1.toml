@@ -1,0 +1,5 @@
+rule = "122.1"
+section = 122
+title = "Counters — CR 122.1"
+status = "skeleton"
+text = "A counter is a marker placed on an object or player that modifies its characteristics and/or interacts with a rule, ability, or effect. Counters are not objects and have no characteristics. Notably, a counter is not a token, and a token is not a counter. Counters with the same name or description are interchangeable."

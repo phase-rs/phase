@@ -1,0 +1,5 @@
+rule = "702.19e"
+section = 702
+title = "Keyword Abilities — CR 702.19e"
+status = "skeleton"
+text = "If a creature with trample over planeswalkers is attacking a planeswalker and that planeswalker is removed from combat, the creature’s damage may be assigned to the defending player once all blocking creatures have been dealt lethal damage or, if there are no blocking creatures when damage is assigned, all its damage is assigned to the defending player. This is an exception to rule 506.4c, and it does not cause the creature to be attacking that player."

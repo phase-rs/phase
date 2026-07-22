@@ -1,0 +1,5 @@
+rule = "702.26i"
+section = 702
+title = "Keyword Abilities — CR 702.26i"
+status = "skeleton"
+text = "An Aura, Equipment, or Fortification that phased out directly will phase in attached to the object or player it was attached to when it phased out, if that object is still in the same zone or that player is still in the game. If not, that Aura, Equipment, or Fortification phases in unattached. State-based actions apply as appropriate. (See rules 704.5m and 704.5n.)"

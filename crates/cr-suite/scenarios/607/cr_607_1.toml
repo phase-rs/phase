@@ -1,0 +1,5 @@
+rule = "607.1"
+section = 607
+title = "Linked Abilities — CR 607.1"
+status = "skeleton"
+text = "An object may have two abilities printed on it such that one of them causes actions to be taken or objects or players to be affected and the other one directly refers to those actions, objects, or players. If so, these two abilities are linked: the second refers only to actions that were taken or objects or players that were affected by the first, and not by any other ability."

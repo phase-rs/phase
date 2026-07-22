@@ -1,0 +1,5 @@
+rule = "729.5a"
+section = 729
+title = "Daybound and Nightbound — CR 729.5a"
+status = "skeleton"
+text = "At the end of a subgame, each nontraditional card not in a supplementary deck that began the subgame in a supplementary deck is turned face down and put on the bottom of that deck. Then each player moves each of their supplementary decks from the subgame command zone to the main-game command zone and shuffles it."

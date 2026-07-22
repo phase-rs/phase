@@ -1,0 +1,5 @@
+rule = "903.12e"
+section = 903
+title = "Commander — CR 903.12e"
+status = "skeleton"
+text = "If a player’s commander has no colors in its color identity, that player’s deck may contain any number of basic lands of one basic land type of their choice. This is an exception to rule 903.5d."

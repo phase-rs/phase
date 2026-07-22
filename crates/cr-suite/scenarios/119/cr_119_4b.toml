@@ -1,0 +1,5 @@
+rule = "119.4b"
+section = 119
+title = "Life — CR 119.4b"
+status = "skeleton"
+text = "Players can always pay 0 life, no matter what their (or their team’s) life total is, and even if an effect says players can’t pay life."

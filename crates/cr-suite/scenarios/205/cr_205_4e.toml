@@ -1,0 +1,5 @@
+rule = "205.4e"
+section = 205
+title = "Type Line — CR 205.4e"
+status = "skeleton"
+text = "Any instant or sorcery spell with the supertype “legendary” is subject to a casting restriction. A player can’t cast a legendary instant or sorcery spell unless that player controls a legendary creature or a legendary planeswalker."

@@ -1,0 +1,5 @@
+rule = "702.124k"
+section = 702
+title = "Keyword Abilities — CR 702.124k"
+status = "skeleton"
+text = "“Choose a Background” means “You may designate two cards as your commander rather than one if one of them is this card and the other is a legendary Background enchantment card.” You can’t designate two cards as your commander if one has a “choose a Background” ability and the other is not a legendary Background enchantment card, and legendary Background enchantment cards can’t be your commander unless you have also designated a commander with “choose a Background.”"

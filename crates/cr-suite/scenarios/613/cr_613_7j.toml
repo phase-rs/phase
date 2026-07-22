@@ -1,0 +1,5 @@
+rule = "613.7j"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.7j"
+status = "skeleton"
+text = "A conspiracy card receives a timestamp at the beginning of the game. If it’s face down, it receives a new timestamp at the time it turns face up."

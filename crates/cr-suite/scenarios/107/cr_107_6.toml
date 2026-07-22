@@ -1,0 +1,5 @@
+rule = "107.6"
+section = 107
+title = "Numbers and Symbols — CR 107.6"
+status = "skeleton"
+text = "The untap symbol is {Q}. The untap symbol in an activation cost means “Untap this permanent.” A permanent that’s already untapped can’t be untapped again to pay the cost. A creature’s activated ability with the untap symbol in its activation cost can’t be activated unless the creature has been under its controller’s control continuously since their most recent turn began. See rule 302.6."

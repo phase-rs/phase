@@ -1,0 +1,5 @@
+rule = "118.9"
+section = 118
+title = "Costs — CR 118.9"
+status = "skeleton"
+text = "Some spells have alternative costs. An alternative cost is a cost listed in a spell’s text, or applied to it from another effect, that its controller may pay rather than paying the spell’s mana cost. Alternative costs are usually phrased, “You may [action] rather than pay [this object’s] mana cost,” or “You may cast [this object] without paying its mana cost.” Note that some alternative costs are listed in keywords; see rule 702."

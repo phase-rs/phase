@@ -1,0 +1,5 @@
+rule = "614.1b"
+section = 614
+title = "Replacement Effects — CR 614.1b"
+status = "skeleton"
+text = "Effects that use the word “skip” are replacement effects. These replacement effects use the word “skip” to indicate what events, steps, phases, or turns will be replaced with nothing."

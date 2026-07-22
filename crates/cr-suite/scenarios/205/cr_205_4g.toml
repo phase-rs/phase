@@ -1,0 +1,5 @@
+rule = "205.4g"
+section = 205
+title = "Type Line — CR 205.4g"
+status = "skeleton"
+text = "Any permanent with the supertype “snow” is a snow permanent. Any permanent that doesn’t have this supertype is a nonsnow permanent, regardless of its name."

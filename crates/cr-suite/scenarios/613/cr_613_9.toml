@@ -1,0 +1,5 @@
+rule = "613.9"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.9"
+status = "skeleton"
+text = "One continuous effect can override another. Sometimes the results of one effect determine whether another effect applies or what another effect does."

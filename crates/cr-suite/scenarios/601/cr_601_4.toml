@@ -1,0 +1,5 @@
+rule = "601.4"
+section = 601
+title = "Casting Spells — CR 601.4"
+status = "skeleton"
+text = "While announcing the choices of any modes, alternative costs, and/or additional costs as described in rule 601.2b, some options may be available to a player only if other choices are made that would normally be made later in that rule’s instructions. In that case, the spell’s controller may consider any other choices to be made in that step. If any such choices could allow them to choose a particular mode, alternative cost, or additional cost, they may do so."

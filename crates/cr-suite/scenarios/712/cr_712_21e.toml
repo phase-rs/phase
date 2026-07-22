@@ -1,0 +1,5 @@
+rule = "712.21e"
+section = 712
+title = "Double-Faced Cards — CR 712.21e"
+status = "skeleton"
+text = "If an effect needs to know the number of objects that changed zones, a melded permanent among those objects counts as one object that moved. If the effect needs to know the number of cards that changed zones, that melded permanent counts as two cards that moved."

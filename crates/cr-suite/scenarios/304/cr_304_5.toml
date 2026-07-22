@@ -1,0 +1,5 @@
+rule = "304.5"
+section = 304
+title = "Instants — CR 304.5"
+status = "skeleton"
+text = "If text states that a player may do something “any time they could cast an instant” or “only as an instant,” it means only that the player must have priority. The player doesn’t need to have an instant card they could cast. Effects that would preclude that player from casting an instant spell don’t affect the player’s capability to perform that action (unless the action is actually casting an instant spell)."

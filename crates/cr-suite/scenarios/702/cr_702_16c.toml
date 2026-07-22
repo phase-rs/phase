@@ -1,0 +1,5 @@
+rule = "702.16c"
+section = 702
+title = "Keyword Abilities — CR 702.16c"
+status = "skeleton"
+text = "A permanent or player with protection can’t be enchanted by Auras that have the stated quality. Such Auras attached to the permanent or player with protection will be put into their owners’ graveyards as a state-based action. (See rule 704, “State-Based Actions.”)"

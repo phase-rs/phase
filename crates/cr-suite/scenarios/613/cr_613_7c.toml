@@ -1,0 +1,5 @@
+rule = "613.7c"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.7c"
+status = "skeleton"
+text = "Each counter receives a timestamp as it’s put on an object or player. If that object or player already has a counter of that kind on it, each counter of that kind receives a new timestamp identical to that of the new counter."

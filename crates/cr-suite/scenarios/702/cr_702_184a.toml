@@ -1,0 +1,5 @@
+rule = "702.184a"
+section = 702
+title = "Keyword Abilities — CR 702.184a"
+status = "skeleton"
+text = "Station is an activated ability. “Station” means “Tap another untapped creature you control: Put a number of charge counters on this permanent equal to the tapped creature’s power. Activate only as a sorcery.”"

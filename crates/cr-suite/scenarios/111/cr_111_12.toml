@@ -1,0 +1,5 @@
+rule = "111.12"
+section = 111
+title = "Tokens — CR 111.12"
+status = "skeleton"
+text = "If an effect instructs a player to create a token that is a copy of a nonexistent object, no token is created (see rule 707, “Copying Objects”). This does not apply to an effect that would use the last known information of an object."

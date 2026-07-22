@@ -1,0 +1,5 @@
+rule = "106.12b"
+section = 106
+title = "Mana — CR 106.12b"
+status = "skeleton"
+text = "A replacement effect that applies if a permanent “is tapped for mana” or tapped for mana of a specific type and/or amount modifies the mana production event while such an ability is resolving and producing mana or the specified type and/or amount of mana."

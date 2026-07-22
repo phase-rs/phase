@@ -1,0 +1,5 @@
+rule = "202.4"
+section = 202
+title = "Mana Cost and Color — CR 202.4"
+status = "skeleton"
+text = "Any additional cost listed in an object’s rules text or imposed by an effect isn’t part of the mana cost. (See rule 601, “Casting Spells.”) Such costs are paid at the same time as the spell’s other costs."

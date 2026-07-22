@@ -1,0 +1,5 @@
+rule = "110.4c"
+section = 110
+title = "Permanents — CR 110.4c"
+status = "skeleton"
+text = "If a permanent somehow loses all its permanent types, it remains on the battlefield. It’s still a permanent."

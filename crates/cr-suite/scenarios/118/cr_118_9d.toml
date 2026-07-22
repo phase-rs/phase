@@ -1,0 +1,5 @@
+rule = "118.9d"
+section = 118
+title = "Costs — CR 118.9d"
+status = "skeleton"
+text = "If an alternative cost is being paid to cast a spell, any additional costs, cost increases, and cost reductions that affect that spell are applied to that alternative cost. (See rule 601.2f.)"

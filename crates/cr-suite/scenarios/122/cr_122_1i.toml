@@ -1,0 +1,5 @@
+rule = "122.1i"
+section = 122
+title = "Counters — CR 122.1i"
+status = "skeleton"
+text = "One or more rad counters on a player cause a triggered ability to trigger at the beginning of that player’s precombat main phase. See rule 728, “Rad Counters.”"

@@ -1,0 +1,5 @@
+rule = "500.7"
+section = 500
+title = "General (Turn Structure) — CR 500.7"
+status = "skeleton"
+text = "Some effects can give a player extra turns. They do this by adding the turns directly after the specified turn. If a player is given multiple extra turns, the extra turns are added one at a time. If multiple players are given extra turns, the extra turns are added one at a time, in APNAP order (see rule 101.4). The most recently created turn will be taken first."

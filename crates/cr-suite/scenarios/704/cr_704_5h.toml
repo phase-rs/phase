@@ -1,0 +1,5 @@
+rule = "704.5h"
+section = 704
+title = "State-Based Actions — CR 704.5h"
+status = "skeleton"
+text = "If a creature has toughness greater than 0, and it’s been dealt damage by a source with deathtouch since the last time state-based actions were checked, that creature is destroyed. Regeneration can replace this event."

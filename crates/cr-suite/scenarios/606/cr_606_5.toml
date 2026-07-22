@@ -1,0 +1,5 @@
+rule = "606.5"
+section = 606
+title = "Loyalty Abilities — CR 606.5"
+status = "skeleton"
+text = "If the total cost to activate a loyalty ability contains multiple costs to add or remove loyalty counters, those costs are combined into a single cost to add or remove loyalty counters, as appropriate."

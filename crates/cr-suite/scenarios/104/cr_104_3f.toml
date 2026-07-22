@@ -1,0 +1,5 @@
+rule = "104.3f"
+section = 104
+title = "Ending the Game — CR 104.3f"
+status = "skeleton"
+text = "If a player would both win and lose the game simultaneously, that player loses the game."

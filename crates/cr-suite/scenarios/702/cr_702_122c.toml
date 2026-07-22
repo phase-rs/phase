@@ -1,0 +1,5 @@
+rule = "702.122c"
+section = 702
+title = "Keyword Abilities — CR 702.122c"
+status = "skeleton"
+text = "If an effect states that a creature “can’t crew Vehicles,” that creature can’t be tapped to pay the crew cost of a Vehicle."

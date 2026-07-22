@@ -1,0 +1,5 @@
+rule = "701.23f"
+section = 701
+title = "Keyword Actions — CR 701.23f"
+status = "skeleton"
+text = "If searching a zone is replaced with searching a portion of that zone, any other instructions that refer to searching the zone still apply. Any abilities that trigger on a library being searched will trigger."

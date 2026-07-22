@@ -1,0 +1,5 @@
+rule = "702.166a"
+section = 702
+title = "Keyword Abilities — CR 702.166a"
+status = "skeleton"
+text = "Bargain is a static ability that functions while the spell with bargain is on the stack. “Bargain” means “As an additional cost to cast this spell, you may sacrifice an artifact, enchantment, or token.” Paying a spell’s bargain cost follows the rules for paying additional costs in rules 601.2b and 601.2f–h."

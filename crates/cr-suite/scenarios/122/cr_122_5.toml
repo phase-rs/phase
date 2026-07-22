@@ -1,0 +1,5 @@
+rule = "122.5"
+section = 122
+title = "Counters — CR 122.5"
+status = "skeleton"
+text = "If an effect says to “move” a counter, it means to remove that counter from the object it’s currently on and put it onto a second object. If either of these actions isn’t possible, it’s not possible to move a counter, and no counter is removed from or put onto anything. This may occur if the first and second objects are the same object; if the first object doesn’t have the appropriate kind of counter on it; if the second object can’t have counters put onto it; or if either object is no longer in the correct zone."

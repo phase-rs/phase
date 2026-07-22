@@ -1,0 +1,5 @@
+rule = "607.2a"
+section = 607
+title = "Linked Abilities — CR 607.2a"
+status = "skeleton"
+text = "If an object has an activated or triggered ability printed on it that instructs a player to exile one or more cards and an ability printed on it that refers either to “the exiled cards” or to cards “exiled with [this object],” these abilities are linked. The second ability refers only to cards in the exile zone that were put there as a result of an instruction to exile them in the first ability."

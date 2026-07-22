@@ -1,0 +1,5 @@
+rule = "718.3a"
+section = 718
+title = "Prototype Cards — CR 718.3a"
+status = "skeleton"
+text = "While casting a prototyped spell, use only its alternative power, toughness, and mana cost when evaluating those characteristics to see if it can be cast."

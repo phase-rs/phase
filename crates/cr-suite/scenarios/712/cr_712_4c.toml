@@ -1,0 +1,5 @@
+rule = "712.4c"
+section = 712
+title = "Double-Faced Cards — CR 712.4c"
+status = "skeleton"
+text = "Unlike other double-faced cards, meld cards cannot be transformed or converted. Any instructions to do so are ignored."

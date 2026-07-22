@@ -1,0 +1,5 @@
+rule = "508.1h"
+section = 508
+title = "Declare Attackers Step — CR 508.1h"
+status = "skeleton"
+text = "If any of the chosen creatures require paying costs to attack, or if any optional costs to attack were chosen, the active player determines the total cost to attack. Costs may include paying mana, tapping permanents, sacrificing permanents, discarding cards, and so on. Once the total cost is determined, it becomes “locked in.” If effects would change the total cost after this time, ignore this change."

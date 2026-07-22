@@ -1,0 +1,5 @@
+rule = "613.1d"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.1d"
+status = "skeleton"
+text = "Layer 4: Type-changing effects are applied. These include effects that change an object’s card type, subtype, and/or supertype."

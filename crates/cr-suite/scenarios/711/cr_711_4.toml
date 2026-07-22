@@ -1,0 +1,5 @@
+rule = "711.4"
+section = 711
+title = "Leveler Cards — CR 711.4"
+status = "skeleton"
+text = "Any ability a leveler card has that isn’t preceded by a level symbol is treated normally. In particular, each leveler permanent has its level up ability (see rule 702.87) at all times; it may be activated regardless of how many level counters are on that permanent."

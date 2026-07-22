@@ -1,0 +1,5 @@
+rule = "109.2a"
+section = 109
+title = "Objects — CR 109.2a"
+status = "skeleton"
+text = "If a spell or ability uses a description of an object that includes the word “card” and the name of a zone, it means a card matching that description in the stated zone."

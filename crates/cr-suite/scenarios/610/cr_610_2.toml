@@ -1,0 +1,5 @@
+rule = "610.2"
+section = 610
+title = "One-Shot Effects — CR 610.2"
+status = "skeleton"
+text = "Some one-shot effects create a delayed triggered ability, which instructs a player to do something later in the game (usually at a specific time) rather than as the spell or ability that’s creating the one-shot effect resolves. See rule 603.7."

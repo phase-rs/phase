@@ -1,0 +1,5 @@
+rule = "903.10"
+section = 903
+title = "Commander — CR 903.10"
+status = "skeleton"
+text = "The Commander variant includes the following specification for winning and losing the game. All other rules for ending the game also apply. (See rule 104.)"

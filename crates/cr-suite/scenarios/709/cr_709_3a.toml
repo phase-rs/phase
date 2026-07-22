@@ -1,0 +1,5 @@
+rule = "709.3a"
+section = 709
+title = "Split Cards — CR 709.3a"
+status = "skeleton"
+text = "Only the chosen half is evaluated to see if it can be cast. Only that half is considered to be put onto the stack."

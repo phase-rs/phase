@@ -1,0 +1,5 @@
+rule = "701.28f"
+section = 701
+title = "Keyword Actions — CR 701.28f"
+status = "skeleton"
+text = "If a spell or ability states that a permanent can’t transform, that permanent also can’t convert."

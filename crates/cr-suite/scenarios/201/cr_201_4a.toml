@@ -1,0 +1,5 @@
+rule = "201.4a"
+section = 201
+title = "Name — CR 201.4a"
+status = "skeleton"
+text = "If a player is instructed to choose a card name with certain characteristics, the player must choose the name of a card whose Oracle text matches those characteristics. (See rule 108.1.)"

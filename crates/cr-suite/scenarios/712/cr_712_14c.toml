@@ -1,0 +1,5 @@
+rule = "712.14c"
+section = 712
+title = "Double-Faced Cards — CR 712.14c"
+status = "skeleton"
+text = "If a meld card is being melded with its counterpart, those cards enter the battlefield as a single permanent with their back faces up."

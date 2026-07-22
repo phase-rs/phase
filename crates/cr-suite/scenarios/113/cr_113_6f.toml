@@ -1,0 +1,5 @@
+rule = "113.6f"
+section = 113
+title = "Abilities — CR 113.6f"
+status = "skeleton"
+text = "An object’s ability that restricts or modifies what zones that particular object can be played or cast from functions everywhere, even outside the game."

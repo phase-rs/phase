@@ -1,0 +1,5 @@
+rule = "108.3b"
+section = 108
+title = "Cards — CR 108.3b"
+status = "skeleton"
+text = "Some spells and abilities allow a player to take cards they own from outside the game and bring them into the game. (See rule 400.11b.) If a card outside that game is involved in a Magic game, its owner is determined as described in rule 108.3. If a card outside that game is in the sideboard of a Magic game (see rule 100.4), its owner is considered to be the player who started the game with it in their sideboard. In all other cases, the owner of a card outside the game is its legal owner."

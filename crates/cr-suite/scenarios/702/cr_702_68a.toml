@@ -1,0 +1,5 @@
+rule = "702.68a"
+section = 702
+title = "Keyword Abilities — CR 702.68a"
+status = "skeleton"
+text = "Frenzy is a triggered ability. “Frenzy N” means “Whenever this creature attacks and isn’t blocked, it gets +N/+0 until end of turn.”"

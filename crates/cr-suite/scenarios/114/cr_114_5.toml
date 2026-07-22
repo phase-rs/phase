@@ -1,0 +1,5 @@
+rule = "114.5"
+section = 114
+title = "Emblems — CR 114.5"
+status = "skeleton"
+text = "An emblem is neither a card nor a permanent. Emblem isn’t a card type."

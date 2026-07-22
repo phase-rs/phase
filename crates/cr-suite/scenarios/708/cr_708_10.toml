@@ -1,0 +1,5 @@
+rule = "708.10"
+section = 708
+title = "Face-Down Spells and Permanents — CR 708.10"
+status = "skeleton"
+text = "If a face-down permanent becomes a copy of another permanent, its copiable values become the copiable values of that permanent, as modified by its face-down status. Its characteristics therefore remain the same: the characteristics listed by the ability or rules that allowed it to be turned face down. However, if it is turned face up, its copiable values become the values it copied from the other permanent. See rule 707.3."

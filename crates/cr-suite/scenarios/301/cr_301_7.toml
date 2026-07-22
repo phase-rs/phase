@@ -1,0 +1,5 @@
+rule = "301.7"
+section = 301
+title = "Artifacts — CR 301.7"
+status = "skeleton"
+text = "Some artifacts have the subtype “Vehicle.” Most Vehicles have a crew ability which allows them to become artifact creatures. See rule 702.122, “Crew.”"

@@ -1,0 +1,5 @@
+rule = "400.3"
+section = 400
+title = "General (Zones) — CR 400.3"
+status = "skeleton"
+text = "If an object would go to any library, graveyard, or hand other than its owner’s, it goes to its owner’s corresponding zone."

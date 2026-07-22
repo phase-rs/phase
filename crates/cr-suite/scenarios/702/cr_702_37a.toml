@@ -1,0 +1,5 @@
+rule = "702.37a"
+section = 702
+title = "Keyword Abilities — CR 702.37a"
+status = "skeleton"
+text = "Morph is a static ability that functions in any zone from which you could play the card it’s on, and the morph effect works any time the card is face down. “Morph [cost]” means “You may cast this card as a 2/2 face-down creature with no text, no name, no subtypes, and no mana cost by paying {3} rather than paying its mana cost.” (See rule 708, “Face-Down Spells and Permanents.”)"

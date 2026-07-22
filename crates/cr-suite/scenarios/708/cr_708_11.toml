@@ -1,0 +1,5 @@
+rule = "708.11"
+section = 708
+title = "Face-Down Spells and Permanents — CR 708.11"
+status = "skeleton"
+text = "If a face-down permanent would have an “As [this permanent] is turned face up . . .” ability after it’s turned face up, that ability is applied while that permanent is being turned face up, not afterward."

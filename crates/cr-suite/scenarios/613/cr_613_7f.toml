@@ -1,0 +1,5 @@
+rule = "613.7f"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.7f"
+status = "skeleton"
+text = "A permanent receives a new timestamp each time it turns face up or face down."

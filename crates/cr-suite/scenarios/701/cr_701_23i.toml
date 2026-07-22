@@ -1,0 +1,5 @@
+rule = "701.23i"
+section = 701
+title = "Keyword Actions — CR 701.23i"
+status = "skeleton"
+text = "If multiple players search at once, each of those players looks at the appropriate cards at the same time, then those players decide in APNAP order (see rule 101.4) which card to find."

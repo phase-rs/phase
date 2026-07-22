@@ -1,0 +1,5 @@
+rule = "119.2"
+section = 119
+title = "Life — CR 119.2"
+status = "skeleton"
+text = "Damage dealt to a player normally causes that player to lose that much life. See rule 120.3."

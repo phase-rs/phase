@@ -1,0 +1,35 @@
+rule = "119.1"
+section = 119
+title = "Life — CR 119.1"
+status = "executable"
+text = "Each player begins the game with a starting life total of 20."
+notes = "Default two-player scenario starts at 20/20."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[assertions]]
+kind = "player_life"
+player = 0
+life = 20
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = 20
+
+[[assertions]]
+kind = "game_not_over"
+
+[[assertions]]
+kind = "phase_is"
+phase = "PreCombatMain"

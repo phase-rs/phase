@@ -1,0 +1,5 @@
+rule = "121.5"
+section = 121
+title = "Drawing a Card — CR 121.5"
+status = "skeleton"
+text = "If an effect moves cards from a player’s library to that player’s hand without using the word “draw,” the player has not drawn those cards. This makes a difference for abilities that trigger on drawing cards and effects that replace card draws, as well as if the player’s library is empty."

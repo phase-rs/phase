@@ -1,0 +1,5 @@
+rule = "702.124d"
+section = 702
+title = "Keyword Abilities — CR 702.124d"
+status = "skeleton"
+text = "Except for determining the color identity of your commander, the two commanders function independently. When casting a commander with partner, ignore how many times your other commander has been cast (see rule 903.8). When determining whether a player has been dealt 21 or more combat damage by the same commander, consider damage from each of your two commanders separately (see rule 903.10a)."

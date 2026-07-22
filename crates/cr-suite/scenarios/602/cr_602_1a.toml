@@ -1,0 +1,5 @@
+rule = "602.1a"
+section = 602
+title = "Activating Activated Abilities — CR 602.1a"
+status = "skeleton"
+text = "The activation cost is everything before the colon (:). An ability’s activation cost must be paid by the player who is activating it."

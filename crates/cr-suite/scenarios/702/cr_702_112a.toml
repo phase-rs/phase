@@ -1,0 +1,5 @@
+rule = "702.112a"
+section = 702
+title = "Keyword Abilities — CR 702.112a"
+status = "skeleton"
+text = "Renown is a triggered ability. “Renown N” means “When this creature deals combat damage to a player, if it isn’t renowned, put N +1/+1 counters on it and it becomes renowned.”"

@@ -1,0 +1,5 @@
+rule = "106.3"
+section = 106
+title = "Mana — CR 106.3"
+status = "skeleton"
+text = "Mana is produced by the effects of mana abilities (see rule 605). It may also be produced by the effects of spells, as well as by the effects of abilities that aren’t mana abilities. A spell or ability that produces mana instructs a player to add that mana. If mana is produced by a spell, the source of that mana is that spell. If mana is produced by an ability, the source of that mana is the source of that ability (see rule 113.7)."

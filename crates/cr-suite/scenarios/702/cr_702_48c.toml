@@ -1,0 +1,5 @@
+rule = "702.48c"
+section = 702
+title = "Keyword Abilities — CR 702.48c"
+status = "skeleton"
+text = "Generic mana in the sacrificed permanent’s mana cost reduces generic mana in the spell’s total cost. Colored and colorless mana in the sacrificed permanent’s mana cost reduces mana of the same type in spell’s total cost, and any excess reduces that much generic mana in spell’s total cost. (See rule 118.7.)"

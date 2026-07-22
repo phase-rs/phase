@@ -1,0 +1,5 @@
+rule = "603.7g"
+section = 603
+title = "Handling Triggered Abilities — CR 603.7g"
+status = "skeleton"
+text = "If a static ability allows a player to take an action and creates a delayed triggered ability if that player does so, the source of that delayed triggered ability is the object with that static ability. The controller of that delayed triggered ability is the same as the controller of that object at the time the action was taken."

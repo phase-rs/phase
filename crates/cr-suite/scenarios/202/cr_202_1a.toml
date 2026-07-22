@@ -1,0 +1,5 @@
+rule = "202.1a"
+section = 202
+title = "Mana Cost and Color — CR 202.1a"
+status = "skeleton"
+text = "The mana cost of an object represents what a player must spend from their mana pool to cast that card. Unless an object’s mana cost includes Phyrexian mana symbols (see rule 107.4f), paying that mana cost requires matching the type of any colored or colorless mana symbols as well as paying the generic mana indicated in the cost."

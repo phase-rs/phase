@@ -1,0 +1,5 @@
+rule = "101.1"
+section = 101
+title = "The Magic Golden Rules — CR 101.1"
+status = "skeleton"
+text = "Whenever a card’s text directly contradicts these rules, the card takes precedence. The card overrides only the rule that applies to that specific situation. The only exception is that a player can concede the game at any time (see rule 104.3a)."

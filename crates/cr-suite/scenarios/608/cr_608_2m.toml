@@ -1,0 +1,5 @@
+rule = "608.2m"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.2m"
+status = "skeleton"
+text = "If an instant spell, sorcery spell, or ability that can legally resolve leaves the stack once it starts to resolve, it will continue to resolve fully."

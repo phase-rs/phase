@@ -1,0 +1,5 @@
+rule = "113.8"
+section = 113
+title = "Abilities — CR 113.8"
+status = "skeleton"
+text = "The controller of an activated ability on the stack is the player who activated it. The controller of a triggered ability on the stack (other than a delayed triggered ability) is the player who controlled the ability’s source when it triggered, or, if it had no controller, the player who owned the ability’s source when it triggered. To determine the controller of a delayed triggered ability, see rules 603.7d–f."

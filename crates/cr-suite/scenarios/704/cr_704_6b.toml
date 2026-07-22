@@ -1,0 +1,5 @@
+rule = "704.6b"
+section = 704
+title = "State-Based Actions — CR 704.6b"
+status = "skeleton"
+text = "In a Two-Headed Giant game, if a team has fifteen or more poison counters, that team loses the game. See rule 810, “Two-Headed Giant Variant.”"

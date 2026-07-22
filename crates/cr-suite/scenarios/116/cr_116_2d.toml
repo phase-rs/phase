@@ -1,0 +1,5 @@
+rule = "116.2d"
+section = 116
+title = "Special Actions — CR 116.2d"
+status = "skeleton"
+text = "Some effects from static abilities allow a player to take an action to ignore the effect from that ability for a duration. Doing so is a special action. A player can take such an action any time they have priority."

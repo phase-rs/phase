@@ -1,0 +1,5 @@
+rule = "104.4b"
+section = 104
+title = "Ending the Game — CR 104.4b"
+status = "skeleton"
+text = "If a game that’s not using the limited range of influence option (including a two-player game) somehow enters a “loop” of mandatory actions, repeating a sequence of events with no way to stop, the game is a draw. Loops that contain an optional action don’t result in a draw."

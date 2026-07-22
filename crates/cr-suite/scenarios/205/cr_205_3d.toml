@@ -1,0 +1,5 @@
+rule = "205.3d"
+section = 205
+title = "Type Line — CR 205.3d"
+status = "skeleton"
+text = "An object can’t gain a subtype that doesn’t correspond to one of that object’s types."

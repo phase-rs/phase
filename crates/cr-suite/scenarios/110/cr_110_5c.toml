@@ -1,0 +1,5 @@
+rule = "110.5c"
+section = 110
+title = "Permanents — CR 110.5c"
+status = "skeleton"
+text = "A permanent retains its status until a spell, ability, or turn-based action changes it, even if that status is not relevant to it."

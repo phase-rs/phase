@@ -1,0 +1,5 @@
+rule = "107.2"
+section = 107
+title = "Numbers and Symbols — CR 107.2"
+status = "skeleton"
+text = "If anything needs to use a number that can’t be determined, either as a result or in a calculation, it uses 0 instead."

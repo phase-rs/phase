@@ -1,0 +1,5 @@
+rule = "118.8c"
+section = 118
+title = "Costs — CR 118.8c"
+status = "skeleton"
+text = "If an effect instructs a player to cast a spell “if able,” and that spell has a mandatory additional cost that includes actions involving cards with a stated quality in a hidden zone, the player isn’t required to cast that spell, even if those cards are present in that zone."

@@ -1,0 +1,5 @@
+rule = "122.8"
+section = 122
+title = "Counters — CR 122.8"
+status = "skeleton"
+text = "If a triggered ability instructs a player to put one object’s counters on another object and that ability’s trigger condition or effect checks that the object with those counters left the battlefield, the player doesn’t move counters from one object to the other. Rather, the player puts the same number of each kind of counter the first object had onto the second object. If the ability specifies what kind(s) of counters to place, the player puts the same number of each of those kinds of counter the first object had onto the second object."

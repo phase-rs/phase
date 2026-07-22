@@ -1,0 +1,5 @@
+rule = "712.18"
+section = 712
+title = "Double-Faced Cards — CR 712.18"
+status = "skeleton"
+text = "When a double-faced permanent transforms or converts, it doesn’t become a new object. Any effects that applied to that permanent will continue to apply to it."

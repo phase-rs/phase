@@ -1,0 +1,5 @@
+rule = "701.7c"
+section = 701
+title = "Keyword Actions — CR 701.7c"
+status = "skeleton"
+text = "Previously, an effect that created tokens instructed a player to “put [those tokens] onto the battlefield.” Cards that were printed with that text have received errata in the Oracle card reference so they now “create” those tokens."

@@ -1,0 +1,5 @@
+rule = "707.2c"
+section = 707
+title = "Copying Objects — CR 707.2c"
+status = "skeleton"
+text = "If a static ability generates a continuous effect that’s a copy effect, the copiable values that effect grants are determined only at the time that effect first starts to apply."

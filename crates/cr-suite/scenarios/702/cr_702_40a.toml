@@ -1,0 +1,5 @@
+rule = "702.40a"
+section = 702
+title = "Keyword Abilities — CR 702.40a"
+status = "skeleton"
+text = "Storm is a triggered ability that functions on the stack. “Storm” means “When you cast this spell, copy it for each other spell that was cast before it this turn. If the spell has any targets, you may choose new targets for any of the copies.”"

@@ -1,0 +1,5 @@
+rule = "509.3c"
+section = 509
+title = "Declare Blockers Step — CR 509.3c"
+status = "skeleton"
+text = "An ability that reads “Whenever [a creature] becomes blocked, . . .” generally triggers only once each combat for that creature, even if it’s blocked by multiple creatures. It will trigger if that creature becomes blocked by at least one creature declared as a blocker. It will also trigger if that creature becomes blocked by an effect or by a creature that’s put onto the battlefield as a blocker, but only if the attacking creature was an unblocked creature at that time. (See rule 509.1h.)"

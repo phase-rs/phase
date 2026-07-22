@@ -1,0 +1,5 @@
+rule = "119.1d"
+section = 119
+title = "Life — CR 119.1d"
+status = "skeleton"
+text = "In a two-player Brawl game, each player’s starting life total is 25. In a multiplayer Brawl game, each player’s starting life total is 30. See rule 903.12, “Brawl Option.”"

@@ -1,0 +1,5 @@
+rule = "712.12"
+section = 712
+title = "Double-Faced Cards — CR 712.12"
+status = "skeleton"
+text = "A player playing a modal double-faced card or a copy of a modal double-faced card as a land chooses one of its faces that’s a land before putting it onto the battlefield. It enters the battlefield with that face up. See rule 305, “Lands.”"

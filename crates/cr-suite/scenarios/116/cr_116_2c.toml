@@ -1,0 +1,5 @@
+rule = "116.2c"
+section = 116
+title = "Special Actions — CR 116.2c"
+status = "skeleton"
+text = "Some effects allow a player to take an action at a later time, usually to end a continuous effect or to stop a delayed triggered ability from triggering. Doing so is a special action. A player can take such an action any time they have priority, unless that effect specifies another timing restriction, for as long as the effect allows it."

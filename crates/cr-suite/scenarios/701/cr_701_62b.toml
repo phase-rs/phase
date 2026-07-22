@@ -1,0 +1,5 @@
+rule = "701.62b"
+section = 701
+title = "Keyword Actions — CR 701.62b"
+status = "skeleton"
+text = "An ability that triggers whenever a player manifests dread triggers after the process described in rule 701.62a is complete, even if some or all of those actions were impossible."

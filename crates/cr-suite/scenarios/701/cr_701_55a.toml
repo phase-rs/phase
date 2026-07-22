@@ -1,0 +1,5 @@
+rule = "701.55a"
+section = 701
+title = "Keyword Actions — CR 701.55a"
+status = "skeleton"
+text = "“[A player] faces a villainous choice — [option A], or [option B]” means “[A player] chooses [option A] or [option B]. Then all actions in the chosen option are performed.”"

@@ -1,0 +1,5 @@
+rule = "500.9"
+section = 500
+title = "General (Turn Structure) — CR 500.9"
+status = "skeleton"
+text = "Some effects can add steps to a phase. They do this by adding the steps directly after a specified step or directly before a specified step. If multiple extra steps are created after the same step, the most recently created step will occur first."

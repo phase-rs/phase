@@ -1,0 +1,32 @@
+rule = "704.5f"
+section = 704
+title = "State-Based Actions — CR 704.5f"
+status = "executable"
+text = "If a creature has toughness 0 or less, it's put into its owner's graveyard. Regeneration can't replace this event."
+notes = "Creature created at 0 toughness dies on SBA check."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "zero_t"
+player = 0
+name = "Zero Toughness"
+power = 1
+toughness = 0
+
+[[steps]]
+action = "check_sbas"
+
+[[assertions]]
+kind = "creature_in_graveyard"
+creature = "zero_t"

@@ -1,0 +1,5 @@
+rule = "118.12a"
+section = 118
+title = "Costs — CR 118.12a"
+status = "skeleton"
+text = "Some spells, activated abilities, and triggered abilities read, “[Do something] unless [a player does something else].” This means the same thing as “[A player may do something else]. If [that player doesn’t], [do something].”"

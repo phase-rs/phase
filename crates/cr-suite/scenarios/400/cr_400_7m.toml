@@ -1,0 +1,5 @@
+rule = "400.7m"
+section = 400
+title = "General (Zones) — CR 400.7m"
+status = "skeleton"
+text = "Stickers on an object in a public zone are retained as it moves to another public zone (see rule 123.5). Any effects from stickers continue to apply to the new object it becomes in that zone."

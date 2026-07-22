@@ -1,0 +1,5 @@
+rule = "702.104a"
+section = 702
+title = "Keyword Abilities — CR 702.104a"
+status = "skeleton"
+text = "Tribute is a static ability that functions as the creature with tribute is entering the battlefield. “Tribute N” means “As this creature enters, choose an opponent. That player may put an additional N +1/+1 counters on it as it enters.”"

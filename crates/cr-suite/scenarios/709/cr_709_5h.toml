@@ -1,0 +1,5 @@
+rule = "709.5h"
+section = 709
+title = "Split Cards — CR 709.5h"
+status = "skeleton"
+text = "Some abilities trigger when a player unlocks a particular half of a permanent. These abilities trigger when that permanent is given the appropriate unlocked designation, regardless of whether it was given that designation while entering the battlefield or after entering the battlefield."

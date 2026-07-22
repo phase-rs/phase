@@ -1,0 +1,5 @@
+rule = "605.5a"
+section = 605
+title = "Mana Abilities — CR 605.5a"
+status = "skeleton"
+text = "An ability with a target is not a mana ability, even if it could put mana into a player’s mana pool when it resolves. The same is true for a triggered ability that could produce mana but triggers from an event other than activating a mana ability, or a triggered ability that triggers from activating a mana ability but couldn’t produce mana. These follow the normal rules for activated or triggered abilities, as appropriate."

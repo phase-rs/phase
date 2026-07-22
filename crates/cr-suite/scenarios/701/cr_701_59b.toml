@@ -1,0 +1,5 @@
+rule = "701.59b"
+section = 701
+title = "Keyword Actions — CR 701.59b"
+status = "skeleton"
+text = "If a player is given the choice to collect evidence but is unable to exile cards with total mana value N or greater from their graveyard (usually because there aren’t enough cards to do so) they can’t choose to collect evidence."

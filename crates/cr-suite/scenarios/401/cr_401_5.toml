@@ -1,0 +1,5 @@
+rule = "401.5"
+section = 401
+title = "Library — CR 401.5"
+status = "skeleton"
+text = "Some effects tell a player to play with the top card of their library revealed, or say that a player may look at the top card of their library. If the top card of the player’s library changes while a spell is being cast, the new top card won’t be revealed and can’t be looked at until the spell becomes cast (see rule 601.2i). The same is true with relation to an ability being activated. If the top card of the player’s library changes while a player is taking a special action (see rule 116, “Special Actions”), the new card won’t be revealed and can’t be looked at until the player has finished taking that special action."

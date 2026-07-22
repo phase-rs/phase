@@ -1,0 +1,5 @@
+rule = "702.172a"
+section = 702
+title = "Keyword Abilities — CR 702.172a"
+status = "skeleton"
+text = "Spree is a static ability found on some modal spells (see rule 700.2) that applies while the spell on the stack. Spree means “Choose one or more modes. As an additional cost to cast this spell, pay the costs associated with those modes.”"

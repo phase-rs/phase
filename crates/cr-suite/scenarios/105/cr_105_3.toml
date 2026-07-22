@@ -1,0 +1,5 @@
+rule = "105.3"
+section = 105
+title = "Colors — CR 105.3"
+status = "skeleton"
+text = "Effects may change an object’s color or give a color to a colorless object. If an effect gives an object a new color, the new color replaces all previous colors the object had (unless the effect said the object became that color “in addition” to its other colors). Effects may also make a colored object become colorless."

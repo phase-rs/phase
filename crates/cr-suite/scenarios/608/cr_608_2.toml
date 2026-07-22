@@ -1,0 +1,5 @@
+rule = "608.2"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.2"
+status = "skeleton"
+text = "If the object that’s resolving is an instant spell, a sorcery spell, or an ability, its resolution may involve several steps. The steps described in rules 608.2a and 608.2b are followed first. The steps described in rules 608.2c–m are then followed as appropriate, in no specific order. The steps described in rule 608.2n and 608.2p are followed last."

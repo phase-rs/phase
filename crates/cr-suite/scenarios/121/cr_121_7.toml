@@ -1,0 +1,5 @@
+rule = "121.7"
+section = 121
+title = "Drawing a Card — CR 121.7"
+status = "skeleton"
+text = "Some replacement effects and prevention effects result in one or more card draws. In such a case, if there are any parts of the original event that haven’t been replaced, those parts occur first, then the card draws happen one at a time."

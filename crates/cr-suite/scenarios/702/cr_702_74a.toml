@@ -1,0 +1,5 @@
+rule = "702.74a"
+section = 702
+title = "Keyword Abilities — CR 702.74a"
+status = "skeleton"
+text = "Evoke represents two abilities: a static ability that functions in any zone from which the card with evoke can be cast and a triggered ability that functions on the battlefield. “Evoke [cost]” means “You may cast this card by paying [cost] rather than paying its mana cost” and “When this permanent enters, if its evoke cost was paid, its controller sacrifices it.” Casting a spell for its evoke cost follows the rules for paying alternative costs in rules 601.2b and 601.2f–h."

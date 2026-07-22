@@ -1,0 +1,5 @@
+rule = "726.3"
+section = 726
+title = "Restarting the Game — CR 726.3"
+status = "skeleton"
+text = "Only one player can have the initiative at a time. As a player takes the initiative, the player who currently has the initiative ceases to have it."

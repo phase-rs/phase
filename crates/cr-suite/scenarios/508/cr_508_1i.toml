@@ -1,0 +1,5 @@
+rule = "508.1i"
+section = 508
+title = "Declare Attackers Step — CR 508.1i"
+status = "skeleton"
+text = "If any of the costs require mana, the active player then has a chance to activate mana abilities (see rule 605, “Mana Abilities”)."

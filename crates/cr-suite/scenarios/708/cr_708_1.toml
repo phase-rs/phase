@@ -1,0 +1,5 @@
+rule = "708.1"
+section = 708
+title = "Face-Down Spells and Permanents — CR 708.1"
+status = "skeleton"
+text = "Some cards allow spells and permanents to be face down."

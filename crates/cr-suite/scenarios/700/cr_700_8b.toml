@@ -1,0 +1,5 @@
+rule = "700.8b"
+section = 700
+title = "General (Additional Rules) — CR 700.8b"
+status = "skeleton"
+text = "If a creature has multiple creature types for which it could be the party member, it is counted as the party member for only one of those types. If there are different ways to count such a creature that results in different numbers of creatures in a player’s party, it is counted in such a way to get the highest result."

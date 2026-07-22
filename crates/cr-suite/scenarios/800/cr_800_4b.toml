@@ -1,0 +1,5 @@
+rule = "800.4b"
+section = 800
+title = "General (Multiplayer Rules) — CR 800.4b"
+status = "skeleton"
+text = "If an object would change to the control of a player who has left the game, it doesn’t. If a token would be created under the control of a player who has left the game, no token is created. If an object would be put onto the battlefield or onto the stack under the control of a player who has left the game, that object remains in its current zone. If a player would be controlled by a player who has left the game, they aren’t."

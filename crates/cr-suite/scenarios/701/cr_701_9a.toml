@@ -1,0 +1,5 @@
+rule = "701.9a"
+section = 701
+title = "Keyword Actions — CR 701.9a"
+status = "skeleton"
+text = "To discard a card, move it from its owner’s hand to that player’s graveyard."

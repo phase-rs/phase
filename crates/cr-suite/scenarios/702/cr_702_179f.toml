@@ -1,0 +1,5 @@
+rule = "702.179f"
+section = 702
+title = "Keyword Abilities — CR 702.179f"
+status = "skeleton"
+text = "Some effects refer to a player’s speed. If that player has no speed, their speed is 0 for the purpose of an effect that refers to speed."

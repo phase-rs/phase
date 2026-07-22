@@ -1,0 +1,5 @@
+rule = "702.140c"
+section = 702
+title = "Keyword Abilities — CR 702.140c"
+status = "skeleton"
+text = "As a mutating creature spell resolves, if its target is legal, it doesn’t enter the battlefield. Rather, it merges with the target creature and becomes one object represented by more than one card or token (see rule 730, “Merging with Permanents”). The spell’s controller chooses whether the spell is put on top of the creature or on the bottom. The resulting permanent is a mutated permanent."

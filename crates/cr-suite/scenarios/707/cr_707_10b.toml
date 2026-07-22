@@ -1,0 +1,5 @@
+rule = "707.10b"
+section = 707
+title = "Copying Objects — CR 707.10b"
+status = "skeleton"
+text = "A copy of an ability has the same source as the original ability. If the ability refers to its source by name, the copy refers to that same object and not to any other object with the same name. The copy is considered to be the same ability by effects that count how many times that ability has resolved during the turn."

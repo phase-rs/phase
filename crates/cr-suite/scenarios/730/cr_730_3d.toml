@@ -1,0 +1,5 @@
+rule = "730.3d"
+section = 730
+title = "Miscellaneous — CR 730.3d"
+status = "skeleton"
+text = "If multiple replacement effects could be applied to the event of a merged permanent leaving the battlefield or being put into the new zone, applying one of those replacement effects to the object applies it to all components of the object. If the merged permanent is a commander, it may be exempt from this rule; see rules 903.9b–c."

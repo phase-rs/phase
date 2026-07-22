@@ -1,0 +1,5 @@
+rule = "701.7a"
+section = 701
+title = "Keyword Actions — CR 701.7a"
+status = "skeleton"
+text = "To create one or more tokens with certain characteristics, put the specified number of tokens with the specified characteristics onto the battlefield."

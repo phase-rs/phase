@@ -1,0 +1,5 @@
+rule = "720.2a"
+section = 720
+title = "Taking Shortcuts — CR 720.2a"
+status = "skeleton"
+text = "If an effect refers to a card, spell, or permanent that “has an Omen,” it refers to an object that has the alternative characteristics of an Omen spell, even if the object currently doesn’t use them."

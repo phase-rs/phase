@@ -1,0 +1,5 @@
+rule = "614.3"
+section = 614
+title = "Replacement Effects — CR 614.3"
+status = "skeleton"
+text = "There are no special restrictions on casting a spell or activating an ability that generates a replacement effect. Such effects last until they’re used up or their duration has expired."

@@ -1,0 +1,5 @@
+rule = "610.3b"
+section = 610
+title = "One-Shot Effects — CR 610.3b"
+status = "skeleton"
+text = "If a resolving triggered ability creates the initial one-shot effect that causes the object to change zones, and the specified event has already occurred before that one-shot effect would occur but after that ability triggered, the object doesn’t move."

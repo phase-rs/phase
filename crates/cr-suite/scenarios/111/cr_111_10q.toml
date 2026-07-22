@@ -1,0 +1,5 @@
+rule = "111.10q"
+section = 111
+title = "Tokens — CR 111.10q"
+status = "skeleton"
+text = "A Wicked Role token is a colorless Aura Role enchantment token named Wicked with enchant creature, “Enchanted creature gets +1/+1,” and “When this token is put into a graveyard from the battlefield, each opponent loses 1 life.”"

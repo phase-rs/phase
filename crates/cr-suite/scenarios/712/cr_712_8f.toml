@@ -1,0 +1,5 @@
+rule = "712.8f"
+section = 712
+title = "Double-Faced Cards — CR 712.8f"
+status = "skeleton"
+text = "While a modal double-faced spell is on the stack or a modal double-faced permanent is on the battlefield, it has only the characteristics of the face that’s up."

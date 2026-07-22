@@ -1,0 +1,5 @@
+rule = "703.4h"
+section = 703
+title = "Turn-Based Actions — CR 703.4h"
+status = "skeleton"
+text = "Immediately after the beginning of combat step begins, if the game being played is a multiplayer game in which the active player’s opponents don’t all automatically become defending players, the active player chooses one of their opponents. That player becomes the defending player. See rule 507.1."

@@ -1,0 +1,5 @@
+rule = "204.2"
+section = 204
+title = "Mana Value — CR 204.2"
+status = "skeleton"
+text = "An object with a color indicator is each color denoted by that color indicator."

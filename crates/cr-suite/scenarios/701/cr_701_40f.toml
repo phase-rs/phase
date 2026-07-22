@@ -1,0 +1,5 @@
+rule = "701.40f"
+section = 701
+title = "Keyword Actions — CR 701.40f"
+status = "skeleton"
+text = "If an effect instructs a player to manifest a card and a rule or effect prohibits the face-down object from entering the battlefield, that card isn’t manifested. Its characteristics remain unmodified and it remains in its previous zone. If it was face up, it remains face up."

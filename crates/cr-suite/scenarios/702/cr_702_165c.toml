@@ -1,0 +1,5 @@
+rule = "702.165c"
+section = 702
+title = "Keyword Abilities — CR 702.165c"
+status = "skeleton"
+text = "Only abilities printed on the object with backup are granted by its backup ability. Any abilities gained by a permanent, whether due to a copy effect, an effect that grants an ability to a permanent, or an effect that creates a token with certain abilities, are not granted by a backup ability."

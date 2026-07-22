@@ -1,0 +1,5 @@
+rule = "510.2"
+section = 510
+title = "Combat Damage Step — CR 510.2"
+status = "skeleton"
+text = "Second, all combat damage that’s been assigned is dealt simultaneously. This turn-based action doesn’t use the stack. No player has the chance to cast spells or activate abilities between the time combat damage is assigned and the time it’s dealt."

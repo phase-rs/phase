@@ -1,0 +1,5 @@
+rule = "603.7b"
+section = 603
+title = "Handling Triggered Abilities — CR 603.7b"
+status = "skeleton"
+text = "A delayed triggered ability will trigger only once—the next time its trigger event occurs—unless it has a stated duration, such as “this turn.” If its trigger event occurs more than once simultaneously and the ability doesn’t have a stated duration, the controller of the delayed triggered ability chooses which event causes the ability to trigger."

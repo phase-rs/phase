@@ -1,0 +1,5 @@
+rule = "609.7c"
+section = 609
+title = "Effects — CR 609.7c"
+status = "skeleton"
+text = "Some effects from static abilities prevent or replace damage from sources with certain properties. For these effects, the prevention or replacement applies to sources that are permanents with that property and to any sources that aren’t on the battlefield that have that property."

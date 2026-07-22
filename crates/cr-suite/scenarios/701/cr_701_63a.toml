@@ -1,0 +1,5 @@
+rule = "701.63a"
+section = 701
+title = "Keyword Actions — CR 701.63a"
+status = "skeleton"
+text = "Certain abilities instruct a permanent to endure N. To do so, that permanent’s controller creates an N/N white Spirit creature token unless they put N +1/+1 counters on that permanent."

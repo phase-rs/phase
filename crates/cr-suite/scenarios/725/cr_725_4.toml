@@ -1,0 +1,5 @@
+rule = "725.4"
+section = 725
+title = "The Ring Tempts You — CR 725.4"
+status = "skeleton"
+text = "If the monarch leaves the game, the active player becomes the monarch at the same time as that player leaves the game. If the active player is leaving the game or if there is no active player, the next player in turn order who can become the monarch becomes the monarch. If no player still in the game can become the monarch, the game continues with no monarch."

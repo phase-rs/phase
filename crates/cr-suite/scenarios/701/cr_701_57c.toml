@@ -1,0 +1,5 @@
+rule = "701.57c"
+section = 701
+title = "Keyword Actions — CR 701.57c"
+status = "skeleton"
+text = "If the final card exiled during the process described in rule 701.57a has mana value N or less, it is the “discovered card,” regardless of whether it was cast or put into a player’s hand."

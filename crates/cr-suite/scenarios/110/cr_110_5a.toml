@@ -1,0 +1,5 @@
+rule = "110.5a"
+section = 110
+title = "Permanents — CR 110.5a"
+status = "skeleton"
+text = "Status is not a characteristic, though it may affect a permanent’s characteristics."

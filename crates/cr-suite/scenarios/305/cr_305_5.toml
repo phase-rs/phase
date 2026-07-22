@@ -1,0 +1,5 @@
+rule = "305.5"
+section = 305
+title = "Lands — CR 305.5"
+status = "skeleton"
+text = "Land subtypes are always a single word and are listed after a long dash. Land subtypes are also called land types. Lands may have multiple subtypes. See rule 205.3i for the complete list of land types."

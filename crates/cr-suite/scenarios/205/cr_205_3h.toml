@@ -1,0 +1,5 @@
+rule = "205.3h"
+section = 205
+title = "Type Line — CR 205.3h"
+status = "skeleton"
+text = "Enchantments have their own unique set of subtypes; these subtypes are called enchantment types. The enchantment types are Aura (see rule 303.4), Background, Cartouche, Case (see rule 719), Class (see rule 716), Curse, Role (see rule 303.7), Room, Rune, Saga (see rule 714), Shard, and Shrine."

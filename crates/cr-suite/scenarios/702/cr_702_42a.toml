@@ -1,0 +1,5 @@
+rule = "702.42a"
+section = 702
+title = "Keyword Abilities — CR 702.42a"
+status = "skeleton"
+text = "Entwine is a static ability of modal spells (see rule 700.2) that functions while the spell is on the stack. “Entwine [cost]” means “You may choose all modes of this spell instead of just the number specified. If you do, you pay an additional [cost].” Using the entwine ability follows the rules for choosing modes and paying additional costs in rules 601.2b and 601.2f–h."

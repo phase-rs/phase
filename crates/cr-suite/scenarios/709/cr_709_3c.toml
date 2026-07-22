@@ -1,0 +1,5 @@
+rule = "709.3c"
+section = 709
+title = "Split Cards — CR 709.3c"
+status = "skeleton"
+text = "An effect may create a copy of a split card and allow a player to cast the copy. That copy retains the characteristics of the two halves separated into the same two halves as the original card. (See rule 707.12.)"

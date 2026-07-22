@@ -1,0 +1,5 @@
+rule = "601.3e"
+section = 601
+title = "Casting Spells — CR 601.3e"
+status = "skeleton"
+text = "Some rules and effects state that an alternative set of characteristics or a subset of characteristics are considered to determine if a card or copy of a card is legal to cast. These alternative characteristics replace the object’s characteristics for this determination. Continuous effects that would apply to that object once it has those characteristics are also considered."

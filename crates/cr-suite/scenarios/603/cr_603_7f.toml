@@ -1,0 +1,5 @@
+rule = "603.7f"
+section = 603
+title = "Handling Triggered Abilities — CR 603.7f"
+status = "skeleton"
+text = "If a static ability generates a replacement effect which causes a delayed triggered ability to be created, the source of that delayed triggered ability is the object with that static ability. The controller of that delayed triggered ability is the same as the controller of that object at the time the replacement effect was applied."

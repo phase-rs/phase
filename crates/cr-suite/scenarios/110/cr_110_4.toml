@@ -1,0 +1,5 @@
+rule = "110.4"
+section = 110
+title = "Permanents — CR 110.4"
+status = "skeleton"
+text = "There are six permanent types: artifact, battle, creature, enchantment, land, and planeswalker. Instant and sorcery cards can’t enter the battlefield and thus can’t be permanents. Some kindred cards can enter the battlefield and some can’t, depending on their other card types. See section 3, “Card Types.”"

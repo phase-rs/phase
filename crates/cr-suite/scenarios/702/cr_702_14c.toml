@@ -1,0 +1,5 @@
+rule = "702.14c"
+section = 702
+title = "Keyword Abilities — CR 702.14c"
+status = "skeleton"
+text = "A creature with landwalk can’t be blocked as long as the defending player controls at least one land with the specified land type (as in “islandwalk”), with the specified type or supertype (as in “artifact landwalk”), without the specified type or supertype (as in “nonbasic landwalk”), or with both the specified type or supertype and the specified subtype (as in “snow swampwalk”). (See rule 509, “Declare Blockers Step.”)"

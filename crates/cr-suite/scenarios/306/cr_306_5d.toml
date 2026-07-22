@@ -1,0 +1,5 @@
+rule = "306.5d"
+section = 306
+title = "Planeswalkers — CR 306.5d"
+status = "skeleton"
+text = "Each planeswalker has a number of loyalty abilities, which are activated abilities with loyalty symbols in their costs. Loyalty abilities follow special rules: A player may activate a loyalty ability of a permanent they control any time they have priority and the stack is empty during a main phase of their turn, but only if none of that permanent’s loyalty abilities have been activated that turn. See rule 606, “Loyalty Abilities.”"

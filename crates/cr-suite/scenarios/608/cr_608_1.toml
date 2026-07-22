@@ -1,0 +1,5 @@
+rule = "608.1"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.1"
+status = "skeleton"
+text = "Each time all players pass in succession, the spell or ability on top of the stack resolves. (See rule 609, “Effects.”)"

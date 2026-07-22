@@ -1,0 +1,5 @@
+rule = "702.23a"
+section = 702
+title = "Keyword Abilities — CR 702.23a"
+status = "skeleton"
+text = "Rampage is a triggered ability. “Rampage N” means “Whenever this creature becomes blocked, it gets +N/+N until end of turn for each creature blocking it beyond the first.” (See rule 509, “Declare Blockers Step.”)"

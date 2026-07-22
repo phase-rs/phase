@@ -1,0 +1,5 @@
+rule = "701.10g"
+section = 701
+title = "Keyword Actions — CR 701.10g"
+status = "skeleton"
+text = "To double an amount of damage a source would deal, that source instead deals twice that much damage. This is a replacement effect."

@@ -1,0 +1,5 @@
+rule = "712.11b"
+section = 712
+title = "Double-Faced Cards — CR 712.11b"
+status = "skeleton"
+text = "A player casting a modal double-faced card or a copy of a modal double-faced card as a spell chooses which face they are casting before putting it onto the stack."

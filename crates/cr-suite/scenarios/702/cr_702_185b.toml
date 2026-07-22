@@ -1,0 +1,5 @@
+rule = "702.185b"
+section = 702
+title = "Keyword Abilities — CR 702.185b"
+status = "skeleton"
+text = "Some effects refer to “warped” cards in exile. A warped card in exile is one that was exiled by the delayed triggered ability created by a warp ability."

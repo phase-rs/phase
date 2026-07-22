@@ -1,0 +1,5 @@
+rule = "405.3"
+section = 405
+title = "Stack — CR 405.3"
+status = "skeleton"
+text = "If an effect puts two or more objects on the stack at the same time, those controlled by the active player are put on lowest, followed by each other player’s objects in APNAP order (see rule 101.4). If a player controls more than one of these objects, that player chooses their relative order on the stack."

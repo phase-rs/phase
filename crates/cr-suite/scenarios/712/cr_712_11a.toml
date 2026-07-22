@@ -1,0 +1,5 @@
+rule = "712.11a"
+section = 712
+title = "Double-Faced Cards — CR 712.11a"
+status = "skeleton"
+text = "If a double-faced card or a copy of a double-faced card is cast as a spell “transformed” or “converted,” it’s put on the stack with its back face up."

@@ -1,0 +1,25 @@
+rule = "704.5a"
+section = 704
+title = "State-Based Actions — CR 704.5a"
+status = "executable"
+text = "If a player has 0 or less life, that player loses the game."
+notes = "Executable contract: starting at 0 life, SBA check ends the game."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 0
+
+[[steps]]
+action = "check_sbas"
+
+[[assertions]]
+kind = "game_over"
+winner = 0

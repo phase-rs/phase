@@ -1,0 +1,5 @@
+rule = "117.1"
+section = 117
+title = "Timing and Priority — CR 117.1"
+status = "skeleton"
+text = "Unless a spell or ability is instructing a player to take an action, which player can take actions at any given time is determined by a system of priority. The player with priority may cast spells, activate abilities, and take special actions."

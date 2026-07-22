@@ -1,0 +1,5 @@
+rule = "702.44a"
+section = 702
+title = "Keyword Abilities — CR 702.44a"
+status = "skeleton"
+text = "Sunburst is a static ability that functions as an object is entering the battlefield. “Sunburst” means “If this object is entering as a creature, ignoring any type-changing effects that would affect it, it enters with a +1/+1 counter on it for each color of mana spent to cast it. Otherwise, it enters with a charge counter on it for each color of mana spent to cast it.”"

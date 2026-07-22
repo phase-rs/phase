@@ -1,0 +1,5 @@
+rule = "205.4f"
+section = 205
+title = "Type Line — CR 205.4f"
+status = "skeleton"
+text = "Any permanent with the supertype “world” is subject to the state-based action for world permanents, also called the “world rule” (see rule 704.5k)."

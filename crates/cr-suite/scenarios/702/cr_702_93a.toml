@@ -1,0 +1,5 @@
+rule = "702.93a"
+section = 702
+title = "Keyword Abilities — CR 702.93a"
+status = "skeleton"
+text = "Undying is a triggered ability. “Undying” means “When this permanent is put into a graveyard from the battlefield, if it had no +1/+1 counters on it, return it to the battlefield under its owner’s control with a +1/+1 counter on it.”"

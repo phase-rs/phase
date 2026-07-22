@@ -1,0 +1,5 @@
+rule = "707.10c"
+section = 707
+title = "Copying Objects — CR 707.10c"
+status = "skeleton"
+text = "Some effects copy a spell or ability and state that its controller may choose new targets for the copy. The player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal. Once the player has decided what the copy’s targets will be, the copy is put onto the stack with those targets."

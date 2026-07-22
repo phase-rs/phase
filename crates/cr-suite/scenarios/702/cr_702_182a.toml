@@ -1,0 +1,5 @@
+rule = "702.182a"
+section = 702
+title = "Keyword Abilities — CR 702.182a"
+status = "skeleton"
+text = "Job select is a triggered ability. “Job select” means “When this Equipment enters, create a 1/1 colorless Hero creature token, then attach this Equipment to it.”"

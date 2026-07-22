@@ -1,0 +1,5 @@
+rule = "508.1b"
+section = 508
+title = "Declare Attackers Step — CR 508.1b"
+status = "skeleton"
+text = "If the defending player controls any planeswalkers, is the protector of any battles, or the game allows the active player to attack multiple other players, the active player announces which player, planeswalker, or battle each of the chosen creatures is attacking."

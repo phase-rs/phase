@@ -1,0 +1,5 @@
+rule = "701.20d"
+section = 701
+title = "Keyword Actions — CR 701.20d"
+status = "skeleton"
+text = "If cards in a player’s library are shuffled or otherwise reordered, any revealed cards that are reordered stop being revealed and become new objects."

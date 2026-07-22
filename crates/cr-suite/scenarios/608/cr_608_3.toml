@@ -1,0 +1,5 @@
+rule = "608.3"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.3"
+status = "skeleton"
+text = "If the object that’s resolving is a permanent spell, its resolution may involve several steps. The instructions in rules 608.3a and b are always performed first. Then one of the steps in rule 608.3c–e is performed, if appropriate."

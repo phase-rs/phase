@@ -1,0 +1,5 @@
+rule = "602.1b"
+section = 602
+title = "Activating Activated Abilities — CR 602.1b"
+status = "skeleton"
+text = "Some text after the colon of an activated ability states instructions that must be followed while activating that ability. Such text may state which players can activate that ability, may restrict when a player can activate the ability, or may define some aspect of the activation cost. This text is not part of the ability’s effect. It functions at all times. If an activated ability has any activation instructions, they appear last, after the ability’s effect."

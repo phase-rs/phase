@@ -1,0 +1,5 @@
+rule = "502.2"
+section = 502
+title = "Untap Step — CR 502.2"
+status = "skeleton"
+text = "Second, if it’s day and the previous turn’s active player didn’t cast any spells during that turn, it becomes night. If it’s night and the previous turn’s active player cast two or more spells during that turn, it becomes day. If it’s neither day nor night, this check doesn’t happen and it remains neither. This turn-based action doesn’t use the stack. See rule 731, “Day and Night.”"

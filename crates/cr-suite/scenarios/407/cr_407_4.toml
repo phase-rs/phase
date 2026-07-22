@@ -1,0 +1,5 @@
+rule = "407.4"
+section = 407
+title = "Ante — CR 407.4"
+status = "skeleton"
+text = "To ante an object is to put that object into the ante zone from whichever zone it’s currently in. The owner of an object is the only player who can ante that object."

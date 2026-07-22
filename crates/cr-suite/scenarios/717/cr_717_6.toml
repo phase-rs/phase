@@ -1,0 +1,5 @@
+rule = "717.6"
+section = 717
+title = "Attraction Cards — CR 717.6"
+status = "skeleton"
+text = "If a card with an Astrotorium card back would be put into a zone other than the battlefield, exile, or the command zone from anywhere, instead its owner puts it into the command zone. This replacement effect may apply more than once to the same event. This is an exception to rule 614.5."

@@ -1,0 +1,5 @@
+rule = "702.44b"
+section = 702
+title = "Keyword Abilities — CR 702.44b"
+status = "skeleton"
+text = "Sunburst adds counters only if the object with sunburst is entering the battlefield from the stack as a resolving spell and only if one or more colored mana was spent on its costs, including additional or alternative costs."

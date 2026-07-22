@@ -1,0 +1,5 @@
+rule = "205.3e"
+section = 205
+title = "Type Line — CR 205.3e"
+status = "skeleton"
+text = "If an effect instructs a player to choose a subtype, that player must choose one, and only one, existing subtype, and the subtype must be for the appropriate card type. For example, the player can’t choose a land type if an instruction requires choosing a creature type."

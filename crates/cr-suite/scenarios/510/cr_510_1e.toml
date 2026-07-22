@@ -1,0 +1,5 @@
+rule = "510.1e"
+section = 510
+title = "Combat Damage Step — CR 510.1e"
+status = "skeleton"
+text = "Once a player has assigned combat damage from each attacking or blocking creature they control, the total damage assignment (not solely the damage assignment of any individual attacking or blocking creature) is checked to see if it complies with the above rules. If it doesn’t, the combat damage assignment is illegal; the game returns to the moment before that player began to assign combat damage. (See rule 733, “Handling Illegal Actions.”)"

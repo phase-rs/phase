@@ -1,0 +1,5 @@
+rule = "701.12c"
+section = 701
+title = "Keyword Actions — CR 701.12c"
+status = "skeleton"
+text = "When life totals are exchanged, each player gains or loses the amount of life necessary to equal the other player’s previous life total. Replacement effects may modify these gains and losses, and triggered abilities may trigger on them. A player who can’t gain life can’t be given a higher life total this way, and a player who can’t lose life can’t be given a lower life total this way (see rules 119.7–8)."

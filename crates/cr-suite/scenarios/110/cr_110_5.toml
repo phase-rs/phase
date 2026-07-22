@@ -1,0 +1,5 @@
+rule = "110.5"
+section = 110
+title = "Permanents — CR 110.5"
+status = "skeleton"
+text = "A permanent’s status is its physical state. There are four status categories, each of which has two possible values: tapped/untapped, flipped/unflipped, face up/face down, and phased in/phased out. Each permanent always has one of these values for each of these categories."

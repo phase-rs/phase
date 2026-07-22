@@ -1,0 +1,5 @@
+rule = "107.4c"
+section = 107
+title = "Numbers and Symbols — CR 107.4c"
+status = "skeleton"
+text = "The colorless mana symbol {C} is used to represent one colorless mana, and also to represent a cost that can be paid only with one colorless mana."

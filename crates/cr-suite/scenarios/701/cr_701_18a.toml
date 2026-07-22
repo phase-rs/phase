@@ -1,0 +1,5 @@
+rule = "701.18a"
+section = 701
+title = "Keyword Actions — CR 701.18a"
+status = "skeleton"
+text = "To play a land means to put it onto the battlefield from the zone it’s in (usually the hand). A player may play a land if they have priority, it’s the main phase of their turn, the stack is empty, and they haven’t played a land this turn. Playing a land is a special action (see rule 116), so it doesn’t use the stack; it simply happens. Putting a land onto the battlefield as the result of a spell or ability isn’t the same as playing a land. See rule 305, “Lands.”"

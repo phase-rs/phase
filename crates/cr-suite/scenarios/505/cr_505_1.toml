@@ -1,0 +1,22 @@
+rule = "505.1"
+section = 505
+title = "Main Phase — CR 505.1"
+status = "executable"
+text = "There are two main phases in a turn. In each turn, the first main phase (also called the precombat main phase) and the second main phase (also called the postcombat main phase) are separated by the combat phase."
+notes = "Scenario can start at PreCombatMain."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[assertions]]
+kind = "phase_is"
+phase = "PreCombatMain"

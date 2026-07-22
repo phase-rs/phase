@@ -1,0 +1,5 @@
+rule = "107.4b"
+section = 107
+title = "Numbers and Symbols — CR 107.4b"
+status = "skeleton"
+text = "Numerical symbols (such as {1}) and variable symbols (such as {X}) represent generic mana in costs. Generic mana in costs can be paid with any type of mana. For more information about {X}, see rule 107.3."

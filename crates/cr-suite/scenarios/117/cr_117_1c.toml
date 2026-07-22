@@ -1,0 +1,5 @@
+rule = "117.1c"
+section = 117
+title = "Timing and Priority — CR 117.1c"
+status = "skeleton"
+text = "A player may take some special actions any time they have priority. A player may take other special actions during their main phase any time they have priority and the stack is empty. See rule 116, “Special Actions.”"

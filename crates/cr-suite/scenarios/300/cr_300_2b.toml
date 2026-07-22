@@ -1,0 +1,5 @@
+rule = "300.2b"
+section = 300
+title = "General (Card Types) — CR 300.2b"
+status = "skeleton"
+text = "Each kindred card has another card type. Casting and resolving a kindred card follow the rules for casting and resolving a card of the other card type."

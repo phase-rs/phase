@@ -1,0 +1,5 @@
+rule = "615.12a"
+section = 615
+title = "Prevention Effects — CR 615.12a"
+status = "skeleton"
+text = "A prevention effect is applied to any particular unpreventable damage event just once. It won’t invoke itself repeatedly trying to prevent that damage."

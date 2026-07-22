@@ -1,0 +1,5 @@
+rule = "502.2a"
+section = 502
+title = "Untap Step — CR 502.2a"
+status = "skeleton"
+text = "Multiplayer games using the shared team turns option use a modified rule. If it’s day and no player on the previous turn’s active team cast a spell during that turn, it becomes night. If it’s night and any player on the previous turn’s active team cast two or more spells during the previous turn, it becomes day. If it’s neither day nor night, this check doesn’t happen and it remains neither. This turn-based action doesn’t use the stack."

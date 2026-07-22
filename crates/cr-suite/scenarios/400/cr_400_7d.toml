@@ -1,0 +1,5 @@
+rule = "400.7d"
+section = 400
+title = "General (Zones) — CR 400.7d"
+status = "skeleton"
+text = "An ability of a permanent can reference information about the spell that became that permanent as it resolved, including what costs were paid to cast that spell or what mana was spent to pay those costs."

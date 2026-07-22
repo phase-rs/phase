@@ -1,0 +1,5 @@
+rule = "105.4"
+section = 105
+title = "Colors — CR 105.4"
+status = "skeleton"
+text = "If a player is asked to choose a color, they must choose one of the five colors. “Multicolored” is not a color. Neither is “colorless.”"

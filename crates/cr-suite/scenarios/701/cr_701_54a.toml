@@ -1,0 +1,5 @@
+rule = "701.54a"
+section = 701
+title = "Keyword Actions — CR 701.54a"
+status = "skeleton"
+text = "Certain spells and abilities have the text “the Ring tempts you.” Each time the Ring tempts you, choose a creature you control. That creature becomes your Ring-bearer until another creature becomes your Ring-bearer or another player gains control of it."

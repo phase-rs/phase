@@ -1,0 +1,5 @@
+rule = "118.7"
+section = 118
+title = "Costs — CR 118.7"
+status = "skeleton"
+text = "What a player actually needs to do to pay a cost may be changed or reduced by effects. If the mana component of a cost is reduced to nothing by cost reduction effects, it’s considered to be {0}. Paying a cost changed or reduced by an effect counts as paying the original cost."

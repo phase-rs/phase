@@ -1,0 +1,5 @@
+rule = "122.1a"
+section = 122
+title = "Counters — CR 122.1a"
+status = "skeleton"
+text = "A +X/+Y counter on a creature or on a creature card in a zone other than the battlefield, where X and Y are numbers, adds X to that object’s power and Y to that object’s toughness. Similarly, -X/-Y counters subtract from power and toughness. See rule 613.4c."

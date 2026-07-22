@@ -1,0 +1,5 @@
+rule = "704.6d"
+section = 704
+title = "State-Based Actions — CR 704.6d"
+status = "skeleton"
+text = "In a Commander game, if a commander is in a graveyard or in exile and that object was put into that zone since the last time state-based actions were checked, its owner may put it into the command zone. See rule 903, “Commander.”"

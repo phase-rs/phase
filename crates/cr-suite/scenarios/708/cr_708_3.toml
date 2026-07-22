@@ -1,0 +1,5 @@
+rule = "708.3"
+section = 708
+title = "Face-Down Spells and Permanents — CR 708.3"
+status = "skeleton"
+text = "Objects that are put onto the battlefield face down are turned face down before they enter the battlefield, so the permanent’s enters-the-battlefield abilities won’t trigger (if triggered) or have any effect (if static)."

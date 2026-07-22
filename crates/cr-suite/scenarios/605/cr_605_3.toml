@@ -1,0 +1,5 @@
+rule = "605.3"
+section = 605
+title = "Mana Abilities — CR 605.3"
+status = "skeleton"
+text = "Activating an activated mana ability follows the rules for activating any other activated ability (see rule 602.2), with the following exceptions:"

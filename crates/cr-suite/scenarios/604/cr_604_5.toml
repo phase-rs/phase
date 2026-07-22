@@ -1,0 +1,5 @@
+rule = "604.5"
+section = 604
+title = "Handling Static Abilities — CR 604.5"
+status = "skeleton"
+text = "Some static abilities apply while a spell is on the stack. These are often abilities that refer to countering the spell. Also, abilities that say “As an additional cost to cast . . . ,” “You may pay [cost] rather than pay [this object]’s mana cost,” and “You may cast [this object] without paying its mana cost” work while a spell is on the stack."

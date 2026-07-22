@@ -1,0 +1,5 @@
+rule = "613.4c"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.4c"
+status = "skeleton"
+text = "Layer 7c: Effects and counters that modify power and/or toughness (but don’t set power and/or toughness to a specific number or value) are applied."

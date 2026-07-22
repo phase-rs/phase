@@ -1,0 +1,5 @@
+rule = "400.7k"
+section = 400
+title = "General (Zones) — CR 400.7k"
+status = "skeleton"
+text = "After resolving a madness triggered ability (see rule 702.35), if the exiled card wasn’t cast and was moved to a public zone, effects referencing the discarded card can find that object."

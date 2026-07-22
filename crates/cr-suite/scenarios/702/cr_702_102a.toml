@@ -1,0 +1,5 @@
+rule = "702.102a"
+section = 702
+title = "Keyword Abilities — CR 702.102a"
+status = "skeleton"
+text = "Fuse is a static ability found on some split cards (see rule 709, “Split Cards”) that applies while the card with fuse is in a player’s hand. If a player casts a split card with fuse from their hand, the player may choose to cast both halves of that split card rather than choose one half. This choice is made before putting the split card with fuse onto the stack. The resulting spell is a fused split spell."

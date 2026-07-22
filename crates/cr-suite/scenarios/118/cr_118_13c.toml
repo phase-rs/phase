@@ -1,0 +1,5 @@
+rule = "118.13c"
+section = 118
+title = "Costs — CR 118.13c"
+status = "skeleton"
+text = "If the cost associated with a special action contains a mana symbol that can be paid in multiple ways, the player taking the special action chooses how to pay for that symbol immediately before they pay that cost."

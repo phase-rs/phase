@@ -1,0 +1,5 @@
+rule = "701.38d"
+section = 701
+title = "Keyword Actions — CR 701.38d"
+status = "skeleton"
+text = "If an effect gives a player multiple votes, those votes all happen at the same time the player would otherwise have voted."

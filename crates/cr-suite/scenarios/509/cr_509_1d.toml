@@ -1,0 +1,5 @@
+rule = "509.1d"
+section = 509
+title = "Declare Blockers Step — CR 509.1d"
+status = "skeleton"
+text = "If any of the chosen creatures require paying costs to block, the defending player determines the total cost to block. Costs may include paying mana, tapping permanents, sacrificing permanents, discarding cards, and so on. Once the total cost is determined, it becomes “locked in.” If effects would change the total cost after this time, ignore this change."

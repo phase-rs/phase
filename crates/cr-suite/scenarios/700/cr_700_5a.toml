@@ -1,0 +1,5 @@
+rule = "700.5a"
+section = 700
+title = "General (Additional Rules) — CR 700.5a"
+status = "skeleton"
+text = "A player’s devotion to each color and combination of colors, taking into account any effects that modify devotion, is calculated after considering any copy, control, or text-changing effects but before any other effects that modify the characteristics of permanents. This is an exception to 613.10. See also rule 613, “Interaction of Continuous Effects.”"

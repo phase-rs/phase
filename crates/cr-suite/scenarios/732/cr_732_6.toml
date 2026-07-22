@@ -1,0 +1,5 @@
+rule = "732.6"
+section = 732
+title = "Ending the Turn — CR 732.6"
+status = "skeleton"
+text = "If a loop contains an effect that says “[A] unless [B],” where [A] and [B] are each actions, no player can be forced to perform [B] to break the loop. If no player chooses to perform [B], the loop will continue as though [A] were mandatory."

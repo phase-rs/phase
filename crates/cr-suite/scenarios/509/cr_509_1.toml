@@ -1,0 +1,5 @@
+rule = "509.1"
+section = 509
+title = "Declare Blockers Step — CR 509.1"
+status = "skeleton"
+text = "First, the defending player declares blockers. This turn-based action doesn’t use the stack. To declare blockers, the defending player follows the steps below, in order. If at any point during the declaration of blockers, the defending player is unable to comply with any of the steps listed below, the declaration is illegal; the game returns to the moment before the declaration (see rule 733, “Handling Illegal Actions”)."

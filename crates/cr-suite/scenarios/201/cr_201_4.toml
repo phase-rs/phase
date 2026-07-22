@@ -1,0 +1,5 @@
+rule = "201.4"
+section = 201
+title = "Name — CR 201.4"
+status = "skeleton"
+text = "If an effect instructs a player to choose a card name, the player must choose the name of a card in the Oracle card reference. (See rule 108.1.) A player may not choose the name of a token unless it’s also the name of a card."

@@ -1,0 +1,5 @@
+rule = "117.3b"
+section = 117
+title = "Timing and Priority — CR 117.3b"
+status = "skeleton"
+text = "The active player receives priority after a spell or ability (other than a mana ability) resolves."

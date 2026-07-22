@@ -1,0 +1,5 @@
+rule = "111.5"
+section = 111
+title = "Tokens — CR 111.5"
+status = "skeleton"
+text = "If a spell or ability would create a token, but a rule or effect states that a permanent with one or more of that token’s characteristics can’t enter the battlefield, the token is not created. Similarly, if an effect would create a token that is a copy of an instant or sorcery card, no token is created."

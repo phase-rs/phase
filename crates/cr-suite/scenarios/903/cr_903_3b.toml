@@ -1,0 +1,5 @@
+rule = "903.3b"
+section = 903
+title = "Commander — CR 903.3b"
+status = "skeleton"
+text = "If a player’s commander is a meld card and it’s melded with the other member of its meld pair, the resulting melded permanent is that player’s commander."

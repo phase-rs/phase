@@ -1,0 +1,5 @@
+rule = "613.1c"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.1c"
+status = "skeleton"
+text = "Layer 3: Text-changing effects are applied. See rule 612, “Text-Changing Effects.”"

@@ -1,0 +1,5 @@
+rule = "609.2"
+section = 609
+title = "Effects — CR 609.2"
+status = "skeleton"
+text = "Effects apply only to permanents unless the instruction’s text states otherwise or they clearly can apply only to objects in one or more other zones."

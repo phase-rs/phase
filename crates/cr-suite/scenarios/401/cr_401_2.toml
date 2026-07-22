@@ -1,0 +1,5 @@
+rule = "401.2"
+section = 401
+title = "Library — CR 401.2"
+status = "skeleton"
+text = "Each library must be kept in a single face-down pile. Players can’t look at or change the order of cards in a library."

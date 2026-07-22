@@ -1,0 +1,5 @@
+rule = "402.2"
+section = 402
+title = "Hand — CR 402.2"
+status = "skeleton"
+text = "Each player has a maximum hand size, which is normally seven cards. A player may have any number of cards in their hand, but as part of their cleanup step, the player must discard excess cards down to the maximum hand size."

@@ -1,0 +1,5 @@
+rule = "205.4c"
+section = 205
+title = "Type Line — CR 205.4c"
+status = "skeleton"
+text = "Any land with the supertype “basic” is a basic land. Any land that doesn’t have this supertype is a nonbasic land, even if it has a basic land type."

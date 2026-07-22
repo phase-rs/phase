@@ -1,0 +1,5 @@
+rule = "701.37b"
+section = 701
+title = "Keyword Actions — CR 701.37b"
+status = "skeleton"
+text = "Monstrous is a designation that has no rules meaning other than to act as a marker that the monstrosity action and other spells and abilities can identify. Only permanents can be or become monstrous. Once a permanent becomes monstrous, it stays monstrous until it leaves the battlefield. Monstrous is neither an ability nor part of the permanent’s copiable values."

@@ -1,0 +1,5 @@
+rule = "613.8a"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.8a"
+status = "skeleton"
+text = "An effect is said to “depend on” another if (a) it’s applied in the same layer (and, if applicable, sublayer) as the other effect; (b) applying the other would change the text or the existence of the first effect, what it applies to, or what it does to any of the things it applies to; and (c) neither effect is from a characteristic-defining ability or both effects are from characteristic-defining abilities. Otherwise, the effect is considered to be independent of the other effect."

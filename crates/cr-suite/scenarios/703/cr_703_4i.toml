@@ -1,0 +1,5 @@
+rule = "703.4i"
+section = 703
+title = "Turn-Based Actions — CR 703.4i"
+status = "skeleton"
+text = "Immediately after the declare attackers step begins, the active player declares attackers. See rule 508.1."

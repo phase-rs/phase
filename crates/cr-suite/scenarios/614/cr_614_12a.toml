@@ -1,0 +1,5 @@
+rule = "614.12a"
+section = 614
+title = "Replacement Effects — CR 614.12a"
+status = "skeleton"
+text = "If a replacement effect that modifies how a permanent enters the battlefield requires a choice, that choice is made before the permanent enters the battlefield."

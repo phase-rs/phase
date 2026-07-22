@@ -1,0 +1,5 @@
+rule = "113.5"
+section = 113
+title = "Abilities — CR 113.5"
+status = "skeleton"
+text = "Some activated abilities are loyalty abilities. Loyalty abilities follow special rules: A player may activate a loyalty ability of a permanent they control any time they have priority and the stack is empty during a main phase of their turn, but only if no player has previously activated a loyalty ability of that permanent that turn. See rule 606, “Loyalty Abilities.”"

@@ -1,0 +1,5 @@
+rule = "610.3"
+section = 610
+title = "One-Shot Effects — CR 610.3"
+status = "skeleton"
+text = "Some one-shot effects cause an object to change zones “until” a specified event occurs. A second one-shot effect is created immediately after the specified event. This second one-shot effect returns the object to its previous zone."

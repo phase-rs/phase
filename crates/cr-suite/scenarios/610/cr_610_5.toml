@@ -1,0 +1,5 @@
+rule = "610.5"
+section = 610
+title = "One-Shot Effects — CR 610.5"
+status = "skeleton"
+text = "Some static abilities create one-shot effects that cause spells a player casts to gain an ability as that player casts them. These effects begin to apply to appropriate spells at the time the player puts such a spell on the stack. See rule 601.2a."

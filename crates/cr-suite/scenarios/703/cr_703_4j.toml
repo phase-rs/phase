@@ -1,0 +1,5 @@
+rule = "703.4j"
+section = 703
+title = "Turn-Based Actions — CR 703.4j"
+status = "skeleton"
+text = "Immediately after the declare blockers step begins, the defending player declares blockers. See rule 509.1."

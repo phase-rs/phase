@@ -1,0 +1,5 @@
+rule = "110.2"
+section = 110
+title = "Permanents — CR 110.2"
+status = "skeleton"
+text = "A permanent’s owner is the same as the owner of the card that represents it (unless it’s a token; see rule 111.2). A permanent’s controller is, by default, the player under whose control it entered the battlefield. Every permanent has a controller."

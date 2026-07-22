@@ -1,0 +1,5 @@
+rule = "205.4a"
+section = 205
+title = "Type Line — CR 205.4a"
+status = "skeleton"
+text = "An object can have one or more supertypes. A card’s supertypes are printed directly before its card types. The supertypes are basic, legendary, ongoing, snow, and world."

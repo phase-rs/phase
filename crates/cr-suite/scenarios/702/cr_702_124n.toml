@@ -1,0 +1,5 @@
+rule = "702.124n"
+section = 702
+title = "Keyword Abilities — CR 702.124n"
+status = "skeleton"
+text = "If an effect refers to a partner ability by name, it means only that partner ability and not any others. If an effect refers to the partner ability or cards with partner and doesn’t mention a specific variant of the partner ability by name, it is referring only to partner, partner—[text], partner with [name], or cards with any of those abilities, and it does not refer to any other partner variant."

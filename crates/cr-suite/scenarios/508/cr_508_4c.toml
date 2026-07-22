@@ -1,0 +1,5 @@
+rule = "508.4c"
+section = 508
+title = "Declare Attackers Step — CR 508.4c"
+status = "skeleton"
+text = "A creature that’s put onto the battlefield attacking or that is stated to be attacking isn’t affected by requirements or restrictions that apply to the declaration of attackers."

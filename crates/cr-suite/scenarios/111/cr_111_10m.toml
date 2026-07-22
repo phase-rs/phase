@@ -1,0 +1,5 @@
+rule = "111.10m"
+section = 111
+title = "Tokens — CR 111.10m"
+status = "skeleton"
+text = "A Royal Role token is a colorless Aura Role enchantment token named Royal with enchant creature and “Enchanted creature gets +1/+1 and has ward {1}.”"

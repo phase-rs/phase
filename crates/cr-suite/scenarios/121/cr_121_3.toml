@@ -1,0 +1,5 @@
+rule = "121.3"
+section = 121
+title = "Drawing a Card — CR 121.3"
+status = "skeleton"
+text = "If there are no cards in a player’s library and an effect offers that player the choice to draw a card, that player can choose to do so. However, if an effect says that a player can’t draw cards and another effect offers that player the choice to draw a card, that player can’t choose to do so."

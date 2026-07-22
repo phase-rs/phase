@@ -1,0 +1,5 @@
+rule = "122.6"
+section = 122
+title = "Counters — CR 122.6"
+status = "skeleton"
+text = "Some spells and abilities refer to counters being put on an object. This refers to putting counters on that object while it’s on the battlefield and also to an object that’s given counters as it enters the battlefield."

@@ -1,0 +1,5 @@
+rule = "614.13"
+section = 614
+title = "Replacement Effects — CR 614.13"
+status = "skeleton"
+text = "An effect that modifies how a permanent enters the battlefield may cause other objects to change zones."

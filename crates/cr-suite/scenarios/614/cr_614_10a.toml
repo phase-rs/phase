@@ -1,0 +1,5 @@
+rule = "614.10a"
+section = 614
+title = "Replacement Effects — CR 614.10a"
+status = "skeleton"
+text = "Anything scheduled for a skipped step, phase, or turn won’t happen. Anything scheduled for the “next” occurrence of something waits for the first occurrence that isn’t skipped. If two effects each cause a player to skip their next occurrence, that player must skip the next two; one effect will be satisfied in skipping the first occurrence, while the other will remain until another occurrence can be skipped."

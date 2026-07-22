@@ -1,0 +1,5 @@
+rule = "703.4"
+section = 703
+title = "Turn-Based Actions — CR 703.4"
+status = "skeleton"
+text = "The turn-based actions are as follows:"

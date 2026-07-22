@@ -1,0 +1,5 @@
+rule = "701.24b"
+section = 701
+title = "Keyword Actions — CR 701.24b"
+status = "skeleton"
+text = "Some effects cause a player to search a library for a card or cards, shuffle that library, then put some or all of the found cards into a different zone or in a certain position in that library. In such cases, the found cards aren’t included in the shuffle, even though they remain in the library at that time. Rather, all the cards in that library except those are shuffled. Abilities that trigger when a library is shuffled will still trigger. See also rule 401, “Library.”"

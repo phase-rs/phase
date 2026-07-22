@@ -1,0 +1,5 @@
+rule = "106.4b"
+section = 106
+title = "Mana — CR 106.4b"
+status = "skeleton"
+text = "If a player passes priority (see rule 117) while there is mana in their mana pool, that player announces what mana is there."

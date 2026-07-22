@@ -1,0 +1,5 @@
+rule = "110.4a"
+section = 110
+title = "Permanents — CR 110.4a"
+status = "skeleton"
+text = "The term “permanent card” is used to refer to a card that could be put onto the battlefield. Specifically, it means an artifact, battle, creature, enchantment, land, or planeswalker card."

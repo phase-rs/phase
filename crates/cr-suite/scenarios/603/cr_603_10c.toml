@@ -1,0 +1,5 @@
+rule = "603.10c"
+section = 603
+title = "Handling Triggered Abilities — CR 603.10c"
+status = "skeleton"
+text = "Abilities that trigger specifically when an object becomes unattached look back in time."

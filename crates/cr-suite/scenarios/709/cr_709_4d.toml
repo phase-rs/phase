@@ -1,0 +1,5 @@
+rule = "709.4d"
+section = 709
+title = "Split Cards — CR 709.4d"
+status = "skeleton"
+text = "The characteristics of a fused split spell on the stack are also those of its two halves combined (see rule 702.102, “Fuse”)."

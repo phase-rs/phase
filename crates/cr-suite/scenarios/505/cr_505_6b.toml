@@ -1,0 +1,5 @@
+rule = "505.6b"
+section = 505
+title = "Main Phase — CR 505.6b"
+status = "skeleton"
+text = "During either main phase, the active player may play one land card from their hand if the stack is empty, if the player has priority, and if they haven’t played a land this turn (unless an effect states the player may play additional lands). This action doesn’t use the stack. Neither the land nor the action of playing the land is a spell or ability, so it can’t be countered, and players can’t respond to it with instants or activated abilities. (See rule 305, “Lands.”)"

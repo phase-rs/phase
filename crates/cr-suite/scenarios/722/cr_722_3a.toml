@@ -1,0 +1,5 @@
+rule = "722.3a"
+section = 722
+title = "Ending Turns and Phases — CR 722.3a"
+status = "skeleton"
+text = "Some spells and abilities cause a permanent with a prepare spell to become prepared or state that a permanent enters prepared. If that permanent has the alternative characteristics of a prepare spell, this gives the permanent the “prepared” designation. Prepared is a designation that acts as a marker which rules and effects can identify. A permanent can’t gain this designation unless it has a prepare spell, Additionally, a permanent can’t gain this designation if the permanent already has it."

@@ -1,0 +1,5 @@
+rule = "305.2b"
+section = 305
+title = "Lands — CR 305.2b"
+status = "skeleton"
+text = "A player can’t play a land, for any reason, if the number of lands the player can play this turn is equal to or less than the number of lands they have already played this turn. Ignore any part of an effect that instructs a player to do so."

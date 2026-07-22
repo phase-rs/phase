@@ -1,0 +1,5 @@
+rule = "120.3f"
+section = 120
+title = "Damage — CR 120.3f"
+status = "skeleton"
+text = "Damage dealt by a source with lifelink causes that source’s controller to gain that much life, in addition to the damage’s other results."

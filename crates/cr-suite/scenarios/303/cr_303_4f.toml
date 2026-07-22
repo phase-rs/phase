@@ -1,0 +1,5 @@
+rule = "303.4f"
+section = 303
+title = "Enchantments — CR 303.4f"
+status = "skeleton"
+text = "If an Aura is entering the battlefield under a player’s control by any means other than by resolving as an Aura spell, and the effect putting it onto the battlefield doesn’t specify the object or player the Aura will enchant, that player chooses what it will enchant as the Aura enters the battlefield. The player must choose a legal object or player according to the Aura’s enchant ability and any other applicable effects."

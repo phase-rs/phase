@@ -1,0 +1,5 @@
+rule = "110.4b"
+section = 110
+title = "Permanents — CR 110.4b"
+status = "skeleton"
+text = "The term “permanent spell” is used to refer to a spell that will enter the battlefield as a permanent as part of its resolution. Specifically, it means an artifact, battle, creature, enchantment, or planeswalker spell."

@@ -1,0 +1,5 @@
+rule = "613.7k"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.7k"
+status = "skeleton"
+text = "A sticker receives a new timestamp each time it’s put on an object. If the object a sticker is on receives a new timestamp, the sticker receives a new timestamp immediately after that one. If the object a sticker is on becomes part of a merged permanent on the battlefield, the sticker receives a new timestamp at that time. If an object has more than one sticker on it as it enters a zone or becomes part of a merged permanent, the relative timestamp order of those stickers remains unchanged."

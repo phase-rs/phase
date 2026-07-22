@@ -1,0 +1,5 @@
+rule = "107.14"
+section = 107
+title = "Numbers and Symbols — CR 107.14"
+status = "skeleton"
+text = "The energy symbol is {E}. It represents one energy counter. To pay {E}, a player removes one energy counter from themselves."

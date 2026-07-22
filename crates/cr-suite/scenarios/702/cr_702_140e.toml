@@ -1,0 +1,5 @@
+rule = "702.140e"
+section = 702
+title = "Keyword Abilities — CR 702.140e"
+status = "skeleton"
+text = "A mutated permanent has all abilities of each card and token that represents it. Its other characteristics are derived from the topmost card or token."

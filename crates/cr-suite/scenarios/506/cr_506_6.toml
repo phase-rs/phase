@@ -1,0 +1,5 @@
+rule = "506.6"
+section = 506
+title = "Combat Phase — CR 506.6"
+status = "skeleton"
+text = "Some abilities check to see whether or not a creature “had to attack” during a particular combat phase. A creature had to attack if one or more effects were requiring that creature to attack at the time attackers were declared in that combat. A creature did not “have to attack” if there were no such effects that required it to attack, even if there were no other legal attacks that could have been declared. (See rule 508.)"

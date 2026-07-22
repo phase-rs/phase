@@ -1,0 +1,5 @@
+rule = "701.47d"
+section = 701
+title = "Keyword Actions — CR 701.47d"
+status = "skeleton"
+text = "Some older cards were printed with amass N without including a subtype. Those cards have received errata in the Oracle card reference so that they read “amass Zombies N.”"

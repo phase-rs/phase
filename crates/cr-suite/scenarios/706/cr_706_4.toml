@@ -1,0 +1,5 @@
+rule = "706.4"
+section = 706
+title = "Rolling a Die — CR 706.4"
+status = "skeleton"
+text = "Some abilities that instruct a player to roll one or more dice do not include a results table. The text of those abilities will indicate how to use the results of the die rolls, if at all."

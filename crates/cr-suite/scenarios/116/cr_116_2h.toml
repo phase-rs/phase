@@ -1,0 +1,5 @@
+rule = "116.2h"
+section = 116
+title = "Special Actions — CR 116.2h"
+status = "skeleton"
+text = "A player who has a card with foretell in their hand may pay {2} and exile that card face down. This is a special action. A player may take this action any time they have priority during their turn. See rule 702.143, “Foretell.”"

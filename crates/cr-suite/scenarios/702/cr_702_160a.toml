@@ -1,0 +1,5 @@
+rule = "702.160a"
+section = 702
+title = "Keyword Abilities — CR 702.160a"
+status = "skeleton"
+text = "Prototype is a static ability that appears on prototype cards that have a secondary set of power, toughness, and mana cost characteristics. A player who casts a spell with prototype can choose to cast that card “prototyped.” If they do, the alternative set of its power, toughness, and mana cost characteristics are used. See 718, “Prototype Cards.”"

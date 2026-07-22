@@ -1,0 +1,5 @@
+rule = "202.1"
+section = 202
+title = "Mana Cost and Color — CR 202.1"
+status = "skeleton"
+text = "A card’s mana cost is indicated by mana symbols near the top of the card. (See rule 107.4.) On most cards, these symbols are printed in the upper right corner. Some cards from the Future Sight set have alternate frames in which the mana symbols appear to the left of the illustration."

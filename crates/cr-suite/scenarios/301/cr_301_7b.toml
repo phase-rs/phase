@@ -1,0 +1,5 @@
+rule = "301.7b"
+section = 301
+title = "Artifacts — CR 301.7b"
+status = "skeleton"
+text = "If a Vehicle becomes a creature, it immediately has its printed power and toughness. Other effects, including the effect that makes it a creature, may modify these values or set them to different values."

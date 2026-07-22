@@ -1,0 +1,5 @@
+rule = "201.5a"
+section = 201
+title = "Name — CR 201.5a"
+status = "skeleton"
+text = "If an ability’s effect grants another ability to an object, and that second ability refers to that first ability’s source by name, the name refers only to the specific object which is that first ability’s source. The second ability does not refer to any other object with the same name as the first ability’s source. However, if the second ability also moved the first ability’s source to a different public zone, the name refers to the object the source became in its new zone. This is also true if the second ability is copied onto a new object."

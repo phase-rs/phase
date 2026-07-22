@@ -1,0 +1,5 @@
+rule = "100.2a"
+section = 100
+title = "General — CR 100.2a"
+status = "skeleton"
+text = "In constructed play (a way of playing in which each player creates their own deck ahead of time), each deck has a minimum deck size of 60 cards. A constructed deck may contain any number of basic land cards and no more than four of any card with a particular English name other than basic land cards. For the purposes of deck construction, cards with interchangeable names have the same English name (see rule 201.3)."

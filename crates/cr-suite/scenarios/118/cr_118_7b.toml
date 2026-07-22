@@ -1,0 +1,5 @@
+rule = "118.7b"
+section = 118
+title = "Costs — CR 118.7b"
+status = "skeleton"
+text = "If a cost is reduced by an amount of colored or colorless mana, but the cost doesn’t require mana of that type, the cost is reduced by that amount of generic mana."

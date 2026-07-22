@@ -1,0 +1,5 @@
+rule = "207.2a"
+section = 207
+title = "Text Box — CR 207.2a"
+status = "skeleton"
+text = "Reminder text is italicized text within parentheses that summarizes a rule that applies to that card. It usually appears on the same line as the ability it’s relevant to, but it may appear on its own line if it applies to an aspect of the card other than an ability."

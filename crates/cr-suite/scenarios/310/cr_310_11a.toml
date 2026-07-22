@@ -1,0 +1,5 @@
+rule = "310.11a"
+section = 310
+title = "Battles — CR 310.11a"
+status = "skeleton"
+text = "As a Siege enters the battlefield, its controller must choose its protector from among their opponents. Only an opponent of a Siege’s controller can be its protector."

@@ -1,0 +1,5 @@
+rule = "104.4f"
+section = 104
+title = "Ending the Game — CR 104.4f"
+status = "skeleton"
+text = "In a multiplayer game using the limited range of influence option, if the game somehow enters a “loop” of mandatory actions, repeating a sequence of events with no way to stop, the game is a draw for each player who controls an object that’s involved in that loop, as well as for each player within the range of influence of any of those players. Only those players leave the game; the game continues for all other players."

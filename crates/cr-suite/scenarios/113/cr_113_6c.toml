@@ -1,0 +1,5 @@
+rule = "113.6c"
+section = 113
+title = "Abilities — CR 113.6c"
+status = "skeleton"
+text = "An ability that states which zones it doesn’t function in functions everywhere except for the specified zones, even outside the game and before the game begins."

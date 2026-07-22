@@ -1,0 +1,5 @@
+rule = "712.15a"
+section = 712
+title = "Double-Faced Cards — CR 712.15a"
+status = "skeleton"
+text = "While face down, a double-faced permanent can’t transform or convert. If it’s turned face up, it will have its front face up."

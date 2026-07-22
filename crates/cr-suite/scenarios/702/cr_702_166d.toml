@@ -1,0 +1,5 @@
+rule = "702.166d"
+section = 702
+title = "Keyword Abilities — CR 702.166d"
+status = "skeleton"
+text = "If part of a spell’s ability has its effect only if that spell was bargained and that part of the ability includes any targets, the spell’s controller chooses those targets only if that spell was bargained. Otherwise, the spell is cast as if it did not have those targets. See rule 601.2c."

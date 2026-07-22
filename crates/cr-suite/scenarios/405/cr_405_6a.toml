@@ -1,0 +1,5 @@
+rule = "405.6a"
+section = 405
+title = "Stack — CR 405.6a"
+status = "skeleton"
+text = "Effects don’t go on the stack; they’re the result of spells and abilities resolving. Effects may create delayed triggered abilities, however, and these may go on the stack when they trigger (see rule 603.7)."

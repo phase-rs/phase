@@ -1,0 +1,5 @@
+rule = "614.11b"
+section = 614
+title = "Replacement Effects — CR 614.11b"
+status = "skeleton"
+text = "If an effect would have a player both draw a card and perform an additional action on that card, and the draw is replaced, the additional action is not performed on any cards that are drawn as a result of that replacement effect."

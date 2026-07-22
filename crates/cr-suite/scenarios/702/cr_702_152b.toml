@@ -1,0 +1,5 @@
+rule = "702.152b"
+section = 702
+title = "Keyword Abilities — CR 702.152b"
+status = "skeleton"
+text = "If a spell has multiple instances of blitz, only one may be used to cast that spell. If a permanent has multiple instances of blitz, each one refers only to payments made for that blitz ability as the spell was cast, not to any payments made for other instances of blitz."

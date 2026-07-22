@@ -1,0 +1,5 @@
+rule = "614.17"
+section = 614
+title = "Replacement Effects — CR 614.17"
+status = "skeleton"
+text = "Some effects state that something can’t happen. These effects aren’t replacement effects, but follow similar rules."

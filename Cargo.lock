@@ -557,6 +557,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cr-suite"
+version = "0.34.0"
+dependencies = [
+ "engine",
+ "indexmap 2.14.0",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

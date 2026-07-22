@@ -1,0 +1,5 @@
+rule = "702.138b"
+section = 702
+title = "Keyword Abilities — CR 702.138b"
+status = "skeleton"
+text = "A spell or permanent “escaped” if that spell or the spell that became that permanent as it resolved was cast from a graveyard with an escape ability."

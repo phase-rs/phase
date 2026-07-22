@@ -1,0 +1,5 @@
+rule = "712.8g"
+section = 712
+title = "Double-Faced Cards — CR 712.8g"
+status = "skeleton"
+text = "While the two cards of a meld pair are on the battlefield as a melded permanent, the object represented by those cards has only the characteristics of the combined back face, and its mana value is the sum of the mana values of its front faces. If a permanent is copying a melded permanent, the mana value of the copy is 0. See rule 202.3c."

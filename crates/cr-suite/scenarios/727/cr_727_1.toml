@@ -1,0 +1,5 @@
+rule = "727.1"
+section = 727
+title = "Subgames — CR 727.1"
+status = "skeleton"
+text = "One card (Karn Liberated) restarts the game. A game that is restarted immediately ends. No players in that game win, lose, or draw that game. All players in that game when it ended then start a new game following the procedures set forth in rule 103, “Starting the Game,” with the following exception:"

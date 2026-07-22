@@ -1,0 +1,5 @@
+rule = "508.1j"
+section = 508
+title = "Declare Attackers Step — CR 508.1j"
+status = "skeleton"
+text = "Once the player has enough mana in their mana pool, they pay all costs in any order. Partial payments are not allowed."

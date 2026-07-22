@@ -1,0 +1,5 @@
+rule = "107.12"
+section = 107
+title = "Numbers and Symbols — CR 107.12"
+status = "skeleton"
+text = "The chaos symbol is {CHAOS}. It appears on one face of the planar die used in the Planechase casual variant, as well as in abilities that refer to the results of rolling the planar die. It looks like a swirling vortex. See rule 901, “Planechase.”"

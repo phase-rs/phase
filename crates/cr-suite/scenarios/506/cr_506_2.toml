@@ -1,0 +1,5 @@
+rule = "506.2"
+section = 506
+title = "Combat Phase — CR 506.2"
+status = "skeleton"
+text = "During the combat phase, the active player is the attacking player; creatures that player controls may attack. During the combat phase of a two-player game, the nonactive player is the defending player; that player, planeswalkers they control, and battles they protect may be attacked."

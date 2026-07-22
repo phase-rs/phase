@@ -1,0 +1,5 @@
+rule = "703.4d"
+section = 703
+title = "Turn-Based Actions — CR 703.4d"
+status = "skeleton"
+text = "Immediately after the draw step begins, the active player draws a card. See rule 504.1."

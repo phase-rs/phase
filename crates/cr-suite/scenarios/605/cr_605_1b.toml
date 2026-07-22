@@ -1,0 +1,5 @@
+rule = "605.1b"
+section = 605
+title = "Mana Abilities — CR 605.1b"
+status = "skeleton"
+text = "A triggered ability is a mana ability if it meets all of the following criteria: it doesn’t require a target (see rule 115.6), it triggers from the activation or resolution of an activated mana ability (see rule 605.1a) or from mana being added to a player’s mana pool, and it could add mana to a player’s mana pool when it resolves."

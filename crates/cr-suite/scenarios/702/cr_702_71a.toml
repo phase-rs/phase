@@ -1,0 +1,5 @@
+rule = "702.71a"
+section = 702
+title = "Keyword Abilities — CR 702.71a"
+status = "skeleton"
+text = "Transfigure is an activated ability. “Transfigure [cost]” means “[Cost], Sacrifice this permanent: Search your library for a creature card with the same mana value as this permanent and put it onto the battlefield. Then shuffle your library. Activate only as a sorcery.”"

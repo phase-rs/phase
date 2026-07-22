@@ -1,0 +1,5 @@
+rule = "702.138c"
+section = 702
+title = "Keyword Abilities — CR 702.138c"
+status = "skeleton"
+text = "An ability that reads “[This permanent] escapes with [one or more of a kind of counter]” means “If this permanent escaped, it enters with [those counters]” That ability may have a triggered ability linked to it that triggers “When it enters this way.” (See rule 603.11.) Such a triggered ability triggers when that permanent enters the battlefield after its replacement effect was applied, even if that replacement effect had no effect."

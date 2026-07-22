@@ -1,0 +1,5 @@
+rule = "715.3d"
+section = 715
+title = "Adventurer Cards — CR 715.3d"
+status = "skeleton"
+text = "Instead of putting a spell that was cast as an Adventure into its owner’s graveyard as it resolves, its controller exiles it. For as long as that card remains exiled, that player may play it. It can’t be cast as an Adventure this way, although other effects that allow a player to cast it may allow a player to cast it as an Adventure."

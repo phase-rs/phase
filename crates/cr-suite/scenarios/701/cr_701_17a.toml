@@ -1,0 +1,5 @@
+rule = "701.17a"
+section = 701
+title = "Keyword Actions — CR 701.17a"
+status = "skeleton"
+text = "For a player to mill a number of cards, that player puts that many cards from the top of their library into their graveyard."

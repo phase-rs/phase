@@ -1,0 +1,5 @@
+rule = "727.2"
+section = 727
+title = "Subgames — CR 727.2"
+status = "skeleton"
+text = "All Magic cards involved in the game that was restarted when it ended, including phased-out permanents and nontraditional Magic cards, are involved in the new game, even if those cards were not originally involved in the restarted game. Ownership of cards in the new game doesn’t change, regardless of their location when the new game begins."

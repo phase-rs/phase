@@ -1,0 +1,5 @@
+rule = "903.13b"
+section = 903
+title = "Commander — CR 903.13b"
+status = "skeleton"
+text = "A draft typically consists of three draft rounds. In each draft round, each player opens a booster pack, drafts two cards by placing them in a face-down pile in front of them, then passes the remaining cards to the next player. Each player then drafts two cards from the booster pack passed to them and passes the remaining cards. This procedure continues until all cards in that draft round have been drafted."

@@ -1,0 +1,5 @@
+rule = "406.7"
+section = 406
+title = "Exile — CR 406.7"
+status = "skeleton"
+text = "If an object in the exile zone becomes exiled, it doesn’t change zones, but it becomes a new object that has just been exiled."

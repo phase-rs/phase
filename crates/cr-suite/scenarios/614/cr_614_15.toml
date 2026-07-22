@@ -1,0 +1,5 @@
+rule = "614.15"
+section = 614
+title = "Replacement Effects — CR 614.15"
+status = "skeleton"
+text = "Some replacement effects are not continuous effects. Rather, they are an effect of a resolving spell or ability that replace part or all of that spell or ability’s own effect(s). Such effects are called self-replacement effects. The text creating a self-replacement effect is usually part of the ability whose effect is being replaced, but the text can be a separate ability, particularly when preceded by an ability word. When applying replacement effects to an event, self-replacement effects are applied before other replacement effects."

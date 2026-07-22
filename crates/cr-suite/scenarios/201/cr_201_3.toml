@@ -1,0 +1,5 @@
+rule = "201.3"
+section = 201
+title = "Name — CR 201.3"
+status = "skeleton"
+text = "Some cards with different English names are treated as though they had the same English name. Pairs of cards with this property have names that are interchangeable."

@@ -1,0 +1,5 @@
+rule = "706.7"
+section = 706
+title = "Rolling a Die — CR 706.7"
+status = "skeleton"
+text = "In a Planechase game, rolling the planar die will cause any ability that triggers whenever a player rolls one or more dice to trigger. However, any effect that refers to a numerical result of a die roll, including ones that exchange the results of that roll with another value or compare the results of that roll to other rolls or to a given number, ignores the rolling of the planar die. See rule 901, “Planechase.”"

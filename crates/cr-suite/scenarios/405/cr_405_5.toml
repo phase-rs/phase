@@ -1,0 +1,5 @@
+rule = "405.5"
+section = 405
+title = "Stack — CR 405.5"
+status = "skeleton"
+text = "When all players pass in succession, the top (last-added) spell or ability on the stack resolves. If the stack is empty when all players pass, the current step or phase ends and the next begins."

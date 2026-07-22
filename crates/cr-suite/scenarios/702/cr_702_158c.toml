@@ -1,0 +1,5 @@
+rule = "702.158c"
+section = 702
+title = "Keyword Abilities — CR 702.158c"
+status = "skeleton"
+text = "Any time a permanent with space sculptor and any creatures without a sector designation are on the battlefield at the same time, each player who controls one or more of those creatures and doesn’t control a permanent with space sculptor chooses a sector designation for each of those creatures they control. Then, each other player who controls one or more of those creatures chooses a sector designation for each of those creatures they control. This is a state-based action (see rule 704.5u)."

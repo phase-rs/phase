@@ -1,0 +1,5 @@
+rule = "723.4"
+section = 723
+title = "The Monarch — CR 723.4"
+status = "skeleton"
+text = "If information about an object in the game would be visible to the player being controlled, it’s visible to both that player and the controller of the player. If information about cards outside the game would be visible to the player being controlled, it’s visible only to that player, not the controller of the player."

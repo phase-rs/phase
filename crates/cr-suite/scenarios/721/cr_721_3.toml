@@ -1,0 +1,5 @@
+rule = "721.3"
+section = 721
+title = "Handling Illegal Actions — CR 721.3"
+status = "skeleton"
+text = "The text box striations have no game significance other than clearly demarcating which abilities and which power/toughness box are associated with which station symbol. Station cards each contain only one text box."

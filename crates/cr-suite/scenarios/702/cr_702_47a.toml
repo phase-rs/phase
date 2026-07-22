@@ -1,0 +1,5 @@
+rule = "702.47a"
+section = 702
+title = "Keyword Abilities — CR 702.47a"
+status = "skeleton"
+text = "Splice is a static ability that functions while a card is in your hand. “Splice onto [quality] [cost]” means “You may reveal this card from your hand as you cast a [quality] spell. If you do, that spell gains the text of this card’s rules text and you pay [cost] as an additional cost to cast that spell.” Paying a card’s splice cost follows the rules for paying additional costs in rules 601.2b and 601.2f–h."

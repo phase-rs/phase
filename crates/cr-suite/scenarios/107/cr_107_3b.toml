@@ -1,0 +1,5 @@
+rule = "107.3b"
+section = 107
+title = "Numbers and Symbols — CR 107.3b"
+status = "skeleton"
+text = "If a player is casting a spell that has an {X} in its mana cost, the value of X isn’t defined by the text of that spell, and an effect lets that player cast that spell while paying neither its mana cost nor an alternative cost that includes X, then the only legal choice for X is 0. This doesn’t apply to effects that only reduce a cost, even if they reduce it to zero. See rule 601, “Casting Spells.”"

@@ -1,0 +1,5 @@
+rule = "400.12"
+section = 400
+title = "General (Zones) — CR 400.12"
+status = "skeleton"
+text = "Some effects instruct a player to do something to a zone (such as “Shuffle your hand into your library”). That action is performed on all cards in that zone. The zone itself is not affected."

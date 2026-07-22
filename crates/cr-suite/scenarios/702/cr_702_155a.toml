@@ -1,0 +1,5 @@
+rule = "702.155a"
+section = 702
+title = "Keyword Abilities — CR 702.155a"
+status = "skeleton"
+text = "Read ahead is a keyword found on some Saga cards. “Read ahead” means “Chapter abilities of this Saga can’t trigger the turn it entered the battlefield unless it has exactly the number of lore counters on it specified in the chapter symbol of that ability.” See rule 714, “Saga Cards.”"

@@ -1,0 +1,5 @@
+rule = "508.4b"
+section = 508
+title = "Declare Attackers Step — CR 508.4b"
+status = "skeleton"
+text = "If the effect that states a creature is attacking specifies it’s attacking a certain player, and that player is no longer in the game when the effect resolves, the creature doesn’t become an attacking creature. The same is true if the effect specifies a creature is attacking a planeswalker or battle and, when the effect resolves, that permanent is no longer on the battlefield, is no longer a planeswalker or battle, is a planeswalker that is no longer controlled by a defending player, or is a battle that is no longer protected by a defending player."

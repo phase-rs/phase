@@ -1,0 +1,5 @@
+rule = "615.1"
+section = 615
+title = "Prevention Effects — CR 615.1"
+status = "skeleton"
+text = "Some continuous effects are prevention effects. Like replacement effects (see rule 614), prevention effects apply continuously as events happen—they aren’t locked in ahead of time. Such effects watch for a damage event that would happen and completely or partially prevent the damage that would be dealt. They act like “shields” around whatever they’re affecting."

@@ -1,0 +1,5 @@
+rule = "701.12b"
+section = 701
+title = "Keyword Actions — CR 701.12b"
+status = "skeleton"
+text = "When control of two permanents is exchanged, if those permanents are controlled by different players, each of those players simultaneously gains control of the permanent that was controlled by the other player. If, on the other hand, those permanents are controlled by the same player, the exchange effect does nothing."

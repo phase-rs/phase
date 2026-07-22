@@ -1,0 +1,5 @@
+rule = "709.3"
+section = 709
+title = "Split Cards — CR 709.3"
+status = "skeleton"
+text = "A player chooses which half of a split card they are casting before putting it onto the stack."

@@ -1,0 +1,5 @@
+rule = "602.5e"
+section = 602
+title = "Activating Activated Abilities — CR 602.5e"
+status = "skeleton"
+text = "Activated abilities that read “Activate only as an instant” mean the player must follow the timing rules for casting an instant spell, though the ability isn’t actually an instant. The player doesn’t actually need to have an instant card that they could cast."

@@ -1,0 +1,5 @@
+rule = "701.52a"
+section = 701
+title = "Keyword Actions — CR 701.52a"
+status = "skeleton"
+text = "To roll to visit your Attractions, roll a six-sided die. Then if you control one or more Attractions with a number lit up that is equal to that result, each of those Attractions has been “visited” and its visit ability triggers. See rule 717, “Attraction Cards,” and rule 702.159, “Visit.”"

@@ -1,0 +1,5 @@
+rule = "602.1e"
+section = 602
+title = "Activating Activated Abilities — CR 602.1e"
+status = "skeleton"
+text = "If a spell or ability that refers to the “activation cost” of an ability modifies how a player may pay that cost, that modification applies to the total cost of that ability, even if that cost is increased and/or decreased by other effects. See rules 602.2b and 601.2f."

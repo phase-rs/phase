@@ -1,0 +1,5 @@
+rule = "701.7b"
+section = 701
+title = "Keyword Actions — CR 701.7b"
+status = "skeleton"
+text = "If a replacement effect applies to a token being created, that effect applies before considering any continuous effects that will modify the characteristics of that token. If a replacement effect applies to a token entering the battlefield, that effect applies after considering any continuous effects that will modify the characteristics of that token."

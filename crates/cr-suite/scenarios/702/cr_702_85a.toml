@@ -1,0 +1,5 @@
+rule = "702.85a"
+section = 702
+title = "Keyword Abilities — CR 702.85a"
+status = "skeleton"
+text = "Cascade is a triggered ability that functions only while the spell with cascade is on the stack. “Cascade” means “When you cast this spell, exile cards from the top of your library until you exile a nonland card whose mana value is less than this spell’s mana value. You may cast that card without paying its mana cost if the resulting spell’s mana value is less than this spell’s mana value. Then put all cards exiled this way that weren’t cast on the bottom of your library in a random order.”"

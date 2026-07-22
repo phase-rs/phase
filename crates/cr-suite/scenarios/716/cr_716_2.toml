@@ -1,0 +1,5 @@
+rule = "716.2"
+section = 716
+title = "Class Cards — CR 716.2"
+status = "skeleton"
+text = "A class level bar is a keyword ability that represents both an activated ability and a static ability. A class level bar includes the activation cost of its activated ability and a level number. Any abilities printed within the same text box section as the class level bar are part of its static ability."

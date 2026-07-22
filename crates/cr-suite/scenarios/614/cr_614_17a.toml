@@ -1,0 +1,5 @@
+rule = "614.17a"
+section = 614
+title = "Replacement Effects — CR 614.17a"
+status = "skeleton"
+text = "“Can’t” effects must exist before the appropriate event occurs—they can’t “go back in time” and change something that’s already happened."

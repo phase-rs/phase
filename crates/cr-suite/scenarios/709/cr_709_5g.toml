@@ -1,0 +1,5 @@
+rule = "709.5g"
+section = 709
+title = "Split Cards — CR 709.5g"
+status = "skeleton"
+text = "Some spells and abilities instruct a player to “lock” half of a permanent. To lock half of a permanent, a player chooses an unlocked half of that permanent, and that permanent loses the appropriate unlocked designation."

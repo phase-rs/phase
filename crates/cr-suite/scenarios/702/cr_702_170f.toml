@@ -1,0 +1,5 @@
+rule = "702.170f"
+section = 702
+title = "Keyword Abilities — CR 702.170f"
+status = "skeleton"
+text = "An effect may allow the plot ability of a card to function in a zone other than a player’s hand. In that case, the card is exiled from the zone it is in as the action is taken rather than from its owner’s hand."

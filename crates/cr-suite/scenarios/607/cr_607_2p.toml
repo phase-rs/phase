@@ -1,0 +1,5 @@
+rule = "607.2p"
+section = 607
+title = "Linked Abilities — CR 607.2p"
+status = "skeleton"
+text = "If an object has both a static ability that causes a player to make a choice for a characteristic-defining ability before the game begins and that characteristic-defining ability printed on it in the same paragraph, those abilities are linked. The second ability refers only to the choice made as a result of the first ability and continues to refer to that choice as the object changes zones during the game."

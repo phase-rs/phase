@@ -1,0 +1,5 @@
+rule = "702.11e"
+section = 702
+title = "Keyword Abilities — CR 702.11e"
+status = "skeleton"
+text = "Any effect that causes an object to lose hexproof will cause an object to lose all “hexproof from [quality]” abilities. Any effect that allows a player to choose a creature with hexproof as a target as though it didn’t have hexproof will allow a player to choose a creature with a “hexproof from [quality]” ability. Any effect that looks for a card with hexproof will find a card with a “hexproof from [quality]” ability."

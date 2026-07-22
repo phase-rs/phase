@@ -1,0 +1,5 @@
+rule = "708.7"
+section = 708
+title = "Face-Down Spells and Permanents — CR 708.7"
+status = "skeleton"
+text = "The ability or rules that allow a permanent to be face down may also allow the permanent’s controller to turn it face up. Spells normally can’t be turned face up."

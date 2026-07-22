@@ -1,0 +1,5 @@
+rule = "121.2d"
+section = 121
+title = "Drawing a Card — CR 121.2d"
+status = "skeleton"
+text = "If more than one player is instructed to draw cards in a game that’s using the shared team turns option (such as a Two-Headed Giant game), first each player on the active team, in whatever order that team likes, performs their draws, then each player on each nonactive team in turn order does the same."

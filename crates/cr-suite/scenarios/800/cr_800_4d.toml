@@ -1,0 +1,5 @@
+rule = "800.4d"
+section = 800
+title = "General (Multiplayer Rules) — CR 800.4d"
+status = "skeleton"
+text = "If an object that would be owned by a player who has left the game would be created in any zone, it isn’t created. If a triggered ability that would be controlled by a player who has left the game would be put onto the stack, it isn’t put on the stack."

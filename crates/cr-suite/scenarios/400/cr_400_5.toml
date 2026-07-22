@@ -1,0 +1,5 @@
+rule = "400.5"
+section = 400
+title = "General (Zones) — CR 400.5"
+status = "skeleton"
+text = "The order of objects in a library, in a graveyard, or on the stack can’t be changed except when effects or rules allow it. The same is true for objects arranged in face-down piles in other zones. Other objects in other zones can be arranged however their owners wish, although who controls those objects, whether they’re tapped or flipped, and what other objects are attached to them must remain clear to all players."

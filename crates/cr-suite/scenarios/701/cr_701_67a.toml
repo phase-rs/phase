@@ -1,0 +1,5 @@
+rule = "701.67a"
+section = 701
+title = "Keyword Actions — CR 701.67a"
+status = "skeleton"
+text = "“Waterbend [cost]” means “Pay [cost]. For each generic mana in that cost, you may tap an untapped artifact or creature you control rather than pay that mana.”"

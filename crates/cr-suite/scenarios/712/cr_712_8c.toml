@@ -1,0 +1,5 @@
+rule = "712.8c"
+section = 712
+title = "Double-Faced Cards — CR 712.8c"
+status = "skeleton"
+text = "Normally, a nonmodal double-faced spell has its front face up while on the stack and has only the characteristics of its front face. However, if an effect allows a player to cast a nonmodal double-faced card “transformed” or “converted,” the resulting spell will have its back face up and have only the characteristics of its back face. Its mana value is calculated using the mana cost of its front face."

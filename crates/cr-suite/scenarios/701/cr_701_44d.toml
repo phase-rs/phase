@@ -1,0 +1,5 @@
+rule = "701.44d"
+section = 701
+title = "Keyword Actions — CR 701.44d"
+status = "skeleton"
+text = "If multiple permanents are instructed to explore at the same time, the first player in APNAP order who controls (or, in the case of a permanent no longer on the battlefield, last controlled; see rule 701.44c) one or more of those permanents chooses one of them and it explores. Then this process is repeated for each remaining instruction to explore."

@@ -1,0 +1,5 @@
+rule = "702.55a"
+section = 702
+title = "Keyword Abilities — CR 702.55a"
+status = "skeleton"
+text = "Haunt is a triggered ability. “Haunt” on a permanent means “When this permanent is put into a graveyard from the battlefield, exile it haunting target creature.” “Haunt” on an instant or sorcery spell means “When this spell is put into a graveyard during its resolution, exile it haunting target creature.”"

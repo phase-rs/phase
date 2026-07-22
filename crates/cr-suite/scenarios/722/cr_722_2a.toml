@@ -1,0 +1,5 @@
+rule = "722.2a"
+section = 722
+title = "Ending Turns and Phases — CR 722.2a"
+status = "skeleton"
+text = "The inset frame of a preparation card is called a “prepare spell.” If a rule or effect refers to a card, spell, or permanent that has a prepare spell, it refers to an object for which these alternative characteristics exist, even if the object currently doesn’t use them."

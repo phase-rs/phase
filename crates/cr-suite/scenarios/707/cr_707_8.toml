@@ -1,0 +1,5 @@
+rule = "707.8"
+section = 707
+title = "Copying Objects — CR 707.8"
+status = "skeleton"
+text = "When copying a melded permanent or other double-faced permanent, use the copiable values of the face that’s currently up to determine the characteristics of the copy. See rule 712, “Double-Faced Cards.”"

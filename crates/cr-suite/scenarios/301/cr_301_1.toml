@@ -1,0 +1,5 @@
+rule = "301.1"
+section = 301
+title = "Artifacts — CR 301.1"
+status = "skeleton"
+text = "A player who has priority may cast an artifact card from their hand during a main phase of their turn when the stack is empty. Casting an artifact as a spell uses the stack. (See rule 601, “Casting Spells.”)"

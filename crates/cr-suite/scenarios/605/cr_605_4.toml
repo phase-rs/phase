@@ -1,0 +1,5 @@
+rule = "605.4"
+section = 605
+title = "Mana Abilities — CR 605.4"
+status = "skeleton"
+text = "Triggered mana abilities follow all the rules for other triggered abilities (see rule 603, “Handling Triggered Abilities”), with the following exception:"

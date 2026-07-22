@@ -1,0 +1,5 @@
+rule = "605.1"
+section = 605
+title = "Mana Abilities — CR 605.1"
+status = "skeleton"
+text = "Some activated abilities and some triggered abilities are mana abilities, which are subject to special rules. Only abilities that meet either of the following two sets of criteria are mana abilities, regardless of what other effects they may generate or what timing restrictions (such as “Activate only as an instant”) they may have."

@@ -1,0 +1,5 @@
+rule = "303.4i"
+section = 303
+title = "Enchantments — CR 303.4i"
+status = "skeleton"
+text = "If an effect attempts to put an Aura onto the battlefield attached to either an object or player it can’t legally enchant or an object or player that is undefined, the Aura remains in its current zone, unless that zone is the stack. In that case, the Aura is put into its owner’s graveyard instead of entering the battlefield. If the Aura is a token, it isn’t created."

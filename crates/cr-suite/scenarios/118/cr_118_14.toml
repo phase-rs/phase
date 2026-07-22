@@ -1,0 +1,5 @@
+rule = "118.14"
+section = 118
+title = "Costs — CR 118.14"
+status = "skeleton"
+text = "Some effects say that “mana of any type can be spent” to pay a cost. This means that players may spend mana as though it were colorless mana or mana of any color to pay that cost. If that effect also gives a player permission to cast spells, this applies only to mana that player spends to cast spells that way. See rule 609.4b."

@@ -1,0 +1,5 @@
+rule = "614.5"
+section = 614
+title = "Replacement Effects — CR 614.5"
+status = "skeleton"
+text = "A replacement effect doesn’t invoke itself repeatedly; it gets only one opportunity to affect an event or any modified events that may replace that event."

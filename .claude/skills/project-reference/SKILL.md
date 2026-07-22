@@ -98,7 +98,7 @@ After `tilt-wait.sh` returns non-zero, fetch details with `tilt logs <resource> 
 
 These blocks are designed for interactive use, where a non-zero exit from `tilt-wait.sh` or a cargo command is surfaced via the printed status line and the operator fixes it before re-verifying. **In a `set -e` shell or scripted/CI harness, the `if` construct will swallow the inner non-zero exit** — wrap each branch with `|| exit $?` (or restructure as `tilt get uiresource clippy >/dev/null 2>&1 && tilt-wait.sh ... || cargo ...`) when copy-pasting into automation.
 
-The one-shot audit binaries (`cargo coverage`, `cargo semantic-audit`, `cargo parser-gaps`, `cargo rules-audit`) are not continuous Tilt resources — invoke them directly in both modes.
+The one-shot audit binaries (`cargo coverage`, `cargo semantic-audit`, `cargo parser-gaps`, `cargo rules-audit`, `cargo cr-suite`) are not continuous Tilt resources — invoke them directly in both modes.
 
 ## Build & Development Commands
 
@@ -124,6 +124,7 @@ cargo serve                         # Run phase-server (release)
 cargo coverage                      # Card support coverage report (reads data/card-data.json)
 cargo parser-gaps                   # Parser gap analysis report
 cargo rules-audit                   # MTG Comprehensive Rules audit (requires --features audit)
+cargo cr-suite                      # Executable CR scenario suite (generate/summary/run)
 cargo semantic-audit                # Semantic audit of parsed card data (outputs data/semantic-audit.json + .md)
 cargo scrape-feeds                  # Scrape metagame feeds from MTGGoldfish
 cargo tune-ai                       # Run AI weight tuning (requires --features tune)

@@ -1,0 +1,5 @@
+rule = "118.7g"
+section = 118
+title = "Costs — CR 118.7g"
+status = "skeleton"
+text = "If a cost is reduced by an amount of mana represented by one or more snow mana symbols, the cost is reduced by that much generic mana."

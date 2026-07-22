@@ -1,0 +1,5 @@
+rule = "706.1"
+section = 706
+title = "Rolling a Die — CR 706.1"
+status = "skeleton"
+text = "An effect that instructs a player to roll a die will specify what kind of die to roll and how many of those dice to roll."

@@ -1,0 +1,5 @@
+rule = "613.8"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.8"
+status = "skeleton"
+text = "Within a layer or sublayer, determining which order effects are applied in is sometimes done using a dependency system. If a dependency exists, it will override the timestamp system."

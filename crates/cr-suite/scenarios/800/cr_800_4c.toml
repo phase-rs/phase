@@ -1,0 +1,5 @@
+rule = "800.4c"
+section = 800
+title = "General (Multiplayer Rules) — CR 800.4c"
+status = "skeleton"
+text = "If an effect that gives a player still in the game control of an object ends, there is no other effect giving control of that object to another player in the game, and the player who controlled that object by default has left the game, the object is exiled. This is not a state-based action. It happens as soon as the control-changing effect ends."

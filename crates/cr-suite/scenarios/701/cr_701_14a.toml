@@ -1,0 +1,5 @@
+rule = "701.14a"
+section = 701
+title = "Keyword Actions — CR 701.14a"
+status = "skeleton"
+text = "A spell or ability may instruct a creature to fight another creature or it may instruct two creatures to fight each other. Each of those creatures deals damage equal to its power to the other creature."

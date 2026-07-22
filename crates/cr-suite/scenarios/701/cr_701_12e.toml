@@ -1,0 +1,5 @@
+rule = "701.12e"
+section = 701
+title = "Keyword Actions — CR 701.12e"
+status = "skeleton"
+text = "If a card in one zone is exchanged with a card in a different zone, and either of them is attached to an object, that card stops being attached to that object and the other card becomes attached to that object."

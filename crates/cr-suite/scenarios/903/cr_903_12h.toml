@@ -1,0 +1,5 @@
+rule = "903.12h"
+section = 903
+title = "Commander — CR 903.12h"
+status = "skeleton"
+text = "Brawl games do not use the state-based action described in rule 704.6c, which causes a player to lose the game if they’ve been dealt 21 or more combat damage by a commander."

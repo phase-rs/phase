@@ -1,0 +1,5 @@
+rule = "701.57a"
+section = 701
+title = "Keyword Actions — CR 701.57a"
+status = "skeleton"
+text = "“Discover N” means “Exile cards from the top of your library until you exile a nonland card with mana value N or less. You may cast that card without paying its mana cost if the resulting spell’s mana value is less than or equal to N. If you don’t cast it, put that card into your hand. Put the remaining exiled cards on the bottom of your library in a random order.”"

@@ -1,0 +1,5 @@
+rule = "207.5"
+section = 207
+title = "Text Box — CR 207.5"
+status = "skeleton"
+text = "One card (Cryptic Spires) has a set of symbols below the text box that represent each color and an ability that instructs a player to circle two of those colors as they create their deck. To circle a color, the player circles (or otherwise clearly indicates) that color’s symbol. The mana symbol of each circled color is considered part of that card’s printed rules text (see rule 613.1) and affects that card’s color identity (see rule 903.4)."

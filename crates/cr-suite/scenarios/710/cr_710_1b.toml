@@ -1,0 +1,5 @@
+rule = "710.1b"
+section = 710
+title = "Flip Cards — CR 710.1b"
+status = "skeleton"
+text = "The bottom half of a flip card contains an alternative name, text box, type line, power, and toughness. These characteristics are used only if the permanent is on the battlefield and only if the permanent is flipped."

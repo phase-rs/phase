@@ -1,0 +1,5 @@
+rule = "702.29b"
+section = 702
+title = "Keyword Abilities — CR 702.29b"
+status = "skeleton"
+text = "Although the cycling ability can be activated only if the card is in a player’s hand, it continues to exist while the object is on the battlefield and in all other zones. Therefore objects with cycling will be affected by effects that depend on objects having one or more activated abilities."

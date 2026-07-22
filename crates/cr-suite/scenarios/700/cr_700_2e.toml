@@ -1,0 +1,5 @@
+rule = "700.2e"
+section = 700
+title = "General (Additional Rules) — CR 700.2e"
+status = "skeleton"
+text = "Some spells and abilities specify that a player other than their controller chooses a mode for it. In that case, the other player does so when the spell or ability’s controller normally would do so. If there is more than one other player who could make such a choice, the spell or ability’s controller decides which of those players will make the choice."

@@ -1,0 +1,5 @@
+rule = "601.3"
+section = 601
+title = "Casting Spells — CR 601.3"
+status = "skeleton"
+text = "A player can begin to cast a spell only if a rule or effect allows that player to cast it and no rule or effect prohibits that player from casting it."

@@ -1,0 +1,5 @@
+rule = "114.2"
+section = 114
+title = "Emblems — CR 114.2"
+status = "skeleton"
+text = "An effect that creates an emblem is written “[Player] gets an emblem with [ability].” This means that [player] puts an emblem with [ability] into the command zone. The emblem is both owned and controlled by that player."

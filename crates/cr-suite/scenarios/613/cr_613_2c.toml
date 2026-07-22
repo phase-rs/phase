@@ -1,0 +1,5 @@
+rule = "613.2c"
+section = 613
+title = "Interaction of Continuous Effects — CR 613.2c"
+status = "skeleton"
+text = "After all rules and effects in layer 1 have been applied, the object’s characteristics are its copiable values. (See rule 707.2.)"

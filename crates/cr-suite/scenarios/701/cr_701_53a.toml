@@ -1,0 +1,5 @@
+rule = "701.53a"
+section = 701
+title = "Keyword Actions — CR 701.53a"
+status = "skeleton"
+text = "To incubate N, create an Incubator token that enters the battlefield with N +1/+1 counters on it. See rule 111.10i."

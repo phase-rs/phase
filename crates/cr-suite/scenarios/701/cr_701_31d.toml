@@ -1,0 +1,5 @@
+rule = "701.31d"
+section = 701
+title = "Keyword Actions — CR 701.31d"
+status = "skeleton"
+text = "The plane card that’s turned face up is the plane the player planeswalks to. The plane card that’s turned face down or that leaves the game is the plane the player planeswalks away from. The same is true with respect to phenomena."

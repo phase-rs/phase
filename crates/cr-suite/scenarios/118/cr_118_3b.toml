@@ -1,0 +1,5 @@
+rule = "118.3b"
+section = 118
+title = "Costs — CR 118.3b"
+status = "skeleton"
+text = "Paying life is done by subtracting the indicated amount of life from a player’s life total. (Players can always pay 0 life.)"
