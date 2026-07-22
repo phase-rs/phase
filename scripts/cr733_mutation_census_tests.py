@@ -535,6 +535,43 @@ class RootDriftGuardTests(unittest.TestCase):
         self.assertGreaterEqual(len(census.collect_gamestate_fields()), census.MIN_GAMESTATE_FIELDS)
 
 
+class FluentChainJoinTests(unittest.TestCase):
+    """rustfmt-split method chains must be matched as one logical statement."""
+
+    def _rows(self, code_lines: "list[str]", fn: str = "record_spell_cast"):
+        return [(i, line, line, fn) for i, line in enumerate(code_lines)]
+
+    def test_joins_continuation_lines_into_first_line(self) -> None:
+        rows = self._rows(
+            [
+                "    state",
+                "        .spells_cast_this_game_by_player",
+                "        .entry(player)",
+                "        .or_default()",
+                "        .push_back(record);",
+            ]
+        )
+        joined = census.join_fluent_chains(rows)
+        self.assertEqual(len(joined), 1)
+        self.assertEqual(joined[0][0], 0)  # keeps the first line's number
+        wr = census.build_write_regexes(["spells_cast_this_game_by_player"])
+        hits = census.detect_write_sites(joined[0][2], wr)
+        self.assertEqual(
+            hits, [("mut_method:entry", "spells_cast_this_game_by_player", "state")]
+        )
+
+    def test_does_not_join_across_functions(self) -> None:
+        rows = [
+            (0, "state", "state", "fn_a"),
+            (1, "    .field(x);", "    .field(x);", "fn_b"),
+        ]
+        self.assertEqual(len(census.join_fluent_chains(rows)), 2)
+
+    def test_plain_statements_pass_through_unchanged(self) -> None:
+        rows = self._rows(["let a = 1;", "state.life = 3;"])
+        self.assertEqual(census.join_fluent_chains(rows), rows)
+
+
 class ScanPopulationTests(unittest.TestCase):
     """Population regressions: production authorities must be in the scan set."""
 
