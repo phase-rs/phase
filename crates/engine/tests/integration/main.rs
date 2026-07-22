@@ -848,6 +848,7 @@ mod well_of_lost_dreams_may_pay_x;
 mod wernog_riders_chaplain_investigate_count;
 mod white_suns_twilight;
 mod who_villainous_choice_scoped_player;
+mod wilhelt_decayed_intervening_if_5937;
 mod willie_lumpkin_cant_attack;
 mod winnowing;
 mod wise_mothman_milled_trigger;

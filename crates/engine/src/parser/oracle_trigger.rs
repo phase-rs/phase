@@ -57,11 +57,12 @@ use crate::types::ability::{
 use crate::types::card_type::{is_land_subtype, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::events::{ClashResult, PlayerActionKind};
-use crate::types::keywords::KeywordKind;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaType};
 use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, PlaneswalkRole, TriggerMode};
 use crate::types::zones::Zone;
+use std::str::FromStr;
 
 /// Returns true if `filter` references the trigger source itself — directly
 /// (`TargetFilter::SelfRef`) or transitively inside an `Or`/`And`/`Not`
@@ -5911,6 +5912,12 @@ fn parse_zone_change_object_filter_condition<'a>(
 }
 
 fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
+    // CR 603.4: past-tense keyword possession ("had <keyword>" / "didn't have
+    // <keyword>", Wilhelt) — tag-disjoint from the token predicate ("is"/"was")
+    // and from the was/wasn't look-back axis below, so ordering is safe.
+    if let Ok((rest, condition)) = parse_zone_change_object_keyword_possession(input) {
+        return Ok((rest, condition));
+    }
     if let Ok((rest, condition)) = parse_zone_change_object_token_predicate(input) {
         return Ok((rest, condition));
     }
@@ -5945,6 +5952,62 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
         filter: TargetFilter::Typed(TypedFilter::creature().properties(props)),
     };
 
+    if negated {
+        Ok((
+            rest,
+            TriggerCondition::Not {
+                condition: Box::new(condition),
+            },
+        ))
+    } else {
+        Ok((rest, condition))
+    }
+}
+
+/// CR 603.4 + CR 603.10a + CR 400.7: "if it (had | didn't have | did not have)
+/// <keyword>" — past-tense keyword possession on the dying event object
+/// (Wilhelt, the Rotcleaver: "if it didn't have decayed", CR 702.147a),
+/// evaluated against the zone-change LKI snapshot. The snapshot captures the
+/// layer-computed keyword set, so continuously granted keywords count
+/// (CR 613.1f, layer 6).
+///
+/// DIES-SHAPE ASSUMPTION: origin Battlefield → destination Graveyard is
+/// hardcoded, identical to every sibling arm in this family (the P/T-comparison
+/// arm and the was/wasn't axis above) — correct for dies triggers (CR 700.4).
+/// CAUTION for future variants: the negated (`Not`-wrapped) form FAILS OPEN if
+/// this condition is ever attached to a non-dies trigger shape (inner filter
+/// false → Not → true → unconditional); a leaves-the-battlefield/exile variant
+/// must derive zones from the trigger context instead of reusing this arm.
+fn parse_zone_change_object_keyword_possession(input: &str) -> OracleResult<'_, TriggerCondition> {
+    let (rest, negated) = alt((
+        value(true, alt((tag("didn't have "), tag("did not have ")))),
+        value(false, tag("had ")),
+    ))
+    .parse(input)?;
+    let (rest, keyword_name) = nom_primitives::parse_keyword_name(rest)?;
+    let keyword = Keyword::from_str(keyword_name).expect("Infallible");
+    // Guard at KeywordKind level: dozens of real Keyword variants fold to
+    // KeywordKind::Unknown (the madness/alt-cost families etc.) and would
+    // over-match under the kind() comparison below; kind() == Unknown also
+    // subsumes the Keyword::Unknown fallback case. Landwalk is rejected too:
+    // the parameter-carrying `Keyword::Landwalk(_)` folds to the single
+    // `KeywordKind::Landwalk` (types/keywords.rs), so a kind-level gate would
+    // over-match across land types — "if it had islandwalk" would also match
+    // forestwalk, but each [type]walk is a distinct ability (CR 702.14a).
+    // Exact-match support is deferred until a real card needs it; walk forms
+    // stay honestly swallowed (the Condition_If diagnostic keeps firing).
+    if matches!(keyword.kind(), KeywordKind::Unknown | KeywordKind::Landwalk) {
+        return Err(oracle_err(input));
+    }
+    let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin: Some(Zone::Battlefield),
+        destination: Zone::Graveyard,
+        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::HasKeywordKind {
+                value: keyword.kind(),
+            },
+        ])),
+    };
     if negated {
         Ok((
             rest,

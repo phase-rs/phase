@@ -20196,6 +20196,125 @@ fn extract_had_no_typed_counters_negates() {
     );
 }
 
+/// CR 603.4 + CR 603.10a + CR 400.7 + issue #5937: the UN-negated past-tense
+/// keyword-possession form "if it had <keyword>" binds the dying event
+/// object's zone-change look-back filter at `KeywordKind` granularity
+/// (synthetic — the printed class card, Wilhelt, uses the negated form,
+/// locked end-to-end by tests/integration/wilhelt_decayed_intervening_if_5937).
+#[test]
+fn extract_had_keyword_binds_dying_event_object_filter() {
+    use crate::types::keywords::KeywordKind;
+    use crate::types::zones::Zone;
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it had flying, draw a card.",
+        "Test Flier Mourner",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flying,
+                },
+            ])),
+        }),
+        "un-negated \"had <keyword>\" must bind the event-object look-back filter"
+    );
+}
+
+/// Priority lock: "if it had a +1/+1 counter on it" on a full dies trigger
+/// still routes to `HadCounters` — the counter extractor runs BEFORE the new
+/// keyword-possession arm, and the keyword arm itself rejects the fragment
+/// ("a +1/+1..." is not a keyword name). Guards the seam between the two
+/// past-tense "if it had" families.
+#[test]
+fn extract_had_counter_still_beats_keyword_possession_arm() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it had a +1/+1 counter on it, draw a card.",
+        "Test Counter Mourner",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HadCounters {
+            counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+        }),
+        "counter form must stay HadCounters, not the keyword-possession filter"
+    );
+}
+
+/// Coverage honesty: a non-keyword object of "didn't have" ("fun" is not a
+/// keyword) must NOT bind a condition — and the Condition_If swallow warning
+/// still fires, keeping the dropped clause visible rather than silently
+/// un-gating the trigger. The `KeywordKind::Unknown` guard in the new arm is
+/// what rejects it (madness-family keywords fold to Unknown too).
+#[test]
+fn extract_didnt_have_non_keyword_stays_swallowed() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it didn't have fun, draw a card.",
+        "Test Joyless Mourner",
+    );
+    assert_eq!(
+        def.condition, None,
+        "a non-keyword possession object must not bind a condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the rejected clause).
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control dies, if it didn't have fun, draw a card.",
+        "Test Joyless Mourner",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the unparsed clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// Coverage honesty (CR 702.14a): landwalk forms are real KEYWORDS-table
+/// entries the keyword-name combinator accepts, but `Keyword::Landwalk(_)`
+/// folds to the single `KeywordKind::Landwalk`, so a kind-level gate would
+/// over-match across land types ("if it had islandwalk" also matching
+/// forestwalk — each [type]walk is a distinct ability). The arm's guard must
+/// reject walk forms so no condition binds — and the Condition_If swallow
+/// warning still fires, keeping the dropped clause visible until exact-match
+/// support is built for a real card.
+#[test]
+fn extract_didnt_have_landwalk_stays_swallowed() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it didn't have islandwalk, draw a card.",
+        "Test Landlocked Mourner",
+    );
+    assert_eq!(
+        def.condition, None,
+        "a landwalk possession object must not bind a kind-level condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the rejected clause).
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control dies, if it didn't have islandwalk, draw a card.",
+        "Test Landlocked Mourner",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the rejected landwalk clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 702.188a + CR 603.4 (issue: Spiders-Man, Heroic Horde): the ETB
 /// intervening-if "if they were cast using web-slinging" must gate the
 /// life-gain + token effects. Before the fix `extract_if_condition` had no
