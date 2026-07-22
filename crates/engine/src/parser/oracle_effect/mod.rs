@@ -4836,29 +4836,52 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
     .parse(input)
 }
 
-/// Consume a single-quoted granted-ability span as one opaque unit, applying the
-/// structural pairing rule from [`token::find_anchored_single_quoted_span`]:
+/// Consume a single-quoted granted-ability span as one opaque unit:
 ///
 /// - the opener is anchored on `" '"` (a space then the quote), so a possessive
 ///   apostrophe (`owner's`, never space-preceded) can never START a span; and
-/// - the closer is the LAST `'` in the input, so a contraction or possessive
-///   INSIDE the ability (`can't`, `owner's`) is content, not the close.
+/// - the closer is the first `'` that is NOT followed by an ASCII alphanumeric.
+///   A contraction or possessive apostrophe INSIDE the ability (`can't`,
+///   `owner's`) is always followed by a letter, so it stays content; a real
+///   closing quote is followed by punctuation, a space, `"` or end of input.
 ///
 /// This matters at depth 2 of a cascading token (Reef Worm): the Fish's trigger
 /// effect is `create a … Whale token with '…, create a … Kraken token.'`, and a
 /// naive `take_until("'")` would close at the first embedded apostrophe and
-/// re-expose the inner `, create …` to the list splitter. Single quotes never
-/// nest in Oracle templating (depth 3 returns to double quotes), so the ability's
-/// close is unambiguously the final `'`.
+/// re-expose the inner `, create …` to the list splitter.
+///
+/// The close is deliberately ITEM-BOUNDED, unlike
+/// `token::find_anchored_single_quoted_span`'s last-`'` rule: that helper sees a
+/// single token's suffix where the final `'` is unambiguous, but this combinator
+/// runs inside a LIST splitter, where a tail-wide `rfind` would let the first
+/// span swallow the separator and a sibling item's own quoted grant. The one
+/// shape the followed-by-letter rule cannot hold is a bare PLURAL possessive
+/// (`opponents'`, apostrophe then space) inside the span — no printed card nests
+/// one inside a single-quoted grant.
 fn opaque_single_quoted_span<'a, E: nom::error::ParseError<&'a str>>(
     input: &'a str,
 ) -> nom::IResult<&'a str, &'a str, E> {
     // Generic over the error type so both list splitters can share it: the choice
     // splitter uses nom's default `Error`, the sequence splitter uses `OracleError`.
     let (after_open, _) = tag::<_, _, E>(" '").parse(input)?;
-    let close = after_open
-        .rfind('\'')
-        .ok_or_else(|| nom::Err::Error(E::from_error_kind(input, nom::error::ErrorKind::Char)))?;
+    // Structural close scan (char-level quote pairing, not parsing dispatch —
+    // same class as `strip_double_quoted_spans`' find('"')).
+    let mut search_from = 0;
+    let close = loop {
+        let Some(rel) = after_open[search_from..].find('\'') else {
+            return Err(nom::Err::Error(E::from_error_kind(
+                input,
+                nom::error::ErrorKind::Char,
+            )));
+        };
+        let idx = search_from + rel;
+        match after_open[idx + 1..].chars().next() {
+            // Contraction/possessive: `'` glued to a following letter or digit.
+            Some(c) if c.is_ascii_alphanumeric() => search_from = idx + 1,
+            // Punctuation, whitespace, `"`, or end of input: the span's close.
+            _ => break idx,
+        }
+    };
     let consumed = input.len() - after_open.len() + close + '\''.len_utf8();
     Ok((&input[consumed..], &input[..consumed]))
 }

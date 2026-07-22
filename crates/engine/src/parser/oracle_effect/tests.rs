@@ -44785,6 +44785,44 @@ fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_sourc
     );
 }
 
+/// Structural cascade traversal: assert `effect` is the named `Effect::Token`,
+/// find its granted dies-trigger (`GrantTrigger` with `ChangesZone` mode), and
+/// return the trigger's executed effect — the next token of the cascade. Shared
+/// by the effect-chain and `parse_oracle_text` card-path Reef Worm regressions
+/// so both prove NESTING (Fish ⊃ Whale ⊃ Kraken), not just token presence or
+/// debug-print order.
+fn granted_dies_token<'a>(effect: &'a Effect, who: &str) -> &'a Effect {
+    let Effect::Token {
+        name,
+        static_abilities,
+        ..
+    } = effect
+    else {
+        panic!("{who}: expected a Token, got {effect:?}");
+    };
+    assert_eq!(name, who, "token name");
+    let trigger = static_abilities
+        .iter()
+        .flat_map(|sd| sd.modifications.iter())
+        .find_map(|m| match m {
+            crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                Some(trigger)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{who}: must carry a granted dies-trigger"));
+    assert_eq!(
+        trigger.mode,
+        crate::types::triggers::TriggerMode::ChangesZone,
+        "{who}: dies-trigger is a zone change"
+    );
+    &trigger
+        .execute
+        .as_ref()
+        .unwrap_or_else(|| panic!("{who}: dies-trigger has no effect"))
+        .effect
+}
+
 /// CR 111.2 + CR 608.2d: Reef Worm creates a single cascading Fish token that
 /// carries a quoted death-triggered ability; it is NOT a modal token choice.
 /// Before the quote-aware splitter, the inner ", create …" severed the clause
@@ -44799,40 +44837,6 @@ fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_sourc
 /// a `GrantTrigger` whose dies-trigger creates the next.
 #[test]
 fn reef_worm_nested_token_cascade() {
-    // The single-created-token effect at the top of a "When this dies, create …"
-    // trigger, given a token that grants a dies-trigger.
-    fn granted_dies_token<'a>(effect: &'a Effect, who: &str) -> &'a Effect {
-        let Effect::Token {
-            name,
-            static_abilities,
-            ..
-        } = effect
-        else {
-            panic!("{who}: expected a Token, got {effect:?}");
-        };
-        assert_eq!(name, who, "token name");
-        let trigger = static_abilities
-            .iter()
-            .flat_map(|sd| sd.modifications.iter())
-            .find_map(|m| match m {
-                crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
-                    Some(trigger)
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("{who}: must carry a granted dies-trigger"));
-        assert_eq!(
-            trigger.mode,
-            crate::types::triggers::TriggerMode::ChangesZone,
-            "{who}: dies-trigger is a zone change"
-        );
-        &trigger
-            .execute
-            .as_ref()
-            .unwrap_or_else(|| panic!("{who}: dies-trigger has no effect"))
-            .effect
-    }
-
     let def = parse_effect_chain(
             "create a 3/3 blue Fish creature token with \"When this token dies, create a 6/6 blue Whale creature token with 'When this token dies, create a 9/9 blue Kraken creature token.'\"",
             AbilityKind::Spell,
@@ -44847,13 +44851,15 @@ fn reef_worm_nested_token_cascade() {
     assert_eq!(name, "Kraken", "innermost token is the 9/9 Kraken");
 }
 
-/// The structural single-quote span parser must close at the LAST `'`, so a
-/// contraction or possessive INSIDE the ability (`can't`, `owner's`) stays
-/// content and never becomes the closing delimiter.
+/// The structural single-quote span parser: a contraction or possessive INSIDE
+/// the ability (`can't`, `owner's`) stays content (its apostrophe is glued to a
+/// following letter), while the close is ITEM-BOUNDED — the first `'` not
+/// followed by an alphanumeric — so a sibling list item's own quoted grant is
+/// never swallowed.
 #[test]
-fn opaque_single_quoted_span_closes_at_last_apostrophe() {
-    // Input: a phrase-anchored single-quoted ability containing two internal
-    // apostrophes and an internal list separator. The whole span must be one unit.
+fn opaque_single_quoted_span_is_item_bounded_and_keeps_contractions() {
+    // A phrase-anchored single-quoted ability containing two internal apostrophes
+    // and an internal list separator. The whole span must be one unit.
     let input = " 'when this dies, if its owner's hand isn't empty, draw a card.'";
     let (rest, span) = super::opaque_single_quoted_span::<nom::error::Error<&str>>(input)
         .expect("must recognize the span");
@@ -44862,10 +44868,54 @@ fn opaque_single_quoted_span_closes_at_last_apostrophe() {
         span.contains("owner's") && span.contains("isn't"),
         "embedded apostrophes stay inside the span, got {span:?}"
     );
+
+    // Item-bounded close: with a SIBLING quoted item after a list separator, the
+    // first span must close at its own quote (followed by `,`), not swallow the
+    // separator and the sibling's span via a tail-wide last-apostrophe rule —
+    // even when the first span carries an embedded possessive.
+    let siblings = " 'this token can't block owner's attackers.', and a 6/6 blue whale creature token with 'when this token dies, draw a card.'";
+    let (rest, first_span) = super::opaque_single_quoted_span::<nom::error::Error<&str>>(siblings)
+        .expect("must recognize the first span");
+    assert_eq!(
+        first_span, " 'this token can't block owner's attackers.'",
+        "the first span closes at its own quote, keeping embedded apostrophes"
+    );
+    assert!(
+        rest.starts_with(", and a 6/6"),
+        "the separator and the sibling item stay OUTSIDE the first span, got {rest:?}"
+    );
+
     // A bare possessive with no space-anchored opener is NOT a span opener.
     assert!(
         super::opaque_single_quoted_span::<nom::error::Error<&str>>("owner's turn").is_err(),
         "a possessive apostrophe must not open a span"
+    );
+}
+
+/// CR 608.2c: Two SIBLING list items that each carry a single-quoted grant must
+/// stay two items — the first span's close is item-bounded, so the `separated_list1`
+/// still sees the boundary. The first span deliberately embeds a contraction.
+#[test]
+fn sibling_quoted_token_items_stay_separate() {
+    let items = super::split_choice_list_items(
+        "a 2/2 blue shark creature token with 'this token can't block.' or a 6/6 \
+         blue whale creature token with 'when this token dies, draw a card.'",
+    )
+    .expect("the disjunctive list must split");
+    assert_eq!(
+        items.len(),
+        2,
+        "two sibling quoted items must stay two list items, got {items:?}"
+    );
+    assert!(
+        items[0].contains("can't block") && !items[0].contains("whale"),
+        "first item keeps its own span only, got {:?}",
+        items[0]
+    );
+    assert!(
+        items[1].contains("whale") && items[1].contains("draw a card"),
+        "second item keeps its own span, got {:?}",
+        items[1]
     );
 }
 
@@ -44949,26 +44999,16 @@ fn reef_worm_card_path_builds_cascade() {
         .iter()
         .find_map(|t| t.execute.as_deref())
         .expect("Reef Worm's dies-trigger must lower to a create-token effect");
-    // Fish → Whale → Kraken must all be present, nested, in the card-path parse.
-    let dump = format!("{dies:?}");
-    assert!(
-        dump.contains("Fish") && dump.contains("Whale") && dump.contains("Kraken"),
-        "all three cascade tokens must be present in the card-path parse"
-    );
-    assert!(
-        !dump.contains("ChooseOneOf"),
-        "the cascade must not lower to a modal ChooseOneOf"
-    );
-    // Whale must appear INSIDE the (double-quoted) Fish grant, and Kraken inside
-    // the (single-quoted) Whale grant — a structural nesting check: Kraken's
-    // GrantTrigger must be reachable only through Whale's.
-    let fish_idx = dump.find("Fish").unwrap();
-    let whale_idx = dump.find("Whale").unwrap();
-    let kraken_idx = dump.find("Kraken").unwrap();
-    assert!(
-        fish_idx < whale_idx && whale_idx < kraken_idx,
-        "cascade must nest outer→inner: Fish, then Whale, then Kraken"
-    );
+    // Structural traversal, not debug-print order (a flat sibling shape could
+    // fake the latter): the dies-trigger creates the Fish, whose granted
+    // dies-trigger creates the Whale, whose granted dies-trigger creates the
+    // Kraken — each hop through `Effect::Token` → `GrantTrigger` → execute.
+    let whale = granted_dies_token(&dies.effect, "Fish");
+    let kraken = granted_dies_token(whale, "Whale");
+    let Effect::Token { name, .. } = kraken else {
+        panic!("Kraken must be a plain Token leaf, got {kraken:?}");
+    };
+    assert_eq!(name, "Kraken", "innermost token is the 9/9 Kraken");
 }
 
 /// CR 702.62a + CR 118.9: The Face of Boe's verbless "pay its suspend cost
