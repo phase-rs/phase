@@ -850,7 +850,20 @@ pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    let root = state
+    super::ability_utils::flatten_targets_in_chain(resolving_root_ability(state, ability))
+}
+
+/// CR 608.2c: The root `ResolvedAbility` of the currently-resolving stack
+/// entry that `ability` belongs to (falling back to `ability` itself when no
+/// matching entry is found — e.g. hand-built test abilities resolved outside
+/// the stack). Single authority for the root-entry lookup shared by
+/// [`parent_chain_targets_from_root`] and the delayed-trigger creation
+/// snapshot (`effects::delayed_trigger`).
+pub(crate) fn resolving_root_ability<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+) -> &'a ResolvedAbility {
+    state
         .resolving_stack_entry
         .as_ref()
         .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
@@ -861,8 +874,7 @@ pub(crate) fn parent_chain_targets_from_root(
                 .find(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
         })
         .and_then(|entry| entry.ability())
-        .unwrap_or(ability);
-    super::ability_utils::flatten_targets_in_chain(root)
+        .unwrap_or(ability)
 }
 
 /// CR 608.2c: Resolve a single earlier target slot by its declared `index` from

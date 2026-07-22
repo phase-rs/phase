@@ -245,6 +245,23 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
         return ability.targets.clone();
     }
 
+    // CR 601.2c + CR 608.2c (issue #5901): When the resolving root chain
+    // DECLARED a chooseable target slot — a `multi_target` bound ("any number
+    // of target noncreature artifacts", Depthshaker Titan) or an optional
+    // "up to one target" slot — reaching this point means the player legally
+    // chose ZERO targets: the two tiers above are empty precisely because the
+    // chosen set is empty. The ParentTarget anaphor ("them"/"it") refers to
+    // that empty chosen set, so the delayed trigger has no subject. Falling
+    // through to the triggering-source fallback instead bound the trigger's
+    // own event source — the Titan sacrificed ITSELF at the next end step.
+    // The fallback below remains for slotless parents (a dies/LTB trigger's
+    // "exile it at end of turn", where "it" genuinely names the event source).
+    if chain_declares_chooseable_target_slots(crate::game::targeting::resolving_root_ability(
+        state, ability,
+    )) {
+        return Vec::new();
+    }
+
     crate::game::targeting::resolve_event_context_target(
         state,
         &TargetFilter::TriggeringSource,
@@ -252,6 +269,25 @@ fn parent_target_snapshot(state: &GameState, ability: &ResolvedAbility) -> Vec<T
     )
     .map(|target| vec![target])
     .unwrap_or_default()
+}
+
+/// True when any link of the chain declares a target slot whose selection may
+/// legally be empty: a `multi_target` bound (CR 115.1d "any number of target
+/// ...") or `optional_targeting` (CR 115.1d "up to one target ..."). Used by
+/// [`parent_target_snapshot`] to distinguish "slots were declared but zero
+/// were chosen" (referent = empty set) from "no slots exist at all" (referent
+/// = the creation event's source object).
+fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
+    ability.multi_target.is_some()
+        || ability.optional_targeting
+        || ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_declares_chooseable_target_slots)
+        || ability
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_declares_chooseable_target_slots)
 }
 
 fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
