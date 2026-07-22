@@ -11379,6 +11379,16 @@ pub struct GameState {
     pub format_config: FormatConfig,
     #[serde(default)]
     pub eliminated_players: Vec<PlayerId>,
+    /// CR 801.2c: the players within each player's range of influence, fixed as
+    /// the current turn began. `None` when the game does not use the limited
+    /// range of influence option, which is every format shipped today.
+    ///
+    /// Snapshotted rather than derived because CR 801.2c determines membership
+    /// "as each turn begins": a player leaving must not change who is in range
+    /// until the next turn starts, so this cannot be recomputed on demand.
+    /// Refreshed only by `game::range_of_influence::refresh_for_turn`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range_of_influence: Option<crate::game::range_of_influence::RangeOfInfluenceSnapshot>,
     #[serde(default)]
     pub commander_damage: Vec<CommanderDamageEntry>,
     #[serde(default)]
@@ -15376,6 +15386,7 @@ impl GameState {
             seat_order,
             format_config: config,
             eliminated_players: Vec::new(),
+            range_of_influence: None,
             commander_damage: Vec::new(),
             priority_passes: BTreeSet::new(),
             auto_pass: HashMap::new(),
@@ -16591,6 +16602,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         seat_order: _,
         format_config: _,
         eliminated_players: _,
+        // CR 801.2c: a per-turn snapshot derived from `seat_order`,
+        // `eliminated_players` and the format's configured range — all of which
+        // this partition already covers. It is bounded by the seat count and
+        // only ever rewritten at a turn boundary, so it cannot act as a
+        // per-iteration accumulator riding a covering pair to a false CR 732.2a
+        // win. Nothing extra to compare.
+        range_of_influence: _,
         commander_damage: _,
         priority_passes: _,
         auto_pass: _,

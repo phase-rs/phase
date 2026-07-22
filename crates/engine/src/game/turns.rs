@@ -812,6 +812,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     state.turn_number += 1;
 
+    // CR 801.2c: the players within each player's range of influence are
+    // determined as each turn begins. Refreshed here, at the single turn-start
+    // authority, so a player leaving mid-turn changes nobody's range until the
+    // next turn actually starts (the rule's own example). No-op unless the
+    // format opts into a limited range.
+    super::range_of_influence::refresh_for_turn(state);
+
     // CR 500.7: Determine the active player and whether this turn is an *extra*
     // turn (LIFO-popped from `state.extra_turns`) or a natural turn (next seat
     // in APNAP order). `is_extra_turn` flows into the replacement pipeline so

@@ -382,7 +382,36 @@ fn find_legal_targets_with_context(
         }
     }
 
+    // CR 801.4: objects and players outside a player's range of influence can't
+    // be the targets of spells or abilities that player controls. Applied once
+    // here, at the single enumeration funnel every targeting path routes
+    // through, rather than inside each filter branch — so no branch can forget
+    // it. A no-op unless the format opts into a limited range.
+    retain_targets_in_range(state, source_controller, &mut targets);
+
     targets
+}
+
+/// CR 801.4 + CR 801.2d: drop targets outside `source_controller`'s range of
+/// influence. Objects are judged by their controller (CR 801.2d); players by
+/// seat distance. Returns immediately when the game does not use the option, so
+/// the common case costs one `Option` check.
+fn retain_targets_in_range(
+    state: &GameState,
+    source_controller: PlayerId,
+    targets: &mut Vec<TargetRef>,
+) {
+    if state.range_of_influence.is_none() {
+        return;
+    }
+    targets.retain(|target| match target {
+        TargetRef::Object(id) => {
+            super::range_of_influence::object_in_range(state, source_controller, *id)
+        }
+        TargetRef::Player(player) => {
+            super::range_of_influence::player_in_range(state, source_controller, *player)
+        }
+    });
 }
 
 fn has_legal_target_with_context(

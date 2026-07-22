@@ -133,6 +133,7 @@ pub mod printed_cards;
 pub mod priority;
 pub mod public_state;
 pub mod quantity;
+pub mod range_of_influence;
 pub mod replacement;
 pub mod replay;
 pub mod restrictions;

@@ -727,6 +727,7 @@ mod purged_source_intervening_if_lki;
 mod purged_source_matches_filter_lki;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
+mod range_of_influence;
 mod refurbished_familiar;
 mod render_silent_cant_cast;
 mod repro_pilot_crew;
