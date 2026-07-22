@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://phase-rs.dev https://preview.phase-rs.dev"
+      "csp": "default-src 'self'; connect-src 'self' https://phase-rs.dev https://app.phase-rs.dev https://preview.phase-rs.dev"
     }
   },
   "bundle": {

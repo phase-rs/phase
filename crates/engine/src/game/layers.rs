@@ -5266,17 +5266,22 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
     }
 }
 
-/// CR 611.2c + CR 109.5: True when a granted `MustBeBlockedByAll` /
-/// `MustBeBlocked` static carries a controller-relative blocker filter
-/// (`ControllerRef::You`/`Opponent`/… — "your opponents", "you control").
-/// When such a static is grafted onto a TARGET permanent by a one-shot effect
-/// (You Look Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter
-/// relative to the target's controller. This gate is the condition under which
-/// the installing player must be snapshotted as the anchor (mirrors
-/// `static_mode_uses_chosen_color`).
-fn static_mode_uses_controller_relative_blocker_filter(
-    mode: &crate::types::statics::StaticMode,
-) -> bool {
+/// CR 611.2c + CR 109.5: True when a granted static mode resolves a player
+/// reference ("you"/"your opponents") that must be the INSTALLING player rather
+/// than the carrier's controller, so the graft has to snapshot
+/// `effect.controller` as the definition's anchor.
+///
+/// Two member classes today:
+/// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
+///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
+///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
+///   Upon the Tarrasque), CR 109.5 would otherwise evaluate the filter relative
+///   to the target's controller.
+/// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
+///   controller (CR 701.15b).
+///
+/// Mirrors `static_mode_uses_chosen_color`.
+fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
     use crate::types::statics::StaticMode;
     match mode {
         StaticMode::MustBeBlockedByAll {
@@ -5285,6 +5290,12 @@ fn static_mode_uses_controller_relative_blocker_filter(
         | StaticMode::MustBeBlocked { by: Some(filter) } => {
             target_filter_controller_is_relative(filter)
         }
+        // CR 109.5 + CR 701.15b: the avoided player is the INSTALLING player,
+        // not the carrier's controller — the requirement is grafted onto an
+        // opponent's creature (Kardur, Doomscourge) or the controller's own
+        // (Maximum Carnage chapter I), so re-deriving it from the carrier would
+        // avoid the wrong player.
+        StaticMode::MustAttackAwayFromSource => true,
         _ => false,
     }
 }
@@ -5767,7 +5778,34 @@ fn apply_continuous_effect_filtered(
         retained
     } else {
         let scan_ids = effect_candidate_ids(state, &effect.affected_filter, zone_cache);
-        let ctx = FilterContext::from_source(state, effect.source_id);
+        // CR 109.5 + CR 611.2c: a continuous effect created by a RESOLVED spell
+        // or ability reads "you"/"your" as that spell or ability's controller,
+        // not as whoever controls the source object at the moment of some later
+        // layer pass. CR 109.5 fixes this for EVERY resolution-created case:
+        // "The words 'you' and 'your' on an object refer to the object's
+        // controller" (so, for a spell, the spell's controller); "For an
+        // activated ability, this is the player who activated the ability";
+        // "For a triggered ability, this is the controller of the object when
+        // the ability triggered". `effect.controller` is that player in all
+        // three cases. CR 611.2c makes only "the set of objects" dynamic for a
+        // rules-modifying continuous effect; the PLAYER reference stays fixed,
+        // so a controller-relative `affected` filter ("creatures your opponents
+        // control") must be evaluated against the snapshot the TCE already
+        // carries. A PRINTED static keeps the live reading (CR 109.5: "For a
+        // static ability, this is the current controller of the object it's
+        // on"), which is exactly what `transient_id` discriminates: `Some(..)`
+        // for resolution-created transients (`gather_transient_continuous_effects`),
+        // `None` for printed static-definition entries.
+        //
+        // Second half of the CR 611.2c migration that keeps the
+        // `MustAttackAwayFromSource` affected filter intact
+        // (`effects/effect.rs`) — see the T13 regression
+        // (`affected_population_does_not_follow_a_stolen_source`).
+        let ctx = if effect.transient_id.is_some() {
+            FilterContext::from_source_with_controller(effect.source_id, effect.controller)
+        } else {
+            FilterContext::from_source(state, effect.source_id)
+        };
         newly_affected_ids = scan_ids
             .iter()
             // Incremental fast path: re-apply only to the freshly-entered objects.
@@ -6623,15 +6661,17 @@ fn apply_continuous_effect_filtered(
                 let resolved_mode = resolve_static_mode_chosen_color(mode, chosen_color);
                 let mut def =
                     StaticDefinition::new(resolved_mode.clone()).affected(TargetFilter::SelfRef);
-                // CR 611.2c + CR 109.5: A controller-relative blocker filter
-                // ("your opponents") grafted onto a TARGET permanent would
-                // otherwise resolve "you" as the target's controller. Snapshot
-                // the installing player (`effect.controller`, the single
-                // authority) so combat re-derives the filter context from the
-                // spell controller — the continuous effect's anchor is locked at
-                // materialization. `None` anchor (permanent-static lures) still
-                // resolves from the carrier.
-                if static_mode_uses_controller_relative_blocker_filter(&resolved_mode) {
+                // CR 611.2c + CR 109.5: A player reference carried by the granted
+                // mode — a controller-relative blocker filter ("your opponents")
+                // or `MustAttackAwayFromSource`'s avoided player (CR 701.15b) —
+                // grafted onto a TARGET permanent would otherwise resolve "you"
+                // as the target's controller. Snapshot the installing player
+                // (`effect.controller`, the single authority) so combat
+                // re-derives the reference from the spell controller — the
+                // continuous effect's anchor is locked at materialization.
+                // `None` anchor (permanent-static lures) still resolves from the
+                // carrier.
+                if static_mode_needs_source_controller_anchor(&resolved_mode) {
                     def = def.source_controller(effect.controller);
                 }
                 // CR 611.2c: stamp the directing object so combat / future

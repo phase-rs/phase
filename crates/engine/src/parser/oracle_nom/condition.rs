@@ -5728,7 +5728,11 @@ fn parse_object_put_into_graveyard_from_battlefield_this_turn(
 /// `TargetFilter::Any` into a fresh `Typed` filter carrying the same property
 /// set; returns other variants (`Player`, `SpecificObject`, …) unchanged
 /// because owner-tagging is meaningless on non-typed shapes.
-fn add_owned_with_props(
+///
+/// Shared with `oracle_nom::quantity` so the where-X / CDA reading of "cards
+/// put into [possessive] graveyard from anywhere this turn" (Fraying Sanity)
+/// builds the same owned+nontoken population the Ravenous Trap condition uses.
+pub(crate) fn add_owned_with_props(
     filter: TargetFilter,
     controller: ControllerRef,
     extras: &[FilterProp],
@@ -7652,8 +7656,10 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         return parse_entered_this_turn_subject(rest, had_enter_suffix, 1, PlayerScope::Controller);
     }
 
-    // CR 403.3 + CR 608.2h: self-inclusive disjunct "~ or another/a <type>
-    // entered the battlefield under your control this turn" (Master's
+    // CR 403.3 + CR 608.2h + CR 608.2i: self-inclusive disjunct "~ or another/a
+    // <type> entered the battlefield under your control this turn". CR 608.2i is
+    // the look-back exception that makes a departed permanent still count.
+    // (Master's
     // Manufactory: "this artifact or another artifact entered ..."). The
     // source's own entry counts, so the disjunct reduces to a bare `<type>`
     // filter carrying NO `FilterProp::Another` — a `~`-only entry (the source
@@ -7702,8 +7708,9 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     parse_entered_this_turn_subject(input, entered_suffix, 1, PlayerScope::Controller)
 }
 
-/// CR 403.3 + CR 608.2h: Parse "N or more [type] <suffix>" into a GE threshold
-/// on the this-turn battlefield-entry count. Shared by the bare past-tense
+/// CR 403.3 + CR 608.2h + CR 608.2i: Parse "N or more [type] <suffix>" into a GE
+/// threshold on the this-turn battlefield-entry count. CR 608.2i is the look-back
+/// exception that makes a departed permanent still count. Shared by the bare past-tense
 /// surface ("N or more creatures entered the battlefield under your control
 /// this turn") and the "you had"-auxiliary present-tense surface ("you had N
 /// or more creatures enter the battlefield under your control this turn", e.g.
@@ -7767,8 +7774,10 @@ fn parse_entered_this_turn_subject<'a>(
     ))
 }
 
-/// CR 102.2 + CR 102.3 + CR 608.2h: "an opponent had [N or more] <type> enter the
-/// battlefield under their control this turn" — the opponent-scoped mirror of
+/// CR 102.2 + CR 102.3 + CR 608.2h + CR 608.2i: "an opponent had [N or more]
+/// <type> enter the battlefield under their control this turn" — CR 608.2i is the
+/// look-back exception that makes a departed permanent still count. The
+/// opponent-scoped mirror of
 /// `parse_entered_this_turn`'s "you had …" auxiliary surface (the Zendikar trap
 /// cycle: Baloth Cage Trap, Lavaball Trap, Permafrost Trap, Whiplash Trap).
 ///

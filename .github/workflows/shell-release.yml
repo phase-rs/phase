@@ -95,6 +95,18 @@ jobs:
           if replacements != 1:
               raise SystemExit("expected exactly one phase-tauri package version")
           cargo_path.write_text(cargo)
+
+          # Cargo.lock records phase-tauri's own version; without this the
+          # stamped manifest fails `cargo check --locked`.
+          lock_path = Path("client/src-tauri/Cargo.lock")
+          lock = lock_path.read_text()
+          lock, replacements = re.subn(
+              r'(\[\[package\]\]\nname = "phase-tauri"\nversion = ")[^"]+(")',
+              rf'\g<1>{version}\g<2>', lock, count=1,
+          )
+          if replacements != 1:
+              raise SystemExit("expected exactly one phase-tauri lockfile entry")
+          lock_path.write_text(lock)
           PY
 
       - name: Assert shell version stamping
@@ -102,6 +114,7 @@ jobs:
           set -euo pipefail
           test "$(jq -r '.version' client/src-tauri/tauri.conf.json)" = "$SHELL_VERSION"
           test "$(sed -nE 's/^version = "([^"]+)"/\1/p' client/src-tauri/Cargo.toml | head -1)" = "$SHELL_VERSION"
+          test "$(awk '/^name = "phase-tauri"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' client/src-tauri/Cargo.lock)" = "$SHELL_VERSION"
 
       - name: Validate Tauri JSON configs
         run: |
@@ -186,11 +199,21 @@ jobs:
 
           const cargoPath = "client/src-tauri/Cargo.toml";
           const cargo = fs.readFileSync(cargoPath, "utf8");
-          const stamped = cargo.replace(/^version = "[^"]+"$/m, `version = "${version}"`);
-          if (stamped === cargo) {
-            throw new Error("expected phase-tauri package version to be stamped");
+          const cargoPattern = /^version = "[^"]+"$/m;
+          if (!cargoPattern.test(cargo)) {
+            throw new Error("expected a phase-tauri package version to stamp");
           }
-          fs.writeFileSync(cargoPath, stamped);
+          fs.writeFileSync(cargoPath, cargo.replace(cargoPattern, `version = "${version}"`));
+
+          // Cargo.lock records phase-tauri's own version; keep it in sync so
+          // the build never resolves against a stale locked version.
+          const lockPath = "client/src-tauri/Cargo.lock";
+          const lock = fs.readFileSync(lockPath, "utf8");
+          const lockPattern = /(\[\[package\]\]\nname = "phase-tauri"\nversion = ")[^"]+(")/;
+          if (!lockPattern.test(lock)) {
+            throw new Error("expected a phase-tauri lockfile entry to stamp");
+          }
+          fs.writeFileSync(lockPath, lock.replace(lockPattern, `$1${version}$2`));
           NODE
 
       - name: Assert shell version stamping
@@ -199,6 +222,7 @@ jobs:
           set -euo pipefail
           test "$(node -p "require('./client/src-tauri/tauri.conf.json').version")" = "$SHELL_VERSION"
           test "$(sed -nE 's/^version = "([^"]+)"/\1/p' client/src-tauri/Cargo.toml | head -1)" = "$SHELL_VERSION"
+          test "$(awk '/^name = "phase-tauri"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' client/src-tauri/Cargo.lock)" = "$SHELL_VERSION"
 
       - name: Install system dependencies (Linux)
         if: matrix.os == 'linux'

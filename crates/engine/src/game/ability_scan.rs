@@ -2183,9 +2183,42 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::BattlefieldEntriesThisTurn { player, filter } => {
+            // CR 732.2a: axis-2 self-assertion. This tally is a board-derived
+            // AGGREGATE — `record_battlefield_entry` (game/restrictions.rs) APPENDS
+            // to `battlefield_entries_this_turn` on every battlefield entry, so a
+            // sibling resolution, or a loop cycle that grows the board, changes its
+            // value.
+            //
+            // The engine ALREADY classifies this journal as loop-pumped:
+            // `project_out_resources` clears it at analysis/resource.rs:2977 under
+            // "CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111
+            // (tokens): append-only event journals a loop pumps". A `sibling: false`
+            // here contradicted that, and in the unsafe direction: it let the
+            // CR 732.2a firewall certify a loop as bounded while a live observer read
+            // the growing class. Per the module header above (ADD-1) over-veto is the
+            // ONLY permitted error direction (#4603-preserving).
+            //
+            // Per the ⛔ INVARIANT on the `TargetFilter::Typed` arm of
+            // `scan_target_filter`, a board-AGGREGATE caller MUST self-assert
+            // `sibling: true` and must NOT delegate its board-read signal to the
+            // `Typed` arm, whose `LoopFirewall` relaxation otherwise erases the
+            // signal at the two `ability_definition_reads_sibling_mutable_for_loop`
+            // scans inside `fire_time_conditions_read_growing_class` —
+            // analysis/resource.rs:1699 (trigger `execute` bodies) and :1722
+            // (battlefield ability bodies) — neither of which has a `projected` twin
+            // in `fire_time_conditions_read_projected_resource`.
+            //
+            // The CR 603.3b APNAP ordering gate (game/triggers.rs, the
+            // `c2_order_independent` term) is the OTHER consumer of this arm and is
+            // provably UNAFFECTED: it scans in `ScanMode::Conservative`, where the
+            // `Typed`/`Or[Typed]` filter every producer emits already forces
+            // `sibling: true` — measured.
+            //
+            // The `filter` census intent stays `SnapshotOrEvent`: it is matched
+            // against a `BattlefieldEntryRecord`, never a live board.
             let mut acc = Axes {
                 event: false,
-                sibling: false,
+                sibling: true,
                 projected: true,
             };
             acc = acc.or(scan_player_scope(player));
@@ -7774,6 +7807,159 @@ mod tests {
         let mut b = fixed_drain();
         b.target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
         assert!(!ability_uses_event_context(&b));
+    }
+
+    // ---- BB-FU10 Step 0c: the CR 608.2i ledger read is an axis-2 board read ----
+
+    /// Build an `AbilityDefinition` whose effect magnitude is `qty`.
+    fn ability_def_with_amount(qty: QuantityRef) -> crate::types::ability::AbilityDefinition {
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref { qty },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn creature_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        })
+    }
+
+    /// T15 (BB-FU10 Step 0c). `battlefield_entries_this_turn` is APPENDED to by
+    /// every battlefield entry (`record_battlefield_entry`), so a read of it is a
+    /// board-derived AGGREGATE and must self-assert `sibling: true` — CR 732.2a:
+    /// the object-growth firewall may only ever OVER-veto, never certify a loop as
+    /// bounded while a live observer reads the growing class.
+    ///
+    /// VACUITY TRAP, named explicitly: assertion (1) is `ScanMode::Conservative`,
+    /// where the `TargetFilter::Typed` arm already forces `sibling: true`. It
+    /// passes with AND without Step 0c and is therefore NOT the discriminator.
+    /// Assertion (2) — `ScanMode::LoopFirewall`, the mode the two production
+    /// callers in `analysis::resource::fire_time_conditions_read_growing_class`
+    /// use — is the one Step 0c actually moves.
+    ///
+    /// REVERT-PROBE: set the arm's `sibling` back to `false` → (2) and (3) FAIL
+    /// while (1) still passes.
+    #[test]
+    fn bbfu10_ledger_ref_is_sibling_mutable_in_both_scan_modes() {
+        let ledger = ability_def_with_amount(QuantityRef::BattlefieldEntriesThisTurn {
+            player: PlayerScope::Controller,
+            filter: creature_filter(),
+        });
+        let live = ability_def_with_amount(QuantityRef::EnteredThisTurn {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Creature],
+                controller: Some(crate::types::ability::ControllerRef::You),
+                properties: vec![],
+            }),
+        });
+
+        // (1) Conservative — vacuity trap, true either way.
+        assert!(
+            ability_definition_reads_sibling_mutable(&ledger),
+            "(1) Conservative axis-2 (CR 603.3b consumer) — passes with or without Step 0c",
+        );
+        // (2) THE DISCRIMINATOR — LoopFirewall, the CR 732.2a firewall's mode.
+        assert!(
+            ability_definition_reads_sibling_mutable_for_loop(&ledger),
+            "(2) CR 732.2a: the ledger read must stay axis-2 under LoopFirewall — \
+             this is the exact predicate analysis/resource.rs calls at the two \
+             `..._for_loop` scan sites",
+        );
+        // (3) parity guard — the look-back and live siblings must agree on both axes.
+        assert_eq!(
+            (
+                ability_definition_reads_sibling_mutable(&ledger),
+                ability_definition_reads_sibling_mutable_for_loop(&ledger),
+            ),
+            (
+                ability_definition_reads_sibling_mutable(&live),
+                ability_definition_reads_sibling_mutable_for_loop(&live),
+            ),
+            "(3) parity: `BattlefieldEntriesThisTurn` and `EnteredThisTurn` are the \
+             same board-aggregate class on the sibling axis",
+        );
+        // (4) the projected axis is untouched by Step 0c.
+        assert!(
+            resolved_ability_axes(
+                &ability_with_amount(QuantityRef::BattlefieldEntriesThisTurn {
+                    player: PlayerScope::Controller,
+                    filter: creature_filter(),
+                }),
+                ScanMode::LoopFirewall,
+            )
+            .projected,
+            "(4) `projected` was already true and stays true",
+        );
+    }
+
+    /// T17 (BB-FU10 Step 0c, T16's non-vacuity instrument). Proves the SHIPPED
+    /// Park Heights Pegasus face is what
+    /// `analysis::resource::fire_time_conditions_read_growing_class` block (1)
+    /// visits, and that the flip lands on the trigger `execute` scan rather than
+    /// on the Conservative trigger-`condition` path that already forces
+    /// `sibling: true` (the Gargoyle Flock trap: `true → true`, non-discriminating).
+    ///
+    /// REVERT-PROBE: set the ledger arm's `sibling` back to `false` → (2) FAILS.
+    /// Measured: PRE-0c `false`, POST-0c `true`, with `condition.is_none()` in both.
+    #[test]
+    fn bbfu10_shipped_ledger_observer_flips_for_loop_axis() {
+        let db = crate::test_support::shared_card_db();
+        let face = db
+            .face_index
+            .get("park heights pegasus")
+            .expect("Park Heights Pegasus is in tests/fixtures/integration_cards.json");
+
+        // (1) the flip CANNOT be landing on the Conservative `condition` path.
+        assert_eq!(face.triggers.len(), 1, "(1) exactly one trigger definition");
+        assert!(
+            face.triggers[0].condition.is_none(),
+            "(1) no intervening-if condition, so `trigger_condition_reads_sibling_mutable` \
+             (Conservative, always true for a Typed filter) is NOT what fires here",
+        );
+        let execute = face.triggers[0]
+            .execute
+            .as_deref()
+            .expect("(1) the trigger must carry an execute body");
+
+        // (3) reach-guard — the body really contains the ledger read.
+        let rendered = serde_json::to_string(execute).expect("AbilityDefinition serializes");
+        assert!(
+            rendered.contains("BattlefieldEntriesThisTurn"),
+            "(3) reach-guard: the scanned body must carry the CR 608.2i ledger read, \
+             not some other board aggregate",
+        );
+
+        // (2) THE DISCRIMINATOR — literally the callee at the block-(1) scan site.
+        assert!(
+            ability_definition_reads_sibling_mutable_for_loop(execute),
+            "(2) CR 732.2a: a shipped ledger observer must veto an object-growth \
+             certificate — reads `false` without Step 0c",
+        );
+
+        // (4) negative sibling — a plain draw trigger body does NOT veto.
+        let plain = crate::parser::parse_oracle_text(
+            "Whenever this creature deals combat damage to a player, draw a card.",
+            "Bbfu10 Plain Draw Trigger",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let plain_execute = plain
+            .triggers
+            .first()
+            .and_then(|t| t.execute.as_deref())
+            .expect("(4) the plain trigger must parse an execute body");
+        assert!(
+            !ability_definition_reads_sibling_mutable_for_loop(plain_execute),
+            "(4) negative sibling: a fixed draw reads no board aggregate",
+        );
     }
 
     // ---- Axis 2: sibling-mutable board read (Rubblebelt / Orcish class) ----

@@ -4056,3 +4056,142 @@ fn predicted_winner_concede_mid_apnap_does_not_drive() {
         ref other => panic!("the liveness guard hands priority back (manual play), got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// BB-FU10 T16 — a battlefield-entry-LEDGER observer VETOES the object-growth
+// offer. This is the ruling's disclosed, sound post-Step-0c behaviour, asserted
+// as such so nobody "fixes" the test by deleting it.
+// ---------------------------------------------------------------------------
+
+/// Park Heights Pegasus, verbatim (Scryfall / MTGJSON `AtomicCards.json`). Its
+/// trigger `execute` body carries the CR 608.2i
+/// `QuantityRef::BattlefieldEntriesThisTurn` read, which
+/// `fire_time_conditions_read_growing_class` block (1) scans at the
+/// `ability_definition_reads_sibling_mutable_for_loop` call site.
+const PARK_HEIGHTS_PEGASUS_ORACLE: &str = "Flying, trample\nWhenever this creature deals combat damage to a player, draw a card if you had two or more creatures enter the battlefield under your control this turn.";
+
+/// ANTI-VACUITY CONTROL: the same board shape with a trigger that reads NOTHING
+/// board-mutable. Granted in BOTH builds, which is what proves the veto below
+/// comes from the ledger clause and not from the bystander's mere presence.
+const PLAIN_DRAW_TRIGGER_ORACLE: &str =
+    "Flying, trample\nWhenever this creature deals combat damage to a player, draw a card.";
+
+/// The passing 51st Sprout Swarm / Witherbloom object-growth row plus exactly ONE
+/// extra P0 battlefield permanent carrying `bystander_oracle`. Returns the final
+/// `WaitingFor` plus the bystander's id, so the caller can reach-guard its zone.
+fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Witherbloom, the Balancer",
+        5,
+        5,
+        WITHERBLOOM_AFFINITY_ORACLE,
+    );
+    let bystander = scenario
+        .add_creature_from_oracle(P0, "BBFU10 Bystander", 2, 2, bystander_oracle)
+        .id();
+    let mut fodder = Vec::new();
+    for _ in 0..4 {
+        fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+    }
+    let sprout = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Sprout Swarm", true, SPROUT_SWARM_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        b.id()
+    };
+    let mut runner = scenario.build();
+    {
+        let st = runner.state_mut();
+        st.loop_detection = LoopDetectionMode::Interactive;
+        for &id in &fodder {
+            st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+    }
+    // The cast pipeline settles the loop verdict into `state().waiting_for`, which
+    // is what the caller reads (the borrowed `CastOutcome` is dropped here).
+    runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit()
+        .resolve();
+    (runner, bystander)
+}
+
+/// T16 (BB-FU10 RULING deliverable). With Step 0c applied, a shipped
+/// battlefield-entry-ledger observer anywhere on a functioning battlefield
+/// SUPPRESSES a CR 732.2a object-growth offer that fires without it.
+///
+/// This asserts the SUPPRESSION as the sound behaviour. Per the plan's §0.5
+/// ruling, the engine already classifies `battlefield_entries_this_turn` as a
+/// journal a loop pumps (`project_out_resources` clears it), so `sibling: false`
+/// let the firewall hand out a false ∞ certificate while a live observer read the
+/// growing class — the one error direction `ability_scan`'s ADD-1 contract
+/// forbids.
+///
+/// **`BB-FU10-N` is the narrowing follow-up that will flip assertion (1) back to
+/// an offer** (gate the veto on whether the observer's filter can actually match
+/// the growing class, mirroring `etb_observer_provably_excludes_class`). Do NOT
+/// "fix" this test by deleting it — update it when `BB-FU10-N` lands.
+///
+/// REVERT-PROBE: set the `BattlefieldEntriesThisTurn` arm's `sibling` back to
+/// `false` in `game/ability_scan.rs` → (1) FAILS (the offer returns). Measured
+/// both directions; the (2) control is granted in BOTH builds.
+#[test]
+fn object_growth_ledger_observer_bystander_suppresses_offer() {
+    use engine::types::zones::Zone;
+
+    // (2) ANTI-VACUITY CONTROL first: an otherwise byte-identical board whose
+    // bystander reads nothing board-mutable still gets the offer.
+    let (control_runner, control_bystander) =
+        object_growth_with_bystander(PLAIN_DRAW_TRIGGER_ORACLE);
+    match &control_runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => assert!(
+            certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+            "(2) control: the detected loop's unbounded axis must be TokensCreated, got {:?}",
+            certificate.unbounded
+        ),
+        other => panic!(
+            "(2) anti-vacuity control: a plain draw-trigger bystander must NOT suppress \
+             the offer, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        control_runner.state().objects[&control_bystander].zone,
+        Zone::Battlefield,
+        "(3) control reach-guard: the bystander is a functioning battlefield permanent"
+    );
+
+    // The subject: the SAME board with Park Heights Pegasus instead.
+    let (runner, bystander) = object_growth_with_bystander(PARK_HEIGHTS_PEGASUS_ORACLE);
+
+    // (3) reach-guard — block (1) hard-skips non-battlefield zones, so the observer
+    // must actually be on the battlefield, and must carry exactly one trigger.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "(3) reach-guard: the ledger observer must be a functioning battlefield permanent"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "(3) reach-guard: exactly one trigger definition carries the ledger read"
+    );
+
+    // (1) THE VETO — the disclosed, sound post-0c behaviour.
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "(1) CR 732.2a: a live observer reading the battlefield-entry ledger must \
+         VETO the object-growth certificate; got {:?}. If BB-FU10-N (the narrowing \
+         follow-up) has landed, this assertion is expected to flip back to an OFFER \
+         — update it, do not delete the test.",
+        runner.state().waiting_for
+    );
+}

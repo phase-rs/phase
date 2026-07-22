@@ -3887,6 +3887,12 @@ fn quantity_ref_target_slot_spec(qty: &QuantityRef) -> Option<TargetFilter> {
         | QuantityRef::CountersOnObjects { filter, .. }
         | QuantityRef::Aggregate { filter, .. }
         | QuantityRef::EnteredThisTurn { filter }
+        // CR 608.2i: the look-back sibling of `EnteredThisTurn` carries the same
+        // kind of population filter, so it must reach the same recursion instead
+        // of dropping into the `_ => None` fallback. Direct precedent in this
+        // group: `SacrificedThisTurn` / `TokensCreatedThisTurn`, both
+        // `PlayerScope`-carrying history refs.
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
         | QuantityRef::SacrificedThisTurn { filter, .. }
         | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
@@ -11339,6 +11345,57 @@ mod tests {
         assert!(quantity_expr_references_target_creature(&mana_spent));
 
         assert!(!filter_references_target_creature_quantity(&fixed_filter()));
+    }
+
+    /// T14a (BB-FU10 Step 3a). `QuantityRef::BattlefieldEntriesThisTurn` is the
+    /// CR 608.2i look-back sibling of `EnteredThisTurn` and carries the same kind
+    /// of population filter, so it must reach the count-over-filter recursion
+    /// instead of the `_ => None` fallback.
+    ///
+    /// DISCRIMINATING BY CONSTRUCTION: the nested count must itself be
+    /// target-referencing. `filter_prop_target_slot_filter` routes
+    /// `FilterProp::Counters { count, .. }` to `quantity_expr_target_slot_filter`,
+    /// which returns `Some` only for a target-bearing ref — a `Fixed(1)` nested
+    /// count would be `None` both before AND after the fix (red in both
+    /// directions, i.e. broken rather than discriminating).
+    ///
+    /// REVERT-PROBE: remove the one-line or-group addition → `None`, FAIL.
+    #[test]
+    fn bbfu10_ledger_variant_surfaces_target_slot_filter() {
+        use crate::types::ability::FilterProp;
+        use crate::types::counter::{CounterMatch, CounterType};
+
+        let props = vec![FilterProp::Counters {
+            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+            comparator: Comparator::GE,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Power {
+                    scope: ObjectScope::Target,
+                },
+            },
+        }];
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: props,
+        });
+
+        let ledger = QuantityRef::BattlefieldEntriesThisTurn {
+            player: PlayerScope::Controller,
+            filter: filter.clone(),
+        };
+        let live = QuantityRef::EnteredThisTurn { filter };
+
+        assert_eq!(
+            quantity_ref_target_slot_spec(&ledger),
+            Some(TargetFilter::Typed(TypedFilter::creature())),
+            "CR 608.2i: the ledger variant must surface the nested target slot",
+        );
+        assert_eq!(
+            quantity_ref_target_slot_spec(&ledger),
+            quantity_ref_target_slot_spec(&live),
+            "parity guard: the look-back and live siblings must agree",
+        );
     }
 
     /// CR 115.1 + CR 208.1 + CR 202.3 + CR 701.9 + CR 120.9: the count-derived

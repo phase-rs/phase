@@ -641,7 +641,11 @@ pub(crate) fn candidate_player_scalar_with_state(
                     .filter(|record| {
                         record.controller == candidate.id
                             && crate::game::restrictions::battlefield_entry_matches_filter(
-                                record, filter, controller, None,
+                                record,
+                                filter,
+                                controller,
+                                &state.all_creature_types,
+                                None,
                             )
                     })
                     .count(),

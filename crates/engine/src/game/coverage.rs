@@ -7516,7 +7516,27 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::BendTypesThisTurn => ("BendTypesThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
-        QuantityRef::BattlefieldEntriesThisTurn { .. } => ("BattlefieldEntriesThisTurn", Handled),
+        // CR 608.2h: `Handled` only when the entry-record matcher can actually evaluate the
+        // filter. `battlefield_entry_matches_filter` fails closed on props the entry snapshot
+        // never captured (game/restrictions.rs:517), so such a card would resolve a silent
+        // constant 0 while claiming support.
+        //
+        // REACHABILITY (measured, MTGJSON sweep): this arm is reached from
+        // `StaticDefinition.condition` (`:7050-7053`), ability conditions, `repeat_for`, and
+        // effect positions — 21 cards, 15 of them purely static-condition (e.g. Armory Mice,
+        // Saddled Rimestag, Mechan Shieldmate). It is NOT reached from a trigger
+        // intervening-if: `:7040-7042` emits only the structural tag and never descends, so
+        // Tunnel Tipster's `FilterProp::FaceDown` ledger read stays invisible here (see the
+        // §10.11 ledger item). No corpus card currently trips this arm (`unhandled=0`); it is a
+        // guard against the next printing, not a live reclassification.
+        QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
+            "BattlefieldEntriesThisTurn",
+            if crate::game::restrictions::ledger_filter_is_evaluable(filter) {
+                Handled
+            } else {
+                Unhandled
+            },
+        ),
         QuantityRef::LandsPlayedThisTurn { .. } => ("LandsPlayedThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::ZoneChangeAggregateThisTurn { .. } => ("ZoneChangeAggregateThisTurn", Handled),
@@ -12263,6 +12283,69 @@ mod tests {
             support,
             FeatureSupport::Handled,
             "TargetZoneCardCount is resolved by game::quantity and should not block coverage",
+        );
+    }
+
+    /// T22 (Step 7c). `battlefield_entry_matches_filter` fails closed on the
+    /// `FilterProp`s the entry snapshot never captured, so a ledger read over one
+    /// of them resolves a silent constant 0. The classifier must stop calling that
+    /// `Handled`. Case (a) is Tunnel Tipster's real live *filter shape* (its
+    /// intervening-if carries `FilterProp::FaceDown`, so its trigger can never fire);
+    /// note the classifier never reaches Tunnel Tipster's trigger intervening-if
+    /// (see `:7519`), so this test drives `quantity_ref_feature` directly.
+    ///
+    /// REVERT-PROBE: restore the unconditional `Handled` arm → (a) and (d) FAIL;
+    /// (b)/(c) pass in both builds and are the vacuity controls.
+    #[test]
+    fn ledger_ref_feature_is_unhandled_when_filter_is_unevaluable() {
+        let ledger = |properties: Vec<FilterProp>| QuantityRef::BattlefieldEntriesThisTurn {
+            player: PlayerScope::Controller,
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties,
+            }),
+        };
+
+        // (a) Tunnel Tipster's shape — unanswerable from the entry record.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::FaceDown])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
+            "(a) FaceDown is not answerable from a BattlefieldEntryRecord"
+        );
+        // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(b) a bare filter is trivially evaluable"
+        );
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::HasColor {
+                color: ManaColor::Green
+            }])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(c) HasColor is one of the four props the matcher answers"
+        );
+        // (d) composite recursion — one unanswerable leaf poisons the whole read.
+        let QuantityRef::BattlefieldEntriesThisTurn { filter: bare, .. } = ledger(vec![]) else {
+            unreachable!()
+        };
+        let QuantityRef::BattlefieldEntriesThisTurn {
+            filter: face_down, ..
+        } = ledger(vec![FilterProp::FaceDown])
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
+                player: PlayerScope::Controller,
+                filter: TargetFilter::Or {
+                    filters: vec![bare, face_down]
+                },
+            }),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
+            "(d) CR 608.2i: an Or disjunct the matcher drops is a silent partial count of a \
+             look-back read"
         );
     }
 

@@ -48,7 +48,7 @@ import type { BracketDeckRequest } from "../types/bracketEstimate";
 // ── Message Protocol ─────────────────────────────────────────────────────
 
 type EngineRequest =
-  | { type: "init" }
+  | { type: "init"; id: number }
   | { type: "loadCardDb"; id: number; cardDataText: string }
   | {
       type: "initializeGame";
@@ -109,7 +109,6 @@ type EngineRequest =
   | { type: "clearReplayPlayback"; id: number };
 
 type EngineResponse =
-  | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
   | { type: "error"; id: number; message: string; bracketViolation?: true };
 
@@ -146,7 +145,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         } else {
           await init();
         }
-        respond({ type: "ready" });
+        result(msg.id, null);
         break;
       }
 
@@ -518,7 +517,6 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
     }
   } catch (err) {
-    const id = "id" in msg ? (msg as { id: number }).id : -1;
-    error(id, err instanceof Error ? err.message : String(err));
+    error(msg.id, err instanceof Error ? err.message : String(err));
   }
 };
