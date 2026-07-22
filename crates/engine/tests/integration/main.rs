@@ -557,6 +557,7 @@ mod issue_6002_neera_wild_mage_bottom_of_library;
 mod issue_6006_aminatou_veil_piercer_own_turn_miracle;
 mod issue_6092_ability_block_reason;
 mod issue_6102_ragavan_exile_cast;
+mod issue_6157_gold_token_auto_mana_payment;
 mod issue_629_fractured_sanity_cycling;
 mod issue_654_stridehangar_automaton;
 mod issue_680_shalai_and_hallar_forgotten_ancient;

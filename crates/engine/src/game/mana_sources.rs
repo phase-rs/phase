@@ -16,7 +16,8 @@
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TriggerDefinitionRef, TypedFilter,
+    PlayerFilter, QuantityExpr, SacrificeCost, SacrificeRequirement, TargetFilter,
+    TriggerDefinition, TriggerDefinitionRef, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
@@ -267,6 +268,27 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
 /// bare `Untap` cost and one nested inside a `Composite` (Pili-Pala: `{2}, {Q}`).
 pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Untap))
+}
+
+/// CR 605.3a + CR 701.21: True when the cost has a `Sacrifice` component that
+/// sacrifices only the ability's own source (`TargetFilter::SelfRef`, exactly
+/// one permanent) — e.g. Gold's "Sacrifice this token: Add one mana of any
+/// color." Unlike a choice-bearing sacrifice cost (Krark-Clan Ironworks'
+/// "Sacrifice an artifact"), there is no candidate to choose among, so this
+/// activation is exactly as deterministic as a `{T}` cost and auto-tap can
+/// select it the same way. Ambiguous sacrifice costs stay off the auto-tap
+/// path and remain reachable only through
+/// `has_activatable_non_tap_mana_ability_for_payment`'s manual-payment flow.
+pub(crate) fn has_unambiguous_self_sacrifice_component(cost: &Option<AbilityCost>) -> bool {
+    cost_has_component(cost, |c| {
+        matches!(
+            c,
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::SelfRef,
+                requirement: SacrificeRequirement::Count { count: 1 },
+            })
+        )
+    })
 }
 
 /// CR 605.3a + CR 106.12 + CR 107.6: True when paying this mana-ability cost is
@@ -1214,7 +1236,13 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 return false;
             }
-            if has_tap_component(&ability.cost) {
+            // Tap-cost and unambiguous self-sacrifice abilities (Gold, Treasure)
+            // need no player choice, so `is_active_tap_mana_ability` already
+            // covers them on the auto-tap path — only ambiguous non-tap costs
+            // (KCI's "Sacrifice an artifact", discard, pay-life) belong here.
+            if has_tap_component(&ability.cost)
+                || has_unambiguous_self_sacrifice_component(&ability.cost)
+            {
                 return false;
             }
             if !mana_abilities::can_activate_mana_ability_now(
@@ -1710,7 +1738,11 @@ fn land_mana_options(
 }
 
 /// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
-/// with a `{T}` component that `controller` could currently activate."
+/// with a `{T}` component, or an unambiguous self-sacrifice component, that
+/// `controller` could currently activate." Both shapes require no choice
+/// among candidates to activate, so auto-tap can select either one exactly
+/// as it does a `{T}` cost (Gold's "Sacrifice this token: Add one mana of
+/// any color" sits alongside Treasure's `{T}, Sacrifice this artifact`).
 /// Single authority shared by `scan_mana_abilities` (which builds per-color
 /// `ManaSourceOption` rows) and `max_mana_yield` (which sums total output) so
 /// the two never diverge on which abilities count as mana sources.
@@ -1748,14 +1780,16 @@ fn is_active_tap_mana_ability(
             return false;
         }
     }
-    if !has_tap_component(&ability.cost) {
+    if !has_tap_component(&ability.cost) && !has_unambiguous_self_sacrifice_component(&ability.cost)
+    {
         return false;
     }
     activation_condition_satisfied(state, controller, object_id, ability_index, ability)
 }
 
-/// Scan an object's abilities for activated mana abilities with a tap cost component.
-/// Type-agnostic — works for lands, creatures, artifacts, etc.
+/// Scan an object's abilities for activated mana abilities with a tap cost
+/// component or an unambiguous self-sacrifice component. Type-agnostic —
+/// works for lands, creatures, artifacts, etc.
 fn scan_mana_abilities(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,

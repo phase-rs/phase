@@ -13194,7 +13194,7 @@ mod tests {
             &mut state,
             CardId(100),
             caster,
-            "Spawn-Funded Spell".to_string(),
+            "Ironworks-Funded Spell".to_string(),
             Zone::Hand,
         );
         state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Instant];
@@ -13234,18 +13234,21 @@ mod tests {
                 .cost(AbilityCost::Tap),
             );
         }
+        // CR 605.3a + CR 701.21: an ambiguous sacrifice cost (choosing among
+        // multiple artifacts, not just the source itself) still requires a
+        // manual player choice, so it must not be auto-tapped — unlike a
+        // self-sacrifice mana source (Gold, Treasure), which auto-tap can
+        // now select on its own (issue #6157).
         let spawn = create_object(
             &mut state,
             CardId(102),
             caster,
-            "Eldrazi Spawn".to_string(),
+            "Krark-Clan Ironworks".to_string(),
             Zone::Battlefield,
         );
         {
             let obj = state.objects.get_mut(&spawn).unwrap();
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.card_types.subtypes.push("Eldrazi".to_string());
-            obj.card_types.subtypes.push("Spawn".to_string());
+            obj.card_types.core_types.push(CoreType::Artifact);
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
@@ -13260,7 +13263,7 @@ mod tests {
                     },
                 )
                 .cost(AbilityCost::Sacrifice(SacrificeCost::count(
-                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                     1,
                 ))),
             );
