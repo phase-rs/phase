@@ -7,9 +7,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::ability::{
-    TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
-};
+use super::ability::TriggerDefinitionRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::SpellCastRecord;
@@ -1390,6 +1388,7 @@ fn ledger_edit_has_legacy_object_identity(edit: &ResolvedLedgerEdit) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaRestriction, ManaType};
 
