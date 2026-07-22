@@ -47867,16 +47867,19 @@ fn token_grant_soft_counter_keeps_unless_pay_on_the_token() {
         panic!("expected a Token, got {:?}", def.effect);
     };
 
-    let granted = static_abilities
+    use crate::types::ability::ContinuousModification as CM;
+
+    let grants: Vec<_> = static_abilities
         .iter()
         .flat_map(|sd| sd.modifications.iter())
-        .find_map(|m| match m {
-            crate::types::ability::ContinuousModification::GrantAbility { definition } => {
-                Some(definition)
-            }
-            _ => None,
-        })
-        .expect("the Wizard token must carry its granted activated ability");
+        .filter(|modification| matches!(modification, CM::GrantAbility { .. }))
+        .collect();
+    let [CM::GrantAbility {
+        definition: granted,
+    }] = grants.as_slice()
+    else {
+        panic!("the Wizard token must carry exactly one granted activated ability, got {grants:?}");
+    };
 
     assert!(
         matches!(&*granted.effect, Effect::Counter { .. }),
