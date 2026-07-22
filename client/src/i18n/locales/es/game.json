@@ -1705,6 +1705,10 @@
     "title": "Elegir oponente para chocar",
     "subtitle": "Elige qué oponente chocará contigo."
   },
+  "zoneOpponentChooser": {
+    "title": "Elegir oponente",
+    "subtitle": "Elige qué oponente hace la elección."
+  },
   "pileOpponent": {
     "title": "Choose Opponent",
     "subtitle": "Choose which opponent separates the cards into piles."

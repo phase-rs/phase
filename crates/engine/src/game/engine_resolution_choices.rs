@@ -670,6 +670,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -1962,6 +1963,8 @@ pub(super) fn handle_resolution_choice(
                         filter,
                         zones,
                         exile_instead_of_graveyard,
+                        source,
+                        member_pool,
                     },
             },
             GameAction::FreeCastWindowChoice { selection },
@@ -2015,6 +2018,8 @@ pub(super) fn handle_resolution_choice(
                         filter,
                         zones,
                         exile_instead_of_graveyard,
+                        source,
+                        member_pool,
                     },
             };
             let result = casting::initiate_cast_during_resolution(
@@ -2557,6 +2562,44 @@ pub(super) fn handle_resolution_choice(
                 set_priority(state, player);
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled clash choice must resume its continuation");
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player,
+                candidates,
+                ability,
+            },
+            GameAction::ChooseZoneOpponentChooser { opponent },
+        ) => {
+            // CR 608.2d: The picked opponent must be one of the offered
+            // candidates (a live opponent of the choose's controller).
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen zone-choice opponent {opponent:?} is not a legal opponent"
+                )));
+            }
+            // CR 608.2d: Present the parked zone selection to the picked
+            // opponent. This re-enters the standard `ChooseFromZoneChoice`
+            // pause (or completes with no choice if the pool emptied), so the
+            // already-parked continuation frame is untouched — exactly as if
+            // the opponent had been the chooser from the start.
+            effects::choose_from_zone::resolve_with_choosing_player(
+                state, &ability, opponent, events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // With an empty pool the choose completed without a new pause —
+            // hand priority back to the controller (mirroring the settled-clash
+            // arm above) so the parked continuation can actually drain: the
+            // drain helper is gated on `WaitingFor::Priority`, and without
+            // `set_priority` the stale opponent-chooser pause would wedge the
+            // resolution (CR 608.2d — the choice is skipped, not the rest of
+            // the ability).
+            if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
+                set_priority(state, player);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled opponent-chooser pick must resume its continuation");
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -3799,6 +3842,27 @@ pub(super) fn handle_resolution_choice(
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                // CR 607.2a + CR 608.2g: A `FreeCastFromZones` continuation
+                // over "the other cards exiled this way" (Plargg and Nassari)
+                // must confine its offer to THIS resolution's exile batch. The
+                // choose's offered pool (`cards`) IS that typed, concrete
+                // batch — it was derived from the chain's tracked set the
+                // exile clause published within this resolution — so forward
+                // the FULL pool (not just `chosen`) as the window head's
+                // object targets; the resolver reads them as its member pool
+                // and intersects the exile-zone scan with it BEFORE the
+                // filter's `Not(InTrackedSet)` chosen-card exclusion. Without
+                // this, `ExiledBySource` alone reads the source's complete
+                // live linked-exile ledger and a linked nonland card left in
+                // exile by a PREVIOUS resolution would be wrongly offered. The
+                // window never reads `ParentTarget`, so overriding the generic
+                // `targets = chosen` forward is safe for this head.
+                if matches!(
+                    cont.chain.effect,
+                    crate::types::ability::Effect::FreeCastFromZones { .. }
+                ) {
+                    cont.chain.targets = cards.iter().map(|&id| TargetRef::Object(id)).collect();
+                }
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
                 // to the sub-ability ONLY for the zone-partition pattern
                 // (`ChooseFromZone`: chosen cards go one place, the rest go

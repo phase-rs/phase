@@ -4,7 +4,7 @@ use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{one_of, space0, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
@@ -3925,6 +3925,13 @@ fn try_parse_choose_owned_by_voter(
 ///
 /// The optional "at random" qualifier sets [`CardSelectionMode::Random`]
 /// (CR 608.2d override): the game selects, the controller does not.
+///
+/// The chooser prefix follows `parse_choose_anaphoric`'s CR 608.2d convention:
+/// "an opponent chooses" → [`Chooser::Opponent`] (Plargg and Nassari: "An
+/// opponent chooses a nonland card exiled this way"), bare "choose" /
+/// "you choose" → [`Chooser::Controller`]. The targeted form ("target
+/// opponent chooses") is not accepted — it must bind the chooser to the
+/// chosen target slot, so it falls through honestly.
 fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
@@ -3952,12 +3959,25 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
         }
     }
 
-    // "choose " / "you choose ", then the singular card anaphor "a [type] card" /
+    // Chooser prefix, then the singular card anaphor "a [type] card" /
     // "one [type] card". The optional card-type qualifier (Koh, the Face Stealer's
-    // "a creature card exiled with ~") narrows the choice; the bare "a card" form
-    // leaves it untyped. The type is intersected with the linked-exile set below.
-    let (rest_after, card_type) = preceded(
-        alt((tag::<_, _, E>("choose "), tag("you choose "))),
+    // "a creature card exiled with ~"; Plargg and Nassari's "a nonland card
+    // exiled this way") narrows the choice; the bare "a card" form leaves it
+    // untyped. The type is intersected with the linked-exile set below.
+    // CR 608.2d: "an opponent chooses" delegates the selection to an opponent
+    // (mirrors `parse_choose_anaphoric`'s chooser alternation). The targeted
+    // form ("target opponent chooses") is deliberately NOT accepted here: it
+    // must bind the chooser to the chosen target slot, and no printed card
+    // pairs it with an "exiled this way" anaphor, so the fall-through stays
+    // honest rather than collapsing target identity into `Chooser::Opponent`.
+    let (rest_after, (chooser, card_type)) = pair(
+        alt((
+            value(Chooser::Opponent, tag::<_, _, E>("an opponent chooses ")),
+            value(
+                Chooser::Controller,
+                alt((tag::<_, _, E>("you choose "), tag("choose "))),
+            ),
+        )),
         preceded(
             alt((tag("a "), tag("one "))),
             parse_choose_card_type_qualifier,
@@ -3972,18 +3992,41 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
         Err(_) => (rest_after, CardSelectionMode::Chosen),
     };
 
-    // "exiled this way" — the chain tracked set. Only the untyped form is attested
-    // (impulse-exile reductions choose from the whole chain set); a typed
-    // restriction here would need `TrackedSetFiltered`, so fall through honestly.
-    if card_type.is_none() {
-        if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
-            if tail.is_empty() {
-                return Some(ChooseImperativeAst::FromTrackedSet {
+    // "exiled this way" — two referents, split on the type qualifier:
+    // * Untyped ("choose a card exiled this way") — the chain's tracked set
+    //   (impulse-exile reductions choose from the whole chain set; End-Blaze
+    //   Epiphany). Unchanged.
+    // * Typed ("choose a nonland card exiled this way" — Plargg and Nassari,
+    //   Author of Shadows) — the source's linked-exile set. CR 607.2a defines
+    //   "exiled this way" by linkage to the exiling instruction, exactly like
+    //   "exiled with ~" below, and `parse_target`'s suffix arm already maps
+    //   the bare participle "exiled this way" to `TargetFilter::ExiledBySource`
+    //   (oracle_target.rs). Lower to the same `FromZone { Exile, AllOwners,
+    //   And { Typed, ExiledBySource } }` shape as the Koh arm so the runtime
+    //   scans the shared exile zone (CR 400.1) and linkage does all scoping.
+    if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
+        if tail.is_empty() {
+            return Some(match card_type {
+                None => ChooseImperativeAst::FromTrackedSet {
                     count: 1,
-                    chooser: Chooser::Controller,
+                    chooser,
                     selection,
-                });
-            }
+                },
+                Some(tf) => ChooseImperativeAst::FromZone {
+                    count: 1,
+                    zones: vec![Zone::Exile],
+                    zone_owner: ZoneOwner::AllOwners,
+                    filter: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(tf)),
+                            TargetFilter::ExiledBySource,
+                        ],
+                    },
+                    chooser,
+                    up_to: false,
+                    selection,
+                },
+            });
         }
     }
 
@@ -4015,7 +4058,7 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
                 zones: vec![Zone::Exile],
                 zone_owner: ZoneOwner::AllOwners,
                 filter,
-                chooser: Chooser::Controller,
+                chooser,
                 up_to: false,
                 selection,
             });
@@ -4080,28 +4123,34 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
 }
 
 /// CR 205.2a: Parse the card-type qualifier of a singular card anaphor — one card
-/// type word followed by " card" (→ `Some(type)`), or the bare "card" (→ `None`).
-/// Used by [`try_parse_choose_exiled_anaphor`] for "choose a [type] card exiled
-/// with ~". A single type covers the attested class (Koh's "creature card");
-/// multi-type qualifiers ("artifact creature card") are not yet attested.
+/// type word followed by " card" (→ `Some(type)`), a negated "non<type>" form
+/// (→ `Some(Non(type))`, CR 205.2b — Plargg and Nassari's "nonland card"), or
+/// the bare "card" (→ `None`). Used by [`try_parse_choose_exiled_anaphor`] for
+/// "choose a [type] card exiled with ~ / exiled this way". A single (possibly
+/// negated) type covers the attested class (Koh's "creature card", Plargg's
+/// "nonland card"); multi-type qualifiers ("artifact creature card") are not
+/// yet attested.
 fn parse_choose_card_type_qualifier(input: &str) -> OracleResult<'_, Option<TypeFilter>> {
+    let card_type_word = || {
+        alt((
+            value(TypeFilter::Creature, tag("creature")),
+            value(TypeFilter::Artifact, tag("artifact")),
+            value(TypeFilter::Enchantment, tag("enchantment")),
+            value(TypeFilter::Land, tag("land")),
+            value(TypeFilter::Planeswalker, tag("planeswalker")),
+            value(TypeFilter::Instant, tag("instant")),
+            value(TypeFilter::Sorcery, tag("sorcery")),
+            value(TypeFilter::Battle, tag("battle")),
+        ))
+    };
     alt((
+        // CR 205.2b: "non" + card type — an object that doesn't have the
+        // stated type ("nonland card", "noncreature card").
         map(
-            terminated(
-                alt((
-                    value(TypeFilter::Creature, tag("creature")),
-                    value(TypeFilter::Artifact, tag("artifact")),
-                    value(TypeFilter::Enchantment, tag("enchantment")),
-                    value(TypeFilter::Land, tag("land")),
-                    value(TypeFilter::Planeswalker, tag("planeswalker")),
-                    value(TypeFilter::Instant, tag("instant")),
-                    value(TypeFilter::Sorcery, tag("sorcery")),
-                    value(TypeFilter::Battle, tag("battle")),
-                )),
-                tag(" card"),
-            ),
-            Some,
+            terminated(preceded(tag("non"), card_type_word()), tag(" card")),
+            |tf| Some(TypeFilter::Non(Box::new(tf))),
         ),
+        map(terminated(card_type_word(), tag(" card")), Some),
         value(None, tag("card")),
     ))
     .parse(input)
@@ -16903,6 +16952,97 @@ mod tests {
     #[test]
     fn parse_choose_anaphoric_you_choose() {
         let text = "you choose one of those cards";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
+                assert_eq!(count, 1);
+                assert_eq!(chooser, Chooser::Controller);
+            }
+            other => panic!("Expected FromTrackedSet, got {other:?}"),
+        }
+    }
+
+    /// CR 607.2a + CR 608.2d: "choose a nonland card exiled this way" (Author of
+    /// Shadows; Plargg and Nassari post-subject-strip) — the TYPED exiled-this-way
+    /// anaphor routes to the linked-exile `FromZone { Exile, AllOwners }` shape
+    /// (same as the Koh "exiled with ~" arm), carrying the negated type qualifier
+    /// intersected with `ExiledBySource`.
+    #[test]
+    fn parse_choose_nonland_card_exiled_this_way() {
+        let text = "choose a nonland card exiled this way";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                count,
+                zones,
+                zone_owner,
+                filter,
+                chooser,
+                up_to,
+                ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(zones, vec![Zone::Exile]);
+                assert_eq!(zone_owner, ZoneOwner::AllOwners);
+                assert_eq!(chooser, Chooser::Controller);
+                assert!(!up_to);
+                let TargetFilter::And { filters } = filter else {
+                    panic!("expected And{{Typed, ExiledBySource}}, got {filter:?}");
+                };
+                assert!(filters.contains(&TargetFilter::ExiledBySource));
+                let typed = filters
+                    .iter()
+                    .find_map(|f| match f {
+                        TargetFilter::Typed(tf) => Some(tf),
+                        _ => None,
+                    })
+                    .expect("And must carry a Typed leg");
+                assert!(typed
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land)));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2d: "an opponent chooses a nonland card exiled this way" (Plargg
+    /// and Nassari's middle sentence, reachable inline through the anaphoric
+    /// choose entry) — same linked-exile shape with the selection delegated to
+    /// an opponent.
+    #[test]
+    fn parse_opponent_chooses_nonland_card_exiled_this_way() {
+        let text = "an opponent chooses a nonland card exiled this way";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                count,
+                zones,
+                zone_owner,
+                filter,
+                chooser,
+                ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(zones, vec![Zone::Exile]);
+                assert_eq!(zone_owner, ZoneOwner::AllOwners);
+                assert_eq!(chooser, Chooser::Opponent);
+                assert!(matches!(&filter, TargetFilter::And { filters }
+                    if filters.contains(&TargetFilter::ExiledBySource)));
+            }
+            other => panic!("Expected FromZone with Opponent chooser, got {other:?}"),
+        }
+    }
+
+    /// Untyped-referent regression guard: the bare "choose a card exiled this
+    /// way" impulse reduction (End-Blaze Epiphany) must keep reading the chain's
+    /// tracked set — the new typed arm must not claim it.
+    #[test]
+    fn parse_choose_card_exiled_this_way_still_tracked_set() {
+        let text = "choose a card exiled this way";
         let lower = text.to_lowercase();
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
         match result {

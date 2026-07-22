@@ -6785,6 +6785,13 @@ pub enum SpellCostSource {
     Emerge,
 }
 
+/// Serde default for offer-payload source fields added after the variant
+/// shipped: saved states predating the field deserialize to the `ObjectId(0)`
+/// sentinel (never a real object; such windows never read the source).
+pub(crate) fn zero_object_id() -> ObjectId {
+    ObjectId(0)
+}
+
 /// The specific kind of cast offer being presented to the player.
 /// Parameterizes `WaitingFor::CastOffer` — all variants share `player: PlayerId`
 /// at the outer level; the kind-specific payload lives here.
@@ -6874,6 +6881,28 @@ pub enum CastOfferKind {
         /// to their owner's graveyard.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard: bool,
+        /// CR 406.6: Source object of the granting ability. `filter`s such as
+        /// `ExiledBySource` (Plargg and Nassari's "the other cards exiled this
+        /// way") resolve their exile links against this id, so the re-offer
+        /// loop must rebuild candidates with the real source rather than a
+        /// sentinel. Defaults to the zero sentinel for saved states predating
+        /// the field (graveyard/hand windows never read it).
+        #[serde(default = "zero_object_id")]
+        source: ObjectId,
+        /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch —
+        /// the concrete member pool the preceding `ChooseFromZone` offered,
+        /// captured when its answer settled. `ExiledBySource` alone reads the
+        /// source's complete LIVE linked-exile ledger, so after an earlier
+        /// resolution left a linked nonland card in exile the next window
+        /// would wrongly offer that stale card; intersecting the offer with
+        /// this pool (before the `Not(InTrackedSet)` chosen-card exclusion)
+        /// confines it to "the other cards exiled this way" of the CURRENT
+        /// resolution (Plargg and Nassari). Empty means "no batch restriction"
+        /// — windows without a choose-linked batch (Invoke Calamity's
+        /// graveyard/hand window) and saved states predating the field keep
+        /// the unrestricted behavior.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        member_pool: Vec<ObjectId>,
     },
     /// CR 608.2g + CR 609.4b: A during-resolution PAID cast of a single card
     /// from a graveyard (Quistis Trepe, Tinybones the Pickpocket: "you may cast
@@ -8540,6 +8569,21 @@ pub enum WaitingFor {
         candidates: Vec<PlayerId>,
         ability: Box<crate::types::ability::ResolvedAbility>,
     },
+    /// CR 608.2d: A resolving `ChooseFromZone { chooser: Opponent }` ("an
+    /// opponent chooses …") in a multiplayer game — the controller (`player`)
+    /// first decides WHICH opponent makes the choice (Plargg and Nassari's
+    /// release notes: "you choose which opponent gets to choose one of the
+    /// exiled nonland cards"). Only entered with two or more live opponents
+    /// and no pre-targeted opponent (one opponent has no decision;
+    /// "target opponent chooses" pre-binds the chooser at announcement).
+    /// `candidates` is the legal opponent set; `ability` is the resolving
+    /// choose ability, carried so the zone choice can be presented to the
+    /// picked opponent.
+    ChooseFromZoneOpponentChooser {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        ability: Box<crate::types::ability::ResolvedAbility>,
+    },
     /// CR 601.2c + CR 115.1: A spell with an "of an opponent's choice" target slot
     /// is being cast in a multiplayer game; the controller (`player`) chooses
     /// which opponent will announce that slot's target. Only entered with two or
@@ -9395,6 +9439,7 @@ impl WaitingFor {
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
             WaitingFor::PopulateChoice { .. } => "PopulateChoice",
             WaitingFor::ClashChooseOpponent { .. } => "ClashChooseOpponent",
+            WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
             WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
@@ -9534,6 +9579,7 @@ impl WaitingFor {
             | WaitingFor::TopOrBottomChoice { player, .. }
             | WaitingFor::PopulateChoice { player, .. }
             | WaitingFor::ClashChooseOpponent { player, .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { player, .. }
             | WaitingFor::ChooseAnnouncingOpponent { player, .. }
             | WaitingFor::ClashCardPlacement { player, .. }
             | WaitingFor::CompanionReveal { player, .. }

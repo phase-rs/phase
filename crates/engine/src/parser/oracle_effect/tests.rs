@@ -39546,6 +39546,184 @@ fn each_player_exiles_outer_effect_lowers_to_exile_from_top_until() {
     );
 }
 
+/// CR 607.2a + CR 608.2d: Plargg and Nassari's FULL upkeep-trigger body — all
+/// three sentences must assemble into one chain: the `player_scope: All`
+/// exile-until head, then the previously-Unimplemented middle sentence
+/// ("An opponent chooses a nonland card exiled this way") lowering to
+/// `ChooseFromZone { Exile, AllOwners, chooser: Opponent }` whose filter
+/// intersects the nonland type restriction with the `ExiledBySource` linked
+/// set, then the "cast … from among the OTHER cards exiled this way" tail as
+/// its `CastFromZone` sub-ability. The middle lowering exercises the
+/// subject-strip → imperative-fallback → opponent-chooser rebind seam in
+/// `lower_subject_predicate_ast`, and the same typed exiled-this-way anaphor
+/// covers Author of Shadows' subjectless "Choose a nonland card exiled this
+/// way."
+#[test]
+fn plargg_and_nassari_full_trigger_chain_choose_then_cast_others() {
+    let def = parse_effect_chain(
+        "each player exiles cards from the top of their library until they exile a nonland card. an opponent chooses a nonland card exiled this way. you may cast up to two spells from among the other cards exiled this way without paying their mana costs.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.player_scope,
+        Some(PlayerFilter::All),
+        "player_scope must propagate from \"each player\" subject"
+    );
+    assert!(
+        matches!(*def.effect, Effect::ExileFromTopUntil { .. }),
+        "head must be ExileFromTopUntil, got {:?}",
+        def.effect
+    );
+
+    let choose = def
+        .sub_ability
+        .as_ref()
+        .expect("middle sentence must attach as the first sub-ability");
+    let Effect::ChooseFromZone {
+        count,
+        ref zone,
+        ref zone_owner,
+        ref filter,
+        ref chooser,
+        ..
+    } = *choose.effect
+    else {
+        panic!("expected ChooseFromZone middle, got {:?}", choose.effect);
+    };
+    assert_eq!(count, 1);
+    assert_eq!(*zone, Zone::Exile);
+    assert_eq!(
+        *zone_owner,
+        ZoneOwner::AllOwners,
+        "CR 400.1: exile is shared — ownership must not gate the pool"
+    );
+    assert_eq!(
+        *chooser,
+        Chooser::Opponent,
+        "CR 608.2d: the \"an opponent\" subject must rebind the chooser"
+    );
+    let Some(TargetFilter::And { ref filters }) = *filter else {
+        panic!("expected And{{Typed, ExiledBySource}} filter, got {filter:?}");
+    };
+    assert!(
+        filters.contains(&TargetFilter::ExiledBySource),
+        "CR 607.2a: \"exiled this way\" must reference the linked-exile set"
+    );
+    assert!(
+        filters.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.iter().any(
+                    |t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Land))
+                )
+        )),
+        "the nonland qualifier must survive into the choose filter"
+    );
+
+    let cast = choose
+        .sub_ability
+        .as_ref()
+        .expect("the cast tail must nest under the choose");
+    let Effect::FreeCastFromZones {
+        count: cast_count,
+        ref filter,
+        ref zones,
+        max_total_mv,
+        exile_instead_of_graveyard,
+    } = *cast.effect
+    else {
+        panic!("expected FreeCastFromZones tail, got {:?}", cast.effect);
+    };
+    assert_eq!(
+        cast_count, 2,
+        "CR 601.2 + ruling 2021-04-16: the \"up to two\" bound must be carried"
+    );
+    assert_eq!(*zones, vec![Zone::Exile]);
+    assert_eq!(max_total_mv, None);
+    assert!(!exile_instead_of_graveyard);
+    let TargetFilter::And { filters: ref cf } = *filter else {
+        panic!("expected And cast filter, got {filter:?}");
+    };
+    assert!(
+        cf.contains(&TargetFilter::ExiledBySource),
+        "CR 607.2a: the window pool must stay inside the linked-exile set"
+    );
+    assert!(
+        cf.iter().any(|f| matches!(
+            f,
+            TargetFilter::Typed(tf)
+                if tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::Not { prop }
+                        if matches!(**prop, FilterProp::InTrackedSet { .. })
+                ))
+        )),
+        "\"the OTHER cards\" must exclude the opponent's pick via Not(InTrackedSet)"
+    );
+}
+
+/// Search for Survivors — "An opponent chooses a card at random in your
+/// graveyard." The bare, untargeted "an opponent" subject goes through the
+/// same `lower_subject_predicate_ast` chooser rebind that Plargg and Nassari
+/// exercises, so the sentence now lowers to a delegated random graveyard
+/// choose instead of the pre-rebind `Unimplemented` fall-through. This test
+/// claims that parse-diff entry deliberately.
+#[test]
+fn search_for_survivors_opponent_chooses_at_random_in_your_graveyard() {
+    let def = parse_effect_chain(
+        "an opponent chooses a card at random in your graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::ChooseFromZone {
+        count,
+        ref zone,
+        ref chooser,
+        ref selection,
+        ..
+    } = *def.effect
+    else {
+        panic!("expected ChooseFromZone, got {:?}", def.effect);
+    };
+    assert_eq!(count, 1);
+    assert_eq!(
+        *zone,
+        Zone::Graveyard,
+        "\"in your graveyard\" names the zone"
+    );
+    assert_eq!(
+        *chooser,
+        Chooser::Opponent,
+        "CR 608.2d: the untargeted \"an opponent\" subject must rebind the chooser"
+    );
+    assert_eq!(
+        *selection,
+        crate::types::ability::CardSelectionMode::Random,
+        "CR 608.2d: \"at random\" must survive into the selection mode"
+    );
+}
+
+/// Forgotten Lore / Shrouded Lore — "Target opponent chooses a card in your
+/// graveyard." `parse_target` lowers "target opponent" to the same bare
+/// opponent filter as "an opponent", but the subject carries a target slot:
+/// the chooser is a chosen TARGET, not "an opponent of the controller's
+/// choice", and `Chooser::Opponent` cannot represent that binding. The
+/// chooser rebind is therefore gated on `subject.target.is_none()`, and the
+/// targeted form must keep its honest `Unimplemented` fall-through rather
+/// than silently collapsing the target identity.
+#[test]
+fn target_opponent_chooses_in_your_graveyard_keeps_honest_fall_through() {
+    let def = parse_effect_chain(
+        "target opponent chooses a card in your graveyard.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(*def.effect, Effect::Unimplemented { ref name, .. } if name == "choose"),
+        "the targeted chooser form must stay on the honesty gate, got {:?}",
+        def.effect
+    );
+}
+
 #[test]
 fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permission() {
     let def = parse_effect_chain(

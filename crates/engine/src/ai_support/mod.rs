@@ -353,6 +353,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
+        | (
+            WaitingFor::ChooseFromZoneOpponentChooser { .. },
+            GameAction::ChooseZoneOpponentChooser { .. },
+        )
         | (WaitingFor::ClashCardPlacement { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::OptionalCostChoice { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::SpliceOffer { .. }, GameAction::RespondToSpliceOffer { .. })

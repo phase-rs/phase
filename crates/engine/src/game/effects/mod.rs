@@ -2433,6 +2433,15 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::PayCost { .. }
             | WaitingFor::RetargetChoice { .. }
             | WaitingFor::ChooseFromZoneChoice { .. }
+            // CR 608.2d + CR 608.2e: the controller's pick of WHICH opponent
+            // will make a `ChooseFromZone` selection is itself a resolution
+            // pause. The chained consumer (Plargg, Dean of Chaos's "you may
+            // cast up to two of the other exiled cards") must not resolve
+            // until the delegated pick round-trips — resolving it inline
+            // would read the pre-pick tracked-set state and compute an empty
+            // candidate pool — so the sub-ability chain auto-stashes here
+            // exactly like the `ChooseFromZoneChoice` pause it precedes.
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ReturnAsAuraTarget { .. }
             | WaitingFor::ChooseManaColor { .. }
@@ -4253,6 +4262,26 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
             return true;
         }
     }
+    // CR 608.2g: `FreeCastFromZones` carries its candidate filter in `filter`,
+    // which `Effect::target_filter()` does not expose (the window offers casts
+    // rather than selecting spell targets). Plargg and Nassari's "the other
+    // cards exiled this way" is `Not(InTrackedSet)` over the opponent's chosen
+    // card, so a chained free-cast window must trigger publication of the
+    // chosen card as the fresh tracked set.
+    if let Effect::FreeCastFromZones { filter, .. } = effect {
+        // CR 608.2c: the chosen-card exclusion is `FilterProp::Not {
+        // InTrackedSet }` INSIDE the typed leg of an `And` ("the OTHER cards
+        // exiled this way"), which the whole-filter walk above cannot see —
+        // without the property-level walk the choose head never publishes the
+        // chosen card as the fresh chain set, the `InTrackedSet(0)` sentinel
+        // stays bound to the exile-batch set, and `Not` over the batch empties
+        // the window (Plargg and Nassari's cast offer silently skipped).
+        if filter_references_tracked_set(filter)
+            || filter_properties_reference_tracked_membership(filter)
+        {
+            return true;
+        }
+    }
     if let Effect::SetTapState {
         scope: EffectScope::All,
         target,
@@ -4374,6 +4403,41 @@ fn filter_properties_reference_tracked_quantity(filter: &TargetFilter) -> bool {
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
             .any(filter_properties_reference_tracked_quantity),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: A filter whose typed properties test tracked-set MEMBERSHIP
+/// (`FilterProp::InTrackedSet`, alone or under `Not`/`AnyOf` — Plargg and
+/// Nassari's "the other cards exiled this way" is `Not(InTrackedSet)` inside
+/// the typed leg of an `And`) consumes the chain tracked set even though the
+/// filter is not a bare `TrackedSet`/`TrackedSetFiltered` reference. Mirrors
+/// `filter_properties_reference_tracked_quantity` for the membership axis.
+fn filter_properties_reference_tracked_membership(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(filter_prop_references_tracked_membership),
+        TargetFilter::Not { filter } => filter_properties_reference_tracked_membership(filter),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter()
+            .any(filter_properties_reference_tracked_membership),
+        _ => false,
+    }
+}
+
+/// CR 608.2c: Membership predicates at the property boundary — a bare
+/// `InTrackedSet`, or one nested under `Not` ("the other cards") / `AnyOf`.
+fn filter_prop_references_tracked_membership(prop: &crate::types::ability::FilterProp) -> bool {
+    match prop {
+        crate::types::ability::FilterProp::InTrackedSet { .. } => true,
+        crate::types::ability::FilterProp::AnyOf { props } => {
+            props.iter().any(filter_prop_references_tracked_membership)
+        }
+        crate::types::ability::FilterProp::Not { prop } => {
+            filter_prop_references_tracked_membership(prop)
+        }
         _ => false,
     }
 }

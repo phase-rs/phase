@@ -695,6 +695,22 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 608.2d: One candidate per opponent the controller could pick to
+        // make a resolving "an opponent chooses …" zone selection.
+        WaitingFor::ChooseFromZoneOpponentChooser {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseZoneOpponentChooser {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ChooseAnnouncingOpponent {
             player, candidates, ..
         } => candidates
@@ -2986,6 +3002,7 @@ pub fn candidate_actions_broad_with_probe(
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::BetweenGamesChoosePlayDraw { .. }
         | WaitingFor::OrderTriggers { .. }

@@ -8976,6 +8976,8 @@ fn handle_resolution_cast_success(
             filter,
             zones,
             exile_instead_of_graveyard,
+            source,
+            member_pool,
         } => {
             if exile_instead_of_graveyard {
                 // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
@@ -8995,9 +8997,14 @@ fn handle_resolution_cast_success(
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
+                source,
                 &filter,
                 &zones,
                 budget_left,
+                // CR 607.2a: the re-offer stays confined to THIS resolution's
+                // "exiled this way" batch (Plargg and Nassari) — see the
+                // window's `member_pool` docs; empty means no restriction.
+                &member_pool,
             );
             // CR 608.2g: Finalize runs before the chosen card is removed from
             // its origin zone; it cannot be offered again while already cast.
@@ -9014,6 +9021,8 @@ fn handle_resolution_cast_success(
                     filter,
                     zones,
                     exile_instead_of_graveyard,
+                    source,
+                    member_pool,
                 },
             }))
         }
