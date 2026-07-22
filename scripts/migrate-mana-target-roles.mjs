@@ -124,6 +124,28 @@ const ROLE_BY_CARD = new Map([
   // supplies the AMOUNT; the controller receives the mana. THE canary entry —
   // if a careless bulk rewrite flips anything, it flips this one.
   ["carpet of flowers", "CountSource"],
+  // --- Entries below appear only in persisted game-state dumps (`--state`),
+  // --- not in the curated card fixture. Verified against Scryfall Oracle text.
+  // "Whenever enchanted land is tapped for mana, its controller adds an
+  // additional {G}." — subject-led anaphoric recipient (ParentTargetController).
+  ["wolfwillow haven", "Recipient"],
+  // "You add {B}{B} and draw a card." — subject-led "you" recipient (Controller).
+  ["priest of forgotten gods", "Recipient"],
+  // "Add {R} for each card in target opponent's hand." — the Jeska's Will
+  // clause verbatim: the opponent supplies only the AMOUNT.
+  ["rousing refrain", "CountSource"],
+]);
+
+/**
+ * Cards that appear only in persisted game-state dumps (`--state` mode), never
+ * in the curated card fixture. Excluded from fixture mode's drop-detection
+ * count so the "expected N entries" guard keeps catching genuine renames/drops
+ * of the curated 11.
+ */
+const STATE_ONLY_CARDS = new Set([
+  "wolfwillow haven",
+  "priest of forgotten gods",
+  "rousing refrain",
 ]);
 
 /** Field name carrying the filter inside each role variant. */
@@ -134,7 +156,85 @@ const FIELD_BY_ROLE = {
 
 const args = process.argv.slice(2);
 const checkOnly = args.includes("--check");
+const stateMode = args.includes("--state");
 const fixturePath = args.find((a) => !a.startsWith("--")) ?? DEFAULT_FIXTURE;
+
+// ---------------------------------------------------------------------------
+// `--state <file.json.gz>`: migrate a PERSISTED GAME-STATE dump instead of the
+// curated card fixture. Several test suites (kilo_live_offer_from_real_dump,
+// combo_infinite_pile, sprout_inalla_realistic_offer) load gzipped `GameState`
+// dumps whose objects carry parsed abilities in the pre-role encoding. A state
+// deserializes through typed serde BEFORE any restore-time migration hook can
+// run, so the dump itself must carry the role encoding.
+//
+// Role attribution uses the nearest enclosing object `name` — the game object
+// that carries the ability — resolved through the SAME name-keyed table.
+// Unknown names fail loudly, exactly as in fixture mode: a state that names a
+// mana-target card missing from the table needs a human role decision from
+// that card's Oracle text, never an inference.
+//
+// NOTE for production saves: this migrates TEST dumps. If real persisted games
+// can carry pre-role Mana targets across an engine upgrade, the restore path
+// needs a JSON-level migration before typed deserialization — that is a
+// maintainer decision, not something this script papers over.
+// ---------------------------------------------------------------------------
+if (stateMode) {
+  const zlib = await import("node:zlib");
+  // Local copy: the shared `isRole` is declared later in the file (after the
+  // fixture-mode load) and consts are TDZ-scoped.
+  const isRole = (target) =>
+    target !== null && typeof target === "object" && typeof target.role === "string";
+  const raw = readFileSync(fixturePath);
+  const text = zlib.gunzipSync(raw).toString("utf8");
+  const doc = JSON.parse(text);
+
+  const migrated = [];
+  const alreadyRole = [];
+  const unknown = [];
+  (function walk(node, owner) {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      node.forEach((x) => walk(x, owner));
+      return;
+    }
+    const nextOwner =
+      typeof node.name === "string" && node.name.length > 0 ? node.name : owner;
+    if (node.type === "Mana" && node.target != null) {
+      if (isRole(node.target)) {
+        alreadyRole.push(nextOwner);
+      } else {
+        const role = ROLE_BY_CARD.get(nextOwner.toLowerCase());
+        if (role === undefined) {
+          unknown.push(nextOwner);
+        } else {
+          node.target = { role, [FIELD_BY_ROLE[role]]: node.target };
+          migrated.push(`${nextOwner} -> ${role}`);
+        }
+      }
+    }
+    for (const v of Object.values(node)) walk(v, nextOwner);
+  })(doc, "?");
+
+  if (unknown.length > 0) {
+    console.error(
+      `\nERROR: state dump carries Effect::Mana target(s) on unmapped card(s):\n` +
+        [...new Set(unknown)].map((n) => `  - ${n}`).join("\n") +
+        `\nDecide each role from the card's Oracle text and add it to ROLE_BY_CARD.\n`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `${checkOnly ? "[--check] would migrate" : "migrated"} ${migrated.length} state entr` +
+      `${migrated.length === 1 ? "y" : "ies"} in ${fixturePath}` +
+      (alreadyRole.length ? ` (${alreadyRole.length} already in role form)` : ""),
+  );
+  migrated.forEach((l) => console.log(`  ${l}`));
+  if (!checkOnly && migrated.length > 0) {
+    writeFileSync(fixturePath, zlib.gzipSync(JSON.stringify(doc)));
+    console.log(`rewrote ${fixturePath} (gzipped, minified)`);
+  }
+  process.exit(0);
+}
 
 const raw = readFileSync(fixturePath, "utf8");
 const db = JSON.parse(raw);
@@ -196,7 +296,7 @@ if (unknown.length > 0) {
   process.exit(1);
 }
 
-const expected = ROLE_BY_CARD.size;
+const expected = ROLE_BY_CARD.size - STATE_ONLY_CARDS.size;
 const touched = migrated.length + alreadyRole.length;
 if (touched !== expected) {
   console.error(
