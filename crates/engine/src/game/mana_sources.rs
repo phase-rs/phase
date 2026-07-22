@@ -293,7 +293,8 @@ pub(crate) fn has_unambiguous_self_sacrifice_component(cost: &Option<AbilityCost
     // sibling such as LED's `Discard`. Then confirm a self-sacrifice component
     // is actually present, so a pure `{T}` cost is not misclassified as
     // self-sacrifice by this predicate.
-    cost.as_ref().is_some_and(mana_abilities::cost_component_choice_free)
+    cost.as_ref()
+        .is_some_and(mana_abilities::cost_component_choice_free)
         && cost_has_component(cost, |c| {
             matches!(
                 c,

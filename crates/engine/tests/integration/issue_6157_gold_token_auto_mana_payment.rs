@@ -261,9 +261,28 @@ fn led_shaped_discard_sacrifice_not_auto_tapped_stays_manual() {
     scenario.add_card_to_hand(P0, "Spare Card A");
     let mut runner = scenario.build();
     let _led = make_led_source(runner.state_mut(), 952);
+    let outcome = runner
+        .cast(spell)
+        .try_resolve()
+        .expect("the scenario driver must preserve the manual mana-payment prompt");
     assert!(
-        runner.cast(spell).try_resolve().is_err(),
-        "with only the LED-shaped source the generic-1 spell must be unpayable by \
-         the auto-tap path"
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::ManaPayment { player, .. } if *player == P0
+        ),
+        "with only the LED-shaped source, auto payment must pause at manual mana payment, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        matches!(
+            outcome.state().pending_cast.as_deref(),
+            Some(pending) if pending.object_id == spell
+        ),
+        "the manual mana-payment pause must preserve the pending spell cast"
+    );
+    assert_eq!(
+        outcome.state().objects.get(&_led).map(|object| object.zone),
+        Some(Zone::Battlefield),
+        "the LED-shaped source must remain available for its manual discard-and-sacrifice payment"
     );
 }
