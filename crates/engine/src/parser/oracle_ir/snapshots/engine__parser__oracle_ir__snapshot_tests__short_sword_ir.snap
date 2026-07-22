@@ -22,36 +22,40 @@ expression: "&ir"
         "fragment": "Equipped creature gets +1/+1."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "Typed",
-            "type_filters": [
-              "Creature"
-            ],
-            "controller": null,
-            "properties": [
-              {
-                "type": "EquippedBy"
-              }
-            ]
-          },
-          "modifications": [
-            {
-              "type": "AddPower",
-              "value": 1
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": null,
+              "properties": [
+                {
+                  "type": "EquippedBy"
+                }
+              ]
             },
-            {
-              "type": "AddToughness",
-              "value": 1
-            }
-          ],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "Equipped creature gets +1/+1."
+            "modifications": [
+              {
+                "type": "AddPower",
+                "value": 1
+              },
+              {
+                "type": "AddToughness",
+                "value": 1
+              }
+            ],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "Equipped creature gets +1/+1."
+          },
+          "source_text": "Equipped creature gets +1/+1.",
+          "body_ir": null
         }
       }
     },

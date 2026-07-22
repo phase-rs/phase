@@ -1203,6 +1203,12 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&opponent| GameAction::ChooseClashOpponent { opponent }),
 
+        // CR 608.2d: "an opponent chooses …" — the controller picks which
+        // opponent makes the zone choice; fall back to the first candidate.
+        WaitingFor::ChooseFromZoneOpponentChooser { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseZoneOpponentChooser { opponent }),
+
         // CR 601.2c + CR 115.1: "of an opponent's choice" announcer — the
         // controller picks which opponent announces; fall back to the first.
         WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => candidates
@@ -4477,17 +4483,11 @@ mod tests {
                 source_id: creature,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         };
         let allowed = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Utility,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
 
         // Inline the filter logic the same way score_candidates does.
@@ -4540,10 +4540,7 @@ mod tests {
                 source_id: creature,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         };
 
         let gated: Vec<CandidateAction> = vec![blocked]
@@ -4861,19 +4858,13 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let opp_candidate = CandidateAction {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
 
         let self_score = policies.score(&PolicyContext {

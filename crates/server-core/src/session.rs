@@ -47,6 +47,11 @@ pub type ActionResult = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// One completed authoritative transition paired with the server revision
+/// allocated while the session lock was held. The transport must keep this
+/// pairing intact when it fans a snapshot out to multiple viewers.
+pub type RevisionedActionResult = (u64, ActionResult);
+
 /// Broadcast-ready fields for a state snapshot taken outside the normal
 /// `handle_action` flow (e.g. an approved takeback rollback): the raw state,
 /// legal actions, auto-pass flag, spell costs, and per-object action grouping.
@@ -100,6 +105,10 @@ pub fn is_acting(state: &GameState, player: PlayerId) -> bool {
 
 pub struct GameSession {
     pub game_code: String,
+    /// Monotonic server-authored revision of the current authoritative state.
+    /// Read-only snapshots reuse this value; mutators advance it before their
+    /// per-viewer views are captured for transport.
+    pub state_revision: u64,
     pub state: GameState,
     /// Player tokens indexed by seat (0..player_count). Empty string = seat not yet claimed.
     pub player_tokens: Vec<String>,
@@ -151,6 +160,12 @@ pub struct GameSession {
 }
 
 impl GameSession {
+    /// Allocates the revision for one completed authoritative state transition.
+    pub fn advance_state_revision(&mut self) -> u64 {
+        self.state_revision = self.state_revision.saturating_add(1);
+        self.state_revision
+    }
+
     /// Returns the player index for the given token, if valid.
     pub fn player_for_token(&self, token: &str) -> Option<PlayerId> {
         self.player_tokens
@@ -512,6 +527,7 @@ impl GameSession {
         let result = start_game(&mut self.state);
         self.start_events = result.events;
         self.game_started = true;
+        self.advance_state_revision();
         self.ai_session = Some(AiSession::arc_from_game(&self.state));
         self.lobby_meta = None;
         Ok(())
@@ -530,7 +546,7 @@ impl GameSession {
     /// turn — out from under the snapshot the table is voting to roll back
     /// to. Every call site (join-fills-the-room, reconnect, fresh AI-game
     /// creation) is gated here once rather than at each caller.
-    pub fn run_ai(&mut self) -> Vec<ActionResult> {
+    pub fn run_ai(&mut self) -> Vec<RevisionedActionResult> {
         if self.ai_seats.is_empty() || self.pending_takeback.is_some() {
             return vec![];
         }
@@ -556,14 +572,18 @@ impl GameSession {
             .map(|r| {
                 let (legal, spell_costs, by_object) = engine_legal_actions_full(&r.state);
                 let auto_pass = auto_pass_recommended(&r.state, &legal);
+                let revision = self.advance_state_revision();
                 (
-                    r.state,
-                    r.events,
-                    legal,
-                    r.log_entries,
-                    auto_pass,
-                    spell_costs,
-                    by_object,
+                    revision,
+                    (
+                        r.state,
+                        r.events,
+                        legal,
+                        r.log_entries,
+                        auto_pass,
+                        spell_costs,
+                        by_object,
+                    ),
                 )
             })
             .collect()
@@ -596,6 +616,7 @@ impl GameSession {
 
         PersistedSession {
             game_code: self.game_code.clone(),
+            state_revision: self.state_revision,
             state: PersistedGameState::capture(self.state.clone()),
             player_tokens: self.player_tokens.clone(),
             display_names: self.display_names.clone(),
@@ -657,6 +678,7 @@ impl GameSession {
 
         GameSession {
             game_code: ps.game_code,
+            state_revision: ps.state_revision,
             state,
             player_tokens: ps.player_tokens,
             connected: vec![false; pc],
@@ -777,6 +799,7 @@ impl SessionManager {
 
         let session = GameSession {
             game_code: game_code.clone(),
+            state_revision: 0,
             state,
             player_tokens,
             connected,
@@ -3020,6 +3043,7 @@ mod tests {
 
         let mut session = GameSession {
             game_code: "TEST01".to_string(),
+            state_revision: 0,
             state,
             player_tokens: vec!["host_token".to_string(), String::new()],
             connected: vec![true, true],

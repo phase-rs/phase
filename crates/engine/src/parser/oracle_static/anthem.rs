@@ -125,8 +125,52 @@ pub(crate) fn parse_typed_you_control(
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
+                // CR 105.1 + CR 205.4a: a compound color/supertype descriptor
+                // ("Black legendary", "Legendary black", ...) — the Legends
+                // banding-land cycle (Unholy Citadel, Seafarer's Quay,
+                // Adventurers' Guildhouse, Cathedral of Serra, Mountain
+                // Stronghold): "<Color> legendary creatures you control have
+                // \"bands with other legendary creatures.\"" (issue #6332).
+                // None of the bespoke arms above recognize a compound
+                // descriptor, so delegate the full subject to
+                // `parse_type_phrase` — the general subject-filter grammar
+                // that already composes a color prefix and a supertype prefix
+                // in either order (see its leading and post-negation
+                // supertype/color passes in `oracle_target.rs`) — rather than
+                // growing a second bespoke color+supertype combinator here.
+                //
+                // Accept ONLY when the fully-consumed result carries BOTH a
+                // `HasColor` and a `HasSupertype` property — i.e. genuinely a
+                // color+supertype compound, not merely "some descriptor
+                // `parse_type_phrase` happens to accept." A full-consumption
+                // check alone is not narrow enough: descriptors this function
+                // has no OTHER arm for (e.g. Saryth, the Viper's Fang / Augusta,
+                // Dean of Order's "Other tapped creatures you control .../Other
+                // untapped creatures you control ...") also fully consume
+                // through `parse_type_phrase`, and unconditionally accepting
+                // them here would silently reroute cards that are unrelated to
+                // this fix onto a different (and untested, for them) filter
+                // path. Requiring both properties scopes acceptance to exactly
+                // the class this fix targets.
                 } else {
-                    return None;
+                    let subject_and_type = tp.original[..creatures_pos + " creatures".len()].trim();
+                    let (compound_filter, remainder) = parse_type_phrase(subject_and_type);
+                    match compound_filter {
+                        TargetFilter::Typed(typed)
+                            if remainder.trim().is_empty()
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasColor { .. }))
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasSupertype { .. })) =>
+                        {
+                            TargetFilter::Typed(typed.controller(ControllerRef::You))
+                        }
+                        _ => return None,
+                    }
                 }
             } else if desc_remaining.eq_ignore_ascii_case("commander") {
                 // CR 903.3d: Combat-status prefix + "Commander creature" — same

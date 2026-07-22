@@ -359,10 +359,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -405,10 +402,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -450,10 +444,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,

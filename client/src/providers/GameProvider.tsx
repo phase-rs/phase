@@ -662,6 +662,10 @@ export function GameProvider({
       && firstPlayer === undefined
       && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
       && nativeEngineKey !== null;
+    const shouldUseNativeP2P =
+      mode === "p2p-host"
+      && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+      && nativeEngineKey !== null;
     setGameMode(mode);
     setEngineMode(mode === "ai" ? (shouldUseNativeAi ? null : "wasm") : null);
 
@@ -786,26 +790,53 @@ export function GameProvider({
               await resumeP2PHost(gameId, adapter);
               signal.throwIfAborted();
             } else {
-            // Resume detection: if both the engine state and the P2P
-            // host session were persisted for this gameId, the host
-            // crashed/reloaded mid-game and should dial back in on the
-            // same room code so returning guests (whose IDB tokens are
-            // keyed on `phase-<roomCode>`) still match. Partial state
-            // (only one record present) is treated as inconsistent:
-            // clear both and fall through to a fresh game.
+            // WASM hosts persist the engine state plus P2P metadata. Native
+            // hosts persist only P2P metadata and local phase-server tokens:
+            // the server owns the authoritative game state.
             const [savedState, savedSession] = await Promise.all([
               loadGame(gameId),
               loadP2PHostSession(gameId),
             ]);
             signal.throwIfAborted();
 
-            const isResume =
-              savedState !== null && savedSession !== null && savedSession.gameStarted;
-            if ((savedState !== null) !== (savedSession !== null)) {
+            const isNativeResume = savedSession?.nativeSession !== undefined;
+            const isWasmResume =
+              !isNativeResume
+              && savedState !== null
+              && savedSession !== null
+              && savedSession.gameStarted;
+            const isResume = isNativeResume || isWasmResume;
+            if (!isNativeResume && (savedState !== null) !== (savedSession !== null)) {
               // Inconsistent: one record present, the other missing.
               // Drop both so the menu's Resume button doesn't re-offer.
               await clearGame(gameId);
               await clearP2PHostSession(gameId);
+            }
+
+            // Native P2P state belongs to the local phase-server, never the
+            // browser's WASM snapshot. For a fresh room, start that binary
+            // before publishing a PeerJS lobby entry; if it cannot start, the
+            // established WASM host remains the fallback for this attempt.
+            let nativeP2P: { expectedServerVersion?: string } | undefined;
+            if (((shouldUseNativeP2P && !isWasmResume) || isNativeResume) && nativeEngineKey) {
+              try {
+                await ensureNativeEngine(nativeEngineKey);
+                signal.throwIfAborted();
+                nativeP2P = {
+                  expectedServerVersion:
+                    "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+                };
+              } catch (err) {
+                if (isNativeResume) {
+                  throw new Error(
+                    `The local native engine is required to resume this hosted game: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
+                console.warn("[P2P] native engine unavailable; using WASM host", err);
+              }
+            }
+            if (isNativeResume && !nativeP2P) {
+              throw new Error("The local native engine is unavailable for this hosted game.");
             }
 
             // Only open a fresh broker client when starting a fresh
@@ -882,10 +913,15 @@ export function GameProvider({
                 gameId,
                 roomCode: host.roomCode,
                 hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
-                resumeData: isResume && savedState && savedSession
-                  ? { state: savedState, session: savedSession }
+                resumeData: isResume && savedSession
+                  ? isNativeResume
+                    ? { session: savedSession }
+                    : savedState
+                      ? { state: savedState, session: savedSession }
+                      : undefined
                   : undefined,
               },
+              nativeP2P,
             );
             p2pAdapter = adapter;
             // Ownership of the Peer transfers to the adapter here; don't
@@ -895,10 +931,9 @@ export function GameProvider({
             wireP2PEvents(adapter);
 
             if (isResume) {
-              // Resume path: adapter.initialize() loads the saved state
-              // via wasm.resumeMultiplayerHostState; resumeP2PHost
-              // pulls state + legal actions into the store. Skip
-              // initializeGame entirely — the engine is already live.
+              // The adapter restores either the WASM snapshot or reconnects
+              // its local phase-server viewers, then resumeP2PHost seeds the
+              // store from that authority. No second initializeGame call.
               await resumeP2PHost(gameId, adapter);
             } else {
               await initGame(gameId, adapter, undefined, formatConfig, effectivePlayerCount, matchConfig);
@@ -1605,6 +1640,7 @@ export function GameProvider({
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
+            manaPaymentShortcutActions: [],
             spellCosts: {},
             stateHistory: [],
             turnCheckpoints: [],

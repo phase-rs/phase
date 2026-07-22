@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -12,9 +13,26 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::{LoopAction, LoopDetectionMode};
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
+
+fn tap_land_action(
+    state: &engine::types::game_state::GameState,
+    object_id: engine::types::identifiers::ObjectId,
+) -> GameAction {
+    activatable_mana_actions_for_player(
+        state,
+        state.waiting_for.acting_player().expect("acting player"),
+    )
+    .into_iter()
+    .find(|action| {
+        matches!(action, GameAction::TapLandForMana { selection }
+            if selection.source.object_id == object_id)
+    })
+    .expect("land must expose semantic mana action")
+}
 
 fn ultima_mana_trigger() -> engine::types::ability::TriggerDefinition {
     let parsed = parse_oracle_text(
@@ -76,9 +94,24 @@ fn ultima_tap_land_for_c_doubles_colorless_mana() {
         Arc::make_mut(&mut obj.abilities);
     }
 
+    let action = tap_land_action(runner.state(), land);
+    let expected_selection = match &action {
+        GameAction::TapLandForMana { selection } => selection.clone(),
+        other => panic!("expected TapLandForMana, got {other:?}"),
+    };
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
     runner
-        .act(GameAction::TapLandForMana { object_id: land })
+        .act(action)
         .expect("tapping a colorless land must succeed");
+
+    assert!(matches!(
+        &runner.state().last_loop_action_sequence[..],
+        [step]
+            if matches!(
+                &step.action,
+                LoopAction::TapLandForMana { selection } if selection == &expected_selection
+            )
+    ));
 
     assert_eq!(
         runner.state().players[P0.0 as usize]
@@ -101,8 +134,9 @@ fn ultima_tap_land_for_c_ignores_colored_mana() {
     let forest = scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
 
     let mut runner = scenario.build();
+    let action = tap_land_action(runner.state(), forest);
     runner
-        .act(GameAction::TapLandForMana { object_id: forest })
+        .act(action)
         .expect("tapping Forest for {G} must succeed");
 
     assert_eq!(

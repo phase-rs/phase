@@ -34,7 +34,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::game::combat::AttackTarget;
-use crate::game::engine::{apply_as_current_for_simulation, SimulationProbeGuard};
+use crate::game::engine::SimulationProbeGuard;
 use crate::game::functioning_abilities::game_functioning_statics;
 use crate::game::{casting, keywords, turn_control};
 use crate::types::ability::{
@@ -122,8 +122,9 @@ impl CandidateFilter for BasicLegalityFilter {
     }
 }
 
-/// Catch-all fallback: clones the state and runs `apply_as_current`, accepting
-/// candidates that produce no error. This is the authoritative oracle — every
+/// Catch-all fallback: clones the state and runs the action with its retained
+/// semantic owner and authorized submitter, accepting candidates that produce
+/// no error. This is the authoritative oracle — every
 /// cheap filter must be a subset of what this rejects. Only reached when all
 /// cheap filters accept.
 pub struct SimulationFilter;
@@ -181,7 +182,25 @@ impl SimulationFilter {
         let _probe = SimulationProbeGuard::enter();
         // Legality-only probe (#4479): `sim` is discarded, so skip display derivation
         // (the O(N^2) mana-availability board sweep on go-wide token boards).
-        apply_as_current_for_simulation(&mut sim, candidate.action.clone()).is_ok()
+        // Candidate generation already maps the semantic owner to the exact
+        // authorized submitter for this decision. In particular, search
+        // authority may be latched independently of live turn control; mapping
+        // that actor a second time can incorrectly hand the probe to a newer,
+        // unrelated turn controller.
+        let actor = candidate
+            .metadata
+            .actor
+            .or_else(|| turn_control::authorized_submitters(state).first().copied());
+        actor.is_some_and(|actor| {
+            let semantic_owner = candidate.metadata.semantic_owner.unwrap_or(actor);
+            crate::game::engine::apply_interaction_for_simulation(
+                &mut sim,
+                actor,
+                semantic_owner,
+                candidate.action.clone(),
+            )
+            .is_ok()
+        })
     }
 }
 
@@ -1200,39 +1219,40 @@ fn legality_equivalence_key(
             key.is_blocked = crate::game::restrictions::is_source_blocked(state, *source_id);
             Some(key)
         }
-        GameAction::TapLandForMana { object_id } | GameAction::UntapLandForMana { object_id } => {
+        GameAction::TapLandForMana { selection } => {
             if poison.has_activation {
                 return None;
             }
-            let controller = state.objects.get(object_id)?.controller;
-            let options = crate::game::mana_sources::activatable_land_mana_options(
-                state, *object_id, controller,
-            );
-            // Exactly one option ⇒ that ability index (or `None` for a legacy
-            // subtype-only record, folded at index 0). Zero or many ⇒ the
-            // verdict is not a single-ability legality question — don't memoize.
-            if options.len() != 1 {
-                return None;
-            }
-            let fp = interner.intern(state, *object_id)?;
+            let object_id = selection.source.object_id;
+            state.objects.get(&object_id)?;
+            let fp = interner.intern(state, object_id)?;
             let mut key = LegalityKey::new(LegalityClass::ManaTap, fp);
-            let ability_index = options[0].ability_index;
+            let ability_index = selection.ability_index;
             key.ability_index = ability_index;
             let lookup_index = ability_index.unwrap_or(0);
             key.activations_this_turn = state
                 .activated_abilities_this_turn
-                .get(&(*object_id, lookup_index))
+                .get(&(object_id, lookup_index))
                 .copied()
                 .unwrap_or(0);
             key.activations_this_game = state
                 .activated_abilities_this_game
-                .get(&(*object_id, lookup_index))
+                .get(&(object_id, lookup_index))
                 .copied()
                 .unwrap_or(0);
-            key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(object_id);
-            key.is_attacking = crate::game::restrictions::is_source_attacking(state, *object_id);
-            key.is_blocking = crate::game::restrictions::is_source_blocking(state, *object_id);
-            key.is_blocked = crate::game::restrictions::is_source_blocked(state, *object_id);
+            key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(&object_id);
+            key.is_attacking = crate::game::restrictions::is_source_attacking(state, object_id);
+            key.is_blocking = crate::game::restrictions::is_source_blocking(state, object_id);
+            key.is_blocked = crate::game::restrictions::is_source_blocked(state, object_id);
+            Some(key)
+        }
+        GameAction::UntapLandForMana { object_id } => {
+            if poison.has_activation {
+                return None;
+            }
+            let fp = interner.intern(state, *object_id)?;
+            let mut key = LegalityKey::new(LegalityClass::ManaTap, fp);
+            key.ability_index = None;
             Some(key)
         }
         GameAction::ChooseTarget {
@@ -1255,7 +1275,11 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::candidate_actions;
-    use crate::types::game_state::{CastPaymentMode, CastingVariant, GameState, StackEntryKind};
+    use crate::game::engine::apply_as_current_for_simulation;
+    use crate::types::game_state::{
+        ActiveSearchDecisionAuthority, ActiveSearchDecisionControl, CastPaymentMode,
+        CastingVariant, GameState, StackEntryKind,
+    };
 
     #[test]
     fn default_pipeline_registered_filters_ordered_by_cost() {
@@ -1286,6 +1310,74 @@ mod tests {
             .expect("PassPriority should be a candidate in the opening state");
         assert!(SimulationFilter.accept(&state, &pass));
         assert!(BasicLegalityFilter.accept(&state, &pass));
+    }
+
+    fn empty_search_state() -> GameState {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            library_owner: Some(PlayerId(0)),
+            cards: Vec::new(),
+            count: 0,
+            reveal: false,
+            up_to: true,
+            allows_partial_find: true,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
+            split: None,
+        };
+        state
+    }
+
+    fn empty_search_candidate(state: &GameState) -> CandidateAction {
+        candidate_actions(state)
+            .into_iter()
+            .find(|candidate| {
+                matches!(
+                    candidate.action,
+                    GameAction::SelectCards { ref cards } if cards.is_empty()
+                )
+            })
+            .expect("an up-to-zero search has an empty selection candidate")
+    }
+
+    #[test]
+    fn simulation_uses_ordinary_search_actor_without_remapping() {
+        let state = empty_search_state();
+        let candidate = empty_search_candidate(&state);
+        assert_eq!(candidate.metadata.semantic_owner, Some(PlayerId(0)));
+        assert_eq!(candidate.metadata.actor, Some(PlayerId(0)));
+        assert!(SimulationFilter.accept(&state, &candidate));
+    }
+
+    #[test]
+    fn simulation_uses_live_turn_controller_already_latched_in_candidate_metadata() {
+        let mut state = empty_search_state();
+        state.active_player = PlayerId(0);
+        state.turn_decision_controller = Some(PlayerId(1));
+        let candidate = empty_search_candidate(&state);
+        assert_eq!(candidate.metadata.semantic_owner, Some(PlayerId(0)));
+        assert_eq!(candidate.metadata.actor, Some(PlayerId(1)));
+        assert!(SimulationFilter.accept(&state, &candidate));
+    }
+
+    #[test]
+    fn simulation_does_not_remap_latched_search_controller_through_live_turn_control() {
+        let mut state = empty_search_state();
+        state.active_player = PlayerId(1);
+        state.turn_decision_controller = Some(PlayerId(2));
+        state
+            .active_search_decision_controls
+            .insert(ActiveSearchDecisionControl {
+                searcher: PlayerId(0),
+                searched_zone_owner: PlayerId(0),
+                authority: ActiveSearchDecisionAuthority::LatchedController {
+                    controller: PlayerId(1),
+                },
+            });
+        let candidate = empty_search_candidate(&state);
+        assert_eq!(candidate.metadata.semantic_owner, Some(PlayerId(0)));
+        assert_eq!(candidate.metadata.actor, Some(PlayerId(1)));
+        assert!(SimulationFilter.accept(&state, &candidate));
     }
 
     /// The `cheap ⊆ sim` invariant: for every candidate generated by
@@ -1345,20 +1437,14 @@ mod tests {
     fn cand(action: GameAction) -> CandidateAction {
         CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         }
     }
 
     fn cand_with_actor(action: GameAction, actor: PlayerId) -> CandidateAction {
         CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(actor),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(actor), TacticalClass::Spell),
         }
     }
 

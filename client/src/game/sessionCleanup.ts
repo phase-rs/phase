@@ -19,6 +19,7 @@ export function clearPromptOverlayState(): void {
     waitingFor: null,
     legalActions: [],
     autoPassRecommended: false,
+    manaPaymentShortcutActions: [],
     spellCosts: {},
     legalActionsByObject: {},
     resolutionProgress: null,

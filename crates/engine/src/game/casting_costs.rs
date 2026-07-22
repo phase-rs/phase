@@ -6368,11 +6368,20 @@ fn pay_additional_cost_with_source(
                 super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0),
             )
             .unwrap_or(0);
-            let player_state = &mut state.players[player.0 as usize];
-            if player_state.energy < amount {
+            let energy = state.players[player.0 as usize].energy;
+            if energy < amount {
                 return Err(EngineError::ActionNotAllowed("Not enough energy".into()));
             }
-            player_state.energy -= amount;
+            if amount > 0 {
+                state
+                    .resolve_and_apply_player_edit(
+                        player,
+                        crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                            delta: -(amount as i32),
+                        },
+                    )
+                    .expect("preflighted cast energy payment must apply");
+            }
             events.push(GameEvent::EnergyChanged {
                 player,
                 delta: -(amount as i32),
@@ -8976,6 +8985,8 @@ fn handle_resolution_cast_success(
             filter,
             zones,
             exile_instead_of_graveyard,
+            source,
+            member_pool,
         } => {
             if exile_instead_of_graveyard {
                 // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
@@ -8995,9 +9006,14 @@ fn handle_resolution_cast_success(
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
+                source,
                 &filter,
                 &zones,
                 budget_left,
+                // CR 607.2a: the re-offer stays confined to THIS resolution's
+                // "exiled this way" batch (Plargg and Nassari) — see the
+                // window's `member_pool` docs; empty means no restriction.
+                &member_pool,
             );
             // CR 608.2g: Finalize runs before the chosen card is removed from
             // its origin zone; it cannot be offered again while already cast.
@@ -9014,6 +9030,8 @@ fn handle_resolution_cast_success(
                     filter,
                     zones,
                     exile_instead_of_graveyard,
+                    source,
+                    member_pool,
                 },
             }))
         }
@@ -10109,32 +10127,39 @@ fn auto_tap_mana_sources_inner(
             }
         } else {
             // Basic-land-subtype fallback — no explicit ability, just tap + produce.
-            if let Some(obj) = state.objects.get_mut(&option.object_id) {
-                if !obj.tapped {
-                    obj.tapped = true;
+            let node = state.begin_activated_mana_journal_node(option.object_id);
+            state.with_rules_execution_node(node, |state| {
+                if crate::game::object_state::resolve_and_apply_object_edit(
+                    state,
+                    option.object_id,
+                    crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                    true,
+                )
+                .expect("auto-tap source must remain a live exact object")
+                {
                     events.push(GameEvent::PermanentTapped {
                         object_id: option.object_id,
                         caused_by: None,
                     });
                 }
-            }
-            mana_payment::produce_mana(
-                state,
-                option.object_id,
-                option.mana_type,
-                player,
-                true,
-                events,
-            );
-            // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
-            // always includes `{T}` in its cost, so this auto-tap fallback
-            // taps the land for mana. Emit one `TappedForMana` per resolution
-            // so `TapsForMana` triggers fire exactly once.
-            events.push(GameEvent::TappedForMana {
-                player_id: player,
-                source_id: option.object_id,
-                produced: vec![option.mana_type],
-                tap_state: ManaTapState::FromTap,
+                mana_payment::produce_mana(
+                    state,
+                    option.object_id,
+                    option.mana_type,
+                    player,
+                    true,
+                    events,
+                );
+                // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
+                // always includes `{T}` in its cost, so this auto-tap fallback
+                // taps the land for mana. Emit one `TappedForMana` per resolution
+                // so `TapsForMana` triggers fire exactly once.
+                events.push(GameEvent::TappedForMana {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    tap_state: ManaTapState::FromTap,
+                });
             });
         }
     }
@@ -10848,12 +10873,36 @@ pub(super) fn apply_committed_assist(
             "Assist mana payment is awaiting a replacement choice".to_string(),
         ));
     }
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == helper) {
-        mana_payment::pay_from_pool(&mut p.mana_pool, &probe).map_err(|e| {
+    if state.players.iter().any(|p| p.id == helper) {
+        state.restamp_pool_pip_ids(helper);
+        let (spent, _) = mana_payment::select_mana_payment(
+            &state
+                .players
+                .iter()
+                .find(|p| p.id == helper)
+                .expect("assisting player exists")
+                .mana_pool,
+            &probe,
+            None,
+            None,
+            false,
+            None,
+            crate::types::mana::LifePaymentColors::EMPTY,
+            &[],
+        )
+        .map_err(|e| {
             EngineError::ActionNotAllowed(format!(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
+        let recipient = state.mana_payment_recipient(pending.object_id, helper);
+        state
+            .resolve_and_apply_mana_spend(helper, recipient, &spent)
+            .map_err(|_| {
+                EngineError::ActionNotAllowed(
+                    "Assisting player's mana pool changed before payment applied".to_string(),
+                )
+            })?;
         if mana_payment::has_unspent_mana_continuous_effects(state) {
             state.layers_dirty.mark_full();
         }

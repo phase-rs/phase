@@ -19,25 +19,41 @@ use crate::types::zones::Zone;
 /// library-top source (Cryptic Coat, Ransom Note). `Some(filter)` names
 /// explicit objects a preceding `Effect::ChooseFromZone` chose and forwarded
 /// onto this ability's `targets` — Vannifar's "cloak a card from your hand".
+///
+/// `enters_under` is the CR 110.2a controller-on-entry override: the player
+/// instructed to cloak puts the card onto the battlefield, so it enters under
+/// that player's control (Etrata, Deadly Fugitive — the cloaker controls the
+/// face-down card cloaked off an opponent's library, while the library owner
+/// keeps owning it). `None` keeps the owner default.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (target, count, object_source) = match &ability.effect {
+    let (target, count, object_source, enters_under) = match &ability.effect {
         Effect::Cloak {
             target,
             count,
             object_source,
+            enters_under,
         } => (
             target.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             object_source.clone(),
+            enters_under.clone(),
         ),
         _ => return Err(EffectError::MissingParam("count".to_string())),
     };
 
     let player = super::resolve_player_for_context_ref(state, ability, &target);
+    // CR 110.2a: resolve the cloaking-player override through the single
+    // canonical authority shared with ChangeZone/ChangeZoneAll/Manifest.
+    let controller = super::change_zone::resolve_enters_under_player(
+        state,
+        ability,
+        "Cloak",
+        enters_under.as_ref(),
+    )?;
 
     match object_source {
         // CR 701.58a: Cloak explicit objects chosen upstream. Two source shapes:
@@ -106,6 +122,7 @@ pub fn resolve(
                     player,
                     source_id: ability.source_id,
                     members,
+                    enters_under: controller,
                 }),
                 events,
             );
@@ -131,29 +148,33 @@ pub fn resolve(
                     object_id,
                     ability.source_id,
                     crate::types::ability::FaceDownProfile::cloaked_2_2(),
-                    None,
+                    controller,
                     events,
                 )
                 .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
             }
         }
-        // CR 701.58e: If an effect instructs a player to cloak multiple cards
-        // from a single library, those cards are cloaked one at a time.
+        // CR 701.58e: cloak one at a time; CR 701.58a + CR 110.2a: each enters
+        // face down under the cloaking player's control via `manifest_card`, the
+        // single face-down-entry authority (attributed to the instructing
+        // ability's source, matching Manifest).
         None => {
             for _ in 0..count {
-                let has_cards = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| !p.library.is_empty())
-                    .unwrap_or(false);
-
-                if !has_cards {
-                    break;
-                }
-
-                crate::game::morph::cloak(state, player, events)
-                    .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
+                let object_id = match crate::game::morph::top_library_object(state, player) {
+                    Ok(id) => id,
+                    // The library owner has no cards left — stop cloaking.
+                    Err(_) => break,
+                };
+                crate::game::morph::manifest_card(
+                    state,
+                    player,
+                    object_id,
+                    ability.source_id,
+                    crate::types::ability::FaceDownProfile::cloaked_2_2(),
+                    controller,
+                    events,
+                )
+                .map_err(|e| EffectError::MissingParam(format!("{e}")))?;
             }
         }
     }
@@ -180,6 +201,7 @@ pub(crate) fn complete_tracked_set_exile_delivery(
     player: crate::types::player::PlayerId,
     source_id: crate::types::identifiers::ObjectId,
     members: Vec<CloakExileMember>,
+    enters_under: Option<crate::types::player::PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
     for (index, member) in members.iter().enumerate() {
@@ -217,7 +239,7 @@ pub(crate) fn complete_tracked_set_exile_delivery(
             member.object_id,
             source_id,
             crate::types::ability::FaceDownProfile::cloaked_2_2(),
-            None,
+            enters_under,
             events,
         )
         .expect("a settled Cloak batch member exists for face-down entry");
@@ -232,6 +254,7 @@ pub(crate) fn complete_tracked_set_exile_delivery(
                     player,
                     source_id,
                     members: members[index + 1..].to_vec(),
+                    enters_under,
                 },
             );
             crate::game::layers::mark_layers_full(state);
@@ -277,6 +300,8 @@ mod tests {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
                 object_source: None,
+                // CR 110.2a: pins the owner-default path — no controller override.
+                enters_under: None,
             },
             vec![],
             ObjectId(999),
@@ -577,5 +602,51 @@ mod tests {
             )),
             "no creature should be cloaked when the pile is empty"
         );
+    }
+
+    /// CR 110.2a + CR 701.58a: the tracked-pile cloak returns each settled
+    /// member under the CLOAKING player's control, not its owner's. A P1-owned
+    /// disguise creature that P0 controls (and can therefore exile into the
+    /// pile) comes back as P0's face-down 2/2 — reverted code (an owner-default
+    /// manifest entry) would return it under P1.
+    #[test]
+    fn expose_mode2_cloaks_opponent_owned_member_under_cloaking_player() {
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        // P1 OWNS the disguise creature ...
+        let stolen = scenario
+            .add_creature(PlayerId(1), "Stolen Disguise", 2, 2)
+            .with_keyword(Keyword::Disguise(ManaCost::generic(3).into()))
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Expose the Culprit", true, EXPOSE_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        // ... but P0 CONTROLS it, so it is eligible for the "face-up creatures
+        // you control with disguise" pile. `base_controller` must carry the
+        // override too — the layer recompute rebuilds `controller` from it
+        // (CR 613.1b), so a raw `controller` write alone would be clobbered.
+        {
+            let obj = runner
+                .state_mut()
+                .objects
+                .get_mut(&stolen)
+                .expect("the stolen disguise creature exists");
+            obj.base_controller = Some(P0);
+            obj.controller = P0;
+        }
+
+        let _ = cast_mode2_select(&mut runner, spell, &[stolen]);
+
+        let obj = &runner.state().objects[&stolen];
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert!(obj.face_down, "the pile member must return face down");
+        // CR 110.2a: the revert-sensitive discriminator — the cloaker (P0)
+        // controls the returned face-down permanent; its owner stays P1.
+        assert_eq!(
+            obj.controller, P0,
+            "the cloaking player controls the returned face-down permanent"
+        );
+        assert_eq!(obj.owner, PlayerId(1), "ownership never changes");
     }
 }

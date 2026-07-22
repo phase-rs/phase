@@ -235,6 +235,128 @@ describe("WebSocketAdapter", () => {
     });
   });
 
+  describe("native P2P pregame transport", () => {
+    it("waits for the server-issued seat attachment and slot confirmation", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        expect.stringContaining('"start_when_full":false'),
+      );
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token" },
+        }),
+      );
+      await expect(attached).resolves.toEqual({
+        gameCode: "NATIVE",
+        playerId: 0,
+        playerToken: "host-token",
+      });
+
+      const confirmed = nativeAdapter.sendSeatMutation({ type: "Start" });
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        JSON.stringify({ type: "SeatMutate", data: { mutation: { type: "Start" } } }),
+      );
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "PlayerSlotsUpdate", data: { slots: [] } }),
+      );
+      await expect(confirmed).resolves.toBeUndefined();
+    });
+
+    it("reconnects a persisted native viewer with its expected seat", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "join",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Guest",
+        {
+          nativePregame: {
+            kind: "reconnect",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            gameCode: "NATIVE",
+            playerId: 1,
+            playerToken: "guest-token",
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        JSON.stringify({
+          type: "Reconnect",
+          data: { game_code: "NATIVE", player_token: "guest-token" },
+        }),
+      );
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state_revision: 7, state: createMockState(), your_player: 1 },
+        }),
+      );
+      await expect(attached).resolves.toEqual({
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+      });
+    });
+
+    it("rejects native pregame attachment when the server returns an error", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "Error", data: { message: "Native setup failed" } }),
+      );
+
+      await expect(attached).rejects.toThrow("Native setup failed");
+    });
+  });
+
   describe("Bug C: stateChanged emission", () => {
     it("emits stateChanged event when StateUpdate arrives without pendingResolve", () => {
       const listener = vi.fn();

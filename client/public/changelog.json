@@ -1,6 +1,19 @@
 {
   "entries": [
     {
+      "id": 179,
+      "date": "2026-07-22",
+      "title": "Plargg and Nassari’s chaos spell works",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Plargg and Nassari now runs its full multiplayer chaos sequence: you choose which opponent picks an exiled nonland card, then you may cast up to two of the other cards for free\n• Golem Artisan now offers all three of its keyword choices — flying, trample, or haste\n\n🛠️ Cards That Now Work Right\n• Ardyn, the Usurper can exile from either graveyard and makes the correct 5/5 Demon copy; Etrata, Deadly Fugitive cloaks cards under the cloaking player’s control\n• Cloak and Dagger, Entwined returns the card it exiled when it leaves the battlefield, while Greenbelt Rampager stays put when you successfully pay its energy cost\n• Reef Worm’s Fish → Whale → Kraken death cascade stays nested, Mage’s Attendant grants its Wizard token the intended soft-counter ability, and Fraying Sanity mills the attached player by the right amount\n• The Legends banding-land cycle recognizes matching color legendary creatures; Battle of Wits, Shadowborn Demon, and Warring Triad also follow their printed conditions\n\n⚔️ Combat & Gameplay\n• “Must attack if able” effects that say to attack someone other than you no longer incorrectly make creatures goaded (Kardur, Doomscourge; Maximum Carnage)\n• Counter effects for “each of them” attacking creatures now apply to the correct attack batch\n\n🖥️ Interface\n• Desktop hand fans and hover previews are easier to read and use\n• Desktop players can toggle the native game engine in settings, while failed AI-worker startup now recovers cleanly instead of leaving a broken pool",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1529566067742212186"
+    },
+    {
       "id": 178,
       "date": "2026-07-21",
       "title": "Aetherworks Marvel finally casts for free",

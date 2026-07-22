@@ -488,6 +488,7 @@ fn paycost_arm_exiles_cards_via_apply_as_current() {
             library_position: None,
             is_cost_payment: true,
             enters_modified_if: None,
+            duration: None,
         };
     }
 

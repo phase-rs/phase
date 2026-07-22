@@ -5,19 +5,49 @@ use engine::analysis::decision_template::{
     DecisionGroupKey, DecisionKind, DecisionSlot, DecisionTemplate, IterationCount,
     MayChoiceOption, PinnedDecision, ReplayMode, TargetPin, TargetSchedule,
 };
+use engine::types::ability::{
+    Comparator, TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+};
 use engine::types::actions::{DebugAction, DebugTokenRequest};
 use engine::types::counter::CounterType;
-use engine::types::game_state::{ManaChoice, ShardChoice, YieldTarget};
-use engine::types::identifiers::CardId;
+use engine::types::game_state::{ManaChoice, ProductionOverride, ShardChoice, YieldTarget};
+use engine::types::identifiers::{CardId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
-use engine::types::mana::ManaType;
+use engine::types::mana::{
+    ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, SpellCostCriterion,
+    TapsForManaSelection,
+};
 use engine::types::match_config::DeckCardCount;
 use engine::types::player::PlayerId;
 use engine::types::proposed_event::TokenCharacteristics;
 use engine::types::{GameAction, ObjectId};
 use server_core::game_action_payload_guard::{
     guard_game_action_payload, MAX_ACTION_LIST_LEN, MAX_CHOICE_LEN, MAX_DEBUG_AST_JSON_LEN,
+    MAX_MANA_SELECTION_STRING_BYTES,
 };
+
+fn mana_source_selection() -> ManaSourceSelection {
+    ManaSourceSelection {
+        source: ObjectIncarnationRef::of(ObjectId(1), 1),
+        ability_index: Some(0),
+        mana_type: ManaType::Green,
+        atomic_combination: None,
+        restrictions: Vec::new(),
+        penalty: ManaSourcePenalty::None,
+        taps_for_mana: Vec::new(),
+    }
+}
+
+fn taps_for_mana(production_override: ProductionOverride) -> TapsForManaSelection {
+    TapsForManaSelection {
+        source: ObjectIncarnationRef::of(ObjectId(2), 1),
+        occurrence: TriggerDefinitionOccurrenceRef::Printed {
+            base_set: TriggerBaseSetInstanceRef::INITIAL,
+            printed_index: 0,
+        },
+        production_override,
+    }
+}
 
 #[test]
 fn rejects_oversized_action_list() {
@@ -45,6 +75,99 @@ fn accepts_reasonably_sized_action_list() {
 fn passes_scalar_only_action() {
     // Variants with no client-supplied list/string fall through unguarded.
     assert!(guard_game_action_payload(&GameAction::PassPriority).is_ok());
+}
+
+#[test]
+fn accepts_realistic_tap_land_semantic_selection() {
+    let mut selection = mana_source_selection();
+    selection.atomic_combination = Some(vec![ManaType::Green, ManaType::Blue]);
+    selection.restrictions = vec![
+        ManaRestriction::OnlyForSpellType("Creature".to_string()),
+        ManaRestriction::OnlyForAny(vec![
+            ManaRestriction::OnlyForCreatureType("Elf".to_string()),
+            ManaRestriction::OnlyForSpellMatchingCostCriteria {
+                spell_type: Some("Legendary".to_string()),
+                criteria: vec![
+                    SpellCostCriterion::ManaValue {
+                        comparator: Comparator::GE,
+                        value: 4,
+                    },
+                    SpellCostCriterion::HasXInCost,
+                ],
+            },
+        ]),
+    ];
+    selection.taps_for_mana = vec![taps_for_mana(ProductionOverride::Combination(vec![
+        ManaType::Red,
+        ManaType::Green,
+    ]))];
+
+    guard_game_action_payload(&GameAction::TapLandForMana { selection })
+        .expect("a realistic semantic mana-source selection stays within every budget");
+}
+
+#[test]
+fn rejects_oversized_tap_land_selection_vectors() {
+    let mut atomic = mana_source_selection();
+    atomic.atomic_combination = Some(vec![ManaType::Green; MAX_ACTION_LIST_LEN + 1]);
+    assert!(guard_game_action_payload(&GameAction::TapLandForMana { selection: atomic }).is_err());
+
+    let mut recursive = mana_source_selection();
+    recursive.restrictions = vec![ManaRestriction::OnlyForAny(vec![
+        ManaRestriction::OnlyForSpell;
+        MAX_ACTION_LIST_LEN + 1
+    ])];
+    assert!(guard_game_action_payload(&GameAction::TapLandForMana {
+        selection: recursive
+    })
+    .is_err());
+
+    let mut criteria = mana_source_selection();
+    criteria.restrictions = vec![ManaRestriction::OnlyForSpellMatchingCostCriteria {
+        spell_type: None,
+        criteria: vec![SpellCostCriterion::HasXInCost; MAX_ACTION_LIST_LEN + 1],
+    }];
+    assert!(guard_game_action_payload(&GameAction::TapLandForMana {
+        selection: criteria
+    })
+    .is_err());
+
+    let mut taps = mana_source_selection();
+    taps.taps_for_mana = vec![
+        taps_for_mana(ProductionOverride::SingleColor(ManaType::Blue));
+        MAX_ACTION_LIST_LEN + 1
+    ];
+    assert!(guard_game_action_payload(&GameAction::TapLandForMana { selection: taps }).is_err());
+
+    let mut production = mana_source_selection();
+    production.taps_for_mana = vec![taps_for_mana(ProductionOverride::Combination(vec![
+        ManaType::White;
+        MAX_ACTION_LIST_LEN + 1
+    ]))];
+    assert!(guard_game_action_payload(&GameAction::TapLandForMana {
+        selection: production
+    })
+    .is_err());
+}
+
+#[test]
+fn rejects_tap_land_selection_cumulative_entry_and_string_budgets() {
+    let first_half = MAX_ACTION_LIST_LEN / 2 + 1;
+    let mut entries = mana_source_selection();
+    entries.atomic_combination = Some(vec![ManaType::Green; first_half]);
+    entries.restrictions = vec![ManaRestriction::OnlyForSpell; first_half];
+    let error = guard_game_action_payload(&GameAction::TapLandForMana { selection: entries })
+        .expect_err("individually bounded vectors must still share one cumulative entry budget");
+    assert!(error.contains("cumulative entry count"));
+
+    let mut strings = mana_source_selection();
+    strings.restrictions = vec![
+        ManaRestriction::OnlyForSpellType("x".repeat(MAX_CHOICE_LEN));
+        MAX_MANA_SELECTION_STRING_BYTES / MAX_CHOICE_LEN + 1
+    ];
+    let error = guard_game_action_payload(&GameAction::TapLandForMana { selection: strings })
+        .expect_err("bounded strings must still share one cumulative byte budget");
+    assert!(error.contains("cumulative string byte count"));
 }
 
 #[test]
