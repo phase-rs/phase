@@ -197,7 +197,10 @@ fn color_preference(prior_picks: &[DraftCardInstance]) -> Vec<String> {
     }
 
     let mut sorted: Vec<(&&str, &u32)> = counts.iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(a.1));
+    // Tie-break by color name so equal pip counts resolve deterministically —
+    // HashMap iteration order is randomized per process, which would otherwise
+    // make a seeded draft replay differently run to run (matches distribute_lands).
+    sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
     // Take top 2 colors
     sorted
@@ -237,6 +240,44 @@ fn curve_bonus(cmc: u8, pick_number: u8) -> i8 {
             } else {
                 0
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(name: &str, colors: &[&str]) -> DraftCardInstance {
+        DraftCardInstance {
+            instance_id: format!("id-{name}"),
+            name: name.to_string(),
+            set_code: "TST".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: colors.iter().map(|s| s.to_string()).collect(),
+            cmc: 2,
+            type_line: "Creature".to_string(),
+        }
+    }
+
+    // Five colors tied at count 1. Without a deterministic tie-break the chosen top-2
+    // depends on HashMap iteration order, which is seeded per map — so a seeded draft
+    // replays differently run to run. Building a fresh map on each call and asserting a
+    // stable alphabetical result (B < G < R < U < W → top 2 = ["B", "G"]) exercises many
+    // seeds; without the tie-break at least one iteration diverges.
+    #[test]
+    fn color_preference_breaks_ties_deterministically() {
+        let picks = [
+            instance("a", &["W"]),
+            instance("b", &["U"]),
+            instance("c", &["B"]),
+            instance("d", &["R"]),
+            instance("e", &["G"]),
+        ];
+        let expected = vec!["B".to_string(), "G".to_string()];
+        for _ in 0..64 {
+            assert_eq!(color_preference(&picks), expected);
         }
     }
 }

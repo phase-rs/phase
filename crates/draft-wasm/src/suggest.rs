@@ -211,7 +211,14 @@ fn find_best_colors<'a>(
     }
 
     let mut sorted: Vec<(&&str, &f64)> = color_scores.iter().collect();
-    sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Tie-break by color name so equal scores resolve deterministically —
+    // HashMap iteration order is randomized per process, which would otherwise
+    // make "Suggest deck" return a different pair run to run (matches distribute_lands).
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
 
     sorted.iter().take(2).map(|(color, _)| **color).collect()
 }
@@ -523,5 +530,24 @@ mod tests {
             &DeckAddableCards::standard_basics(),
         );
         assert!(!deck.lands.contains_key("On Color Dual"));
+    }
+
+    // Five colors tied at equal score (no card DB → every card scores the same). Without a
+    // deterministic tie-break the top-2 pick follows HashMap iteration order, which is seeded
+    // per map, so a seeded draft is non-deterministic. Building a fresh map on each call and
+    // asserting a stable alphabetical result (B < G < R < U < W → ["B", "G"]) exercises many
+    // seeds; without the tie-break at least one iteration diverges.
+    #[test]
+    fn find_best_colors_breaks_ties_deterministically() {
+        let pool = [
+            instance("a", &["W"], 2, "Creature"),
+            instance("b", &["U"], 2, "Creature"),
+            instance("c", &["B"], 2, "Creature"),
+            instance("d", &["R"], 2, "Creature"),
+            instance("e", &["G"], 2, "Creature"),
+        ];
+        for _ in 0..64 {
+            assert_eq!(find_best_colors(&pool, None), vec!["B", "G"]);
+        }
     }
 }
