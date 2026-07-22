@@ -1225,6 +1225,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // and this call is diagnostics-neutral, so the hoist is behavior-preserving.
     let trigger_subject = extract_trigger_subject_for_context(condition_text, ctx);
 
+    // Hoisted above the intervening-if extraction (formerly bound just before
+    // `extract_unless_pay_modifier`) so the dies-shape prover below can read
+    // the lowercased trigger head; binding-only hoist, behavior-preserving.
+    let cond_lower = condition_text.to_lowercase();
+
     let effect_lower = effect_text.to_lowercase();
     // CR 701.42b: A meld instigator's effect text opens with the own/control
     // gate ("if you both own and control ~ and a [type] named [partner], exile
@@ -1244,6 +1249,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     &effect_text,
                     card_name,
                     Some(&trigger_subject),
+                    trigger_head_dies_zone_change(&cond_lower),
                 );
                 (without_if, cond, None)
             }
@@ -1276,8 +1282,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // Strip constraint sentences so they don't leak into effect parsing as sub-abilities
     let effect_final = strip_constraint_sentences(&effect_without_if);
-
-    let cond_lower = condition_text.to_lowercase();
 
     // CR 118.12: Detect "unless [player] pays {cost}" in effect text.
     let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final, &cond_lower);
@@ -4771,9 +4775,13 @@ fn parse_cast_them_and_graveyard_count_intervening_if(
 /// first-of-type recognizer's "other than ~" self-exclusion, which never fires
 /// for these single-condition inputs; production trigger parsing routes through
 /// [`extract_if_condition_with_card_name`] with the real card name.
+///
+/// Passes no proven trigger zone-change shape, so shape-gated arms (the
+/// keyword-possession look-back) are unreachable here — exercise those through
+/// `parse_trigger_line` with a full dies-head trigger line instead.
 #[cfg(test)]
 fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
-    extract_if_condition_with_card_name(text, "", None)
+    extract_if_condition_with_card_name(text, "", None, None)
 }
 
 /// Extract an intervening-if condition from effect text.
@@ -4788,6 +4796,7 @@ fn extract_if_condition_with_card_name(
     text: &str,
     card_name: &str,
     dying_subject: Option<&TargetFilter>,
+    trigger_zone_change: Option<(Zone, Zone)>,
 ) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -5375,9 +5384,12 @@ fn extract_if_condition_with_card_name(
         }
     }
 
-    if let Some(result) =
-        try_extract_zone_change_object_filter_condition(&lower, text, dying_subject)
-    {
+    if let Some(result) = try_extract_zone_change_object_filter_condition(
+        &lower,
+        text,
+        dying_subject,
+        trigger_zone_change,
+    ) {
         return result;
     }
 
@@ -5517,9 +5529,10 @@ fn try_extract_zone_change_object_filter_condition(
     lower: &str,
     text: &str,
     dying_subject: Option<&TargetFilter>,
+    trigger_zone_change: Option<(Zone, Zone)>,
 ) -> Option<(String, Option<TriggerCondition>)> {
     let (before, condition, rest) = scan_preceded(lower, |i| {
-        parse_zone_change_object_filter_condition(i, dying_subject)
+        parse_zone_change_object_filter_condition(i, dying_subject, trigger_zone_change)
     })?;
     let next_char_is_boundary = rest
         .chars()
@@ -5880,9 +5893,27 @@ fn parse_dying_pt_comparison_tail(input: &str) -> OracleResult<'_, (Comparator, 
     .parse(input)
 }
 
+/// CR 603.4 + CR 700.4: Prove the trigger head (the "When/Whenever ..." clause,
+/// lowercased) is a dies shape — its final verb phrase is "dies"/"die" or the
+/// spelled-out "is/are put into a graveyard from the battlefield" equivalent —
+/// and return the zone-change pair that shape pins: origin `Battlefield`,
+/// destination `Graveyard`. Any other head (ETB, leaves-the-battlefield, exile,
+/// non-zone events) yields `None`: those events do not prove a
+/// battlefield→graveyard move, so look-back grammars that hardcode that pair
+/// (see `dies_lookback_condition`) must not activate. Strictly requiring an
+/// EMPTY tail after the verb keeps unsplit compound or qualified heads
+/// ("... dies during your turn") conservatively unproven.
+fn trigger_head_dies_zone_change(condition_lower: &str) -> Option<(Zone, Zone)> {
+    let (_before, (), rest) = scan_preceded(condition_lower, parse_dies_verb_phrase)?;
+    rest.trim()
+        .is_empty()
+        .then_some((Zone::Battlefield, Zone::Graveyard))
+}
+
 fn parse_zone_change_object_filter_condition<'a>(
     input: &'a str,
     dying_subject: Option<&TargetFilter>,
+    trigger_zone_change: Option<(Zone, Zone)>,
 ) -> OracleResult<'a, TriggerCondition> {
     // CR 603.6a: possessive entering-object P/T-vs-source ("if its power is
     // greater than ~'s power ...", Sharp-Eyed Rookie). Both new "if its ..."
@@ -5905,15 +5936,27 @@ fn parse_zone_change_object_filter_condition<'a>(
     {
         return Ok((rest, condition));
     }
-    preceded(tag("if it "), parse_zone_change_object_filter_predicate).parse(input)
+    preceded(tag("if it "), |i| {
+        parse_zone_change_object_filter_predicate(i, trigger_zone_change)
+    })
+    .parse(input)
 }
 
-fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, TriggerCondition> {
-    // CR 603.4: past-tense keyword possession ("had <keyword>" / "didn't have
-    // <keyword>", Wilhelt) — tag-disjoint from the token predicate ("is"/"was")
-    // and from the was/wasn't look-back axis below, so ordering is safe.
-    if let Ok((rest, condition)) = parse_zone_change_object_keyword_possession(input) {
-        return Ok((rest, condition));
+fn parse_zone_change_object_filter_predicate(
+    input: &str,
+    trigger_zone_change: Option<(Zone, Zone)>,
+) -> OracleResult<'_, TriggerCondition> {
+    // CR 603.4 + CR 700.4: past-tense keyword possession ("had <keyword>" /
+    // "didn't have <keyword>", Wilhelt) — tag-disjoint from the token predicate
+    // ("is"/"was") and from the was/wasn't look-back axis below, so ordering is
+    // safe. Gated on a PROVEN dies head: the arm builds a battlefield→graveyard
+    // look-back whose negated form fails open on any other event shape (inner
+    // filter false → `Not` → true), so on non-dies heads it must decline and
+    // leave the clause honestly swallowed (Condition_If diagnostic).
+    if trigger_zone_change == Some((Zone::Battlefield, Zone::Graveyard)) {
+        if let Ok((rest, condition)) = parse_zone_change_object_keyword_possession(input) {
+            return Ok((rest, condition));
+        }
     }
     if let Ok((rest, condition)) = parse_zone_change_object_token_predicate(input) {
         return Ok((rest, condition));
@@ -5975,10 +6018,13 @@ fn dies_lookback_condition(props: Vec<FilterProp>, negated: bool) -> TriggerCond
 /// DIES-SHAPE ASSUMPTION: origin Battlefield → destination Graveyard is
 /// hardcoded, identical to every sibling arm in this family (the P/T-comparison
 /// arm and the was/wasn't axis above) — correct for dies triggers (CR 700.4).
-/// CAUTION for future variants: the negated (`Not`-wrapped) form FAILS OPEN if
-/// this condition is ever attached to a non-dies trigger shape (inner filter
-/// false → Not → true → unconditional); a leaves-the-battlefield/exile variant
-/// must derive zones from the trigger context instead of reusing this arm.
+/// Because the negated (`Not`-wrapped) form FAILS OPEN on any other event
+/// shape (inner filter false → Not → true → unconditional), the caller
+/// (`parse_zone_change_object_filter_predicate`) only reaches this arm when
+/// `trigger_head_dies_zone_change` PROVED the enclosing trigger head is a dies
+/// shape; every other head leaves the clause honestly swallowed. A future
+/// leaves-the-battlefield/exile variant must derive zones from the trigger
+/// context instead of widening that gate.
 fn parse_zone_change_object_keyword_possession(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, negated) = alt((
         value(true, alt((tag("didn't have "), tag("did not have ")))),
@@ -15682,6 +15728,21 @@ fn parse_cast_origin_zone(input: &str) -> OracleResult<'_, Option<Zone>> {
     .parse(input)
 }
 
+/// CR 700.4: The dies verb-phrase family — "dies"/"die" and the spelled-out
+/// "is/are put into a graveyard from the battlefield" equivalent. Shared by
+/// `parse_zone_change_clause` (event construction) and
+/// `trigger_head_dies_zone_change` (dies-shape proof for shape-gated
+/// intervening-if grammars) so both recognize the identical verb set.
+fn parse_dies_verb_phrase(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        value((), tag::<_, _, OracleError<'_>>("dies")),
+        value((), tag("die")),
+        value((), tag("is put into a graveyard from the battlefield")),
+        value((), tag("are put into a graveyard from the battlefield")),
+    ))
+    .parse(input)
+}
+
 /// CR 603.6 + CR 603.2: Parse one clause of a disjunctive zone-change trigger
 /// from `[subject] [verb-phrase]`. Returns the typed `ZoneChangeClause`, or
 /// `None` if the verb phrase is not a recognized zone-change shape.
@@ -15690,14 +15751,7 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
 
     // CR 700.4: "dies" / "is put into a graveyard from the battlefield" —
     // battlefield → graveyard.
-    if let Ok((tail, ())) = alt((
-        value((), tag::<_, _, OracleError<'_>>("dies")),
-        value((), tag("die")),
-        value((), tag("is put into a graveyard from the battlefield")),
-        value((), tag("are put into a graveyard from the battlefield")),
-    ))
-    .parse(rest)
-    {
+    if let Ok((tail, ())) = parse_dies_verb_phrase(rest) {
         if !tail.trim().is_empty() {
             return None;
         }

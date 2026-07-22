@@ -20375,6 +20375,78 @@ fn extract_didnt_have_landwalk_stays_swallowed() {
     );
 }
 
+/// Soundness (CR 603.4 + issue #5937 review): the keyword-possession look-back
+/// pins origin Battlefield → destination Graveyard, so its negated form FAILS
+/// OPEN on any non-dies event (inner filter false → `Not` → true →
+/// unconditional trigger). The arm must therefore decline unless the enclosing
+/// trigger head is a PROVEN dies shape: an ETB head carrying the same clause
+/// binds NO condition — and the Condition_If swallow warning still fires,
+/// keeping the unsupported form honestly swallowed until the grammar derives
+/// zones from the trigger's actual event shape.
+#[test]
+fn extract_didnt_have_keyword_on_etb_trigger_stays_swallowed() {
+    let def = parse_trigger_line(
+        "When this creature enters, if it didn't have decayed, draw a card.",
+        "Test Fresh Arrival",
+    );
+    assert_eq!(
+        def.condition, None,
+        "keyword possession on an ETB head must not bind a dies look-back condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the dropped clause).
+    let parsed = parse_oracle_text(
+        "When this creature enters, if it didn't have decayed, draw a card.",
+        "Test Fresh Arrival",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the shape-rejected clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// Soundness (CR 603.4 + issue #5937 review): sibling non-dies shape — a
+/// leaves-the-battlefield head is a zone change whose destination is NOT
+/// provably the graveyard (exile/hand/library departures fire it too), so the
+/// Battlefield→Graveyard look-back mis-models the event and its negation fails
+/// open on every non-graveyard departure. The arm must decline and the clause
+/// stays honestly swallowed.
+#[test]
+fn extract_didnt_have_keyword_on_ltb_trigger_stays_swallowed() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control leaves the battlefield, if it didn't have decayed, draw a card.",
+        "Test Departure Watcher",
+    );
+    assert_eq!(
+        def.condition, None,
+        "keyword possession on an LTB head must not bind a dies look-back condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the dropped clause).
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control leaves the battlefield, if it didn't have decayed, draw a card.",
+        "Test Departure Watcher",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the shape-rejected clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 702.188a + CR 603.4 (issue: Spiders-Man, Heroic Horde): the ETB
 /// intervening-if "if they were cast using web-slinging" must gate the
 /// life-gain + token effects. Before the fix `extract_if_condition` had no
