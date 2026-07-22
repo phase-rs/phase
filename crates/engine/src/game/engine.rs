@@ -8804,7 +8804,12 @@ fn record_graveyard_play_permission(
         });
     match frequency {
         Some(crate::types::statics::CastFrequency::OncePerTurn) => {
-            state.graveyard_cast_permissions_used.insert(source_id);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source_id,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCast,
+            )
+            .expect("graveyard play permission must have an unused ledger slot");
         }
         Some(crate::types::statics::CastFrequency::OncePerTurnPerPermanentType) => {
             // CR 110.4: Use the player-chosen slot if one was stashed by the
@@ -8819,9 +8824,14 @@ fn record_graveyard_play_permission(
                     super::casting::pick_per_permanent_type_slot(state, source_id, played_object)
                 });
             if let Some(slot) = slot {
-                state
-                    .graveyard_cast_permissions_used_per_type
-                    .insert((source_id, slot));
+                crate::game::ledger::consume_once_per_turn_permission(
+                    state,
+                    source_id,
+                    crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCastPermanentType {
+                        permanent_type: slot,
+                    },
+                )
+                .expect("graveyard permanent-type play slot must be unused");
             }
         }
         Some(crate::types::statics::CastFrequency::Unlimited) | None => {
@@ -8834,7 +8844,12 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
     let Some(source_id) = source else {
         return;
     };
-    state.exile_play_permissions_used.insert(source_id);
+    crate::game::ledger::consume_once_per_turn_permission(
+        state,
+        source_id,
+        crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExilePlay,
+    )
+    .expect("exile play permission must have an unused ledger slot");
 }
 
 /// CR 305.1 + CR 116.2a + CR 401.5: Consume the per-turn slot when a
@@ -8853,7 +8868,12 @@ fn record_top_of_library_land_permission(
     frequency: crate::types::statics::CastFrequency,
 ) {
     if matches!(frequency, crate::types::statics::CastFrequency::OncePerTurn) {
-        state.top_of_library_cast_permissions_used.insert(src_id);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            src_id,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::TopOfLibraryCast,
+        )
+        .expect("top-of-library play permission must have an unused ledger slot");
     }
 }
 

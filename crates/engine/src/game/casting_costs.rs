@@ -8585,7 +8585,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
             ..
         } => {
-            state.graveyard_cast_permissions_used.insert(source);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCast,
+            )
+            .expect("graveyard cast permission must have an unused ledger slot");
         }
         CastingVariant::GraveyardPermission {
             source,
@@ -8594,9 +8599,14 @@ fn finalize_cast_with_phyrexian_choices_inner(
             ..
         } => {
             // CR 110.4: Consume the chosen permanent-type slot for this source.
-            state
-                .graveyard_cast_permissions_used_per_type
-                .insert((source, slot));
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCastPermanentType {
+                    permanent_type: slot,
+                },
+            )
+            .expect("graveyard permanent-type slot must be unused");
         }
         CastingVariant::GraveyardPermission {
             frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
@@ -8613,7 +8623,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
         } => {
-            state.hand_cast_free_permissions_used.insert(source);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::HandCastFree,
+            )
+            .expect("hand cast permission must have an unused ledger slot");
         }
         // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. Stamp
         // the per-source slot when the static is `OncePerTurn`; `Unlimited`
@@ -8626,7 +8641,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
         } => {
-            state.exile_cast_permissions_used.insert(source);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExileCast,
+            )
+            .expect("exile cast permission must have an unused ledger slot");
         }
         _ => {}
     }
@@ -8639,12 +8659,22 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // every sibling permission. As Foretold's grant rides `CastingVariant::Normal`,
     // so the `match casting_variant` above never covers it — this is a separate block.
     if let Some(src) = alt_cost_grant_source {
-        state.alt_cost_grant_permissions_used.insert(src);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            src,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::AlternativeCostGrant,
+        )
+        .expect("alternative-cost grant must have an unused ledger slot");
     }
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
         exile_play_permission_source
     {
-        state.exile_play_permissions_used.insert(source);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExilePlay,
+        )
+        .expect("exile play permission must have an unused ledger slot");
     }
     // CR 601.2a + CR 401.5: Consume the per-turn slot ONLY when the *selected*
     // authorizing top-of-library permission is `OncePerTurn` (Assemble the
@@ -8655,7 +8685,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
         top_of_library_permission_source
     {
-        state.top_of_library_cast_permissions_used.insert(source);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::TopOfLibraryCast,
+        )
+        .expect("top-of-library cast permission must have an unused ledger slot");
     }
     // CR 601.2a + CR 603.7 + CR 611.2a: A single-use exile-cast grant is spent
     // on this cast. Record the group and strip the now-void `PlayFromExile` grant from

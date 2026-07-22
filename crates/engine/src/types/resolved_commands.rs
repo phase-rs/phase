@@ -8,7 +8,10 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::ability::TriggerDefinitionRef;
-use super::identifiers::ObjectIncarnationRef;
+use super::card_type::CoreType;
+use super::counter::CounterType;
+use super::game_state::SpellCastRecord;
+use super::identifiers::{ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 
@@ -114,6 +117,95 @@ pub struct ResolvedObjectStatusCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// The final mutation to one exact object's counter map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedObjectCounterEdit {
+    /// CR 122.1 + CR 122.6: Put this final post-replacement count of counters
+    /// on the exact object. The actor is retained for counter-history facts.
+    Add { actor: PlayerId, count: u32 },
+    /// CR 122.1: Remove this final already-clamped count from the exact object.
+    Remove { count: u32 },
+}
+
+/// One exact object-counter delivery after all replacement effects have settled.
+///
+/// `expected_old` makes this semantic delta non-idempotent: retained-prefix
+/// replay applies it exactly once instead of adding/removing another count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectCounterCommand {
+    pub object: ObjectIncarnationRef,
+    pub counter_type: CounterType,
+    pub expected_old: u32,
+    pub edit: ResolvedObjectCounterEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// One exact constrained-trigger ledger fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedTriggerLedgerEdit {
+    /// CR 603.2c: This trigger occurrence has used its one-per-turn fact.
+    OncePerTurn,
+    /// CR 603.2c: This trigger occurrence has used its one-per-game fact.
+    OncePerGame,
+    /// CR 603.2c: This trigger occurrence has used this opponent's per-turn fact.
+    OncePerOpponentPerTurn { opponent: PlayerId },
+    /// Increment from the captured prior count for MaxTimesPerTurn.
+    MaxTimesPerTurn { expected_old: u32 },
+}
+
+/// A named once-per-turn permission slot consumed by a completed play or cast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResolvedOncePerTurnPermission {
+    GraveyardCast,
+    GraveyardCastPermanentType { permanent_type: CoreType },
+    HandCastFree,
+    AlternativeCostGrant,
+    ExilePlay,
+    ExileCast,
+    TopOfLibraryCast,
+}
+
+/// A composable per-event ledger mutation.
+///
+/// Each payload changes only one exact key or append position. Turn-boundary
+/// bulk clears intentionally belong to the future turn-transition family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedLedgerEdit {
+    /// CR 601.2i: Append one finalized spell-cast fact to this player's history.
+    SpellCast {
+        player: PlayerId,
+        record: SpellCastRecord,
+        expected_turn_count: u8,
+        expected_game_count: u32,
+        expected_turn_history_len: u32,
+        expected_game_history_len: u32,
+    },
+    /// CR 602.5b: Increment exactly one activated-ability occurrence's facts.
+    AbilityActivated {
+        source: super::identifiers::ObjectId,
+        ability_index: usize,
+        expected_turn_count: u32,
+        expected_game_count: u32,
+    },
+    /// CR 603.2c: Record one constrained trigger occurrence.
+    TriggerFired {
+        trigger: TriggerDefinitionRef,
+        edit: ResolvedTriggerLedgerEdit,
+    },
+    /// CR 601.2i: Consume one already-selected bounded permission slot.
+    OncePerTurnPermission {
+        source: super::identifiers::ObjectId,
+        permission: ResolvedOncePerTurnPermission,
+    },
+}
+
+/// One exact per-event ledger mutation with its causal node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedLedgerEditCommand {
+    pub edit: ResolvedLedgerEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -124,6 +216,8 @@ pub enum ResolvedRulesCommand {
     ManaSpend(ResolvedManaSpendCommand),
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
+    ObjectCounter(ResolvedObjectCounterCommand),
+    LedgerEdit(ResolvedLedgerEditCommand),
 }
 
 /// Typed failure while applying an already-resolved mana command to a replay state.
@@ -244,6 +338,106 @@ impl std::fmt::Display for ResolvedObjectStatusReplayInvariantError {
 }
 
 impl std::error::Error for ResolvedObjectStatusReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved object-counter command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedObjectCounterReplayInvariantError {
+    MissingObject(ObjectIncarnationRef),
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    ZeroCount,
+    CounterPreconditionMismatch {
+        counter_type: CounterType,
+        expected: u32,
+        found: u32,
+    },
+    CounterOverflow {
+        counter_type: CounterType,
+        previous: u32,
+        added: u32,
+    },
+}
+
+impl std::fmt::Display for ResolvedObjectCounterReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingObject(object) => {
+                write!(f, "resolved counter command cannot find {object:?}")
+            }
+            Self::StaleObject { expected, found } => write!(
+                f,
+                "resolved counter command expected {expected:?}, found {found:?}"
+            ),
+            Self::ZeroCount => write!(f, "resolved counter command has a zero count"),
+            Self::CounterPreconditionMismatch {
+                counter_type,
+                expected,
+                found,
+            } => write!(
+                f,
+                "resolved {counter_type:?} counter command expected {expected}, found {found}"
+            ),
+            Self::CounterOverflow {
+                counter_type,
+                previous,
+                added,
+            } => write!(
+                f,
+                "resolved {counter_type:?} counter command overflows {previous} + {added}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedObjectCounterReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved per-event ledger command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedLedgerEditReplayInvariantError {
+    UnknownPlayer(PlayerId),
+    SpellCastPreconditionMismatch,
+    AbilityActivationPreconditionMismatch,
+    TriggerAlreadyRecorded,
+    TriggerCountPreconditionMismatch { expected: u32, found: u32 },
+    PermissionAlreadyConsumed(ResolvedOncePerTurnPermission),
+    CounterOverflow,
+}
+
+impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPlayer(player) => write!(f, "unknown ledger-command player {}", player.0),
+            Self::SpellCastPreconditionMismatch => {
+                write!(
+                    f,
+                    "resolved spell-cast command does not match its ledger prefix"
+                )
+            }
+            Self::AbilityActivationPreconditionMismatch => write!(
+                f,
+                "resolved activated-ability command does not match its ledger prefix"
+            ),
+            Self::TriggerAlreadyRecorded => {
+                write!(
+                    f,
+                    "resolved trigger command repeats an existing once-only fact"
+                )
+            }
+            Self::TriggerCountPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved trigger command expected count {expected}, found {found}"
+            ),
+            Self::PermissionAlreadyConsumed(permission) => {
+                write!(f, "resolved {permission:?} permission was already consumed")
+            }
+            Self::CounterOverflow => write!(f, "resolved ledger command overflows a counter"),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedLedgerEditReplayInvariantError {}
 
 /// Semantic category of a resolved rules-execution node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +866,22 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::ObjectStatus(command))
     }
 
+    /// Records one final object-counter delivery under its causal node.
+    pub fn record_object_counter(
+        &mut self,
+        command: ResolvedObjectCounterCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::ObjectCounter(command))
+    }
+
+    /// Records one exact semantic ledger mutation under its causal node.
+    pub fn record_ledger_edit(
+        &mut self,
+        command: ResolvedLedgerEditCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::LedgerEdit(command))
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -867,7 +1077,10 @@ impl ResolvedRulesJournal {
                         }
                     }
                 }
-                ResolvedRulesCommand::PlayerEdit(_) | ResolvedRulesCommand::ObjectStatus(_) => {}
+                ResolvedRulesCommand::PlayerEdit(_)
+                | ResolvedRulesCommand::ObjectStatus(_)
+                | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::LedgerEdit(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1052,6 +1265,36 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::ObjectCounter(command) => {
+                if entry.node != command.cause || object_counter_edit_is_empty(&command.edit) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "object-counter command has an empty edit or unrelated cause".to_string(),
+                    ));
+                }
+                if command.object.incarnation == LEGACY_INCARNATION {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "object-counter command cannot use a legacy object identity".to_string(),
+                    ));
+                }
+                if let ResolvedObjectCounterEdit::Remove { count } = &command.edit {
+                    if *count > command.expected_old {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "object-counter removal has an impossible predecessor".to_string(),
+                        ));
+                    }
+                }
+            }
+            ResolvedRulesCommand::LedgerEdit(command) => {
+                if entry.node != command.cause
+                    || ledger_edit_is_invalid(&command.edit)
+                    || ledger_edit_has_legacy_object_identity(&command.edit)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "ledger command has an impossible edit, legacy identity, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1095,6 +1338,48 @@ fn player_edit_is_empty(edit: &ResolvedPlayerEdit) -> bool {
         | ResolvedPlayerEdit::Counter { delta, .. } => *delta == 0,
         ResolvedPlayerEdit::Speed { old, new } => old == new,
     }
+}
+
+fn object_counter_edit_is_empty(edit: &ResolvedObjectCounterEdit) -> bool {
+    match edit {
+        ResolvedObjectCounterEdit::Add { count, .. }
+        | ResolvedObjectCounterEdit::Remove { count } => *count == 0,
+    }
+}
+
+fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
+    match edit {
+        ResolvedLedgerEdit::SpellCast {
+            expected_turn_count,
+            expected_game_count,
+            expected_turn_history_len,
+            expected_game_history_len,
+            ..
+        } => {
+            *expected_game_count == u32::MAX
+                || *expected_turn_history_len == u32::MAX
+                || *expected_game_history_len == u32::MAX
+        }
+        ResolvedLedgerEdit::AbilityActivated {
+            expected_turn_count,
+            expected_game_count,
+            ..
+        } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::TriggerFired {
+            edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old },
+            ..
+        } => *expected_old == u32::MAX,
+        ResolvedLedgerEdit::TriggerFired { .. }
+        | ResolvedLedgerEdit::OncePerTurnPermission { .. } => false,
+    }
+}
+
+fn ledger_edit_has_legacy_object_identity(edit: &ResolvedLedgerEdit) -> bool {
+    matches!(
+        edit,
+        ResolvedLedgerEdit::TriggerFired { trigger, .. }
+            if trigger.source.incarnation == LEGACY_INCARNATION
+    )
 }
 
 #[cfg(test)]
@@ -1352,6 +1637,99 @@ mod tests {
         command.cause = RulesExecutionNodeRef::Payment(SettlementNodeOrdinal(99));
         assert!(serde_json::from_value::<ResolvedRulesJournal>(
             serde_json::to_value(unrelated_cause).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn counter_and_ledger_commands_roundtrip_and_reject_malformed_payloads() {
+        let mut journal = ResolvedRulesJournal::default();
+        let cause = journal.begin_proposal().unwrap();
+        journal
+            .record_object_counter(ResolvedObjectCounterCommand {
+                object: ObjectIncarnationRef::of(ObjectId(9), 0),
+                counter_type: CounterType::Plus1Plus1,
+                expected_old: 2,
+                edit: ResolvedObjectCounterEdit::Add {
+                    actor: PlayerId(0),
+                    count: 1,
+                },
+                cause,
+            })
+            .unwrap();
+        journal
+            .record_ledger_edit(ResolvedLedgerEditCommand {
+                edit: ResolvedLedgerEdit::AbilityActivated {
+                    source: ObjectId(9),
+                    ability_index: 0,
+                    expected_turn_count: 0,
+                    expected_game_count: 0,
+                },
+                cause,
+            })
+            .unwrap();
+        journal
+            .record_ledger_edit(ResolvedLedgerEditCommand {
+                edit: ResolvedLedgerEdit::TriggerFired {
+                    trigger: TriggerDefinitionRef {
+                        source: ObjectIncarnationRef::of(ObjectId(10), 0),
+                        occurrence: super::ability::TriggerDefinitionOccurrenceRef::Printed {
+                            base_set: super::ability::TriggerBaseSetInstanceRef::INITIAL,
+                            printed_index: 0,
+                        },
+                    },
+                    edit: ResolvedTriggerLedgerEdit::OncePerTurn,
+                },
+                cause,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serde_json::to_value(&journal).unwrap())
+                .unwrap(),
+            journal
+        );
+
+        let mut empty_counter = journal.clone();
+        let Some(ResolvedRulesCommand::ObjectCounter(command)) =
+            empty_counter.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the counter command");
+        };
+        command.edit = ResolvedObjectCounterEdit::Add {
+            actor: PlayerId(0),
+            count: 0,
+        };
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(empty_counter).unwrap()
+        )
+        .is_err());
+
+        // A pre-incarnation bare object id deserializes to LEGACY_INCARNATION.
+        // It is valid only for its original compatibility readers, never for a
+        // new executable command whose applier requires an exact occurrence.
+        let mut legacy_counter = serde_json::to_value(&journal).unwrap();
+        legacy_counter["entries"][1]["command"]["ObjectCounter"]["object"] = serde_json::json!(9);
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(legacy_counter).is_err());
+
+        let mut legacy_trigger = serde_json::to_value(&journal).unwrap();
+        legacy_trigger["entries"][3]["command"]["LedgerEdit"]["edit"]["TriggerFired"]["trigger"]
+            ["source"] = serde_json::json!(10);
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(legacy_trigger).is_err());
+
+        let mut impossible_ledger = journal.clone();
+        let Some(ResolvedRulesCommand::LedgerEdit(command)) =
+            impossible_ledger.entries[2].command.as_mut()
+        else {
+            panic!("entry 2 must be the ledger command");
+        };
+        command.edit = ResolvedLedgerEdit::AbilityActivated {
+            source: ObjectId(9),
+            ability_index: 0,
+            expected_turn_count: u32::MAX,
+            expected_game_count: 0,
+        };
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(impossible_ledger).unwrap()
         )
         .is_err());
     }

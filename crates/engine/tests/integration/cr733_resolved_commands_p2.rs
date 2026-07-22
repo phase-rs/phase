@@ -1,20 +1,24 @@
-//! P2 replay coverage for resolved mana, scalar, and object-status commands.
+//! P2 replay coverage for resolved mana, scalar, status, counter, and ledger commands.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerCounterKind;
 use engine::types::resolved_commands::{
-    ResolvedManaReplayInvariantError, ResolvedObjectStatusReplayInvariantError, ResolvedPlayerEdit,
-    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError, ResolvedRulesCommand,
-    RulesExecutionNodeRef,
+    ResolvedLedgerEdit, ResolvedLedgerEditReplayInvariantError, ResolvedManaReplayInvariantError,
+    ResolvedObjectCounterReplayInvariantError, ResolvedObjectStatusReplayInvariantError,
+    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ResolvedRulesCommand, RulesExecutionNodeRef,
 };
 
 const DIMIR_SIGNET_ORACLE: &str = "{1}, {T}: Add {U}{B}.";
+const STONY_STRENGTH_ORACLE: &str =
+    "Put a +1/+1 counter on target creature you control. Untap that creature.";
 
 fn make_artifact(runner: &mut GameRunner, id: ObjectId) {
     let object = runner.state_mut().objects.get_mut(&id).unwrap();
@@ -68,6 +72,12 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         }
         ResolvedRulesCommand::ObjectStatus(command) => {
             engine::game::object_state::apply_resolved_object_edit(state, command).unwrap();
+        }
+        ResolvedRulesCommand::ObjectCounter(command) => {
+            engine::game::effects::counters::apply_resolved_counter_edit(state, command).unwrap();
+        }
+        ResolvedRulesCommand::LedgerEdit(command) => {
+            engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
     }
 }
@@ -151,9 +161,10 @@ fn exact_mana_spend_rejects_a_second_removal() {
                 observed_spend = true;
                 break;
             }
-            ResolvedRulesCommand::PlayerEdit(_) | ResolvedRulesCommand::ObjectStatus(_) => {
-                apply_semantic_command(&mut replay, command);
-            }
+            ResolvedRulesCommand::PlayerEdit(_)
+            | ResolvedRulesCommand::ObjectStatus(_)
+            | ResolvedRulesCommand::ObjectCounter(_)
+            | ResolvedRulesCommand::LedgerEdit(_) => apply_semantic_command(&mut replay, command),
         }
     }
     assert!(
@@ -319,4 +330,116 @@ fn scalar_commands_compose_across_life_energy_counters_and_speed() {
         4,
         "each final scalar edit has one journal command"
     );
+}
+
+fn counter_spell_states() -> (GameState, GameState, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let target = scenario.add_creature(P0, "Counter Target", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Stony Strength", false, STONY_STRENGTH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    let pre_state = runner.state().clone();
+
+    runner.cast(spell).target_object(target).resolve();
+
+    (pre_state, runner.state().clone(), target)
+}
+
+/// A real counter spell records the final object-counter delivery. Replaying
+/// the semantic journal never consults the replacement pipeline a second time.
+#[test]
+fn real_counter_spell_replays_recorded_object_counter_delivery() {
+    let (pre_state, ordinary_state, target) = counter_spell_states();
+    let commands = semantic_commands(&ordinary_state);
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        ResolvedRulesCommand::ObjectCounter(command)
+            if command.object.object_id == target
+                && command.counter_type == CounterType::Plus1Plus1
+    )));
+
+    let mut replay = pre_state;
+    replay.resolved_rules_journal = ordinary_state.resolved_rules_journal.clone();
+    for command in &commands {
+        apply_semantic_command(&mut replay, command);
+    }
+
+    assert_eq!(
+        replay.objects[&target].counters, ordinary_state.objects[&target].counters,
+        "replay preserves the final post-replacement counter count"
+    );
+    assert_eq!(
+        replay.counter_added_this_turn, ordinary_state.counter_added_this_turn,
+        "counter history is part of the semantic counter delivery"
+    );
+}
+
+/// Counter deliveries are exact occurrence transitions: a duplicate does not
+/// add more counters, and an object with the same storage id but a new
+/// incarnation is rejected.
+#[test]
+fn recorded_counter_rejects_double_apply_and_stale_incarnation() {
+    let (pre_state, ordinary_state, target) = counter_spell_states();
+    let command = semantic_commands(&ordinary_state)
+        .into_iter()
+        .find_map(|command| match command {
+            ResolvedRulesCommand::ObjectCounter(command) if command.object.object_id == target => {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("Stony Strength must journal its object-counter delivery");
+
+    let mut replay = pre_state.clone();
+    engine::game::effects::counters::apply_resolved_counter_edit(&mut replay, &command).unwrap();
+    assert!(matches!(
+        engine::game::effects::counters::apply_resolved_counter_edit(&mut replay, &command),
+        Err(ResolvedObjectCounterReplayInvariantError::CounterPreconditionMismatch { .. })
+    ));
+
+    let mut stale = pre_state;
+    stale.objects.get_mut(&target).unwrap().bump_incarnation();
+    assert!(matches!(
+        engine::game::effects::counters::apply_resolved_counter_edit(&mut stale, &command),
+        Err(ResolvedObjectCounterReplayInvariantError::StaleObject { .. })
+    ));
+}
+
+/// A finalized cast records an append-only spell history command. Applying it
+/// twice fails its captured prefix rather than appending a duplicate history.
+#[test]
+fn real_spell_cast_replays_its_exact_ledger_record_once() {
+    let (pre_state, ordinary_state, _) = counter_spell_states();
+    let command = semantic_commands(&ordinary_state)
+        .into_iter()
+        .find_map(|command| match command {
+            ResolvedRulesCommand::LedgerEdit(command)
+                if matches!(&command.edit, ResolvedLedgerEdit::SpellCast { .. }) =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("the real spell cast must journal its exact ledger record");
+
+    let mut replay = pre_state;
+    engine::game::ledger::apply_resolved_ledger_edit(&mut replay, &command).unwrap();
+    assert_eq!(
+        replay.spells_cast_this_turn,
+        ordinary_state.spells_cast_this_turn
+    );
+    assert_eq!(
+        replay.spells_cast_this_game,
+        ordinary_state.spells_cast_this_game
+    );
+    assert_eq!(
+        replay.spells_cast_this_turn_by_player,
+        ordinary_state.spells_cast_this_turn_by_player
+    );
+    assert!(matches!(
+        engine::game::ledger::apply_resolved_ledger_edit(&mut replay, &command),
+        Err(ResolvedLedgerEditReplayInvariantError::SpellCastPreconditionMismatch)
+    ));
 }
