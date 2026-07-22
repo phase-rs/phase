@@ -110,6 +110,51 @@ fn real_mana_activation_records_exact_produced_and_spent_units() {
     assert_eq!(land_node.caused_by, Some(signet_node.identity));
 }
 
+/// P1 retention policy: the journal is bounded to one turn. A turn transition
+/// cannot begin with a payment in flight, so truncating at the boundary is
+/// safe until the CR 733 settlement consumer defines the real window.
+#[test]
+fn provenance_journal_is_truncated_at_the_turn_boundary() {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+    let _ = runner.state_mut().add_mana_to_pool(
+        P0,
+        ManaUnit::new(ManaType::Green, ObjectId(99), false, Vec::new()),
+    );
+    assert!(
+        !runner
+            .state()
+            .resolved_rules_journal
+            .produced_mana()
+            .is_empty(),
+        "journal must have provenance before the boundary"
+    );
+    runner.state_mut().players[0].mana_pool.clear();
+
+    let start_turn = runner.state().turn_number;
+    let mut guard = 0;
+    while runner.state().turn_number == start_turn {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must advance an empty-stack game");
+        guard += 1;
+        assert!(
+            guard < 200,
+            "turn must roll over within a bounded pass count"
+        );
+    }
+    assert!(
+        runner
+            .state()
+            .resolved_rules_journal
+            .produced_mana()
+            .is_empty()
+            && runner.state().resolved_rules_journal.nodes().is_empty(),
+        "the turn boundary must truncate the provenance journal"
+    );
+}
+
 #[test]
 fn provenance_journal_is_not_exposed_in_a_viewer_projection() {
     let mut state = GameState::new_two_player(11);
