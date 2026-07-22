@@ -22,57 +22,61 @@ expression: "&ir"
         "fragment": "~'s power and toughness are each equal to the greatest mana value among artifacts you control."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "SelfRef"
-          },
-          "modifications": [
-            {
-              "type": "SetDynamicPower",
-              "value": {
-                "type": "Ref",
-                "qty": {
-                  "type": "Aggregate",
-                  "function": "Max",
-                  "property": "ManaValue",
-                  "filter": {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Artifact"
-                    ],
-                    "controller": "You",
-                    "properties": []
-                  }
-                }
-              }
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
             },
-            {
-              "type": "SetDynamicToughness",
-              "value": {
-                "type": "Ref",
-                "qty": {
-                  "type": "Aggregate",
-                  "function": "Max",
-                  "property": "ManaValue",
-                  "filter": {
-                    "type": "Typed",
-                    "type_filters": [
-                      "Artifact"
-                    ],
-                    "controller": "You",
-                    "properties": []
+            "modifications": [
+              {
+                "type": "SetDynamicPower",
+                "value": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "Aggregate",
+                    "function": "Max",
+                    "property": "ManaValue",
+                    "filter": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Artifact"
+                      ],
+                      "controller": "You",
+                      "properties": []
+                    }
+                  }
+                }
+              },
+              {
+                "type": "SetDynamicToughness",
+                "value": {
+                  "type": "Ref",
+                  "qty": {
+                    "type": "Aggregate",
+                    "function": "Max",
+                    "property": "ManaValue",
+                    "filter": {
+                      "type": "Typed",
+                      "type_filters": [
+                        "Artifact"
+                      ],
+                      "controller": "You",
+                      "properties": []
+                    }
                   }
                 }
               }
-            }
-          ],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": true,
-          "description": "~'s power and toughness are each equal to the greatest mana value among artifacts you control."
+            ],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": true,
+            "description": "~'s power and toughness are each equal to the greatest mana value among artifacts you control."
+          },
+          "source_text": "~'s power and toughness are each equal to the greatest mana value among artifacts you control.",
+          "body_ir": null
         }
       }
     },

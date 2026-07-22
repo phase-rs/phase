@@ -5102,7 +5102,10 @@ pub(crate) fn parse_oracle_ir(
                 );
                 if !defs.is_empty() {
                     for __item in defs {
-                        emitter.static_at(item_line, __item);
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(&static_line, __item),
+                        );
                     }
                     i += 1;
                     continue;
@@ -5962,7 +5965,7 @@ pub(crate) fn parse_oracle_ir(
         );
         if !defs.is_empty() {
             for __item in defs {
-                emitter.static_at(item_line, __item);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
             i += 1;
             continue;
