@@ -111,8 +111,8 @@ fn yare_extra_blockers_allow_three_attackers_blocked() {
 
 #[test]
 fn two_extra_blocker_grants_are_cumulative_not_max() {
-    // CR 509.1b: two separate "can block an additional creature" effects on the
-    // same creature stack additively — e.g. two copies of Brave the Sands grant
+    // Two separate "can block an additional creature" effects on the same
+    // creature stack additively — e.g. two copies of Brave the Sands grant
     // a limit of 1 (default) + 1 + 1 = 3, not max(1 + 1, 1 + 1) = 2.
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     let attacker1 = create_creature(&mut state, PlayerId(0), "Attacker A", 2, 2);

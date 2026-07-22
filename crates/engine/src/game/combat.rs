@@ -1643,7 +1643,7 @@ pub fn validate_blockers_for_player(
         }
     }
 
-    // CR 509.1a + CR 509.1b: Enforce per-blocker limit on how many attackers it can block.
+    // CR 509.1a: Enforce per-blocker limit on how many attackers it can block.
     // Default is 1; ExtraBlockers { count: Some(n) } allows 1 + n; count: None = unlimited.
     {
         for (&blocker_id, &num_blocked) in &attackers_per_blocker {
@@ -1654,7 +1654,7 @@ pub fn validate_blockers_for_player(
                 .objects
                 .get(&blocker_id)
                 .ok_or_else(|| format!("Blocker {:?} not found during limit check", blocker_id))?;
-            // Sum every ExtraBlockers grant on this creature (CR 509.1b).
+            // Sum every ExtraBlockers grant on this creature.
             let max_allowed = extra_block_limit(state, blocker);
             if num_blocked > max_allowed {
                 return Err(format!(
@@ -4937,14 +4937,12 @@ fn ring_bearer_unblockable_by_greater_power(
         && blocker.power.unwrap_or(0) > attacker.power.unwrap_or(0)
 }
 
-/// CR 509.1a + CR 509.1b: Compute the maximum number of attackers a creature can block.
+/// CR 509.1a: Compute the maximum number of attackers a creature can block.
 /// Default is 1. ExtraBlockers { count: Some(n) } adds n (so 1+n). count: None = unlimited (u32::MAX).
-/// Multiple ExtraBlockers stack: the best (highest) limit wins.
+/// Multiple finite ExtraBlockers grants stack additively.
 fn extra_block_limit(state: &GameState, blocker: &GameObject) -> u32 {
-    // CR 509.1b: multiple "can block an additional creature" effects are
-    // cumulative — each grant raises the limit independently, so the additional
-    // counts SUM (default 1 + the sum of every grant's `n`). A single `None`
-    // grant ("any number of creatures") makes the limit unbounded.
+    // Each grant raises the limit independently, so the additional counts sum.
+    // A single `None` grant ("any number of creatures") makes the limit unbounded.
     let mut extra: u32 = 0;
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     for sd in super::functioning_abilities::active_static_definitions(state, blocker) {
