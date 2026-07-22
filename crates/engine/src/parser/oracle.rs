@@ -4920,7 +4920,7 @@ pub(crate) fn parse_oracle_ir(
                     parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
                 ) {
                     emitter.keyword_at(item_line, kw);
-                    emitter.static_at(item_line, def);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_part, def));
                     i += 1;
                     continue;
                 }
@@ -5809,7 +5809,7 @@ pub(crate) fn parse_oracle_ir(
                     parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
                 ) {
                     emitter.keyword_at(item_line, kw);
-                    emitter.static_at(item_line, def);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_part, def));
                     i += 1;
                     continue;
                 }
