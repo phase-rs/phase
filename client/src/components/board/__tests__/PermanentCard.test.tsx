@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
 import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -890,7 +890,20 @@ describe("PermanentCard", () => {
       objects: { 39: kessig },
       battlefield: [39],
     };
-    const manaAction = { type: "TapLandForMana", data: { object_id: 39 } } as const;
+    const manaAction: GameAction = {
+      type: "TapLandForMana",
+      data: {
+        selection: {
+          source: { object_id: 39, incarnation: 1 },
+          ability_index: null,
+          mana_type: "Green",
+          atomic_combination: null,
+          restrictions: [],
+          penalty: "None",
+          taps_for_mana: [],
+        },
+      },
+    };
     const abilityAction = {
       type: "ActivateAbility",
       data: { source_id: 39, ability_index: 1 },

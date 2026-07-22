@@ -1518,6 +1518,11 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_number_of_creatures_died_this_turn,
             parse_number_of_sacrificed_this_turn,
             parse_number_of_descended_this_turn,
+            // CR 404.1 + CR 111.7 + CR 303.4b: "cards put into [possessive]
+            // graveyard from anywhere this turn" (Fraying Sanity where-X) —
+            // must precede the generic controlled-type arm and share the nest
+            // with the other this-turn zone-change counts.
+            parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn,
             parse_number_of_times_you_chose_a_mode,
         )),
         parse_tokens_created_this_turn_tail,
@@ -3869,13 +3874,39 @@ fn parse_source_self_ref(input: &str) -> OracleResult<'_, ()> {
     )))
 }
 
-/// CR 400.7: Parse "[type] that entered (the battlefield) this turn" into
-/// the shared entered-this-turn battlefield count. The "under your control"
-/// surface form stamps `ControllerRef::You` onto the typed filter; phrases
-/// that already include "you control" keep the controller supplied by
-/// `parse_type_phrase`.
+/// CR 608.2h / CR 608.2i: which grammatical constituent the controller qualifier
+/// of an "…that entered … this turn" relative clause attaches to. This is the
+/// single discriminator between the class's two readings, and WotC's own rulings
+/// track it:
+///
+/// - Hobgoblin Bandit Lord — "Goblins that entered the battlefield UNDER YOUR
+///   CONTROL this turn": "It doesn't matter if those Goblins are still on the
+///   battlefield as it resolves." The qualifier describes the past entry EVENT,
+///   so nothing in the phrase requires the object to exist now → CR 608.2i
+///   look-back tally over the `battlefield_entries_this_turn` ledger.
+/// - Tromell, Seymour's Butler — "nontoken creatures YOU CONTROL that entered
+///   this turn": "look at the nontoken creatures you control and count each one
+///   that entered this turn." The qualifier is a present-tense predicate on the
+///   subject noun, and by CR 109.2 an unqualified permanent noun names a
+///   battlefield permanent → CR 608.2h live population read.
+///
+/// The distinguishing token is NOT the substring "the battlefield": the
+/// `" the battlefield this turn"` surface carries it while binding any
+/// controller to the noun ("creatures you control that entered the battlefield
+/// this turn"), and must stay live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnteredControlBinding {
+    /// "…entered [the battlefield] under <whose> control this turn".
+    EntryEvent(PlayerScope),
+    /// "…[<noun> you control] that entered [the battlefield] this turn".
+    SubjectNoun,
+}
+
+/// CR 608.2h + CR 608.2i: Parse "[type] that entered (the battlefield) [under
+/// <whose> control] this turn" into whichever of the two readings the grammar
+/// selects — see [`EnteredControlBinding`].
 fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, (type_text, inject_you)) = parse_entered_this_turn_clause(input)?;
+    let (rest, (type_text, binding)) = parse_entered_this_turn_clause(input)?;
     let (filter, remainder) = parse_type_phrase(type_text.trim());
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -3883,28 +3914,76 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             nom::error::ErrorKind::Fail,
         )));
     }
-    let filter = if inject_you {
-        inject_controller(filter, ControllerRef::You)
-    } else {
-        filter
+    let qty = match binding {
+        // CR 608.2i: the controller belongs to the past entry event, so this is a
+        // look-back tally over `battlefield_entries_this_turn`. The scope carries
+        // "under whose control" (the runtime keys on `record.controller`) and the
+        // filter stays bare — mirroring `parse_or_more_entered_count`
+        // (oracle_nom/condition.rs), the condition-side sibling BB-FU1 migrated,
+        // which likewise omits the controller injection.
+        //
+        // CR 608.2i: the look-back tally is only honest if the entry-record matcher can evaluate
+        // the filter. `battlefield_entry_matches_filter` fails closed on the 94 `FilterProp`s the
+        // entry snapshot cannot answer (game/restrictions.rs:517), which would resolve to a silent
+        // constant 0 while `coverage.rs` reported the card supported. Refusing here is measurably
+        // better on this path: a failed quantity clause becomes `Effect::Unimplemented`, so the
+        // gap is visible to `cargo parser-gaps` instead of shipping a wrong number.
+        //
+        // NOT mirrored at the three condition-side emitters (oracle_nom/condition.rs:7688/:7738/
+        // :7767): an unparseable intervening-if is SILENTLY DROPPED (`condition: null` -> the
+        // trigger fires unconditionally) and an unparseable "Activate only if" clause drops the
+        // whole restriction (`activation_restrictions: []` -> always activatable). There, refusing
+        // would turn a conservative never-fires into an over-permit. Those sites are covered by the
+        // `coverage.rs` classifier instead.
+        EnteredControlBinding::EntryEvent(player) => {
+            if !crate::game::restrictions::ledger_filter_is_evaluable(&filter) {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                )));
+            }
+            QuantityRef::BattlefieldEntriesThisTurn { player, filter }
+        }
+        // CR 608.2h: any controller came from the subject noun and is
+        // present-tense, so this names the current battlefield population
+        // (CR 109.2) narrowed by a historical predicate — Tromell's reading.
+        EnteredControlBinding::SubjectNoun => QuantityRef::EnteredThisTurn { filter },
     };
-    Ok((rest, QuantityRef::EnteredThisTurn { filter }))
+    Ok((rest, qty))
 }
 
-fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, bool)> {
-    map(
-        pair(
-            take_until(" that entered"),
-            preceded(
-                tag(" that entered"),
-                alt((
-                    value(true, tag(" the battlefield under your control this turn")),
-                    value(false, tag(" the battlefield this turn")),
-                    value(false, tag(" this turn")),
-                )),
-            ),
+fn parse_entered_this_turn_clause(input: &str) -> OracleResult<'_, (&str, EnteredControlBinding)> {
+    pair(
+        take_until(" that entered"),
+        preceded(
+            pair(tag(" that entered"), opt(tag(" the battlefield"))),
+            alt((
+                map(
+                    parse_entry_event_controller,
+                    EnteredControlBinding::EntryEvent,
+                ),
+                value(EnteredControlBinding::SubjectNoun, tag(" this turn")),
+            )),
         ),
-        |(type_text, inject_you)| (type_text, inject_you),
+    )
+    .parse(input)
+}
+
+/// CR 109.5: the "under <whose> control" qualifier bound to the entry event.
+/// Only the controller reading is templated on any printed card today (measured:
+/// 0/34 corpus cards print the opponent or any-player surface in a quantity
+/// context), so those readings intentionally fall through to an honest
+/// `Effect::Unimplemented` rather than to a guessed parse.
+// ponytail: adding the opponent reading is one `value(PlayerScope::Opponent { aggregate: Max },
+// tag(" under an opponent's control"))` arm here PLUS normalizing any filter-borne controller off
+// the filter — measured, `"creatures you control that entered … under your control this turn"`
+// keeps `controller: You` on the ledger filter, and game/quantity.rs:3324/:3328 scopes records by
+// `scoped_player.id` while passing the ABILITY controller to the matcher, so a surviving `You`
+// contradicts a non-`Controller` scope and reads a constant 0.
+fn parse_entry_event_controller(input: &str) -> OracleResult<'_, PlayerScope> {
+    terminated(
+        value(PlayerScope::Controller, tag(" under your control")),
+        tag(" this turn"),
     )
     .parse(input)
 }
@@ -3929,28 +4008,6 @@ fn parse_tokens_created_this_turn_tail(input: &str) -> OracleResult<'_, Quantity
             filter,
         },
     ))
-}
-
-fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(controller)),
-        TargetFilter::Or { filters } => TargetFilter::Or {
-            filters: filters
-                .into_iter()
-                .map(|filter| inject_controller(filter, controller.clone()))
-                .collect(),
-        },
-        TargetFilter::And { filters } => TargetFilter::And {
-            filters: filters
-                .into_iter()
-                .map(|filter| inject_controller(filter, controller.clone()))
-                .collect(),
-        },
-        TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(inject_controller(*filter, controller)),
-        },
-        other => other,
-    }
 }
 
 /// CR 601.2h + CR 202.2: Parse a self-scoped mana-spent-to-cast reference in
@@ -4618,6 +4675,61 @@ fn parse_number_of_descended_this_turn(input: &str) -> OracleResult<'_, Quantity
                     controller: ControllerRef::You,
                 },
             ])),
+        },
+    ))
+}
+
+/// CR 404.1 + CR 111.7 + CR 303.4b (issue #5947): "cards put into [possessive]
+/// graveyard from anywhere this turn" — the Fraying Sanity where-X class.
+///
+/// A card is put into *its owner's* graveyard (CR 404.1), so the possessive
+/// scopes by ownership (`FilterProp::Owned`), not control. "From anywhere"
+/// means `from: None` (any origin zone). Bare "cards" carries no type, so the
+/// filter starts as `Any` narrowed by Owned + NonToken — tokens cease to exist
+/// instead of being put into a graveyard (CR 111.7), matching Ravenous Trap's
+/// condition population (`oracle_nom::condition`).
+///
+/// Possessive axis (compose, don't enumerate):
+///   - `"your "` → `ControllerRef::You`
+///   - `"their "` / `"his or her "` / `"enchanted player's "` →
+///     `ControllerRef::EnchantedPlayer` (curse anaphor: "enchanted player mills
+///     X … cards put into their graveyard")
+fn parse_number_of_cards_put_into_graveyard_from_anywhere_this_turn(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    // Optional leading type phrase ("creature cards" / bare "cards").
+    // Consume up to the fixed "put into … from anywhere this turn" tail so a
+    // typed prefix is optional without enumerating every type × possessive
+    // permutation.
+    let plural = "cards put into ";
+    let singular = "card put into ";
+    let (rest, type_text) = alt((
+        terminated(take_until(plural), tag(plural)),
+        terminated(take_until(singular), tag(singular)),
+    ))
+    .parse(input)?;
+    let (filter, leftover) = parse_type_phrase(type_text.trim());
+    if !leftover.trim().is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            leftover,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // Possessive owner of the graveyard.
+    let (rest, owner) = alt((
+        value(ControllerRef::You, tag("your ")),
+        value(ControllerRef::EnchantedPlayer, tag("their ")),
+        value(ControllerRef::EnchantedPlayer, tag("his or her ")),
+        value(ControllerRef::EnchantedPlayer, tag("enchanted player's ")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag("graveyard from anywhere this turn").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: None,
+            to: Some(Zone::Graveyard),
+            filter: super::condition::add_owned_with_props(filter, owner, &[FilterProp::NonToken]),
         },
     ))
 }
@@ -8389,6 +8501,8 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 608.2h: destructure the LIVE-population reading
+    /// (`QuantityRef::EnteredThisTurn`), whose controller lives on the filter.
     fn assert_entered_this_turn_typed(
         q: QuantityRef,
     ) -> (Vec<TypeFilter>, Option<ControllerRef>, Vec<FilterProp>) {
@@ -8405,6 +8519,31 @@ mod tests {
         }
     }
 
+    /// CR 608.2i: destructure the LOOK-BACK reading
+    /// (`QuantityRef::BattlefieldEntriesThisTurn`), whose "under whose control"
+    /// lives on the `PlayerScope` and whose filter is therefore BARE.
+    fn assert_ledger_entries_this_turn_typed(
+        q: QuantityRef,
+    ) -> (
+        PlayerScope,
+        Vec<TypeFilter>,
+        Option<ControllerRef>,
+        Vec<FilterProp>,
+    ) {
+        match q {
+            QuantityRef::BattlefieldEntriesThisTurn {
+                player,
+                filter:
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }),
+            } => (player, type_filters, controller, properties),
+            other => panic!("expected typed BattlefieldEntriesThisTurn ref, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_for_each_entered_this_turn_under_your_control() {
         let (rest, q) = parse_for_each_clause_ref(
@@ -8412,9 +8551,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rest, "");
-        let (type_filters, controller, properties) = assert_entered_this_turn_typed(q);
+        let (player, type_filters, controller, properties) =
+            assert_ledger_entries_this_turn_typed(q);
+        assert_eq!(player, PlayerScope::Controller);
         assert_eq!(type_filters, vec![TypeFilter::Land]);
-        assert_eq!(controller, Some(ControllerRef::You));
+        // CR 608.2i: the tally keys on `record.controller` via the scope, so the
+        // filter must NOT carry a controller of its own.
+        assert_eq!(controller, None);
         assert!(properties.is_empty());
     }
 
@@ -8425,15 +8568,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rest, "");
-        let (type_filters, controller, properties) = assert_entered_this_turn_typed(q);
+        let (player, type_filters, controller, properties) =
+            assert_ledger_entries_this_turn_typed(q);
+        assert_eq!(player, PlayerScope::Controller);
         assert_eq!(
             type_filters,
             vec![TypeFilter::Subtype("Zombie".to_string())]
         );
-        assert_eq!(controller, Some(ControllerRef::You));
+        assert_eq!(controller, None);
         assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
     }
 
+    /// IN-CRATE BOUNDARY LOCK (BB-FU10): Tromell, Seymour's Butler binds the
+    /// controller to the SUBJECT NOUN ("nontoken creatures you control that
+    /// entered this turn"), which is CR 608.2h live-population, NOT the CR 608.2i
+    /// look-back ledger. If this ever asserts `BattlefieldEntriesThisTurn` the
+    /// discriminator has been widened to the wrong constituent.
     #[test]
     fn parse_number_of_controlled_entered_this_turn() {
         let (rest, q) = parse_quantity_ref(
@@ -8831,6 +8981,53 @@ mod tests {
                 };
                 assert_eq!(tf.controller, None, "{phrase:?} must not scope controller");
             }
+        }
+    }
+
+    /// CR 404.1 + CR 111.7 + CR 303.4b (issue #5947): Fraying Sanity's where-X
+    /// phrase — "the number of cards put into their graveyard from anywhere
+    /// this turn" — must bind to `ZoneChangeCountThisTurn` scoped by
+    /// `Owned { EnchantedPlayer }` (curse anaphor) + `NonToken`, with
+    /// `from: None` ("from anywhere"). The "your" possessive is the controller-
+    /// owned sibling.
+    #[test]
+    fn parse_cards_put_into_graveyard_from_anywhere_this_turn() {
+        let cases = [
+            (
+                "cards put into their graveyard from anywhere this turn",
+                ControllerRef::EnchantedPlayer,
+            ),
+            (
+                "cards put into his or her graveyard from anywhere this turn",
+                ControllerRef::EnchantedPlayer,
+            ),
+            (
+                "cards put into enchanted player's graveyard from anywhere this turn",
+                ControllerRef::EnchantedPlayer,
+            ),
+            (
+                "cards put into your graveyard from anywhere this turn",
+                ControllerRef::You,
+            ),
+        ];
+        for (phrase, owner) in cases {
+            let (_, q) = parse_quantity_ref(&format!("the number of {phrase}"))
+                .unwrap_or_else(|_| panic!("number-of {phrase:?} should parse"));
+            let QuantityRef::ZoneChangeCountThisTurn { from, to, filter } = q else {
+                panic!("expected ZoneChangeCountThisTurn for {phrase:?}, got {q:?}");
+            };
+            assert_eq!(from, None, "{phrase:?}: from anywhere → from: None");
+            assert_eq!(to, Some(Zone::Graveyard));
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Owned {
+                        controller: owner.clone(),
+                    },
+                    FilterProp::NonToken,
+                ])),
+                "{phrase:?}"
+            );
         }
     }
 

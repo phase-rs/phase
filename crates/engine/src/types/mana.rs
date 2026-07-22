@@ -2,9 +2,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{AbilityTag, Comparator, TargetFilter};
+use super::ability::{AbilityTag, Comparator, TargetFilter, TriggerDefinitionOccurrenceRef};
 use super::events::GameEvent;
-use super::identifiers::ObjectId;
+use super::game_state::ProductionOverride;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::{Keyword, KeywordKind};
 use super::player::PlayerId;
 use super::zones::Zone;
@@ -585,6 +586,318 @@ pub enum ManaRestriction {
     ConvokePayment,
 }
 
+/// CR 605.3b: Semantic classification of an activatable mana source's
+/// irreversible consequences. This is part of a submitted mana-source
+/// selection because two otherwise-identical rows with different penalties
+/// are not the same activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManaSourcePenalty {
+    None,
+    HasIrreversibleContinuation,
+    DealsDamageOnResolution { fixed_amount: Option<u16> },
+    PaysLifeOnActivation { fixed_amount: Option<u16> },
+    Sacrifices,
+}
+
+/// Exact identity of one triggered mana ability that augments a land's own
+/// production when that land is tapped for mana.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapsForManaSelection {
+    pub source: ObjectIncarnationRef,
+    pub occurrence: TriggerDefinitionOccurrenceRef,
+    pub production_override: ProductionOverride,
+}
+
+/// Stable semantic selection for one currently activatable land-mana row.
+///
+/// The action carries every field that can change legality or resolution, but
+/// the reducer never trusts those fields directly: it enumerates current live
+/// options and requires one exact semantic match before activating that live
+/// option. `ObjectIncarnationRef` prevents a stale choice from rebinding to an
+/// object that left and re-entered the battlefield (CR 400.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaSourceSelection {
+    pub source: ObjectIncarnationRef,
+    pub ability_index: Option<usize>,
+    pub mana_type: ManaType,
+    pub atomic_combination: Option<Vec<ManaType>>,
+    pub restrictions: Vec<ManaRestriction>,
+    pub penalty: ManaSourcePenalty,
+    pub taps_for_mana: Vec<TapsForManaSelection>,
+}
+
+impl ManaSourceSelection {
+    /// Stable total order for the action wire. The non-`Ord` semantic fields
+    /// are compared by explicit closed-enum comparators below; debug strings or
+    /// serialized bytes must never become ordering authority.
+    pub fn cmp_stable(&self, other: &Self) -> std::cmp::Ordering {
+        self.source
+            .cmp(&other.source)
+            .then_with(|| self.ability_index.cmp(&other.ability_index))
+            .then_with(|| self.mana_type.cmp(&other.mana_type))
+            .then_with(|| self.atomic_combination.cmp(&other.atomic_combination))
+            .then_with(|| cmp_mana_restriction_slices(&self.restrictions, &other.restrictions))
+            .then_with(|| cmp_mana_source_penalty(self.penalty, other.penalty))
+            .then_with(|| cmp_taps_for_mana_slices(&self.taps_for_mana, &other.taps_for_mana))
+    }
+}
+
+fn cmp_slice_by<T>(
+    left: &[T],
+    right: &[T],
+    cmp: impl Copy + Fn(&T, &T) -> std::cmp::Ordering,
+) -> std::cmp::Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| cmp(a, b))
+        .find(|ordering| !ordering.is_eq())
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn cmp_taps_for_mana_slices(
+    left: &[TapsForManaSelection],
+    right: &[TapsForManaSelection],
+) -> std::cmp::Ordering {
+    cmp_slice_by(left, right, |a, b| {
+        a.source
+            .cmp(&b.source)
+            .then_with(|| a.occurrence.cmp(&b.occurrence))
+            .then_with(|| cmp_production_override(&a.production_override, &b.production_override))
+    })
+}
+
+fn cmp_production_override(
+    left: &ProductionOverride,
+    right: &ProductionOverride,
+) -> std::cmp::Ordering {
+    use ProductionOverride::{Combination, SingleColor};
+    match (left, right) {
+        (SingleColor(a), SingleColor(b)) => a.cmp(b),
+        (Combination(a), Combination(b)) => a.cmp(b),
+        (SingleColor(_), Combination(_)) => std::cmp::Ordering::Less,
+        (Combination(_), SingleColor(_)) => std::cmp::Ordering::Greater,
+    }
+}
+
+fn cmp_mana_source_penalty(
+    left: ManaSourcePenalty,
+    right: ManaSourcePenalty,
+) -> std::cmp::Ordering {
+    fn rank(value: ManaSourcePenalty) -> u8 {
+        match value {
+            ManaSourcePenalty::None => 0,
+            ManaSourcePenalty::HasIrreversibleContinuation => 1,
+            ManaSourcePenalty::DealsDamageOnResolution { .. } => 2,
+            ManaSourcePenalty::PaysLifeOnActivation { .. } => 3,
+            ManaSourcePenalty::Sacrifices => 4,
+        }
+    }
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount: a },
+                ManaSourcePenalty::DealsDamageOnResolution { fixed_amount: b },
+            )
+            | (
+                ManaSourcePenalty::PaysLifeOnActivation { fixed_amount: a },
+                ManaSourcePenalty::PaysLifeOnActivation { fixed_amount: b },
+            ) => a.cmp(&b),
+            _ => std::cmp::Ordering::Equal,
+        })
+}
+
+fn cmp_mana_restriction_slices(
+    left: &[ManaRestriction],
+    right: &[ManaRestriction],
+) -> std::cmp::Ordering {
+    cmp_slice_by(left, right, cmp_mana_restriction)
+}
+
+#[allow(clippy::too_many_lines)]
+fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std::cmp::Ordering {
+    fn rank(value: &ManaRestriction) -> u8 {
+        match value {
+            ManaRestriction::OnlyForSpell => 0,
+            ManaRestriction::OnlyForSpellType(_) => 1,
+            ManaRestriction::OnlyForCreatureType(_) => 2,
+            ManaRestriction::OnlyForTypeSpellsOrAbilities { .. } => 3,
+            ManaRestriction::OnlyForActivation => 4,
+            ManaRestriction::OnlyForTaggedActivation(_) => 5,
+            ManaRestriction::OnlyForXCosts => 6,
+            ManaRestriction::OnlyForSpellWithKeywordKind(_) => 7,
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _) => 8,
+            ManaRestriction::OnlyForSpellWithManaValue { .. } => 9,
+            ManaRestriction::OnlyForSpellMatchingCostCriteria { .. } => 10,
+            ManaRestriction::OnlyForSpellWithColorCount { .. } => 11,
+            ManaRestriction::OnlyForSpellFromZone(_) => 12,
+            ManaRestriction::OnlyForFaceDownSpell => 13,
+            ManaRestriction::OnlyForAny(_) => 14,
+            ManaRestriction::OnlyForSpecialAction(_) => 15,
+            ManaRestriction::ConvokePayment => 16,
+        }
+    }
+    rank(left).cmp(&rank(right)).then_with(|| match (left, right) {
+        (ManaRestriction::OnlyForSpellType(a), ManaRestriction::OnlyForSpellType(b))
+        | (
+            ManaRestriction::OnlyForCreatureType(a),
+            ManaRestriction::OnlyForCreatureType(b),
+        ) => a.cmp(b),
+        (
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: a_type,
+                ability: a_ability,
+            },
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type: b_type,
+                ability: b_ability,
+            },
+        ) => a_type
+            .cmp(b_type)
+            .then_with(|| ability_activation_scope_rank(*a_ability).cmp(&ability_activation_scope_rank(*b_ability))),
+        (
+            ManaRestriction::OnlyForTaggedActivation(a),
+            ManaRestriction::OnlyForTaggedActivation(b),
+        ) => ability_tag_rank(*a).cmp(&ability_tag_rank(*b)),
+        (
+            ManaRestriction::OnlyForSpellWithKeywordKind(a),
+            ManaRestriction::OnlyForSpellWithKeywordKind(b),
+        ) => a.cmp(b),
+        (
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(a_kind, a_zone),
+            ManaRestriction::OnlyForSpellWithKeywordKindFromZone(b_kind, b_zone),
+        ) => a_kind.cmp(b_kind).then_with(|| a_zone.cmp(b_zone)),
+        (
+            ManaRestriction::OnlyForSpellWithManaValue {
+                comparator: a_cmp,
+                value: a_value,
+            },
+            ManaRestriction::OnlyForSpellWithManaValue {
+                comparator: b_cmp,
+                value: b_value,
+            },
+        ) => comparator_rank(*a_cmp)
+            .cmp(&comparator_rank(*b_cmp))
+            .then_with(|| a_value.cmp(b_value)),
+        (
+            ManaRestriction::OnlyForSpellMatchingCostCriteria {
+                spell_type: a_type,
+                criteria: a_criteria,
+            },
+            ManaRestriction::OnlyForSpellMatchingCostCriteria {
+                spell_type: b_type,
+                criteria: b_criteria,
+            },
+        ) => a_type
+            .cmp(b_type)
+            .then_with(|| cmp_slice_by(a_criteria, b_criteria, cmp_spell_cost_criterion)),
+        (
+            ManaRestriction::OnlyForSpellWithColorCount {
+                comparator: a_cmp,
+                count: a_count,
+            },
+            ManaRestriction::OnlyForSpellWithColorCount {
+                comparator: b_cmp,
+                count: b_count,
+            },
+        ) => comparator_rank(*a_cmp)
+            .cmp(&comparator_rank(*b_cmp))
+            .then_with(|| a_count.cmp(b_count)),
+        (
+            ManaRestriction::OnlyForSpellFromZone(a),
+            ManaRestriction::OnlyForSpellFromZone(b),
+        ) => a.zone.cmp(&b.zone).then_with(|| {
+            zone_spend_polarity_rank(a.polarity).cmp(&zone_spend_polarity_rank(b.polarity))
+        }),
+        (ManaRestriction::OnlyForAny(a), ManaRestriction::OnlyForAny(b)) => {
+            cmp_mana_restriction_slices(a, b)
+        }
+        (
+            ManaRestriction::OnlyForSpecialAction(a),
+            ManaRestriction::OnlyForSpecialAction(b),
+        ) => special_action_rank(*a).cmp(&special_action_rank(*b)),
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
+fn cmp_spell_cost_criterion(
+    left: &SpellCostCriterion,
+    right: &SpellCostCriterion,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (
+            SpellCostCriterion::ManaValue {
+                comparator: a_cmp,
+                value: a_value,
+            },
+            SpellCostCriterion::ManaValue {
+                comparator: b_cmp,
+                value: b_value,
+            },
+        ) => comparator_rank(*a_cmp)
+            .cmp(&comparator_rank(*b_cmp))
+            .then_with(|| a_value.cmp(b_value)),
+        (SpellCostCriterion::HasXInCost, SpellCostCriterion::HasXInCost) => {
+            std::cmp::Ordering::Equal
+        }
+        (SpellCostCriterion::ManaValue { .. }, SpellCostCriterion::HasXInCost) => {
+            std::cmp::Ordering::Less
+        }
+        (SpellCostCriterion::HasXInCost, SpellCostCriterion::ManaValue { .. }) => {
+            std::cmp::Ordering::Greater
+        }
+    }
+}
+
+fn comparator_rank(value: Comparator) -> u8 {
+    match value {
+        Comparator::GT => 0,
+        Comparator::LT => 1,
+        Comparator::GE => 2,
+        Comparator::LE => 3,
+        Comparator::EQ => 4,
+        Comparator::NE => 5,
+    }
+}
+
+fn ability_activation_scope_rank(value: AbilityActivationScope) -> u8 {
+    match value {
+        AbilityActivationScope::OfSpellType => 0,
+        AbilityActivationScope::Any => 1,
+    }
+}
+
+fn ability_tag_rank(value: AbilityTag) -> u8 {
+    match value {
+        AbilityTag::Boast => 0,
+        AbilityTag::Evolve => 1,
+        AbilityTag::Exhaust => 2,
+        AbilityTag::Outlast => 3,
+        AbilityTag::Cycling => 4,
+        AbilityTag::Backup => 5,
+        AbilityTag::PowerUp => 6,
+        AbilityTag::Equip => 7,
+        AbilityTag::Augment => 8,
+    }
+}
+
+fn zone_spend_polarity_rank(value: ZoneSpendPolarity) -> u8 {
+    match value {
+        ZoneSpendPolarity::From => 0,
+        ZoneSpendPolarity::NotFrom => 1,
+    }
+}
+
+fn special_action_rank(value: SpecialAction) -> u8 {
+    match value {
+        SpecialAction::CompanionToHand => 0,
+        SpecialAction::UnlockDoor => 1,
+        SpecialAction::Plot => 2,
+        SpecialAction::TurnFaceUp => 3,
+        SpecialAction::RollPlanarDie => 4,
+    }
+}
+
 impl ManaRestriction {
     fn matches_required_quality<'a>(
         required: &str,
@@ -1070,6 +1383,56 @@ pub enum ManaCostShard {
 }
 
 impl ManaCostShard {
+    /// Canonical printed symbol for this mana-cost component.
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::White => "W",
+            Self::Blue => "U",
+            Self::Black => "B",
+            Self::Red => "R",
+            Self::Green => "G",
+            Self::Colorless => "C",
+            Self::Snow => "S",
+            Self::X => "X",
+            Self::TwoOrMoreColorSource => "Z",
+            Self::WhiteBlue => "W/U",
+            Self::WhiteBlack => "W/B",
+            Self::BlueBlack => "U/B",
+            Self::BlueRed => "U/R",
+            Self::BlackRed => "B/R",
+            Self::BlackGreen => "B/G",
+            Self::RedWhite => "R/W",
+            Self::RedGreen => "R/G",
+            Self::GreenWhite => "G/W",
+            Self::GreenBlue => "G/U",
+            Self::TwoWhite => "2/W",
+            Self::TwoBlue => "2/U",
+            Self::TwoBlack => "2/B",
+            Self::TwoRed => "2/R",
+            Self::TwoGreen => "2/G",
+            Self::PhyrexianWhite => "W/P",
+            Self::PhyrexianBlue => "U/P",
+            Self::PhyrexianBlack => "B/P",
+            Self::PhyrexianRed => "R/P",
+            Self::PhyrexianGreen => "G/P",
+            Self::PhyrexianWhiteBlue => "W/U/P",
+            Self::PhyrexianWhiteBlack => "W/B/P",
+            Self::PhyrexianBlueBlack => "U/B/P",
+            Self::PhyrexianBlueRed => "U/R/P",
+            Self::PhyrexianBlackRed => "B/R/P",
+            Self::PhyrexianBlackGreen => "B/G/P",
+            Self::PhyrexianRedWhite => "R/W/P",
+            Self::PhyrexianRedGreen => "R/G/P",
+            Self::PhyrexianGreenWhite => "G/W/P",
+            Self::PhyrexianGreenBlue => "G/U/P",
+            Self::ColorlessWhite => "C/W",
+            Self::ColorlessBlue => "C/U",
+            Self::ColorlessBlack => "C/B",
+            Self::ColorlessRed => "C/R",
+            Self::ColorlessGreen => "C/G",
+        }
+    }
+
     /// Returns true if this shard contributes to devotion for the given color.
     /// CR 700.5: Each mana symbol that is or contains the color counts.
     /// Hybrid symbols count toward each of their colors. A single hybrid symbol

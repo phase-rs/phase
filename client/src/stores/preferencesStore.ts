@@ -420,7 +420,8 @@ interface PreferencesState {
    *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
    *  regardless. See `services/telemetry.ts`. */
   telemetryEnabled: boolean;
-  /** Prefer the shell-managed native engine for eligible desktop AI games. */
+  /** Prefer the shell-managed native engine for eligible desktop local games
+   * and P2P games hosted through a lobby. */
   nativeEngineEnabled: boolean;
 }
 

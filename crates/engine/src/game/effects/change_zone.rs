@@ -886,6 +886,11 @@ pub fn resolve(
             // `EffectZoneChoice` round-trip so it is evaluated against the
             // chosen object on resume (Summoner's Grimoire).
             enters_modified_if: effect_enters_modified_if.clone(),
+            // CR 611.2a + CR 610.3: carry the bounded-move duration across the
+            // interactive round-trip so the multi-candidate path builds the
+            // same `UntilSourceLeaves` exile link the single-candidate
+            // shortcut does (Cloak and Dagger, Entwined — issue #4235 review).
+            duration: ability.duration.clone(),
         };
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses
         // (matching the DiscardChoice pattern — single authority for the event).
@@ -8964,6 +8969,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         let _ = apply_as_current(

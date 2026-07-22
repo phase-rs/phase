@@ -1488,17 +1488,17 @@ pub fn parse_target_with_syntax<'a>(
     }
 
     // CR 608.2c: "each of them" is a plural-pronoun anaphor that refers back to
-    // the parent ability's chosen targets. Centralising the binding here means
-    // every sibling effect parser (destroy, exile, bounce, tap, etc.) benefits
+    // the parent ability's chosen targets or batched event objects — NEVER the
+    // single-object `TriggeringSource` that `resolve_pronoun_target` would emit
+    // for a typed trigger subject. Centralising the binding here means every
+    // sibling effect parser (destroy, exile, bounce, tap, etc.) benefits
     // automatically instead of each site adding its own special case. A word-
-    // boundary guard via `parse_word_bounded` excludes "themselves". Resolution
-    // delegates to `resolve_pronoun_target` which applies the same trigger-
-    // subject vs. compound-anaphor dispatch as the bare "them" pronoun arm above.
+    // boundary guard via `parse_word_bounded` excludes "themselves".
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
         let (i, ()) = value((), tag::<_, _, OracleError<'_>>("each of ")).parse(input)?;
         parse_word_bounded(i, "them")
     }) {
-        return (resolve_pronoun_target(ctx, "them"), rest, syntax);
+        return (TargetFilter::ParentTarget, rest, syntax);
     }
 
     // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
@@ -10824,6 +10824,24 @@ mod tests {
     fn each_of_them_is_parent_target() {
         let mut ctx = ParseContext::default();
         let (filter, rest, _syntax) = parse_target_with_syntax("each of them", &mut ctx);
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    /// CR 608.2c (issue #5949): even with a typed trigger subject on the parse
+    /// context, "each of them" is a batch distributive anaphor — NOT the
+    /// singular `TriggeringSource` that bare "them" carries.
+    #[test]
+    fn each_of_them_stays_parent_target_with_typed_trigger_subject() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .subtype("Insect".into()),
+            )),
+            ..Default::default()
+        };
+        let (filter, rest) = parse_target_with_ctx("each of them", &mut ctx);
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
     }

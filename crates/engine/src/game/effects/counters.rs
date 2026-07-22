@@ -1624,6 +1624,31 @@ fn resolve_defined_or_targets(
         return vec![ability.source_id];
     }
 
+    // CR 508.1 + CR 603.2c + CR 608.2c (issue #5949): A batched attack trigger's
+    // "each of them"/"those creatures" anaphor (`ParentTarget` with no chosen
+    // object target) refers to the whole declared-attackers batch. Route through
+    // the shared attack-trigger batch resolver — the exact path `Effect::Pump`
+    // uses via `resolved_targets` for Champions from Beyond's "those creatures
+    // get +4/+4" — so the counter is placed on every attacker (Vrestin,
+    // Menoptra Leader). Non-attack `ParentTarget` contexts return `None` here
+    // and fall through to the existing event-context resolution below.
+    if matches!(target_spec, Some(TargetFilter::ParentTarget))
+        && !has_object_target
+        && !has_choice_bookkeeping_player
+    {
+        if let Some(targets) =
+            crate::game::targeting::parent_target_refs_from_attack_trigger_context(state)
+        {
+            return targets
+                .into_iter()
+                .filter_map(|target| match target {
+                    TargetRef::Object(id) => Some(id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+        }
+    }
+
     // CR 608.2c + CR 122.1: `ParentTargetSlot { index }` — a later counter
     // instruction that refers to a specific earlier declared target slot ("put a
     // +1/+1 counter on the creature you control", index 0). The counter node's

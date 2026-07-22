@@ -22,6 +22,7 @@
     "updatePending": "mise à jour en attente après la partie",
     "cards": "cartes {{age}} ({{commit}})",
     "cardDataTitle": "Données de cartes générées le {{date}} à partir de {{commit}}",
+    "desktopAppVersion": "Application de bureau v{{version}}",
     "checkForUpdates": "Rechercher des mises à jour",
     "updaterDebugInfo": "Infos de débogage de la mise à jour",
     "updaterIssue": "Problème de mise à jour : {{error}}",

@@ -380,6 +380,7 @@ mod tests {
             is_cost_payment: false,
             library_position: None,
             enters_modified_if: None,
+            duration: None,
         };
 
         let filtered = filter_state_for_player(&state, PlayerId(1));

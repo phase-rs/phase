@@ -2075,6 +2075,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::MustBeBlocked { .. }
         | StaticMode::MustBeBlockedByAll { .. }
         | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
         | StaticMode::CombatAlone { .. }
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn

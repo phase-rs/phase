@@ -57,6 +57,23 @@ function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   };
 }
 
+function tapLandAction(objectId: number): GameAction {
+  return {
+    type: "TapLandForMana",
+    data: {
+      selection: {
+        source: { object_id: objectId, incarnation: 1 },
+        ability_index: null,
+        mana_type: "Green",
+        atomic_combination: null,
+        restrictions: [],
+        penalty: "None",
+        taps_for_mana: [],
+      },
+    },
+  };
+}
+
 describe("collectObjectActions", () => {
   it("returns the engine-provided bucket for the requested object", () => {
     // Engine-grouped map mirrors what `legal_actions_full` produces in Rust:
@@ -101,7 +118,7 @@ describe("isManaObjectAction", () => {
       ],
     });
 
-    expect(isManaObjectAction({ type: "TapLandForMana", data: { object_id: 1 } }, object)).toBe(true);
+    expect(isManaObjectAction(tapLandAction(1), object)).toBe(true);
     expect(
       isManaObjectAction(
         { type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } },
@@ -304,7 +321,7 @@ describe("abilityChoiceLabel", () => {
 
     expect(
       abilityChoiceLabel(
-        { type: "TapLandForMana", data: { object_id: 1 } },
+        tapLandAction(1),
         object,
       ).label,
     ).toBe("Tap for Mana");

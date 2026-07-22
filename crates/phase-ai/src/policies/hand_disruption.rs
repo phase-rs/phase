@@ -302,10 +302,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority {
@@ -462,10 +459,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -588,10 +582,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,
@@ -681,10 +672,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(target),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             };
             let ctx = PolicyContext {
                 state: &state,

@@ -542,10 +542,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 0 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -558,10 +555,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 2 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -613,10 +607,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 0 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -629,10 +620,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 3 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -667,10 +655,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(small)),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -685,10 +670,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(large)),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),

@@ -57,8 +57,27 @@ TEST_SUPPORT_EXPORT = re.compile(
 
 
 def test_support_modules(game_mod_source: str) -> frozenset[str]:
-    """Return game modules explicitly compiled only for tests/test-support."""
-    return frozenset(match.group("module") for match in TEST_SUPPORT_EXPORT.finditer(game_mod_source))
+    """Return game modules explicitly compiled only for tests/test-support.
+
+    A module can be declared twice with the cfg gating *visibility* rather than
+    existence (`#[cfg(any(test, feature = "test-support"))] pub mod x;` paired
+    with `#[cfg(not(...))] pub(crate) mod x;` — game/mod.rs does this for
+    `zones`). Such a module is compiled into production builds and must NOT be
+    classified as test support, so a gated export only counts when it is the
+    module's sole declaration.
+    """
+    gated = frozenset(match.group("module") for match in TEST_SUPPORT_EXPORT.finditer(game_mod_source))
+
+    def declaration_count(module: str) -> int:
+        return len(
+            re.findall(
+                rf"^\s*pub(?:\(crate\))?\s+mod\s+{module}\s*;\s*$",
+                game_mod_source,
+                re.MULTILINE,
+            )
+        )
+
+    return frozenset(module for module in gated if declaration_count(module) == 1)
 
 
 TEST_SUPPORT_MODULES = test_support_modules((ENGINE_GAME_DIR / "mod.rs").read_text(encoding="utf-8"))

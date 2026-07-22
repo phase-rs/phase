@@ -938,6 +938,13 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.graveyard_cast_permissions_used.clear();
     // CR 110.4 + CR 601.2a: Reset per-turn-per-permanent-type tracking (Muldrotha).
     state.graveyard_cast_permissions_used_per_type.clear();
+    // P1 retention policy (not a CR rule): the resolved-rules provenance
+    // journal only has consumers within a payment/announcement window, and a
+    // turn transition cannot begin with a payment in flight (the stack is
+    // empty, prompts are settled, and mana pools drained at step end per
+    // CR 106.4). Truncating here bounds journal growth to one turn until the
+    // CR 733 settlement consumer defines the real retention window.
+    state.resolved_rules_journal = Default::default();
     // CR 601.2b: Reset per-turn CastFromHandFree once-per-turn tracking (Zaffai).
     state.hand_cast_free_permissions_used.clear();
     // CR 118.9 + CR 601.2b + CR 400.7: Reset per-turn once-per-turn
@@ -1362,8 +1369,14 @@ pub fn execute_untap_with_choices(
                                 count: 1,
                             });
                         }
-                    } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
+                    } else if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .expect("untap-step object must remain a live exact object")
+                    {
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
@@ -1686,8 +1699,14 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
                                     count: 1,
                                 });
                             }
-                        } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                            obj.tapped = false;
+                        } else if crate::game::object_state::resolve_and_apply_object_edit(
+                            state,
+                            object_id,
+                            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                            false,
+                        )
+                        .expect("Seedborn untap object must remain a live exact object")
+                        {
                             events.push(GameEvent::PermanentUntapped { object_id });
                         }
                     }

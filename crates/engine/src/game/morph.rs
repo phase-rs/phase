@@ -495,26 +495,6 @@ pub fn manifest(
     )
 }
 
-/// CR 701.58a: Cloak puts the top card of library onto the battlefield face
-/// down as a 2/2 creature **with ward {2}**. Like manifest, a cloaked creature
-/// card can later be turned face up for its mana cost.
-pub fn cloak(
-    state: &mut GameState,
-    player: PlayerId,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EngineError> {
-    let object_id = top_library_object(state, player)?;
-    manifest_card(
-        state,
-        player,
-        object_id,
-        object_id,
-        crate::types::ability::FaceDownProfile::cloaked_2_2(),
-        None,
-        events,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::printed_cards::snapshot_object_face;

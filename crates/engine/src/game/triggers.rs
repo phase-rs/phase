@@ -31124,6 +31124,7 @@ pub mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         crate::game::engine::apply_as_current(
