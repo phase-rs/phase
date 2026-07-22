@@ -3203,8 +3203,11 @@ fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType])
     let mut sim = pool.clone();
     // Simulation path — `None` context preserves the prior "can pool cover
     // this at all" semantics. Restriction-aware affordability is checked at
-    // the real payment site via `pay_mana_sub_cost`.
-    debit_cost_with_plan(&mut sim, cost, plan, None).ok()
+    // the real payment site via `pay_mana_sub_cost`; the simulated spent
+    // units are discarded (provenance is recorded only at the real site).
+    debit_cost_with_plan(&mut sim, cost, plan, None)
+        .ok()
+        .map(|_| ())
 }
 
 /// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
