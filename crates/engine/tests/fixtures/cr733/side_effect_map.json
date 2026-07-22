@@ -1,21 +1,21 @@
 {
   "census": {
-    "base_commit": "e48c7d6e1861d735f1b39aa5fd60d5d79e53b418",
+    "base_commit": "a60993aeed7dfc54700c8eda535d5a7ad7430dd1",
     "family_counts": {
-      "allocator": 168,
-      "event_emission": 705,
+      "allocator": 171,
+      "event_emission": 710,
       "information": 47,
-      "rng": 74,
-      "write": 2368
+      "rng": 75,
+      "write": 2590
     },
     "gamestate_fields": 256,
-    "reachable_functions": 8662,
+    "reachable_functions": 8707,
     "schema": "cr733-p0-census/1",
-    "sha256": "c6afb7c698f464d2a84c7733ea7f71197877a66d4a29a44b33960f399a3ac376",
-    "site_count": 3362
+    "sha256": "c7791dddbbdd786e4b76e63432a6681c55b4d2f124723cc14b3bf4018e75a87e",
+    "site_count": 3593
   },
   "schema": "cr733-p0-side-effect-map/1",
-  "site_count": 752,
+  "site_count": 757,
   "sites": [
     {
       "classification": "out_of_closure",
@@ -7945,6 +7945,19 @@
         "family": "event_emission",
         "file": "crates/engine/src/game/engine.rs",
         "fn": "apply_action",
+        "line": 3887,
+        "pattern": "events-push",
+        "reachable": true
+      }
+    },
+    {
+      "classification": "out_of_closure",
+      "current_authority": "crate::game::engine::apply_action",
+      "reason": "GameEvent publication is a consequence/trigger input, not a resolved command; the matching state mutation is covered by the field matrix.",
+      "site": {
+        "family": "event_emission",
+        "file": "crates/engine/src/game/engine.rs",
+        "fn": "apply_action",
         "line": 3928,
         "pattern": "events-push",
         "reachable": true
@@ -10463,6 +10476,62 @@
         "line": 1727,
         "pattern": "visibility-redaction",
         "reachable": false
+      }
+    },
+    {
+      "classification": "out_of_closure",
+      "current_authority": "crate::game::zones::move_to_zone",
+      "reason": "GameEvent publication is a consequence/trigger input, not a resolved command; the matching state mutation is covered by the field matrix.",
+      "site": {
+        "family": "event_emission",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "move_to_zone",
+        "line": 1010,
+        "pattern": "events-push",
+        "reachable": true,
+        "variant": "Unattached"
+      }
+    },
+    {
+      "classification": "out_of_closure",
+      "current_authority": "crate::game::zones::move_to_zone",
+      "reason": "GameEvent publication is a consequence/trigger input, not a resolved command; the matching state mutation is covered by the field matrix.",
+      "site": {
+        "family": "event_emission",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "move_to_zone",
+        "line": 1016,
+        "pattern": "events-push",
+        "reachable": true,
+        "variant": "ZoneChanged"
+      }
+    },
+    {
+      "classification": "out_of_closure",
+      "current_authority": "crate::game::zones::move_to_library_at_index",
+      "reason": "GameEvent publication is a consequence/trigger input, not a resolved command; the matching state mutation is covered by the field matrix.",
+      "site": {
+        "family": "event_emission",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "move_to_library_at_index",
+        "line": 1391,
+        "pattern": "events-push",
+        "reachable": true,
+        "variant": "Unattached"
+      }
+    },
+    {
+      "classification": "out_of_closure",
+      "current_authority": "crate::game::zones::move_to_library_at_index",
+      "reason": "GameEvent publication is a consequence/trigger input, not a resolved command; the matching state mutation is covered by the field matrix.",
+      "site": {
+        "family": "event_emission",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "move_to_library_at_index",
+        "line": 1397,
+        "pattern": "events-push",
+        "reachable": true,
+        "variant": "ZoneChanged"
       }
     },
     {

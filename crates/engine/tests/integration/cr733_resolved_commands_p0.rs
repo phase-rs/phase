@@ -7,6 +7,60 @@ use serde_json::Value;
 
 const AUTHORITY_MATRIX: &str = include_str!("../fixtures/cr733/authority_matrix.json");
 const WRITE_SITE_CLASSIFICATIONS: &str = include_str!("../fixtures/cr733/blocked_write_sites.json");
+const RNG_ALLOCATOR_MAP: &str = include_str!("../fixtures/cr733/rng_allocator_map.json");
+const SIDE_EFFECT_MAP: &str = include_str!("../fixtures/cr733/side_effect_map.json");
+
+fn write_site_identity(site: &Value) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        site["field"]
+            .as_str()
+            .expect("CR733 write site must name its field"),
+        site["file"]
+            .as_str()
+            .expect("CR733 write site must name its file"),
+        site["fn"]
+            .as_str()
+            .expect("CR733 write site must name its enclosing function"),
+        site["line"]
+            .as_u64()
+            .expect("CR733 write site must name its line"),
+        site["pattern"]
+            .as_str()
+            .expect("CR733 write site must name its pattern"),
+        site["receiver"]
+            .as_str()
+            .expect("CR733 write site must name its receiver"),
+        site["reachable"]
+            .as_bool()
+            .expect("CR733 write site must name its reachability"),
+    )
+}
+
+fn non_write_site_identity(site: &Value) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        site["family"]
+            .as_str()
+            .expect("CR733 side-effect site must name its family"),
+        site["file"]
+            .as_str()
+            .expect("CR733 side-effect site must name its file"),
+        site["fn"]
+            .as_str()
+            .expect("CR733 side-effect site must name its enclosing function"),
+        site["line"]
+            .as_u64()
+            .expect("CR733 side-effect site must name its line"),
+        site["pattern"]
+            .as_str()
+            .expect("CR733 side-effect site must name its pattern"),
+        site["variant"].as_str().unwrap_or(""),
+        site["reachable"]
+            .as_bool()
+            .expect("CR733 side-effect site must name its reachability"),
+    )
+}
 
 #[test]
 fn cr733_authority_matrix_covers_the_fresh_write_census() {
@@ -38,6 +92,16 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
                 .to_owned()
         })
         .collect();
+    let rng_allocator_map: Value = serde_json::from_str(RNG_ALLOCATOR_MAP)
+        .expect("CR733 RNG/allocator map fixture must be valid JSON");
+    let rng_allocator_sites = rng_allocator_map["sites"]
+        .as_array()
+        .expect("CR733 RNG/allocator map must contain a sites array");
+    let side_effect_map: Value = serde_json::from_str(SIDE_EFFECT_MAP)
+        .expect("CR733 side-effect map fixture must be valid JSON");
+    let side_effect_sites = side_effect_map["sites"]
+        .as_array()
+        .expect("CR733 side-effect map must contain a sites array");
 
     let mut matrix_field_counts = BTreeMap::new();
     for entry in matrix_fields {
@@ -96,7 +160,12 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
                     "blocked field {field:?} must state its narrowed hard-stop reason"
                 );
             }
-            "out_of_reachable_closure" => {}
+            "out_of_reachable_closure" => {
+                assert!(
+                    entry["reason"].as_str().is_some(),
+                    "out-of-reachable field {field:?} must state why it is outside the P0 closure"
+                );
+            }
             unexpected => panic!(
                 "CR733 authority matrix field {field:?} has unsupported classification {unexpected:?}"
             ),
@@ -143,7 +212,13 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
                     "discarded clone site {site_id:?} must have source-read provenance"
                 );
             }
-            "derived" | "blocked" => {}
+            "derived" | "blocked" | "out_of_reachable_closure" => {
+                assert_eq!(
+                    site["reroute_required"].as_bool(),
+                    Some(false),
+                    "non-rerouted write site for {field:?} must not be sent through P2"
+                );
+            }
             unexpected => panic!(
                 "CR733 write-site record for {field:?} has unsupported classification {unexpected:?}"
             ),
@@ -178,6 +253,25 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
     fs::remove_file(&output_path).expect("remove temporary CR733 census output");
     let census: Value =
         serde_json::from_str(&census_text).expect("fresh CR733 census must be valid JSON");
+
+    let summary = &census["summary"];
+    assert_eq!(
+        matrix["census"]["site_count"].as_u64(),
+        Some(
+            census["sites"]
+                .as_array()
+                .expect("fresh CR733 census must contain a sites array")
+                .len() as u64
+        ),
+        "authority-matrix census site-count pin must match a fresh census"
+    );
+    for family in ["write", "rng", "allocator", "event_emission", "information"] {
+        assert_eq!(
+            matrix["census"]["family_counts"][family].as_u64(),
+            summary["per_family_counts"][family].as_u64(),
+            "authority-matrix census pin for {family:?} must match a fresh census"
+        );
+    }
 
     let mut census_fields = BTreeSet::new();
     let mut reachable_fields = BTreeSet::new();
@@ -222,4 +316,68 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
             "new reachable CR733 write-family field {field:?} is unmapped"
         );
     }
+
+    let mut expected_write_site_counts = BTreeMap::new();
+    let mut classified_write_site_counts = BTreeMap::new();
+    for site in census["sites"]
+        .as_array()
+        .expect("fresh CR733 census must contain a sites array")
+        .iter()
+        .filter(|site| site["family"].as_str() == Some("write"))
+    {
+        *expected_write_site_counts
+            .entry(write_site_identity(site))
+            .or_insert(0_usize) += 1;
+    }
+    for site in classified_sites {
+        *classified_write_site_counts
+            .entry(write_site_identity(site))
+            .or_insert(0_usize) += 1;
+    }
+    assert_eq!(
+        classified_write_site_counts, expected_write_site_counts,
+        "CR733 write-site classifications must mirror every fresh write-family census site exactly"
+    );
+
+    let mut expected_rng_allocator_counts = BTreeMap::new();
+    let mut mapped_rng_allocator_counts = BTreeMap::new();
+    let mut expected_side_effect_counts = BTreeMap::new();
+    let mut mapped_side_effect_counts = BTreeMap::new();
+    for site in census["sites"]
+        .as_array()
+        .expect("fresh CR733 census must contain a sites array")
+    {
+        match site["family"].as_str() {
+            Some("rng" | "allocator") => {
+                *expected_rng_allocator_counts
+                    .entry(non_write_site_identity(site))
+                    .or_insert(0_usize) += 1;
+            }
+            Some("event_emission" | "information") => {
+                *expected_side_effect_counts
+                    .entry(non_write_site_identity(site))
+                    .or_insert(0_usize) += 1;
+            }
+            Some("write") => {}
+            other => panic!("unexpected CR733 census family {other:?}"),
+        }
+    }
+    for entry in rng_allocator_sites {
+        *mapped_rng_allocator_counts
+            .entry(non_write_site_identity(&entry["site"]))
+            .or_insert(0_usize) += 1;
+    }
+    for entry in side_effect_sites {
+        *mapped_side_effect_counts
+            .entry(non_write_site_identity(&entry["site"]))
+            .or_insert(0_usize) += 1;
+    }
+    assert_eq!(
+        mapped_rng_allocator_counts, expected_rng_allocator_counts,
+        "CR733 RNG/allocator receipts must mirror every fresh census site exactly"
+    );
+    assert_eq!(
+        mapped_side_effect_counts, expected_side_effect_counts,
+        "CR733 event/information map must mirror every fresh census site exactly"
+    );
 }

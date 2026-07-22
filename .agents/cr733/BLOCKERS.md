@@ -1,17 +1,13 @@
-# CR733 Run 2 — true P0 blocker residue
+# CR733 Run 3 — true P0 blocker residue
 
 ## Status
 
-**Empty.** The corrected classification found no reachable write that is uncommandable, external to `GameState`, or incapable of expression as a composable semantic command.
+**Empty.** The v3 census has zero `blocked` fields and zero `blocked` sites.
 
-The former 229-field / 1,973-site `blocked_missing_final_authority` set is now 227 `proposed_authority` fields and two fields whose only detected writes are discarded analysis clones. The companion fixture records 76 source-verified clone/probe sites and 1,882 canonical sites P2 must reroute; the remaining 15 candidates are parser or presentation receiver name collisions, retained for census transparency but not reroutes.
+Evidence: all 2,590 write-family records from the fresh v3-equivalent census are represented exactly once in `blocked_write_sites.json`; every proposed field names one final authority, command family, and composition policy. The seven fields still marked `out_of_reachable_closure` have no reachable writer: their nine hits are configuration/destructure/projection artifacts, not a reachable mutation without an authority.
 
-## Evidence
-
-- [`authority_matrix.json`](../../crates/engine/tests/fixtures/cr733/authority_matrix.json) contains zero `blocked` records. Every proposed row names a P2 authority seam, command-family scope, composition policy, and canonical reroute-site list.
-- [`blocked_write_sites.json`](../../crates/engine/tests/fixtures/cr733/blocked_write_sites.json) records the provenance for every clone/probe disposition: the clone’s construction from a shared state, its analysis/simulation use, and the absence of a write-back to canonical rules state.
-- `battlefield` and `spells_cast_this_game_by_player` are the only field-level `out_of_closure_clone` rows; every detected hit for each is a discarded analysis projection.
+The zones correction removed the prior false clone-only status for `battlefield`; `zones::remove_from_zone` and `zones::add_to_zone` now supply its canonical Zone-change writes. The fluent-chain correction likewise exposes the game-lifetime spell ledger append in `restrictions::record_spell_cast_from_zone`.
 
 ## P1 decision
 
-P1 may begin. The narrowed hard-stop residue is empty, so there is no lead decision required before the identity/order/provenance work begins. P2 must preserve the fixture’s final-authority seams and reroute lists rather than reverting to raw field writes.
+P1 may begin. No lead decision is required for a hard-stop residue. P2 must keep `zones.rs`/`zone_pipeline.rs` implementation writes inside the existing final Zone authority and reroute only callers that bypass that authority.

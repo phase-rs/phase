@@ -1,21 +1,21 @@
 {
   "census": {
-    "base_commit": "e48c7d6e1861d735f1b39aa5fd60d5d79e53b418",
+    "base_commit": "a60993aeed7dfc54700c8eda535d5a7ad7430dd1",
     "family_counts": {
-      "allocator": 168,
-      "event_emission": 705,
+      "allocator": 171,
+      "event_emission": 710,
       "information": 47,
-      "rng": 74,
-      "write": 2368
+      "rng": 75,
+      "write": 2590
     },
     "gamestate_fields": 256,
-    "reachable_functions": 8662,
+    "reachable_functions": 8707,
     "schema": "cr733-p0-census/1",
-    "sha256": "c6afb7c698f464d2a84c7733ea7f71197877a66d4a29a44b33960f399a3ac376",
-    "site_count": 3362
+    "sha256": "c7791dddbbdd786e4b76e63432a6681c55b4d2f124723cc14b3bf4018e75a87e",
+    "site_count": 3593
   },
   "schema": "cr733-p0-rng-allocator-map/1",
-  "site_count": 242,
+  "site_count": 246,
   "sites": [
     {
       "consuming_authority": "crate::analysis::corpus::install_on_battlefield",
@@ -145,7 +145,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/ability_utils.rs",
         "fn": "random_select_modal_indices",
-        "line": 1445,
+        "line": 1443,
         "pattern": "choose",
         "reachable": true
       }
@@ -158,7 +158,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/ability_utils.rs",
         "fn": "random_select_modal_indices",
-        "line": 1445,
+        "line": 1443,
         "pattern": "state.rng",
         "reachable": true
       }
@@ -671,7 +671,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/effects/choose_from_zone.rs",
         "fn": "resolve_random_in_chain",
-        "line": 515,
+        "line": 514,
         "pattern": "state.rng",
         "reachable": true
       }
@@ -753,7 +753,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/effects/create_token_copy_from_pool.rs",
         "fn": "resolve",
-        "line": 134,
+        "line": 133,
         "pattern": "choose",
         "reachable": true
       }
@@ -766,7 +766,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/effects/create_token_copy_from_pool.rs",
         "fn": "resolve",
-        "line": 134,
+        "line": 133,
         "pattern": "state.rng",
         "reachable": true
       }
@@ -927,7 +927,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/effects/heist.rs",
         "fn": "resolve",
-        "line": 113,
+        "line": 112,
         "pattern": "state.rng",
         "reachable": true
       }
@@ -1401,7 +1401,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/engine.rs",
         "fn": "start_game",
-        "line": 10326,
+        "line": 10324,
         "pattern": "random_range",
         "reachable": false
       }
@@ -1414,7 +1414,7 @@
         "family": "rng",
         "file": "crates/engine/src/game/engine.rs",
         "fn": "start_game",
-        "line": 10326,
+        "line": 10324,
         "pattern": "state.rng",
         "reachable": false
       }
@@ -1760,6 +1760,61 @@
         "line": 111,
         "pattern": "rng_word_pos",
         "reachable": false
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::create_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "create_object",
+        "line": 566,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::create_object",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "create_object",
+        "line": 567,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_object_id"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::move_to_zone",
+      "proposed_receipt_kind": "AllocationReceipt",
+      "receipt_requirement": "Record allocator kind and exact reserved range or IDs; replay consumes reserved identities without allocation.",
+      "site": {
+        "family": "allocator",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "move_to_zone",
+        "line": 885,
+        "pattern": "next-id-alloc",
+        "reachable": true,
+        "variant": "next_timestamp"
+      }
+    },
+    {
+      "consuming_authority": "crate::game::zones::random_top_slot_index",
+      "proposed_receipt_kind": "TypedEntropyReceipt",
+      "receipt_requirement": "Record operation kind, stream span, and sampled result; replay consumes the recorded result without RNG access.",
+      "site": {
+        "family": "rng",
+        "file": "crates/engine/src/game/zones.rs",
+        "fn": "random_top_slot_index",
+        "line": 1291,
+        "pattern": "random_range",
+        "reachable": true
       }
     },
     {
@@ -2159,7 +2214,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/game_state.rs",
         "fn": "push_draw_sequence_with_origin",
-        "line": 14440,
+        "line": 14436,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_frame_id"
@@ -2173,7 +2228,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/game_state.rs",
         "fn": "push_draw_sequence_with_origin",
-        "line": 14442,
+        "line": 14441,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_frame_id"
@@ -2215,7 +2270,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/game_state.rs",
         "fn": "take_completed_multi_draw_frame",
-        "line": 14642,
+        "line": 14641,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_frame_id"
@@ -2229,7 +2284,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/game_state.rs",
         "fn": "abandon_active_replacement_tails",
-        "line": 14753,
+        "line": 14752,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_frame_id"
@@ -2243,7 +2298,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/game_state.rs",
         "fn": "abandon_active_replacement_tails",
-        "line": 14765,
+        "line": 14764,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_frame_id"
@@ -2285,7 +2340,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/game_state.rs",
         "fn": "allocate_logical_zone_change_group",
-        "line": 15023,
+        "line": 15022,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_logical_zone_change_group_id"
@@ -3227,7 +3282,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/resolution.rs",
         "fn": "from_value",
-        "line": 2612,
+        "line": 2610,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_draw_sequence_frame_id"
@@ -3311,7 +3366,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/resolution.rs",
         "fn": "canonicalize_legacy_resolution_state",
-        "line": 3261,
+        "line": 3260,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_draw_sequence_frame_id"
@@ -3325,7 +3380,7 @@
         "family": "allocator",
         "file": "crates/engine/src/types/resolution.rs",
         "fn": "project_frames_into_legacy_state",
-        "line": 3283,
+        "line": 3281,
         "pattern": "next-id-alloc",
         "reachable": true,
         "variant": "next_draw_sequence_frame_id"
