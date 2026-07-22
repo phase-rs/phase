@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use engine::ai_support::legal_actions;
+use engine::game::mana_sources::activatable_mana_actions_for_player;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
@@ -22,13 +22,16 @@ fn tap_land_action(
     state: &engine::types::game_state::GameState,
     object_id: engine::types::identifiers::ObjectId,
 ) -> GameAction {
-    legal_actions(state)
-        .into_iter()
-        .find(|action| {
-            matches!(action, GameAction::TapLandForMana { selection }
+    activatable_mana_actions_for_player(
+        state,
+        state.waiting_for.acting_player().expect("acting player"),
+    )
+    .into_iter()
+    .find(|action| {
+        matches!(action, GameAction::TapLandForMana { selection }
             if selection.source.object_id == object_id)
-        })
-        .expect("land must expose semantic mana action")
+    })
+    .expect("land must expose semantic mana action")
 }
 
 fn ultima_mana_trigger() -> engine::types::ability::TriggerDefinition {

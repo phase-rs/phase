@@ -292,6 +292,9 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mana_payment_shortcut_actions: Vec<GameAction>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         spell_costs: HashMap<ObjectId, ManaCost>,
         /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
@@ -325,6 +328,9 @@ pub enum ServerMessage {
         legal_actions: Vec<GameAction>,
         #[serde(default)]
         auto_pass_recommended: bool,
+        /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mana_payment_shortcut_actions: Vec<GameAction>,
         #[serde(default)]
         eliminated_players: Vec<PlayerId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -899,6 +905,7 @@ mod tests {
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
             legal_actions: vec![GameAction::PassPriority],
             auto_pass_recommended: false,
+            mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
             derived: Default::default(),
@@ -934,6 +941,7 @@ mod tests {
             player_names: vec![],
             legal_actions: vec![],
             auto_pass_recommended: false,
+            mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
             derived: Default::default(),

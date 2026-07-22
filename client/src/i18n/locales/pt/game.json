@@ -499,13 +499,22 @@
     "clickToFocus": "clique para focar"
   },
   "manaPool": {
+    "onlyForSpell": "Spend only to cast spells",
     "onlyForSpellType": "Gaste apenas para conjurar mágicas de um tipo específico",
     "onlyForCreatureType": "Gaste apenas para conjurar uma mágica de criatura do tipo escolhido",
     "onlyForTypeSpellsOrAbilities": "Gaste apenas em mágicas ou habilidades de um tipo específico",
+    "onlyForTaggedActivation": "Spend only to activate abilities of a specific kind",
     "onlyForSpellWithKeywordKind": "Gaste apenas para conjurar mágicas com uma palavra-chave específica",
     "onlyForSpellWithKeywordKindFromZone": "Gaste apenas para conjurar mágicas com palavra-chave de um cemitério",
+    "onlyForSpellWithManaValue": "Spend only to cast spells meeting a mana-value requirement",
+    "onlyForSpellMatchingCostCriteria": "Spend only to cast spells meeting a cost requirement",
+    "onlyForSpellWithColorCount": "Spend only to cast spells meeting a color-count requirement",
+    "onlyForSpellFromZone": "Spend only to cast spells from an allowed zone",
+    "onlyForFaceDownSpell": "Spend only to cast face-down spells",
     "onlyForActivation": "Gaste apenas para ativar habilidades",
     "onlyForXCosts": "Gaste apenas em custos que incluam {X}",
+    "onlyForAny": "Spend only on one of the listed uses",
+    "onlyForSpecialAction": "Spend only on a specific special action",
     "convokePayment": "Pagamento de convocação",
     "grantsProperty": "Concede uma propriedade à mágica",
     "grantCantBeCountered": "Gaste nesta mágica para que ela não possa ser anulada"

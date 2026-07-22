@@ -1763,6 +1763,34 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     (actions, spell_costs, grouped)
 }
 
+/// Engine-authored action sequence for the "tap all lands" mana-payment shortcut.
+///
+/// This is presentation policy, not a new game action: preserve battlefield order
+/// and include a source only when it has exactly one legal land-mana action. A
+/// source with multiple legal mana rows is deliberately omitted because choosing
+/// among them is a player decision, not a deterministic shortcut.
+pub fn mana_payment_shortcut_actions(
+    state: &GameState,
+    legal_actions_by_object: &HashMap<ObjectId, Vec<GameAction>>,
+) -> Vec<GameAction> {
+    if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+        return Vec::new();
+    }
+
+    state
+        .battlefield
+        .iter()
+        .filter_map(|object_id| {
+            let mut options = legal_actions_by_object
+                .get(object_id)?
+                .iter()
+                .filter(|action| matches!(action, GameAction::TapLandForMana { .. }));
+            let action = options.next()?;
+            options.next().is_none().then(|| action.clone())
+        })
+        .collect()
+}
+
 /// Returns `legal_actions_full` scoped to a specific viewer. Empty tuple if
 /// `viewer` is not the player currently expected to act.
 ///
@@ -2712,22 +2740,16 @@ mod tests {
             bucket_has_tap_land(&grouped, forest),
             "subtype-only basic land fallback must remain tappable"
         );
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: blue_idx,
-            },
-        ));
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: black_idx,
-            },
-        ));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(blue_idx))
+        )));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(black_idx))
+        )));
         assert!(
             !flat
                 .iter()
@@ -2740,6 +2762,33 @@ mod tests {
                 .any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == dual)),
             "flat legal actions stay free of explicit mana abilities"
         );
+    }
+
+    #[test]
+    fn mana_payment_shortcut_preserves_battlefield_order_and_omits_ambiguous_sources() {
+        let mut state = setup_priority();
+        let forest = create_land(&mut state, "Forest", &["Forest"]);
+        let dual = create_land(&mut state, "Underground Sea", &[]);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Blue);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Black);
+        let mountain = create_land(&mut state, "Mountain", &["Mountain"]);
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        let shortcut = mana_payment_shortcut_actions(&state, &grouped);
+        let sources: Vec<_> = shortcut
+            .iter()
+            .map(|action| match action {
+                GameAction::TapLandForMana { selection } => selection.source.object_id,
+                other => panic!("unexpected shortcut action: {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(sources, vec![forest, mountain]);
     }
 
     #[test]
@@ -2855,14 +2904,11 @@ mod tests {
         let (_, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            bucket_has(
-                &grouped,
-                skycloud,
-                &GameAction::ActivateAbility {
-                    source_id: skycloud,
-                    ability_index: 0,
-                },
-            ),
+            grouped.get(&skycloud).is_some_and(|actions| actions.iter().any(
+                |action| matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == skycloud
+                        && selection.ability_index == Some(0))
+            )),
             "Skycloud Expanse should be manually activatable when another mana source can pay its {{1}} cost",
         );
     }

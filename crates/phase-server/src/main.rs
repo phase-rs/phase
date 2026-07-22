@@ -21,6 +21,7 @@ use clap::Parser;
 use engine::ai_support::{
     auto_pass_recommended_for_viewer as engine_auto_pass_for_viewer,
     legal_actions_full as engine_legal_actions_full,
+    mana_payment_shortcut_actions as engine_mana_payment_shortcut_actions,
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
@@ -251,6 +252,11 @@ fn build_game_started_message(
     let (legal_actions, spell_costs_all, by_object_all) = engine_legal_actions_full(&session.state);
     let is_actor = server_core::is_acting(&session.state, player);
     let auto_pass = engine_auto_pass_for_viewer(&session.state, player, &legal_actions);
+    let mana_payment_shortcut_actions = if is_actor {
+        engine_mana_payment_shortcut_actions(&session.state, &by_object_all)
+    } else {
+        Vec::new()
+    };
     let filtered = server_core::filter_state_for_player(&session.state, player);
     let opponent_name = engine::game::players::opponents(&session.state, player)
         .first()
@@ -271,6 +277,7 @@ fn build_game_started_message(
         player_names: session.display_names.clone(),
         legal_actions: if is_actor { legal_actions } else { Vec::new() },
         auto_pass_recommended: auto_pass,
+        mana_payment_shortcut_actions,
         spell_costs: if is_actor {
             spell_costs_all
         } else {
@@ -329,6 +336,11 @@ fn build_state_update_message(
     let is_actor = server_core::is_acting(raw_state, player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_transport_views(raw_state, &filtered, Some(player));
+    let mana_payment_shortcut_actions = if is_actor {
+        engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
+    } else {
+        Vec::new()
+    };
 
     Ok(ServerMessage::StateUpdate {
         state: filtered,
@@ -339,6 +351,7 @@ fn build_state_update_message(
             Vec::new()
         },
         auto_pass_recommended: engine_auto_pass_for_viewer(raw_state, player, legal_actions),
+        mana_payment_shortcut_actions,
         eliminated_players: Vec::new(),
         log_entries: log_entries.clone(),
         spell_costs: if is_actor {
@@ -371,6 +384,7 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         player_names: session.display_names.clone(),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
+        mana_payment_shortcut_actions: Vec::new(),
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
@@ -401,6 +415,7 @@ fn build_spectator_state_update_message(
         events: server_core::filter_events_for_player(events, raw_state, SPECTATOR_PLAYER_ID),
         legal_actions: Vec::new(),
         auto_pass_recommended: false,
+        mana_payment_shortcut_actions: Vec::new(),
         eliminated_players,
         log_entries: log_entries.to_vec(),
         spell_costs: HashMap::new(),
@@ -3037,6 +3052,11 @@ async fn broadcast_takeback_approved(
                     vec![]
                 };
                 let p_auto_pass = engine_auto_pass_for_viewer(&raw_state, *pid, &legal_actions);
+                let p_mana_payment_shortcut_actions = if is_actor {
+                    engine_mana_payment_shortcut_actions(&raw_state, &by_object)
+                } else {
+                    Vec::new()
+                };
                 let p_spell_costs = if is_actor {
                     spell_costs.clone()
                 } else {
@@ -3052,6 +3072,7 @@ async fn broadcast_takeback_approved(
                     events: vec![],
                     legal_actions: player_legals,
                     auto_pass_recommended: p_auto_pass,
+                    mana_payment_shortcut_actions: p_mana_payment_shortcut_actions,
                     eliminated_players: raw_state.eliminated_players.clone(),
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
@@ -3550,6 +3571,15 @@ async fn handle_client_message(
                                     } else {
                                         false
                                     };
+                                    let p_mana_payment_shortcut_actions =
+                                        if ai_results.is_empty() && is_actor {
+                                            engine_mana_payment_shortcut_actions(
+                                                &raw_state,
+                                                &legal_actions_by_object,
+                                            )
+                                        } else {
+                                            Vec::new()
+                                        };
                                     let p_spell_costs = if ai_results.is_empty() && is_actor {
                                         spell_costs.clone()
                                     } else {
@@ -3567,6 +3597,8 @@ async fn handle_client_message(
                                         ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
+                                        mana_payment_shortcut_actions:
+                                            p_mana_payment_shortcut_actions,
                                         eliminated_players: eliminated.clone(),
                                         log_entries: log_entries.clone(),
                                         spell_costs: p_spell_costs,
@@ -3654,6 +3686,14 @@ async fn handle_client_message(
                                     } else {
                                         false
                                     };
+                                    let p_mana_payment_shortcut_actions = if is_last && is_actor {
+                                        engine_mana_payment_shortcut_actions(
+                                            ai_raw_state,
+                                            ai_by_object,
+                                        )
+                                    } else {
+                                        Vec::new()
+                                    };
                                     let p_spell_costs = if is_last && is_actor {
                                         ai_spell_costs.clone()
                                     } else {
@@ -3673,6 +3713,8 @@ async fn handle_client_message(
                                         ),
                                         legal_actions: player_legals,
                                         auto_pass_recommended: p_auto_pass,
+                                        mana_payment_shortcut_actions:
+                                            p_mana_payment_shortcut_actions,
                                         eliminated_players: eliminated.clone(),
                                         log_entries: ai_log_entries.clone(),
                                         spell_costs: p_spell_costs,
@@ -4946,6 +4988,7 @@ async fn handle_client_message(
                         events: vec![],
                         legal_actions: vec![],
                         auto_pass_recommended: false,
+                        mana_payment_shortcut_actions: vec![],
                         eliminated_players: vec![],
                         log_entries: vec![],
                         spell_costs: HashMap::new(),

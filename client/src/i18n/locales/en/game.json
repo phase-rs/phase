@@ -531,13 +531,22 @@
     "clickToFocus": "click to focus"
   },
   "manaPool": {
+    "onlyForSpell": "Spend only to cast spells",
     "onlyForSpellType": "Spend only to cast spells of a specific type",
     "onlyForCreatureType": "Spend only to cast a creature spell of the chosen type",
     "onlyForTypeSpellsOrAbilities": "Spend only on spells or abilities of a specific type",
+    "onlyForTaggedActivation": "Spend only to activate abilities of a specific kind",
     "onlyForSpellWithKeywordKind": "Spend only to cast spells with a specific keyword",
     "onlyForSpellWithKeywordKindFromZone": "Spend only to cast keyword spells from a graveyard",
+    "onlyForSpellWithManaValue": "Spend only to cast spells meeting a mana-value requirement",
+    "onlyForSpellMatchingCostCriteria": "Spend only to cast spells meeting a cost requirement",
+    "onlyForSpellWithColorCount": "Spend only to cast spells meeting a color-count requirement",
+    "onlyForSpellFromZone": "Spend only to cast spells from an allowed zone",
+    "onlyForFaceDownSpell": "Spend only to cast face-down spells",
     "onlyForActivation": "Spend only to activate abilities",
     "onlyForXCosts": "Spend only on costs that include {X}",
+    "onlyForAny": "Spend only on one of the listed uses",
+    "onlyForSpecialAction": "Spend only on a specific special action",
     "convokePayment": "Convoke payment",
     "grantsProperty": "Grants a property to the spell",
     "grantCantBeCountered": "Spend on this spell to make it uncounterable"

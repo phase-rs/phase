@@ -38,8 +38,15 @@ use engine::types::zones::Zone;
 use crate::support::shared_card_db as load_db;
 
 fn priority_view(state: &GameState) -> engine::types::interaction::ViewerInteraction {
-    let filtered = filter_state_for_viewer(state, P0);
-    derive_viewer_interaction(state, &filtered, P0)
+    viewer_interaction(state, P0)
+}
+
+fn viewer_interaction(
+    state: &GameState,
+    viewer: PlayerId,
+) -> engine::types::interaction::ViewerInteraction {
+    let filtered = filter_state_for_viewer(state, viewer);
+    derive_viewer_interaction(state, &filtered, viewer)
 }
 
 fn bind(state: &mut GameState, id: &str) {
@@ -2358,13 +2365,13 @@ fn oversized_session_fails_closed_and_serial_rolls_to_next_generation() {
         .interaction_id
         .as_str()
         .ends_with(&format!(".0.{}", "9".repeat(32))));
-    assert_eq!(priority_view(&serial).opportunities.len(), 1);
+    assert_eq!(viewer_interaction(&serial, P1).opportunities.len(), 1);
 
     let mut longest_valid = GameState::new_two_player(42);
     bind(&mut longest_valid, &"v".repeat(128));
     longest_valid.next_interaction_serial = "8".repeat(32);
     apply(&mut longest_valid, P0, GameAction::PassPriority).expect("bounded serial resolves");
-    let view = priority_view(&longest_valid);
+    let view = viewer_interaction(&longest_valid, P1);
     assert!(view.opportunities.iter().all(|opportunity| {
         opportunity.interaction_id.as_str().len() <= 256
             && match &opportunity.response {

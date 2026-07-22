@@ -148,6 +148,7 @@
       { "type": "PassPriority" }
     ],
     "auto_pass_recommended": false,
+    "mana_payment_shortcut_actions": [],
     "eliminated_players": [],
     "log_entries": [],
     "spell_costs": {}

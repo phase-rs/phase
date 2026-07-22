@@ -1605,6 +1605,7 @@ export function GameProvider({
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
+            manaPaymentShortcutActions: [],
             spellCosts: {},
             stateHistory: [],
             turnCheckpoints: [],

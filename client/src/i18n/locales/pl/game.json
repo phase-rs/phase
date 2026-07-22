@@ -499,13 +499,22 @@
     "clickToFocus": "kliknij, aby skupić"
   },
   "manaPool": {
+    "onlyForSpell": "Spend only to cast spells",
     "onlyForSpellType": "Wydaj tylko na rzucanie czarów określonego typu",
     "onlyForCreatureType": "Wydaj tylko na rzucenie czaru stwora wybranego typu",
     "onlyForTypeSpellsOrAbilities": "Wydaj tylko na czary lub zdolności określonego typu",
+    "onlyForTaggedActivation": "Spend only to activate abilities of a specific kind",
     "onlyForSpellWithKeywordKind": "Wydaj tylko na rzucanie czarów z określonym słowem kluczowym",
     "onlyForSpellWithKeywordKindFromZone": "Wydaj tylko na rzucanie czarów ze słowem kluczowym z cmentarza",
+    "onlyForSpellWithManaValue": "Spend only to cast spells meeting a mana-value requirement",
+    "onlyForSpellMatchingCostCriteria": "Spend only to cast spells meeting a cost requirement",
+    "onlyForSpellWithColorCount": "Spend only to cast spells meeting a color-count requirement",
+    "onlyForSpellFromZone": "Spend only to cast spells from an allowed zone",
+    "onlyForFaceDownSpell": "Spend only to cast face-down spells",
     "onlyForActivation": "Wydaj tylko na aktywowanie zdolności",
     "onlyForXCosts": "Wydaj tylko na koszty zawierające {X}",
+    "onlyForAny": "Spend only on one of the listed uses",
+    "onlyForSpecialAction": "Spend only on a specific special action",
     "convokePayment": "Płatność Convoke",
     "grantsProperty": "Nadaje czarowi właściwość",
     "grantCantBeCountered": "Wydaj na ten czar, aby nie można było go skontrować"

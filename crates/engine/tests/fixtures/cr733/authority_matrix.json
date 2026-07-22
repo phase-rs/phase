@@ -178,6 +178,26 @@
    "excluded_non_gamestate_site_ids": []
   },
   {
+   "field": "active_interaction_slots",
+   "classification": "proposed_authority",
+   "census_site_count": 12,
+   "reachable_site_count": 7,
+   "final_authority": "crate::game::interaction::{bind_interaction_authority, rebind_interaction_slots_after_action}",
+   "authority_status": "existing_to_promote",
+   "owning_module": "crates/engine/src/game/interaction.rs",
+   "command_family": "Continuation/prompt state",
+   "command_scopes": [
+    {
+     "family": "Continuation/prompt state",
+     "scope": "mint and preserve the exact capability IDs for the semantic interaction slots published at an outer action boundary."
+    }
+   ],
+   "composition_policy": "atomic capability-ledger transition; preserve current IDs for preference-only actions and rotate only the submitted slot owner.",
+   "reroute_site_ids": [],
+   "excluded_clone_site_ids": [],
+   "excluded_non_gamestate_site_ids": []
+  },
+  {
    "field": "active_library_searches",
    "classification": "proposed_authority",
    "census_site_count": 9,
@@ -2352,6 +2372,46 @@
    "excluded_non_gamestate_site_ids": []
   },
   {
+   "field": "interaction_generation",
+   "classification": "proposed_authority",
+   "census_site_count": 7,
+   "reachable_site_count": 3,
+   "final_authority": "crate::game::interaction::{bind_interaction_authority, rebind_interaction_slots_after_action}",
+   "authority_status": "existing_to_promote",
+   "owning_module": "crates/engine/src/game/interaction.rs",
+   "command_family": "Continuation/prompt state",
+   "command_scopes": [
+    {
+     "family": "Continuation/prompt state",
+     "scope": "advance the capability generation exactly when the bounded interaction serial rolls over."
+    }
+   ],
+   "composition_policy": "monotonic capability allocation receipt; generation and serial advance atomically with slot publication.",
+   "reroute_site_ids": [],
+   "excluded_clone_site_ids": [],
+   "excluded_non_gamestate_site_ids": []
+  },
+  {
+   "field": "interaction_session_id",
+   "classification": "proposed_authority",
+   "census_site_count": 5,
+   "reachable_site_count": 1,
+   "final_authority": "crate::game::interaction::bind_interaction_authority",
+   "authority_status": "existing_to_promote",
+   "owning_module": "crates/engine/src/game/interaction.rs",
+   "command_family": "Continuation/prompt state",
+   "command_scopes": [
+    {
+     "family": "Continuation/prompt state",
+     "scope": "bind the trusted transport session namespace used to mint interaction capabilities."
+    }
+   ],
+   "composition_policy": "session binding is an outer-boundary replacement that atomically resets its generation, serial, and active capability slots.",
+   "reroute_site_ids": [],
+   "excluded_clone_site_ids": [],
+   "excluded_non_gamestate_site_ids": []
+  },
+  {
    "field": "lands_played_this_turn",
    "classification": "proposed_authority",
    "census_site_count": 9,
@@ -3335,6 +3395,26 @@
     "crates/engine/src/game/engine.rs:10367:start_game_with_starting_player:assign",
     "crates/engine/src/game/match_flow.rs:255:handle_game_over_transition:assign"
    ],
+   "excluded_clone_site_ids": [],
+   "excluded_non_gamestate_site_ids": []
+  },
+  {
+   "field": "next_interaction_serial",
+   "classification": "proposed_authority",
+   "census_site_count": 7,
+   "reachable_site_count": 3,
+   "final_authority": "crate::game::interaction::{bind_interaction_authority, rebind_interaction_slots_after_action}",
+   "authority_status": "existing_to_promote",
+   "owning_module": "crates/engine/src/game/interaction.rs",
+   "command_family": "Continuation/prompt state",
+   "command_scopes": [
+    {
+     "family": "Continuation/prompt state",
+     "scope": "reserve the next bounded serial used to mint exact interaction and choice capability IDs."
+    }
+   ],
+   "composition_policy": "monotonic capability allocation receipt; serial and generation advance atomically with slot publication.",
+   "reroute_site_ids": [],
    "excluded_clone_site_ids": [],
    "excluded_non_gamestate_site_ids": []
   },

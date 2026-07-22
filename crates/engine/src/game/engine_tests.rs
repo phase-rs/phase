@@ -8006,27 +8006,24 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
         .expect("Holdout Settlement should expose legal mana actions");
     assert!(holdout_actions.iter().any(|action| matches!(
         action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 0
-        } if *source_id == holdout
+        GameAction::TapLandForMana { selection }
+            if selection.source.object_id == holdout && selection.ability_index == Some(0)
     )));
-    assert!(holdout_actions.iter().any(|action| matches!(
-        action,
-        GameAction::ActivateAbility {
-            source_id,
-            ability_index: 1
-        } if *source_id == holdout
-    )));
+    let green_action = holdout_actions
+        .iter()
+        .find(|action| {
+            matches!(
+                action,
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == holdout
+                        && selection.ability_index == Some(1)
+                        && selection.mana_type == ManaType::Green
+            )
+        })
+        .cloned()
+        .expect("Holdout Settlement should expose its semantic green mana action");
 
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ActivateAbility {
-            source_id: holdout,
-            ability_index: 1,
-        },
-    )
-    .unwrap();
+    let result = apply_as_current(&mut state, green_action).unwrap();
 
     match result.waiting_for {
         WaitingFor::PayCost {
@@ -8055,28 +8052,12 @@ fn holdout_settlement_second_mana_ability_prompts_for_creature_then_adds_mana() 
     .unwrap();
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ChooseManaColor {
-            player: PlayerId(0),
-            ..
-        }
-    ));
-    assert!(state.objects.get(&holdout).unwrap().tapped);
-    assert!(state.objects.get(&creature).unwrap().tapped);
-
-    let result = apply_as_current(
-        &mut state,
-        GameAction::ChooseManaColor {
-            choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        },
-    )
-    .unwrap();
-    assert!(matches!(
-        result.waiting_for,
         WaitingFor::Priority {
             player: PlayerId(0)
         }
     ));
+    assert!(state.objects.get(&holdout).unwrap().tapped);
+    assert!(state.objects.get(&creature).unwrap().tapped);
     assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
 }
 

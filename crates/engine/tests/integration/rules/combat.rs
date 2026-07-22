@@ -2,13 +2,20 @@
 use super::*;
 
 fn tap_land_action(runner: &GameRunner, object_id: ObjectId) -> GameAction {
-    engine::ai_support::legal_actions(runner.state())
-        .into_iter()
-        .find(|action| {
-            matches!(action, GameAction::TapLandForMana { selection }
+    engine::game::mana_sources::activatable_mana_actions_for_player(
+        runner.state(),
+        runner
+            .state()
+            .waiting_for
+            .acting_player()
+            .expect("acting player"),
+    )
+    .into_iter()
+    .find(|action| {
+        matches!(action, GameAction::TapLandForMana { selection }
             if selection.source.object_id == object_id)
-        })
-        .expect("land must expose semantic mana action")
+    })
+    .expect("land must expose semantic mana action")
 }
 
 /// CR 510.1: Unblocked attacker deals combat damage to defending player

@@ -499,13 +499,22 @@
     "clickToFocus": "cliquez pour cibler"
   },
   "manaPool": {
+    "onlyForSpell": "Spend only to cast spells",
     "onlyForSpellType": "À dépenser uniquement pour lancer des sorts d'un type spécifique",
     "onlyForCreatureType": "À dépenser uniquement pour lancer un sort de créature du type choisi",
     "onlyForTypeSpellsOrAbilities": "À dépenser uniquement pour des sorts ou capacités d'un type spécifique",
+    "onlyForTaggedActivation": "Spend only to activate abilities of a specific kind",
     "onlyForSpellWithKeywordKind": "À dépenser uniquement pour lancer des sorts avec un mot-clé spécifique",
     "onlyForSpellWithKeywordKindFromZone": "À dépenser uniquement pour lancer des sorts à mot-clé depuis un cimetière",
+    "onlyForSpellWithManaValue": "Spend only to cast spells meeting a mana-value requirement",
+    "onlyForSpellMatchingCostCriteria": "Spend only to cast spells meeting a cost requirement",
+    "onlyForSpellWithColorCount": "Spend only to cast spells meeting a color-count requirement",
+    "onlyForSpellFromZone": "Spend only to cast spells from an allowed zone",
+    "onlyForFaceDownSpell": "Spend only to cast face-down spells",
     "onlyForActivation": "À dépenser uniquement pour activer des capacités",
     "onlyForXCosts": "À dépenser uniquement pour des coûts incluant {X}",
+    "onlyForAny": "Spend only on one of the listed uses",
+    "onlyForSpecialAction": "Spend only on a specific special action",
     "convokePayment": "Paiement de la convocation",
     "grantsProperty": "Accorde une propriété au sort",
     "grantCantBeCountered": "À dépenser pour ce sort afin qu'il ne puisse pas être contrecarré"

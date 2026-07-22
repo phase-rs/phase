@@ -51,6 +51,8 @@ fn decode_restored_game_state(json_str: &str) -> Result<GameState, JsValue> {
 struct LegalActionsResult {
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    /// Exact engine-authored actions for the deterministic mana-payment shortcut.
+    mana_payment_shortcut_actions: Vec<GameAction>,
     /// Effective mana costs for castable spells, keyed by object_id.
     /// Reflects all cost modifiers (reductions, commander tax, alt costs).
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
@@ -1178,9 +1180,12 @@ pub fn get_legal_actions_js() -> JsValue {
         engine::game::layers::flush_layers(state);
         let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(state);
         let auto_pass = auto_pass_recommended(state, &actions);
+        let mana_payment_shortcut_actions =
+            engine::ai_support::mana_payment_shortcut_actions(state, &legal_actions_by_object);
         to_js(&LegalActionsResult {
             actions,
             auto_pass_recommended: auto_pass,
+            mana_payment_shortcut_actions,
             spell_costs,
             legal_actions_by_object,
             stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
@@ -1261,6 +1266,7 @@ struct ViewerSnapshot {
     state: GameState,
     actions: Vec<GameAction>,
     auto_pass_recommended: bool,
+    mana_payment_shortcut_actions: Vec<GameAction>,
     spell_costs: std::collections::HashMap<ObjectId, ManaCost>,
     legal_actions_by_object: std::collections::HashMap<ObjectId, Vec<GameAction>>,
     /// Engine-level progress-wedge diagnostic: non-fatal signal that an owed
@@ -1273,9 +1279,12 @@ struct ViewerSnapshot {
 fn legal_actions_result_for_viewer(state: &GameState, viewer: PlayerId) -> LegalActionsResult {
     let (actions, spell_costs, legal_actions_by_object) = legal_actions_for_viewer(state, viewer);
     let auto_pass_recommended = auto_pass_recommended_for_viewer(state, viewer, &actions);
+    let mana_payment_shortcut_actions =
+        engine::ai_support::mana_payment_shortcut_actions(state, &legal_actions_by_object);
     LegalActionsResult {
         actions,
         auto_pass_recommended,
+        mana_payment_shortcut_actions,
         spell_costs,
         legal_actions_by_object,
         stuck_diagnostic: engine::ai_support::stuck_decision_diagnostic(state),
@@ -1336,6 +1345,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             state: filtered,
             actions: legal.actions,
             auto_pass_recommended: legal.auto_pass_recommended,
+            mana_payment_shortcut_actions: legal.mana_payment_shortcut_actions,
             spell_costs: legal.spell_costs,
             legal_actions_by_object: legal.legal_actions_by_object,
             stuck_diagnostic: legal.stuck_diagnostic,

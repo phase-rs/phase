@@ -83,7 +83,13 @@ export class ReplayAdapter implements EngineAdapter {
   }
 
   async getLegalActions(): Promise<LegalActionsResult> {
-    return { actions: [], autoPassRecommended: false, spellCosts: {}, legalActionsByObject: {} };
+    return {
+      actions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+      spellCosts: {},
+      legalActionsByObject: {},
+    };
   }
 
   /** Same "no single current state" contract as `getState` — the Replay Viewer

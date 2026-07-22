@@ -1658,8 +1658,15 @@ pub(super) fn advance_mana_ability_activation(
     // 117.1d / CR 118.2).
     if pending.chosen_mana_payment.is_none() {
         if let Some(sub_cost) = mana_sub_cost_of(&ability_def.cost) {
+            let (source_types, source_subtypes) =
+                super::casting::activation_source_types(state, pending.source_id);
+            let activation_ctx = PaymentContext::Activation {
+                source_types: &source_types,
+                source_subtypes: &source_subtypes,
+                ability_tag: None,
+            };
             let pool = &state.players[pending.player.0 as usize].mana_pool;
-            let plans = enumerate_hybrid_payment_plans(pool, sub_cost);
+            let plans = enumerate_hybrid_payment_plans(pool, sub_cost, &activation_ctx);
             match plans.len() {
                 0 if {
                     let excluded_sources = std::collections::HashSet::from([pending.source_id]);
@@ -3156,10 +3163,14 @@ fn batch_eligible_siblings(
 /// covers the cost (representing the trivial empty-choice plan), or empty
 /// when the pool cannot cover. Callers short-circuit the single-plan case
 /// into auto-pay.
-fn enumerate_hybrid_payment_plans(pool: &ManaPool, cost: &ManaCost) -> Vec<Vec<ManaType>> {
+fn enumerate_hybrid_payment_plans(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    ctx: &PaymentContext<'_>,
+) -> Vec<Vec<ManaType>> {
     let hybrid_pairs = hybrid_shard_pairs(cost);
     let mut plans = Vec::new();
-    enumerate_plans_rec(pool, cost, &hybrid_pairs, &mut Vec::new(), &mut plans);
+    enumerate_plans_rec(pool, cost, ctx, &hybrid_pairs, &mut Vec::new(), &mut plans);
     plans
 }
 
@@ -3184,23 +3195,24 @@ fn hybrid_shard_pairs(cost: &ManaCost) -> Vec<(ManaType, ManaType)> {
 fn enumerate_plans_rec(
     pool: &ManaPool,
     cost: &ManaCost,
+    ctx: &PaymentContext<'_>,
     hybrid_pairs: &[(ManaType, ManaType)],
     chosen: &mut Vec<ManaType>,
     out: &mut Vec<Vec<ManaType>>,
 ) {
     if chosen.len() == hybrid_pairs.len() {
-        if try_pay_with_hybrid_plan(pool, cost, chosen).is_some() {
+        if try_pay_with_hybrid_plan(pool, cost, chosen, ctx).is_some() {
             out.push(chosen.clone());
         }
         return;
     }
     let (a, b) = hybrid_pairs[chosen.len()];
     chosen.push(a);
-    enumerate_plans_rec(pool, cost, hybrid_pairs, chosen, out);
+    enumerate_plans_rec(pool, cost, ctx, hybrid_pairs, chosen, out);
     chosen.pop();
     if a != b {
         chosen.push(b);
-        enumerate_plans_rec(pool, cost, hybrid_pairs, chosen, out);
+        enumerate_plans_rec(pool, cost, ctx, hybrid_pairs, chosen, out);
         chosen.pop();
     }
 }
@@ -3209,13 +3221,19 @@ fn enumerate_plans_rec(
 /// shards pinned to the colors in `plan`. Returns `Some(())` when the pool
 /// covers the cost, `None` otherwise. Deterministic — uses the same
 /// auto-pay rules as `pay_cost` except hybrid shards defer to `plan`.
-fn try_pay_with_hybrid_plan(pool: &ManaPool, cost: &ManaCost, plan: &[ManaType]) -> Option<()> {
+fn try_pay_with_hybrid_plan(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    plan: &[ManaType],
+    ctx: &PaymentContext<'_>,
+) -> Option<()> {
     let mut sim = pool.clone();
-    // Simulation path — `None` context preserves the prior "can pool cover
-    // this at all" semantics. Restriction-aware affordability is checked at
-    // the real payment site via `pay_mana_sub_cost`; the simulated spent
-    // units are discarded (provenance is recorded only at the real site).
-    debit_cost_with_plan(&mut sim, cost, plan, None)
+    // CR 106.6: Plan publication and auto-selection must use the same
+    // activation context as the authoritative real debit. Otherwise the
+    // engine can offer a restricted mana unit that execution then rejects.
+    // The simulated spent units are discarded; provenance is recorded only
+    // at the real payment site.
+    debit_cost_with_plan(&mut sim, cost, plan, Some(ctx))
         .ok()
         .map(|_| ())
 }
@@ -3306,7 +3324,7 @@ fn pay_mana_sub_cost(
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
     parent: Option<&ManaAbilityCostParent>,
 ) -> Result<(), EngineError> {
-    if hybrid_plan.is_none() {
+    let Some(hybrid_plan) = hybrid_plan else {
         // CR 605.3c: Every source already in `excluded_sources` is an ancestor
         // mana-ability activation that is synchronously suspended on the call
         // stack mid-payment (its cost is still being paid; it has not yet
@@ -3333,7 +3351,7 @@ fn pay_mana_sub_cost(
             sub_cost_demand,
             parent,
         );
-    }
+    };
 
     // CR 106.6: The mana sub-cost of a mana ability is paid as part of an
     // ability activation — spend-restrictions must be evaluated through
@@ -3351,34 +3369,10 @@ fn pay_mana_sub_cost(
     };
     state.restamp_pool_pip_ids(player);
     let pool = &mut state.players[player.0 as usize].mana_pool;
-    let spent = match hybrid_plan {
-        Some(plan) => debit_cost_with_plan(pool, cost, plan, Some(&ctx)).map_err(|_| {
-            EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
-        })?,
-        None => {
-            mana_payment::pay_cost_with_demand_and_choices(
-                pool,
-                cost,
-                None,
-                Some(&ctx),
-                false,
-                None,
-                // CR 107.4f: same K'rrik-not-applicable rationale as above.
-                crate::types::mana::LifePaymentColors::EMPTY,
-                // CR 118.3a: mana-ability activation sub-costs are not pinnable.
-                &[],
-            )
-            .map_err(|_| {
-                EngineError::ActionNotAllowed(
-                    "Mana pool cannot cover mana ability cost".to_string(),
-                )
-            })?
-            .0
-        }
-    };
-    if !spent.is_empty() || hybrid_plan.is_some() {
-        state.layers_dirty.mark_full();
-    }
+    let spent = debit_cost_with_plan(pool, cost, hybrid_plan, Some(&ctx)).map_err(|_| {
+        EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
+    })?;
+    state.layers_dirty.mark_full();
     let recipient = state.mana_payment_recipient(source_id, player);
     state.record_mana_payment(player, recipient, &spent);
     // CR 605.3b: The player's mana pool mutation is the public signal; no
@@ -3844,7 +3838,9 @@ mod tests {
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
+    use crate::types::mana::{
+        ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit,
+    };
     use crate::types::statics::{CostPaymentProhibition, ProhibitionScope, StaticMode};
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -3901,7 +3897,6 @@ mod tests {
     use crate::game::test_fixtures::brushland_colored_ability;
 
     fn seed_pool_with(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
-        use crate::types::mana::ManaUnit;
         for _ in 0..count {
             state.players[player.0 as usize].mana_pool.add(ManaUnit {
                 color,
@@ -3914,6 +3909,18 @@ mod tests {
                 expiry: None,
             });
         }
+    }
+
+    fn seed_pool_with_restriction(
+        state: &mut GameState,
+        player: PlayerId,
+        color: ManaType,
+        restriction: ManaRestriction,
+    ) {
+        let _ = state.add_mana_to_pool(
+            player,
+            ManaUnit::new(color, ObjectId(0), false, vec![restriction]),
+        );
     }
 
     fn expect_mana_ability_context(context: ManaChoiceContext) -> Box<PendingManaAbility> {
@@ -8008,6 +8015,116 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
         // Tap component also paid.
         assert!(state.objects.get(&ruins).unwrap().tapped);
+    }
+
+    #[test]
+    fn filter_land_taps_another_source_when_matching_pool_mana_is_spell_only() {
+        // CR 106.6 + CR 605.3a: Spell-only {U} already in the pool cannot pay
+        // this mana ability's {U/B} activation cost. The engine must ignore it
+        // during hybrid-plan discovery and retain the nested mana-ability path,
+        // which taps the Island for an eligible {U}.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        let island = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Island".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&island).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+        }
+        seed_pool_with_restriction(
+            &mut state,
+            PlayerId(0),
+            ManaType::Blue,
+            ManaRestriction::OnlyForSpell,
+        );
+
+        assert!(can_activate_mana_ability_now(
+            &state,
+            PlayerId(0),
+            ruins,
+            0,
+            &ability,
+        ));
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::Combination { .. },
+                ..
+            }
+        ));
+        assert!(state.objects.get(&island).unwrap().tapped);
+        assert!(state.objects.get(&ruins).unwrap().tapped);
+        let pool = &state.players[0].mana_pool;
+        assert_eq!(pool.total(), 1);
+        assert_eq!(pool.mana[0].color, ManaType::Blue);
+        assert_eq!(
+            pool.mana[0].restrictions,
+            vec![ManaRestriction::OnlyForSpell]
+        );
+    }
+
+    #[test]
+    fn filter_land_excludes_ineligible_hybrid_payment_option() {
+        // CR 106.6: Of the apparent {U/B} assignments, spell-only {U} is not
+        // legal for an activation while unrestricted {B} is. The engine must
+        // auto-select the sole legal plan instead of publishing both options.
+        let mut state = GameState::new_two_player(42);
+        let (ruins, ability) = setup_sunken_ruins(&mut state);
+        seed_pool_with_restriction(
+            &mut state,
+            PlayerId(0),
+            ManaType::Blue,
+            ManaRestriction::OnlyForSpell,
+        );
+        seed_pool_with(&mut state, PlayerId(0), ManaType::Black, 1);
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            ruins,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            waiting,
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::Combination { .. },
+                ..
+            }
+        ));
+        let pool = &state.players[0].mana_pool;
+        assert_eq!(pool.count_color(ManaType::Blue), 1);
+        assert_eq!(pool.count_color(ManaType::Black), 0);
+        assert_eq!(
+            pool.mana[0].restrictions,
+            vec![ManaRestriction::OnlyForSpell]
+        );
     }
 
     #[test]

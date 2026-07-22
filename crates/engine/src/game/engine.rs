@@ -4238,6 +4238,7 @@ fn apply_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let events_before = events.len();
             let waiting_for = handle_tap_land_for_mana(
                 state,
                 *player,
@@ -4245,6 +4246,10 @@ fn apply_action(
                 ManaAbilityResume::Priority,
                 &mut events,
             )?;
+            // CR 605.4a: Triggered mana abilities coupled to this semantic
+            // land activation resolve immediately. This also consumes any
+            // engine-authored Aura color override before the public boundary.
+            triggers::resolve_tap_mana_triggers_inline(state, &mut events, events_before);
             record_mana_loop_action_step(
                 state,
                 *player,
@@ -6281,6 +6286,11 @@ fn apply_action(
                 },
                 &mut events,
             )?;
+            super::triggers::resolve_tap_mana_triggers_inline(
+                state,
+                &mut events,
+                events_before,
+            );
             // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
             // Fertile Ground, Mana Flare class) must resolve inline when mana is
             // produced during cost payment. The ManaPayment path does not flow through

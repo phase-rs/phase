@@ -233,10 +233,7 @@ pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
 
 /// Complete primitive actions for mana sources the player can currently activate.
 /// Shared by human interaction authority and AI enumeration so legality cannot drift.
-pub(crate) fn activatable_mana_actions_for_player(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<GameAction> {
+pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) -> Vec<GameAction> {
     let aura_sources = taps_for_mana_trigger_sources(state);
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
     let mut actions = Vec::new();

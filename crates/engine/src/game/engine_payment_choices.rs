@@ -1403,7 +1403,8 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         ));
     };
 
-    handle_tap_land_for_mana(
+    let events_before = events.len();
+    let waiting_for = handle_tap_land_for_mana(
         state,
         player,
         selection,
@@ -1416,7 +1417,11 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
             remaining: remaining.clone(),
         },
         events,
-    )
+    )?;
+    // CR 605.4a: Triggered mana abilities coupled to a semantic land tap
+    // resolve inline even while an unless payment owns the waiting state.
+    super::triggers::resolve_tap_mana_triggers_inline(state, events, events_before);
+    Ok(waiting_for)
 }
 
 pub(super) fn handle_unless_payment_untap_land_for_mana(
