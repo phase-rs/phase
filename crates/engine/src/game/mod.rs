@@ -105,6 +105,7 @@ mod conspiracy_tests;
 mod merge_tests;
 pub mod morph;
 pub mod mulligan;
+pub mod object_state;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;

@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::ability::TriggerDefinitionRef;
 use super::identifiers::ObjectIncarnationRef;
 use super::mana::{ManaPipId, ManaUnit};
-use super::player::PlayerId;
+use super::player::{PlayerCounterKind, PlayerId};
 
 /// Globally ordered identity of a resolved command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -69,6 +69,51 @@ pub struct ResolvedManaSpendCommand {
     pub units: Vec<ResolvedManaSpentUnit>,
 }
 
+/// One resolved scalar change to a player's rules-visible resources.
+///
+/// Each variant is a semantic edit rather than a whole-player replacement, so
+/// independently retained resource commands compose against the retained
+/// prefix. Life changes record their final post-replacement delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedPlayerEdit {
+    /// CR 119.2 + CR 119.3 + CR 119.4 + CR 119.5: A final gain/loss delta
+    /// applied after any replacement.
+    Life { delta: i32 },
+    /// CR 122.1 + CR 107.14: A final energy-counter delta.
+    Energy { delta: i32 },
+    /// CR 122.1: A final delta for one exact player counter kind.
+    Counter { kind: PlayerCounterKind, delta: i32 },
+    /// CR 702.179b: An exact speed transition, including no-speed.
+    Speed { old: Option<u8>, new: Option<u8> },
+}
+
+/// One exact player-resource mutation after replacement and quantity resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlayerEditCommand {
+    pub player: PlayerId,
+    pub edit: ResolvedPlayerEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// The object-state status axis owned by a resolved command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedObjectStatus {
+    /// CR 701.26: The permanent's tapped state.
+    Tapped,
+    /// CR 701.43d: The exact object was exerted during this turn.
+    Exerted,
+}
+
+/// One exact object-status transition with an optimistic old-status precondition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectStatusCommand {
+    pub object: ObjectIncarnationRef,
+    pub status: ResolvedObjectStatus,
+    pub expected_old: bool,
+    pub new: bool,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -77,6 +122,8 @@ pub struct ResolvedManaSpendCommand {
 pub enum ResolvedRulesCommand {
     ManaInsert(ResolvedManaInsertCommand),
     ManaSpend(ResolvedManaSpendCommand),
+    PlayerEdit(ResolvedPlayerEditCommand),
+    ObjectStatus(ResolvedObjectStatusCommand),
 }
 
 /// Typed failure while applying an already-resolved mana command to a replay state.
@@ -116,6 +163,87 @@ impl std::fmt::Display for ResolvedManaReplayInvariantError {
 }
 
 impl std::error::Error for ResolvedManaReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved player-resource command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedPlayerEditReplayInvariantError {
+    UnknownPlayer(PlayerId),
+    ZeroDelta,
+    ResourceUnderflow,
+    ResourceOverflow,
+    SpeedPreconditionMismatch {
+        expected: Option<u8>,
+        found: Option<u8>,
+    },
+}
+
+impl std::fmt::Display for ResolvedPlayerEditReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPlayer(player) => write!(f, "unknown player-command player {}", player.0),
+            Self::ZeroDelta => write!(f, "resolved player command has a zero delta"),
+            Self::ResourceUnderflow => {
+                write!(f, "resolved player command would underflow a resource")
+            }
+            Self::ResourceOverflow => {
+                write!(f, "resolved player command would overflow a resource")
+            }
+            Self::SpeedPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved speed command expected {expected:?}, found {found:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedPlayerEditReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved object-status command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedObjectStatusReplayInvariantError {
+    UnknownObject(super::identifiers::ObjectId),
+    MissingObject(ObjectIncarnationRef),
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    StatusPreconditionMismatch {
+        status: ResolvedObjectStatus,
+        expected: bool,
+        found: bool,
+    },
+}
+
+impl std::fmt::Display for ResolvedObjectStatusReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownObject(object) => {
+                write!(
+                    f,
+                    "resolved object-status command cannot find object {}",
+                    object.0
+                )
+            }
+            Self::MissingObject(object) => {
+                write!(f, "resolved object-status command cannot find {object:?}")
+            }
+            Self::StaleObject { expected, found } => write!(
+                f,
+                "resolved object-status command expected {expected:?}, found {found:?}"
+            ),
+            Self::StatusPreconditionMismatch {
+                status,
+                expected,
+                found,
+            } => write!(
+                f,
+                "resolved {status:?} command expected status {expected}, found {found}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedObjectStatusReplayInvariantError {}
 
 /// Semantic category of a resolved rules-execution node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -528,6 +656,22 @@ impl ResolvedRulesJournal {
         Ok(Some(command))
     }
 
+    /// Records one final scalar player-resource mutation under its causal node.
+    pub fn record_player_edit(
+        &mut self,
+        command: ResolvedPlayerEditCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::PlayerEdit(command))
+    }
+
+    /// Records one exact object-status transition under its causal node.
+    pub fn record_object_status(
+        &mut self,
+        command: ResolvedObjectStatusCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::ObjectStatus(command))
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -723,6 +867,7 @@ impl ResolvedRulesJournal {
                         }
                     }
                 }
+                ResolvedRulesCommand::PlayerEdit(_) | ResolvedRulesCommand::ObjectStatus(_) => {}
             }
         }
         for node in &self.nodes {
@@ -892,6 +1037,21 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::PlayerEdit(command) => {
+                if entry.node != command.cause || player_edit_is_empty(&command.edit) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "player command has an empty edit or unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectStatus(command) => {
+                if entry.node != command.cause || command.expected_old == command.new {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "object-status command has a no-op transition or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -926,6 +1086,15 @@ fn has_duplicate_values<T: Eq + std::hash::Hash>(values: &[T]) -> bool {
 
 fn exact_mana_unit_eq(left: &ManaUnit, right: &ManaUnit) -> bool {
     left.pip_id == right.pip_id && left == right
+}
+
+fn player_edit_is_empty(edit: &ResolvedPlayerEdit) -> bool {
+    match edit {
+        ResolvedPlayerEdit::Life { delta }
+        | ResolvedPlayerEdit::Energy { delta }
+        | ResolvedPlayerEdit::Counter { delta, .. } => *delta == 0,
+        ResolvedPlayerEdit::Speed { old, new } => old == new,
+    }
 }
 
 #[cfg(test)]
@@ -1064,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_mana_commands_roundtrip_and_reject_malformed_payloads() {
+    fn semantic_commands_roundtrip_and_reject_malformed_payloads() {
         let mut journal = ResolvedRulesJournal::default();
         let producer = journal.begin_proposal().unwrap();
         let produced = unit(1);
@@ -1120,6 +1289,69 @@ mod tests {
         duplicate_spend.next_command_ordinal = 5;
         assert!(serde_json::from_value::<ResolvedRulesJournal>(
             serde_json::to_value(duplicate_spend).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scalar_and_object_status_commands_roundtrip_and_reject_malformed_payloads() {
+        let mut journal = ResolvedRulesJournal::default();
+        let cause = journal.begin_proposal().unwrap();
+        journal
+            .record_player_edit(ResolvedPlayerEditCommand {
+                player: PlayerId(0),
+                edit: ResolvedPlayerEdit::Life { delta: -3 },
+                cause,
+            })
+            .unwrap();
+        journal
+            .record_object_status(ResolvedObjectStatusCommand {
+                object: ObjectIncarnationRef::of(ObjectId(9), 0),
+                status: ResolvedObjectStatus::Tapped,
+                expected_old: false,
+                new: true,
+                cause,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serde_json::to_value(&journal).unwrap())
+                .unwrap(),
+            journal
+        );
+
+        let mut empty_player_edit = journal.clone();
+        let Some(ResolvedRulesCommand::PlayerEdit(command)) =
+            empty_player_edit.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the player edit");
+        };
+        command.edit = ResolvedPlayerEdit::Energy { delta: 0 };
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(empty_player_edit).unwrap()
+        )
+        .is_err());
+
+        let mut no_op_status = journal.clone();
+        let Some(ResolvedRulesCommand::ObjectStatus(command)) =
+            no_op_status.entries[2].command.as_mut()
+        else {
+            panic!("entry 2 must be the object-status edit");
+        };
+        command.new = false;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(no_op_status).unwrap()
+        )
+        .is_err());
+
+        let mut unrelated_cause = journal.clone();
+        let Some(ResolvedRulesCommand::PlayerEdit(command)) =
+            unrelated_cause.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the player edit");
+        };
+        command.cause = RulesExecutionNodeRef::Payment(SettlementNodeOrdinal(99));
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(unrelated_cause).unwrap()
         )
         .is_err());
     }

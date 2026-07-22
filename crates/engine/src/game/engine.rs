@@ -9253,8 +9253,14 @@ pub(super) fn handle_tap_land_for_mana(
         }
     } else {
         // Legacy fallback for subtype-only lands.
-        let obj = state.objects.get_mut(&object_id).unwrap();
-        obj.tapped = true;
+        let tapped = crate::game::object_state::resolve_and_apply_object_edit(
+            state,
+            object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            true,
+        )
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        debug_assert!(tapped, "preflighted land tap must transition status");
         events.push(GameEvent::PermanentTapped {
             object_id,
             caused_by: None,
@@ -9354,11 +9360,14 @@ pub(super) fn handle_untap_land_for_mana(
     }
 
     // Untap the land
-    let obj = state
-        .objects
-        .get_mut(&object_id)
-        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-    obj.tapped = false;
+    let untapped = crate::game::object_state::resolve_and_apply_object_edit(
+        state,
+        object_id,
+        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+        false,
+    )
+    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    debug_assert!(untapped, "a tracked manually tapped land must be tapped");
     events.push(GameEvent::PermanentUntapped { object_id });
 
     // Remove from tracking

@@ -50,7 +50,8 @@ use super::resolution::{
 };
 use super::resolved_commands::{
     ManaPaymentRecipient, ResolvedManaInsertCommand, ResolvedManaReplayInvariantError,
-    ResolvedManaSpendCommand, ResolvedRulesJournal, RulesExecutionNodeRef,
+    ResolvedManaSpendCommand, ResolvedPlayerEdit, ResolvedPlayerEditCommand,
+    ResolvedPlayerEditReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -72,6 +73,25 @@ fn default_game_number() -> u8 {
 
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
+    (delta != 0)
+        .then_some(delta.unsigned_abs())
+        .ok_or(ResolvedPlayerEditReplayInvariantError::ZeroDelta)
+}
+
+fn apply_u32_delta(value: u32, delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
+    let amount = nonzero_delta_magnitude(delta)?;
+    if delta.is_positive() {
+        value
+            .checked_add(amount)
+            .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)
+    } else {
+        value
+            .checked_sub(amount)
+            .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceUnderflow)
+    }
 }
 
 pub(crate) fn is_zero_usize(value: &usize) -> bool {
@@ -15155,11 +15175,7 @@ impl GameState {
         if !self.players.iter().any(|candidate| candidate.id == player) {
             return None;
         }
-        let producer = self.active_rules_execution_node.unwrap_or_else(|| {
-            self.resolved_rules_journal
-                .begin_proposal()
-                .expect("resolved-rules journal proposal ordinal overflow")
-        });
+        let producer = self.current_or_begin_rules_execution_node();
         let command = ResolvedManaInsertCommand {
             player,
             unit: unit.clone(),
@@ -15171,6 +15187,97 @@ impl GameState {
             .record_mana_insert(command)
             .expect("stamped mana must have one unique journal producer");
         Some(unit)
+    }
+
+    /// Applies and journals one already-resolved player resource edit.
+    ///
+    /// Replacements and dynamic quantities must be settled before this boundary;
+    /// the command is the final composable semantic edit against the live prefix.
+    pub fn resolve_and_apply_player_edit(
+        &mut self,
+        player: PlayerId,
+        edit: ResolvedPlayerEdit,
+    ) -> Result<(), ResolvedPlayerEditReplayInvariantError> {
+        let command = ResolvedPlayerEditCommand {
+            player,
+            edit,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_player_edit(&command)?;
+        self.resolved_rules_journal
+            .record_player_edit(command)
+            .expect("resolved player edit must have a live journal cause");
+        Ok(())
+    }
+
+    /// Applies one final player-resource edit without replacements, quantity
+    /// evaluation, or an implicit player selection.
+    pub fn apply_resolved_player_edit(
+        &mut self,
+        command: &ResolvedPlayerEditCommand,
+    ) -> Result<(), ResolvedPlayerEditReplayInvariantError> {
+        let player = self
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == command.player)
+            .ok_or(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(
+                command.player,
+            ))?;
+
+        match &command.edit {
+            ResolvedPlayerEdit::Life { delta } => {
+                let amount = nonzero_delta_magnitude(*delta)?;
+                let life = player
+                    .life
+                    .checked_add(*delta)
+                    .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                if *delta > 0 {
+                    let gained = player
+                        .life_gained_this_turn
+                        .checked_add(amount)
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                    player.life = life;
+                    player.life_gained_this_turn = gained;
+                } else {
+                    let lost = player
+                        .life_lost_this_turn
+                        .checked_add(amount)
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                    player.life = life;
+                    player.life_lost_this_turn = lost;
+                }
+            }
+            ResolvedPlayerEdit::Energy { delta } => {
+                player.energy = apply_u32_delta(player.energy, *delta)?;
+            }
+            ResolvedPlayerEdit::Counter { kind, delta } => {
+                let count = apply_u32_delta(player.player_counter(kind), *delta)?;
+                match kind {
+                    PlayerCounterKind::Poison => player.poison_counters = count,
+                    _ if count == 0 => {
+                        player.player_counters.remove(kind);
+                    }
+                    _ => {
+                        player.player_counters.insert(*kind, count);
+                    }
+                }
+            }
+            ResolvedPlayerEdit::Speed { old, new } => {
+                if player.speed != *old {
+                    return Err(
+                        ResolvedPlayerEditReplayInvariantError::SpeedPreconditionMismatch {
+                            expected: *old,
+                            found: player.speed,
+                        },
+                    );
+                }
+                if old == new {
+                    return Err(ResolvedPlayerEditReplayInvariantError::ZeroDelta);
+                }
+                player.speed = *new;
+            }
+        }
+        Ok(())
     }
 
     /// CR 106.4: Apply one exact, already-resolved mana insertion without
@@ -15271,6 +15378,14 @@ impl GameState {
             .ok_or(ResolvedManaReplayInvariantError::ManaPipIdOverflow(pip))?;
         self.next_pip_id = self.next_pip_id.max(next);
         Ok(())
+    }
+
+    pub(crate) fn current_or_begin_rules_execution_node(&mut self) -> RulesExecutionNodeRef {
+        self.active_rules_execution_node.unwrap_or_else(|| {
+            self.resolved_rules_journal
+                .begin_proposal()
+                .expect("resolved-rules journal proposal ordinal overflow")
+        })
     }
 
     /// CR 605.3b: Begin the distinct, immediate execution node for one

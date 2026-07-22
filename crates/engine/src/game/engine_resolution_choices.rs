@@ -2398,14 +2398,28 @@ pub(super) fn handle_resolution_choice(
                 }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                        if p.energy < amount {
+                    if let Some(energy) = state
+                        .players
+                        .iter()
+                        .find(|candidate| candidate.id == player)
+                        .map(|candidate| candidate.energy)
+                    {
+                        if energy < amount {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {:?} has {} energy, cannot pay {}",
-                                player, p.energy, amount
+                                player, energy, amount
                             )));
                         }
-                        p.energy -= amount;
+                        if amount > 0 {
+                            state
+                                .resolve_and_apply_player_edit(
+                                    player,
+                                    crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                                        delta: -(amount as i32),
+                                    },
+                                )
+                                .expect("preflighted resolution energy payment must apply");
+                        }
                         events.push(GameEvent::EnergyChanged {
                             player,
                             delta: -(amount as i32),

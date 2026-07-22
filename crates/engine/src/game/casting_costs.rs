@@ -6368,11 +6368,20 @@ fn pay_additional_cost_with_source(
                 super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0),
             )
             .unwrap_or(0);
-            let player_state = &mut state.players[player.0 as usize];
-            if player_state.energy < amount {
+            let energy = state.players[player.0 as usize].energy;
+            if energy < amount {
                 return Err(EngineError::ActionNotAllowed("Not enough energy".into()));
             }
-            player_state.energy -= amount;
+            if amount > 0 {
+                state
+                    .resolve_and_apply_player_edit(
+                        player,
+                        crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                            delta: -(amount as i32),
+                        },
+                    )
+                    .expect("preflighted cast energy payment must apply");
+            }
             events.push(GameEvent::EnergyChanged {
                 player,
                 delta: -(amount as i32),
@@ -10120,14 +10129,18 @@ fn auto_tap_mana_sources_inner(
             // Basic-land-subtype fallback — no explicit ability, just tap + produce.
             let node = state.begin_activated_mana_journal_node(option.object_id);
             state.with_rules_execution_node(node, |state| {
-                if let Some(obj) = state.objects.get_mut(&option.object_id) {
-                    if !obj.tapped {
-                        obj.tapped = true;
-                        events.push(GameEvent::PermanentTapped {
-                            object_id: option.object_id,
-                            caused_by: None,
-                        });
-                    }
+                if crate::game::object_state::resolve_and_apply_object_edit(
+                    state,
+                    option.object_id,
+                    crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                    true,
+                )
+                .expect("auto-tap source must remain a live exact object")
+                {
+                    events.push(GameEvent::PermanentTapped {
+                        object_id: option.object_id,
+                        caused_by: None,
+                    });
                 }
                 mana_payment::produce_mana(
                     state,

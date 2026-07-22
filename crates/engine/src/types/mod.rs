@@ -76,9 +76,11 @@ pub use resolution::{
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
     ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedManaSpentUnit, ResolvedRulesCommand, ResolvedRulesJournal, ResolvedRulesJournalError,
-    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
-    SpentManaUnit,
+    ResolvedManaSpentUnit, ResolvedObjectStatus, ResolvedObjectStatusCommand,
+    ResolvedObjectStatusReplayInvariantError, ResolvedPlayerEdit, ResolvedPlayerEditCommand,
+    ResolvedPlayerEditReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
+    ResolvedRulesJournalError, RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode,
+    SettlementNodeOrdinal, SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
