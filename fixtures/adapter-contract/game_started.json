@@ -1,6 +1,7 @@
 {
   "type": "GameStarted",
   "data": {
+    "state_revision": 1,
     "state": {
       "turn_number": 1,
       "active_player": 0,

@@ -1,6 +1,7 @@
 {
   "type": "StateUpdate",
   "data": {
+    "state_revision": 2,
     "state": {
       "turn_number": 1,
       "active_player": 0,

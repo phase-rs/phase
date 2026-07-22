@@ -44,6 +44,12 @@ import {
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
+import { usePreferencesStore } from "./preferencesStore";
+import {
+  canAttemptNativeEngine,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
 import type { P2PHostAdapter } from "../adapter/p2p-adapter";
 import {
   ServerDraftAdapter,
@@ -1025,6 +1031,23 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             activeP2PHostGameId = null;
           }
 
+          let nativeP2P: { expectedServerVersion?: string } | undefined;
+          const nativeEngineKey = nativeEngineKeyForCurrentOrigin();
+          if (
+            nativeEngineKey
+            && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+          ) {
+            try {
+              await ensureNativeEngine(nativeEngineKey);
+              nativeP2P = {
+                expectedServerVersion:
+                  "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+              };
+            } catch (err) {
+              console.warn("[P2P] native engine unavailable; using WASM host", err);
+            }
+          }
+
           const host = await hostRoom(undefined, {});
           destroyHostedRoom = () => host.destroy();
           if (opts.useBroker) {
@@ -1074,6 +1097,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               roomCode: host.roomCode,
               hostDisplayName: get().displayName || undefined,
             },
+            nativeP2P,
           );
 
           adapter.onEvent((event) => {

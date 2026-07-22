@@ -57,6 +57,7 @@ pub fn guard_client_message_before_dispatch(
         ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::Concede
+        | ClientMessage::AbandonGame
         | ClientMessage::RequestTakeback
         | ClientMessage::RespondTakeback { .. }
         | ClientMessage::CancelTakeback => Ok(()),
@@ -236,6 +237,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::Action { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::Reconnect { .. }
+        | ClientMessage::AbandonGame
         | ClientMessage::Concede
         | ClientMessage::Emote { .. }
         | ClientMessage::SpectatorJoin { .. }

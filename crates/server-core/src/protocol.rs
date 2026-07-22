@@ -116,6 +116,10 @@ pub enum ClientMessage {
         game_code: String,
         player_token: String,
     },
+    /// Permanently removes a full-mode game. The server authorizes this from
+    /// the host's authenticated session; it is used to clean up a host-local
+    /// native engine session that can no longer serve its P2P transport.
+    AbandonGame,
     SubscribeLobby,
     UnsubscribeLobby,
     CreateGameWithSettings {
@@ -282,7 +286,19 @@ pub enum ServerMessage {
         game_code: String,
         player_token: String,
     },
+    /// Confirms the authenticated server seat for one connection before a
+    /// pregame room has started. A host-side P2P bridge binds this identity to
+    /// its already-authenticated PeerJS seat; it must never infer it from join
+    /// order.
+    SessionAttached {
+        game_code: String,
+        player_id: PlayerId,
+        player_token: String,
+    },
     GameStarted {
+        /// Monotonic server-authored snapshot revision. Every viewer of this
+        /// authoritative state receives the same revision.
+        state_revision: u64,
         state: GameState,
         your_player: PlayerId,
         opponent_name: Option<String>,
@@ -322,6 +338,9 @@ pub enum ServerMessage {
         events: Vec<GameEvent>,
     },
     StateUpdate {
+        /// Monotonic server-authored snapshot revision. Reused for read-only
+        /// snapshots and advanced only by authoritative state transitions.
+        state_revision: u64,
         state: GameState,
         events: Vec<GameEvent>,
         #[serde(default)]
@@ -351,6 +370,10 @@ pub enum ServerMessage {
     },
     ActionRejected {
         reason: String,
+    },
+    /// Acknowledges a host-authorized permanent game cleanup.
+    GameAbandoned {
+        game_code: String,
     },
     /// Mana sources the engine's automatic payment path would use for one
     /// `PreviewManaPayment` request. Sent only to the requesting player.
@@ -868,6 +891,36 @@ mod tests {
     }
 
     #[test]
+    fn client_message_abandon_game_roundtrips() {
+        let json = serde_json::to_string(&ClientMessage::AbandonGame).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::AbandonGame));
+    }
+
+    #[test]
+    fn session_attached_roundtrips_with_only_its_own_token() {
+        let msg = ServerMessage::SessionAttached {
+            game_code: "ABC123".to_string(),
+            player_id: PlayerId(1),
+            player_token: "token".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::SessionAttached {
+                game_code,
+                player_id,
+                player_token,
+            } => {
+                assert_eq!(game_code, "ABC123");
+                assert_eq!(player_id, PlayerId(1));
+                assert_eq!(player_token, "token");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn client_message_emote_roundtrips() {
         let msg = ClientMessage::Emote {
             emote: "GG".to_string(),
@@ -899,6 +952,7 @@ mod tests {
     fn server_message_game_started_with_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
         let msg = ServerMessage::GameStarted {
+            state_revision: 0,
             state: state.clone(),
             your_player: PlayerId(0),
             opponent_name: Some("Opponent".to_string()),
@@ -935,6 +989,7 @@ mod tests {
     fn server_message_game_started_without_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
         let msg = ServerMessage::GameStarted {
+            state_revision: 0,
             state,
             your_player: PlayerId(1),
             opponent_name: None,
@@ -1918,8 +1973,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_20() {
-        assert_eq!(PROTOCOL_VERSION, 20);
+    fn protocol_version_is_21() {
+        assert_eq!(PROTOCOL_VERSION, 21);
     }
 
     #[test]
