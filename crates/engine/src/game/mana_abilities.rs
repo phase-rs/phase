@@ -3227,28 +3227,27 @@ fn try_pay_with_hybrid_plan(
     plan: &[ManaType],
     ctx: &PaymentContext<'_>,
 ) -> Option<()> {
-    let mut sim = pool.clone();
     // CR 106.6: Plan publication and auto-selection must use the same
     // activation context as the authoritative real debit. Otherwise the
     // engine can offer a restricted mana unit that execution then rejects.
     // The simulated spent units are discarded; provenance is recorded only
     // at the real payment site.
-    debit_cost_with_plan(&mut sim, cost, plan, Some(ctx))
+    select_cost_with_plan(pool, cost, plan, Some(ctx))
         .ok()
         .map(|_| ())
 }
 
-/// CR 107.4e + CR 601.2h: Debit `cost` from `pool` using `plan` for hybrid
+/// CR 107.4e + CR 601.2h: Select the exact units that pay `cost` using `plan` for hybrid
 /// shards. Non-hybrid shards (single, Phyrexian, snow, colorless-hybrid,
 /// hybrid-Phyrexian, two-generic-hybrid, X) are routed through the same
 /// auto-pay rules the casting flow uses via `mana_payment::pay_from_pool`, but
 /// with the hybrid shards already resolved, the plan is unambiguous.
 ///
 /// Implementation: build a scratch cost with hybrid shards rewritten to
-/// single-color shards per `plan`, then delegate to `pay_cost`. This keeps
+/// single-color shards per `plan`, then delegate to the shared selector. This keeps
 /// every shard-kind's payment rules in one place.
-fn debit_cost_with_plan(
-    pool: &mut ManaPool,
+fn select_cost_with_plan(
+    pool: &ManaPool,
     cost: &ManaCost,
     plan: &[ManaType],
     ctx: Option<&PaymentContext<'_>>,
@@ -3279,7 +3278,7 @@ fn debit_cost_with_plan(
     // ShardChoice and is paid implicitly during ability resolution; pass an
     // empty `LifePaymentColors` since K'rrik substitution does not apply to
     // mana abilities' own activation costs in any printed exemplar today.
-    mana_payment::pay_cost_with_demand_and_choices(
+    mana_payment::select_mana_payment(
         pool,
         &scratch_cost,
         None,
@@ -3368,13 +3367,22 @@ fn pay_mana_sub_cost(
         ability_tag: None,
     };
     state.restamp_pool_pip_ids(player);
-    let pool = &mut state.players[player.0 as usize].mana_pool;
-    let spent = debit_cost_with_plan(pool, cost, hybrid_plan, Some(&ctx)).map_err(|_| {
+    let spent = select_cost_with_plan(
+        &state.players[player.0 as usize].mana_pool,
+        cost,
+        hybrid_plan,
+        Some(&ctx),
+    )
+    .map_err(|_| {
         EngineError::ActionNotAllowed("Mana pool cannot cover mana ability cost".to_string())
     })?;
-    state.layers_dirty.mark_full();
     let recipient = state.mana_payment_recipient(source_id, player);
-    state.record_mana_payment(player, recipient, &spent);
+    state
+        .resolve_and_apply_mana_spend(player, recipient, &spent)
+        .map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
+        })?;
+    state.layers_dirty.mark_full();
     // CR 605.3b: The player's mana pool mutation is the public signal; no
     // dedicated event exists for ability mana payments. The pool-diff is
     // surfaced via the standard state-update machinery.

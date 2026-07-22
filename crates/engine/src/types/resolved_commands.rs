@@ -1,7 +1,7 @@
 //! Append-only, identity-bearing records for resolved rules work.
 //!
-//! P1 records provenance only. Existing engine reducers remain the behavior
-//! authority until the later resolved-command application phase.
+//! P1 established provenance and ordering. P2 makes mana insert and exact
+//! spend commands executable through their owning authority appliers.
 
 use std::collections::HashSet;
 
@@ -38,6 +38,84 @@ pub enum ManaPaymentRecipient {
     Object(ObjectIncarnationRef),
     Player(PlayerId),
 }
+
+/// One exact mana-pool insertion after mana production has been resolved.
+///
+/// CR 106.4: resolved mana enters this player’s pool with this already-stamped
+/// pip identity; replay must neither choose a new recipient nor mint a new pip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedManaInsertCommand {
+    pub player: PlayerId,
+    pub unit: ManaUnit,
+    pub producer: RulesExecutionNodeRef,
+}
+
+/// One exact mana unit selected by the payment solver, with its producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedManaSpentUnit {
+    pub unit: ManaUnit,
+    pub producer: RulesExecutionNodeRef,
+}
+
+/// One exact mana-pool removal after the payment solver has selected its units.
+///
+/// CR 118.3a: this command removes precisely these units, in their recorded
+/// consumption order. It never asks a solver to choose replacement mana.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedManaSpendCommand {
+    pub payer: PlayerId,
+    pub recipient: ManaPaymentRecipient,
+    pub payment: RulesExecutionNodeRef,
+    pub units: Vec<ResolvedManaSpentUnit>,
+}
+
+/// Semantic command payload currently carried by a resolved-rules journal entry.
+///
+/// Additional command families are intentionally added by their owning P2
+/// authority rather than by a central replay dispatcher.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedRulesCommand {
+    ManaInsert(ResolvedManaInsertCommand),
+    ManaSpend(ResolvedManaSpendCommand),
+}
+
+/// Typed failure while applying an already-resolved mana command to a replay state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedManaReplayInvariantError {
+    UnknownPlayer(PlayerId),
+    UnstampedManaPip,
+    DuplicateManaPip(ManaPipId),
+    ManaPipIdOverflow(ManaPipId),
+    DuplicateSpentManaPip(ManaPipId),
+    MissingExactManaUnit(ManaPipId),
+    MismatchedExactManaUnit(ManaPipId),
+}
+
+impl std::fmt::Display for ResolvedManaReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPlayer(player) => write!(f, "unknown mana-command player {}", player.0),
+            Self::UnstampedManaPip => write!(f, "resolved mana command has an unstamped pip"),
+            Self::DuplicateManaPip(pip) => {
+                write!(f, "resolved mana command would duplicate pip {}", pip.0)
+            }
+            Self::ManaPipIdOverflow(pip) => {
+                write!(f, "resolved mana command cannot advance past pip {}", pip.0)
+            }
+            Self::DuplicateSpentManaPip(pip) => {
+                write!(f, "resolved mana spend repeats pip {}", pip.0)
+            }
+            Self::MissingExactManaUnit(pip) => {
+                write!(f, "resolved mana spend cannot find pip {}", pip.0)
+            }
+            Self::MismatchedExactManaUnit(pip) => {
+                write!(f, "resolved mana spend found mismatched pip {}", pip.0)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResolvedManaReplayInvariantError {}
 
 /// Semantic category of a resolved rules-execution node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +164,10 @@ pub struct SettlementNode {
 pub struct ResolvedCommandJournalEntry {
     pub ordinal: ResolvedCommandOrdinal,
     pub node: RulesExecutionNodeRef,
+    /// P1 node slots intentionally have no semantic payload. P2 commands append
+    /// their own globally ordered entry while preserving those original slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<ResolvedRulesCommand>,
 }
 
 /// Exact stamped mana created by one node.
@@ -273,6 +355,7 @@ impl ResolvedRulesJournal {
         self.entries.push(ResolvedCommandJournalEntry {
             ordinal: command,
             node: identity,
+            command: None,
         });
         self.nodes.push(SettlementNode {
             ordinal,
@@ -338,6 +421,16 @@ impl ResolvedRulesJournal {
         Ok(())
     }
 
+    /// Records and owns the exact command that inserted one mana unit.
+    pub fn record_mana_insert(
+        &mut self,
+        command: ResolvedManaInsertCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.ensure_command_capacity()?;
+        self.record_produced_mana(command.producer, command.unit.clone())?;
+        self.append_command(command.producer, ResolvedRulesCommand::ManaInsert(command))
+    }
+
     /// Records all exact units consumed by one cost component in solver order.
     pub fn record_spent_mana(
         &mut self,
@@ -395,6 +488,46 @@ impl ResolvedRulesJournal {
         Ok(Some(payment))
     }
 
+    /// Records and owns one exact solver-selected mana payment command.
+    pub fn record_mana_spend(
+        &mut self,
+        payer: PlayerId,
+        recipient: ManaPaymentRecipient,
+        spent: &[ManaUnit],
+    ) -> Result<Option<ResolvedManaSpendCommand>, ResolvedRulesJournalError> {
+        if spent.is_empty() {
+            return Ok(None);
+        }
+        self.ensure_command_capacity_for(2)?;
+        let Some(payment) = self.record_spent_mana(payer, recipient.clone(), spent)? else {
+            return Ok(None);
+        };
+        self.ensure_command_capacity()?;
+        let units = spent
+            .iter()
+            .map(|unit| {
+                let producer = self
+                    .spent_mana
+                    .iter()
+                    .find(|record| record.payment == payment && record.unit.pip_id == unit.pip_id)
+                    .expect("recorded spent mana must retain its producer")
+                    .producer;
+                ResolvedManaSpentUnit {
+                    unit: unit.clone(),
+                    producer,
+                }
+            })
+            .collect();
+        let command = ResolvedManaSpendCommand {
+            payer,
+            recipient,
+            payment,
+            units,
+        };
+        self.append_command(payment, ResolvedRulesCommand::ManaSpend(command.clone()))?;
+        Ok(Some(command))
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -413,6 +546,7 @@ impl ResolvedRulesJournal {
         self.entries.push(ResolvedCommandJournalEntry {
             ordinal: command,
             node: identity,
+            command: None,
         });
         self.nodes.push(SettlementNode {
             ordinal,
@@ -428,8 +562,29 @@ impl ResolvedRulesJournal {
         Ok(identity)
     }
 
+    fn append_command(
+        &mut self,
+        node: RulesExecutionNodeRef,
+        command: ResolvedRulesCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.ensure_command_capacity()?;
+        let node_index = self.node_index(node)?;
+        let ordinal = self.allocate_command();
+        self.entries.push(ResolvedCommandJournalEntry {
+            ordinal,
+            node,
+            command: Some(command),
+        });
+        self.nodes[node_index].journal_ordinals.push(ordinal);
+        Ok(ordinal)
+    }
+
     fn ensure_command_capacity(&self) -> Result<(), ResolvedRulesJournalError> {
-        (self.next_command_ordinal != u64::MAX)
+        self.ensure_command_capacity_for(1)
+    }
+
+    fn ensure_command_capacity_for(&self, count: u64) -> Result<(), ResolvedRulesJournalError> {
+        (self.next_command_ordinal <= u64::MAX.saturating_sub(count))
             .then_some(())
             .ok_or(ResolvedRulesJournalError::CommandOrdinalOverflow)
     }
@@ -544,6 +699,32 @@ impl ResolvedRulesJournal {
                 ));
             }
         }
+        let mut inserted_command_pips = HashSet::new();
+        let mut spent_command_pips = HashSet::new();
+        for entry in &self.entries {
+            let Some(command) = &entry.command else {
+                continue;
+            };
+            self.validate_resolved_command(entry, command)?;
+            match command {
+                ResolvedRulesCommand::ManaInsert(command) => {
+                    if !inserted_command_pips.insert(command.unit.pip_id) {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "duplicate mana-insert command pip".to_string(),
+                        ));
+                    }
+                }
+                ResolvedRulesCommand::ManaSpend(command) => {
+                    for spent in &command.units {
+                        if !spent_command_pips.insert(spent.unit.pip_id) {
+                            return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                                "duplicate mana-spend command pip".to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for node in &self.nodes {
             for ordinal in &node.journal_ordinals {
                 if !self
@@ -641,6 +822,79 @@ impl ResolvedRulesJournal {
         }
         Ok(())
     }
+
+    fn validate_resolved_command(
+        &self,
+        entry: &ResolvedCommandJournalEntry,
+        command: &ResolvedRulesCommand,
+    ) -> Result<(), ResolvedRulesJournalError> {
+        match command {
+            ResolvedRulesCommand::ManaInsert(command) => {
+                Self::require_stamped(command.unit.pip_id)?;
+                if entry.node != command.producer
+                    || !self.produced_mana.iter().any(|record| {
+                        record.producer == command.producer
+                            && exact_mana_unit_eq(&record.unit, &command.unit)
+                    })
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-insert command disagrees with produced mana".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ManaSpend(command) => {
+                if command.units.is_empty() || entry.node != command.payment {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-spend command has an empty or unrelated payment".to_string(),
+                    ));
+                }
+                let payment = self.node_index(command.payment).map_err(|_| {
+                    ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-spend command references an unknown payment".to_string(),
+                    )
+                })?;
+                let RulesExecutionNodeKind::Payment { payer, recipient } =
+                    &self.nodes[payment].kind
+                else {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-spend command references a non-payment node".to_string(),
+                    ));
+                };
+                if *payer != command.payer || *recipient != command.recipient {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-spend command disagrees with payment metadata".to_string(),
+                    ));
+                }
+                let records: Vec<&SpentManaUnit> = self
+                    .spent_mana
+                    .iter()
+                    .filter(|record| record.payment == command.payment)
+                    .collect();
+                if records.len() != command.units.len()
+                    || records.iter().zip(&command.units).any(|(record, spent)| {
+                        record.producer != spent.producer
+                            || !exact_mana_unit_eq(&record.unit, &spent.unit)
+                            || record.recipient != command.recipient
+                    })
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-spend command disagrees with spent mana".to_string(),
+                    ));
+                }
+                let mut pips = HashSet::new();
+                if command
+                    .units
+                    .iter()
+                    .any(|spent| spent.unit.pip_id.0 == 0 || !pips.insert(spent.unit.pip_id))
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "mana-spend command has duplicate or unstamped pips".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn identity_matches_kind(identity: RulesExecutionNodeRef, kind: &RulesExecutionNodeKind) -> bool {
@@ -668,6 +922,10 @@ fn identity_matches_kind(identity: RulesExecutionNodeRef, kind: &RulesExecutionN
 fn has_duplicate_values<T: Eq + std::hash::Hash>(values: &[T]) -> bool {
     let mut seen = HashSet::new();
     values.iter().any(|value| !seen.insert(value))
+}
+
+fn exact_mana_unit_eq(left: &ManaUnit, right: &ManaUnit) -> bool {
+    left.pip_id == right.pip_id && left == right
 }
 
 #[cfg(test)]
@@ -803,5 +1061,66 @@ mod tests {
         let mut nonmonotonic = serialized;
         nonmonotonic["nodes"][1]["ordinal"] = serde_json::json!(0);
         assert!(serde_json::from_value::<ResolvedRulesJournal>(nonmonotonic).is_err());
+    }
+
+    #[test]
+    fn semantic_mana_commands_roundtrip_and_reject_malformed_payloads() {
+        let mut journal = ResolvedRulesJournal::default();
+        let producer = journal.begin_proposal().unwrap();
+        let produced = unit(1);
+        journal
+            .record_mana_insert(ResolvedManaInsertCommand {
+                player: PlayerId(0),
+                unit: produced.clone(),
+                producer,
+            })
+            .unwrap();
+        let spend = journal
+            .record_mana_spend(
+                PlayerId(0),
+                ManaPaymentRecipient::Player(PlayerId(0)),
+                std::slice::from_ref(&produced),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(spend.units[0].unit, produced);
+        assert!(matches!(
+            journal.entries()[1].command.as_ref(),
+            Some(ResolvedRulesCommand::ManaInsert(_))
+        ));
+        assert!(matches!(
+            journal.entries()[3].command.as_ref(),
+            Some(ResolvedRulesCommand::ManaSpend(_))
+        ));
+        let serialized = serde_json::to_value(&journal).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serialized).unwrap(),
+            journal
+        );
+
+        let mut mismatched_insert = journal.clone();
+        let Some(ResolvedRulesCommand::ManaInsert(command)) =
+            mismatched_insert.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the insert command");
+        };
+        command.unit.pip_id = ManaPipId(99);
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(mismatched_insert).unwrap()
+        )
+        .is_err());
+
+        let mut duplicate_spend = journal.clone();
+        let mut duplicate_entry = duplicate_spend.entries[3].clone();
+        duplicate_entry.ordinal = ResolvedCommandOrdinal(4);
+        duplicate_spend.entries.push(duplicate_entry);
+        duplicate_spend.nodes[1]
+            .journal_ordinals
+            .push(ResolvedCommandOrdinal(4));
+        duplicate_spend.next_command_ordinal = 5;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(duplicate_spend).unwrap()
+        )
+        .is_err());
     }
 }

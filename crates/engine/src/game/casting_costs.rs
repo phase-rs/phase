@@ -10860,12 +10860,36 @@ pub(super) fn apply_committed_assist(
             "Assist mana payment is awaiting a replacement choice".to_string(),
         ));
     }
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == helper) {
-        mana_payment::pay_from_pool(&mut p.mana_pool, &probe).map_err(|e| {
+    if state.players.iter().any(|p| p.id == helper) {
+        state.restamp_pool_pip_ids(helper);
+        let (spent, _) = mana_payment::select_mana_payment(
+            &state
+                .players
+                .iter()
+                .find(|p| p.id == helper)
+                .expect("assisting player exists")
+                .mana_pool,
+            &probe,
+            None,
+            None,
+            false,
+            None,
+            crate::types::mana::LifePaymentColors::EMPTY,
+            &[],
+        )
+        .map_err(|e| {
             EngineError::ActionNotAllowed(format!(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
+        let recipient = state.mana_payment_recipient(pending.object_id, helper);
+        state
+            .resolve_and_apply_mana_spend(helper, recipient, &spent)
+            .map_err(|_| {
+                EngineError::ActionNotAllowed(
+                    "Assisting player's mana pool changed before payment applied".to_string(),
+                )
+            })?;
         if mana_payment::has_unspent_mana_continuous_effects(state) {
             state.layers_dirty.mark_full();
         }
