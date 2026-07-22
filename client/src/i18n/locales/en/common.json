@@ -22,6 +22,7 @@
     "updatePending": "update pending after game",
     "cards": "cards {{age}} ({{commit}})",
     "cardDataTitle": "Card data generated {{date}} from {{commit}}",
+    "desktopAppVersion": "Desktop app v{{version}}",
     "checkForUpdates": "Check for updates",
     "updaterDebugInfo": "Updater debug info",
     "updaterIssue": "Updater issue: {{error}}",
