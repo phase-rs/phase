@@ -5826,18 +5826,15 @@ fn parse_dying_object_pt_comparison_condition<'a>(
     let (rest, (comparator, threshold)) = parse_dying_pt_comparison_tail(rest)?;
     Ok((
         rest,
-        TriggerCondition::ZoneChangeObjectMatchesFilter {
-            origin: Some(Zone::Battlefield),
-            destination: Zone::Graveyard,
-            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                FilterProp::PtComparison {
-                    stat,
-                    scope: PtValueScope::Current,
-                    comparator,
-                    value: QuantityExpr::Fixed { value: threshold },
-                },
-            ])),
-        },
+        dies_lookback_condition(
+            vec![FilterProp::PtComparison {
+                stat,
+                scope: PtValueScope::Current,
+                comparator,
+                value: QuantityExpr::Fixed { value: threshold },
+            }],
+            false,
+        ),
     ))
 }
 
@@ -5946,6 +5943,13 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
         ),
     ))
     .parse(rest)?;
+    Ok((rest, dies_lookback_condition(props, negated)))
+}
+
+/// Build a dies-trigger look-back condition from the event object's battlefield
+/// characteristics, optionally negated for the "wasn't" / "didn't have"
+/// predicate forms.
+fn dies_lookback_condition(props: Vec<FilterProp>, negated: bool) -> TriggerCondition {
     let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
         origin: Some(Zone::Battlefield),
         destination: Zone::Graveyard,
@@ -5953,14 +5957,11 @@ fn parse_zone_change_object_filter_predicate(input: &str) -> OracleResult<'_, Tr
     };
 
     if negated {
-        Ok((
-            rest,
-            TriggerCondition::Not {
-                condition: Box::new(condition),
-            },
-        ))
+        TriggerCondition::Not {
+            condition: Box::new(condition),
+        }
     } else {
-        Ok((rest, condition))
+        condition
     }
 }
 
@@ -5999,25 +6000,15 @@ fn parse_zone_change_object_keyword_possession(input: &str) -> OracleResult<'_, 
     if matches!(keyword.kind(), KeywordKind::Unknown | KeywordKind::Landwalk) {
         return Err(oracle_err(input));
     }
-    let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
-        origin: Some(Zone::Battlefield),
-        destination: Zone::Graveyard,
-        filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
-            FilterProp::HasKeywordKind {
+    Ok((
+        rest,
+        dies_lookback_condition(
+            vec![FilterProp::HasKeywordKind {
                 value: keyword.kind(),
-            },
-        ])),
-    };
-    if negated {
-        Ok((
-            rest,
-            TriggerCondition::Not {
-                condition: Box::new(condition),
-            },
-        ))
-    } else {
-        Ok((rest, condition))
-    }
+            }],
+            negated,
+        ),
+    ))
 }
 
 /// CR 506.5: Parse the combat-alone predicate phrase of a zone-change
