@@ -11,7 +11,11 @@
     "local": false,
     "windows": ["main"],
     "remote": {
-      "urls": ["https://phase-rs.dev/*", "https://preview.phase-rs.dev/*"]
+      "urls": [
+        "https://phase-rs.dev/*",
+        "https://app.phase-rs.dev/*",
+        "https://preview.phase-rs.dev/*"
+      ]
     },
     "permissions": [
       "core:default",
