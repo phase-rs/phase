@@ -11122,9 +11122,10 @@ fn effect_cloak_top_card() {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
                 object_source: None,
+                enters_under: Some(ControllerRef::You),
             }
         ),
-        "expected Cloak {{ Controller, count: 1, object_source: None }}, got: {e:?}"
+        "expected Cloak {{ Controller, count: 1, object_source: None, enters_under: You }}, got: {e:?}"
     );
 }
 
@@ -11138,9 +11139,10 @@ fn effect_cloak_top_n_cards() {
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 2 },
                 object_source: None,
+                enters_under: Some(ControllerRef::You),
             }
         ),
-        "expected Cloak {{ Controller, count: 2, object_source: None }}, got: {e:?}"
+        "expected Cloak {{ Controller, count: 2, object_source: None, enters_under: You }}, got: {e:?}"
     );
 }
 
@@ -11181,10 +11183,12 @@ fn effect_cloak_a_card_from_your_hand_lowers_to_choose_from_zone_then_cloak() {
             sub.effect.as_ref(),
             Effect::Cloak {
                 object_source: Some(_),
+                enters_under: Some(ControllerRef::You),
                 ..
             }
         ),
-        "sub-ability must be Cloak with an explicit object_source, got: {:?}",
+        "sub-ability must be Cloak with an explicit object_source and the \
+         CR 110.2a cloaker-controls entry (enters_under: You), got: {:?}",
         sub.effect
     );
 }

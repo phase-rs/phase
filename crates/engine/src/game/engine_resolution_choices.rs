@@ -6783,8 +6783,14 @@ pub(crate) fn run_batch_completion(
             player,
             source_id,
             members,
+            enters_under,
         } => effects::cloak::complete_tracked_set_exile_delivery(
-            state, player, source_id, members, events,
+            state,
+            player,
+            source_id,
+            members,
+            enters_under,
+            events,
         ),
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,

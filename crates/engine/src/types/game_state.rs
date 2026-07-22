@@ -4484,6 +4484,11 @@ pub enum BatchCompletion {
         player: PlayerId,
         source_id: ObjectId,
         members: Vec<CloakExileMember>,
+        /// CR 110.2a: The resolved cloaking player the settled pile members
+        /// enter the battlefield under. Snapshotted at the resolver boundary so
+        /// a replacement-choice park cannot rebind it.
+        #[serde(default)]
+        enters_under: Option<PlayerId>,
     },
     /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
     /// batch settled. Keep the resolved ability and its two target partitions

@@ -25812,6 +25812,10 @@ fn parse_exile_pile_shuffle_cloak_ir(
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
                 object_source: Some(tracked_sentinel),
+                // CR 110.2a: "you exile ... then cloak them" — the cloaker
+                // controls the returned face-down permanents even for pile
+                // members they don't own.
+                enters_under: Some(ControllerRef::You),
             }),
             None,
             ClauseDisposition::Emit {

@@ -12521,6 +12521,16 @@ pub enum Effect {
         /// object selection is the parent `ChooseFromZone`'s responsibility).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         object_source: Option<TargetFilter>,
+        /// CR 110.2a: Controller-on-entry override — the player instructed to
+        /// cloak puts the card onto the battlefield, so it enters under that
+        /// player's control (Etrata, Deadly Fugitive: the cloaker controls the
+        /// face-down card while the library owner keeps owning it). `None` =
+        /// the owner default, reserved for future third-person subjects ("its
+        /// controller cloaks ... their library"). Mirrors `Manifest.enters_under`
+        /// and resolves through the single `resolve_enters_under_player`
+        /// authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 406.3 + CR 701.20a: Turn a face-down card face up via a resolving effect (not the
     /// morph special action). Used by the Imprint "flip" cards — Clone Shell,

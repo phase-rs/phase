@@ -141,6 +141,7 @@ mod enlightened_tutor_regression;
 mod equipment_etb_attach_parent_target;
 mod ertai_trickery_counter_kicked;
 mod etali_primal_sickness_poison;
+mod etrata_cloak_enters_under_cloaker_5944;
 mod evelyn_regression;
 mod excess_damage_quantity_channel;
 mod exchange_life_totals_cards;

@@ -2899,7 +2899,13 @@ fn legacy_effect(x: &Effect) -> bool {
             target,
             count,
             object_source,
-        } => legacy_quantity_expr(count) || legacy_target_filter(target) || otf(object_source),
+            enters_under,
+        } => {
+            legacy_quantity_expr(count)
+                || legacy_target_filter(target)
+                || otf(object_source)
+                || ocr(enters_under)
+        }
         Effect::SetLifeTotal { target, amount } | Effect::DealDamage { amount, target, .. } => {
             legacy_quantity_expr(amount) || legacy_target_filter(target)
         }
@@ -4683,6 +4689,11 @@ fn rw_effect(
             target: _,
             count,
             object_source,
+            // CR 110.2a: controller-on-entry override — no extra RW axis, same
+            // as the `Manifest` arm above: the membership write is already
+            // maximal (Census::Any + ZoneSpan::Any); unlike `ChangeZone`, Cloak
+            // does not derive `writes_membership_external_ctrl`.
+            enters_under: _,
         } => {
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_external.set(StateKind::HandLibrary);

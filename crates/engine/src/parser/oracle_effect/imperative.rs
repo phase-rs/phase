@@ -9734,6 +9734,9 @@ pub(super) fn parse_imperative_family_ast(
                     target: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
                     from_zone: Some(Zone::Hand),
+                    // CR 110.2a: the imperative "you" subject cloaks, so the
+                    // card enters under the instruction controller's control.
+                    enters_under: Some(ControllerRef::You),
                 })
             } else {
                 let that_player_target = that_player_library_filter(ctx);
@@ -9771,6 +9774,13 @@ pub(super) fn parse_imperative_family_ast(
                         target,
                         count,
                         from_zone: None,
+                        // CR 110.2a: both library-top surfaces are imperative
+                        // "you" subjects — the cloaker controls the face-down
+                        // entry even when the source is "that player's library"
+                        // (Etrata, Deadly Fugitive). Same stamping as
+                        // `parse_direct_manifest_clause`, where `Some(You)` is a
+                        // semantic no-op for "your library".
+                        enters_under: Some(ControllerRef::You),
                     })
                 } else {
                     None
@@ -11611,6 +11621,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             count,
             from_zone: Some(zone),
+            enters_under,
         } => {
             let mut clause = parsed_clause(Effect::ChooseFromZone {
                 count: 1,
@@ -11629,6 +11640,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     target,
                     count,
                     object_source: Some(TargetFilter::ParentTarget),
+                    enters_under,
                 },
             )));
             clause
@@ -11739,10 +11751,16 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward
         // {2}). The from-hand form (`from_zone: Some`) is intercepted upstream in
         // `lower_imperative_family_ast`; only the library-top source reaches here.
-        ImperativeFamilyAst::Cloak { target, count, .. } => Effect::Cloak {
+        ImperativeFamilyAst::Cloak {
+            target,
+            count,
+            enters_under,
+            ..
+        } => Effect::Cloak {
             target,
             count,
             object_source: None,
+            enters_under,
         },
         // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
         ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
