@@ -2779,7 +2779,7 @@ mod tests {
         };
 
         let (_, _, grouped) = legal_actions_full(&state);
-        let shortcut = mana_payment_shortcut_actions(&state, &grouped);
+        let shortcut = super::mana_payment_shortcut_actions(&state, &grouped);
         let sources: Vec<_> = shortcut
             .iter()
             .map(|action| match action {
