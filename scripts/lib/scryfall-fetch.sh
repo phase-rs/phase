@@ -52,7 +52,20 @@ scryfall_download() {
     rm -f "$tmp"
     return 1
   fi
-  mv -f "$tmp" "$file"
+  if ! mv -f "$tmp" "$file" 2>/dev/null; then
+    # POSIX rename silently replaces FILE even if another process has it open
+    # -- the concurrent-writer safety this function is designed around (see
+    # header comment). Windows cannot rename onto a file another process has
+    # open, so the losing side of a race hard-fails here instead of just
+    # losing harmlessly. If a concurrent invocation already produced a valid
+    # FILE, our own download is redundant: drop it and let the winner stand.
+    if [ -f "$file" ] && scryfall_validate_json "$file"; then
+      rm -f "$tmp"
+    else
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
 }
 
 # jq prelude shared by the gen-scryfall-*.sh transforms. Prepend it to a jq

@@ -50,7 +50,14 @@ DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
 # build-wasm.sh honors CARGO_TARGET_DIR (defaulting to target/ for CI/deploy
 # callers that don't set it), so only this dev-loop invocation is relocated.
 local_resource('wasm',
-    cmd = 'CARGO_TARGET_DIR=target/wasm ./scripts/build-wasm.sh',
+    # List-form cmd: Tilt runs a STRING cmd through the platform shell (cmd.exe on
+    # Windows), which can't parse POSIX `VAR=val cmd` syntax or `./script.sh` --
+    # and worse, cmd.exe mangles nested double-quotes before bash ever sees them,
+    # so a 'bash -c "..."' STRING wrapper fails with "unexpected EOF" (found the
+    # hard way). A list-form cmd bypasses cmd.exe's string parsing entirely --
+    # Tilt execs the argv array directly, so bash receives the script text as one
+    # untouched element. On Mac/Linux this is equally valid and equally a no-op.
+    cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/wasm ./scripts/build-wasm.sh'],
     deps = ENGINE_SRC + AI_SRC + WASM_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
     ignore = TMP_IGNORE,
     allow_parallel = True,
@@ -190,7 +197,9 @@ local_resource('test-frontend',
 # also gives it its own build lock, so it never queues behind the native test
 # builds. Cost: a second debug tree on disk (reclaimed by cargo-sweep).
 local_resource('clippy',
-    cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check',
+    # List-form cmd: see the 'wasm' resource above for why (a STRING 'bash -c "..."'
+    # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
+    cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check'],
     deps = ['crates/', 'client/src/adapter/generated/interaction/index.ts', 'scripts/check-interaction-bindings.sh'],
     ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
@@ -213,7 +222,9 @@ local_resource('check-frontend',
 # ---------------------------------------------------------------------------
 
 local_resource('card-data',
-    cmd = './scripts/gen-card-data.sh',
+    # List-form cmd: see the 'wasm' resource above for why (a STRING 'bash -c "..."'
+    # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
+    cmd = ['bash', '-c', './scripts/gen-card-data.sh'],
     deps = ENGINE_SRC,
     # gen-card-data.sh promotes these tracked files under crates/engine/data/, which is
     # in ENGINE_SRC (deps). Watching card-data's own generated outputs makes every
