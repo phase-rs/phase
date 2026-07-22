@@ -10972,8 +10972,10 @@ pub struct GameState {
     /// The synchronous rules-execution scope receiving newly produced mana.
     /// It is empty outside an activation or inline trigger and is never wire
     /// authority on its own.
+    // pub(crate) rather than private: functional-record-update construction
+    // (`..GameState::default()`) in sibling engine modules requires access.
     #[serde(skip)]
-    active_rules_execution_node: Option<RulesExecutionNodeRef>,
+    pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
