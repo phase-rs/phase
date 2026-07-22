@@ -128,6 +128,58 @@ fn greenbelt_rampager_cant_pay_energy_bounces_to_hand() {
     );
 }
 
+/// Maintainer review on PR #5869 (stale-flag blocker): a successful mandatory
+/// `PayCost` must not inherit a failure from an EARLIER, unrelated resolution.
+/// `cost_payment_failed_flag` is only ever set on failure; before the fix,
+/// `pay::resolve` never cleared it, so the mandatory-rider seed's
+/// `!cost_payment_failed_flag` guard saw the stale `true`, skipped seeding
+/// `optional_effect_performed` for a payment that SUCCEEDED, and the
+/// `Not { OptionalEffectPerformed }` bounce rider fired anyway.
+///
+/// Production-path fixture: the same Rampager is cast twice. The first cast's
+/// {E}{E} is unpayable (0 energy) — it bounces, grants {E}, and leaves the
+/// global failure flag set. The second cast, after topping energy up to
+/// exactly {E}{E}, pays successfully and MUST stay on the battlefield with
+/// both energy spent and no rider {E}.
+#[test]
+fn greenbelt_rampager_pays_after_earlier_unpayable_payment_left_stale_state() {
+    let (mut runner, rampager) = scenario_with_rampager(0);
+
+    // First resolution: unpayable payment (the stale-flag producer).
+    let outcome = runner.cast(rampager).resolve();
+    outcome.assert_zone(&[rampager], Zone::Hand);
+    assert_eq!(
+        energy_of(runner.state()),
+        1,
+        "sanity: the unpayable first cast must bounce and grant exactly {{E}}"
+    );
+
+    // Second resolution: fund the recast ({G}) and top energy up to exactly
+    // the {E}{E} the ETB cost needs (1 from the rider + 1 here).
+    runner.state_mut().add_mana_to_pool(
+        P0,
+        ManaUnit::new(ManaType::Green, ObjectId(9_998), false, vec![]),
+    );
+    runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == P0)
+        .expect("P0 exists")
+        .energy = 2;
+
+    let outcome = runner.cast(rampager).resolve();
+
+    outcome.assert_zone(&[rampager], Zone::Battlefield);
+    let energy = energy_of(outcome.state());
+    assert_eq!(
+        energy, 0,
+        "a successfully paid {{E}}{{E}} after an earlier unpayable resolution \
+         must keep the creature on the battlefield and must NOT fire the bounce \
+         rider (stale cost_payment_failed_flag); energy={energy}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Controller/owner divergence — maintainer review on PR #5869
 // ---------------------------------------------------------------------------
