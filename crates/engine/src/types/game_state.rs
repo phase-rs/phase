@@ -7823,6 +7823,17 @@ pub enum WaitingFor {
         /// use). Mirrors the `enter_tapped` / `enters_attacking` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_modified_if: Option<crate::types::ability::TargetFilter>,
+        /// CR 611.2a + CR 610.3: the `ChangeZone` duration carried across the
+        /// `EffectZoneChoice` round-trip, so an interactive multi-candidate
+        /// selection preserves a bounded move ("exile ... until ~ leaves the
+        /// battlefield" → the `UntilSourceLeaves` exile link). Without this
+        /// carry-through the resume authority reconstructed the move ctx with
+        /// `duration: None` and the chosen card was exiled PERMANENTLY —
+        /// while the single-candidate shortcut (no pause) kept the duration,
+        /// making the bug visible only when a real choice existed. Mirrors
+        /// the `face_down_profile` / `enters_modified_if` carry-through above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<crate::types::ability::Duration>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -20043,6 +20054,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -20381,6 +20393,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -20930,6 +20943,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

@@ -9705,6 +9705,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             library_position: Some(position),
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         let completed = runner

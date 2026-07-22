@@ -269,6 +269,7 @@ fn open_private_zone_cast_selection(
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
     Ok(())
 }

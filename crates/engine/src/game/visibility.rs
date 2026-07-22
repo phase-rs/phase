@@ -1218,6 +1218,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         library_position: None,
         is_cost_payment: _,
         enters_modified_if: _,
+        ref duration,
     } = state.waiting_for
     {
         // `open_private_zone_cast_selection` is the sole Library producer and
@@ -1249,6 +1250,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 library_position: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
+                // The bounded-move duration is a public effect parameter, not
+                // private hand info — pass it through the redaction.
+                duration: duration.clone(),
             };
         }
     }

@@ -78,8 +78,9 @@ fn parse_until_body(input: &str) -> OracleResult<'_, Duration> {
         // be accepted here, mirroring the same singular/plural alternation
         // already handled by the LTB *trigger* parsers (the `leaves_tail`
         // alt in `oracle_trigger.rs` and `oracle_effect/mod.rs`'s
-        // "leaves the battlefield"/"leave the battlefield" alt) — CR 603.2c
-        // notes the plural "leave" form is used with plural/batched subjects.
+        // "leaves the battlefield"/"leave the battlefield" alt). CR 611.2a:
+        // the parsed value is the continuous effect's stated duration — here
+        // the host permanent's own battlefield lifetime.
         value(
             Duration::UntilHostLeavesPlay,
             (

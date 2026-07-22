@@ -1226,6 +1226,7 @@ fn pay_ability_cost_inner(
                     library_position: None,
                     is_cost_payment: true,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
