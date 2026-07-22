@@ -90,6 +90,7 @@ mod counter_spell_zone_redirect;
 mod court_of_cunning_multi_target_mill;
 mod cr733_resolved_commands_p0;
 mod cr733_resolved_commands_p1;
+mod cr733_resolved_commands_p2;
 mod cr_annotations;
 mod craft_tithing_blade_transform;
 mod cross_line_instead_override_branch;

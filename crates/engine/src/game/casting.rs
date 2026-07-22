@@ -14239,11 +14239,11 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     let pins: Vec<crate::types::mana::ManaPipId> = state.active_payment_pins.clone();
     let player_data = state
         .players
-        .iter_mut()
+        .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
-        &mut player_data.mana_pool,
+    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+        &player_data.mana_pool,
         cost,
         Some(&hand_demand),
         spell_ctx.as_ref(),
@@ -14254,7 +14254,11 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = state.mana_payment_recipient(source_id, player);
-    state.record_mana_payment(player, recipient, &spent_units);
+    state
+        .resolve_and_apply_mana_spend(player, recipient, &spent_units)
+        .map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
+        })?;
     if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
@@ -14717,11 +14721,11 @@ fn pay_non_cast_mana_cost(
     state.restamp_pool_pip_ids(player);
     let player_data = state
         .players
-        .iter_mut()
+        .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
-        &mut player_data.mana_pool,
+    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+        &player_data.mana_pool,
         cost,
         None,
         Some(&ctx),
@@ -14735,7 +14739,11 @@ fn pay_non_cast_mana_cost(
     let recipient = source_id
         .map(|source| state.mana_payment_recipient(source, player))
         .unwrap_or(ManaPaymentRecipient::Player(player));
-    state.record_mana_payment(player, recipient, &spent_units);
+    state
+        .resolve_and_apply_mana_spend(player, recipient, &spent_units)
+        .map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
+        })?;
     if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
@@ -14877,11 +14885,11 @@ fn auto_tap_and_pay_cost_excluding(
     let pins: Vec<crate::types::mana::ManaPipId> = state.active_payment_pins.clone();
     let player_data = state
         .players
-        .iter_mut()
+        .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::pay_cost_with_demand_and_choices(
-        &mut player_data.mana_pool,
+    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+        &player_data.mana_pool,
         cost,
         Some(&combined_demand),
         ctx,
@@ -14892,7 +14900,11 @@ fn auto_tap_and_pay_cost_excluding(
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = state.mana_payment_recipient(source_id, player);
-    state.record_mana_payment(player, recipient, &spent_units);
+    state
+        .resolve_and_apply_mana_spend(player, recipient, &spent_units)
+        .map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
+        })?;
     if !spent_units.is_empty() && mana_payment::has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }

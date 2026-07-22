@@ -48,7 +48,10 @@ use super::resolution::{
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
-use super::resolved_commands::{ManaPaymentRecipient, ResolvedRulesJournal, RulesExecutionNodeRef};
+use super::resolved_commands::{
+    ManaPaymentRecipient, ResolvedManaInsertCommand, ResolvedManaReplayInvariantError,
+    ResolvedManaSpendCommand, ResolvedRulesJournal, RulesExecutionNodeRef,
+};
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
 
@@ -10957,9 +10960,9 @@ pub struct GameState {
     /// games don't re-mint colliding ids.
     #[serde(default)]
     pub next_pip_id: u64,
-    /// P1 provenance-only journal for resolved rules work. It is serialized so
-    /// a restored game retains exact stamped mana provenance, but it does not
-    /// yet participate in command application.
+    /// Resolved-rules journal for exact mana provenance and P2 mana commands.
+    /// It is serialized so a restored game retains the command operands needed
+    /// by later retained-prefix replay.
     #[serde(default)]
     pub resolved_rules_journal: ResolvedRulesJournal,
     /// CR 118.3a: transient carrier for the caster's pin hints during a single
@@ -15142,27 +15145,132 @@ impl GameState {
         ManaPipId(id)
     }
 
-    /// CR 118.3a: Stamp a stable pip id on `unit` and add it to `player`'s mana
-    /// pool. This is the single authority for mana entering a *real* pool: every
+    /// CR 106.4 + CR 118.3a: Resolve and apply one real-pool mana insertion.
+    /// This is the single authority for mana entering a *real* pool: every
     /// production/refill/convoke/delve injection routes here so that each pooled
     /// unit has a unique id the player can pin to direct payment. Detached
     /// preview pools (with no `GameState`) keep calling `ManaPool::add` directly.
     pub fn add_mana_to_pool(&mut self, player: PlayerId, mut unit: ManaUnit) -> Option<ManaUnit> {
         unit.pip_id = self.next_pip_id();
-        if let Some(p) = self.players.iter_mut().find(|p| p.id == player) {
-            p.mana_pool.add(unit.clone());
-            let producer = self.active_rules_execution_node.unwrap_or_else(|| {
-                self.resolved_rules_journal
-                    .begin_proposal()
-                    .expect("resolved-rules journal proposal ordinal overflow")
-            });
-            self.resolved_rules_journal
-                .record_produced_mana(producer, unit.clone())
-                .expect("stamped mana must have one unique journal producer");
-            Some(unit)
-        } else {
-            None
+        if !self.players.iter().any(|candidate| candidate.id == player) {
+            return None;
         }
+        let producer = self.active_rules_execution_node.unwrap_or_else(|| {
+            self.resolved_rules_journal
+                .begin_proposal()
+                .expect("resolved-rules journal proposal ordinal overflow")
+        });
+        let command = ResolvedManaInsertCommand {
+            player,
+            unit: unit.clone(),
+            producer,
+        };
+        self.apply_resolved_mana_insert(&command)
+            .expect("fresh mana insertion must satisfy its replay preconditions");
+        self.resolved_rules_journal
+            .record_mana_insert(command)
+            .expect("stamped mana must have one unique journal producer");
+        Some(unit)
+    }
+
+    /// CR 106.4: Apply one exact, already-resolved mana insertion without
+    /// allocating a replacement pip or consulting mana-production state.
+    pub fn apply_resolved_mana_insert(
+        &mut self,
+        command: &ResolvedManaInsertCommand,
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        if command.unit.pip_id.0 == 0 {
+            return Err(ResolvedManaReplayInvariantError::UnstampedManaPip);
+        }
+        let player = self
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == command.player)
+            .ok_or(ResolvedManaReplayInvariantError::UnknownPlayer(
+                command.player,
+            ))?;
+        if player
+            .mana_pool
+            .mana
+            .iter()
+            .any(|unit| unit.pip_id == command.unit.pip_id)
+        {
+            return Err(ResolvedManaReplayInvariantError::DuplicateManaPip(
+                command.unit.pip_id,
+            ));
+        }
+        player.mana_pool.add(command.unit.clone());
+        self.advance_pip_high_water(command.unit.pip_id)
+    }
+
+    /// CR 118.3a: Construct, journal, and apply the solver-selected exact mana
+    /// payment. Solver choice happens before this boundary; this method never
+    /// re-solves or substitutes units.
+    pub(crate) fn resolve_and_apply_mana_spend(
+        &mut self,
+        payer: PlayerId,
+        recipient: ManaPaymentRecipient,
+        spent: &[ManaUnit],
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        let Some(command) = self
+            .resolved_rules_journal
+            .record_mana_spend(payer, recipient, spent)
+            .expect("every paid mana pip must have one unique journal producer")
+        else {
+            return Ok(());
+        };
+        self.apply_resolved_mana_spend(&command)
+    }
+
+    /// CR 118.3a: Apply one exact, already-resolved mana payment. A missing or
+    /// mismatched pip is a typed replay-invariant failure, never an invitation
+    /// to choose substitute mana.
+    pub fn apply_resolved_mana_spend(
+        &mut self,
+        command: &ResolvedManaSpendCommand,
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        let player = self
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == command.payer)
+            .ok_or(ResolvedManaReplayInvariantError::UnknownPlayer(
+                command.payer,
+            ))?;
+        let units: Vec<ManaUnit> = command
+            .units
+            .iter()
+            .map(|spent| spent.unit.clone())
+            .collect();
+        for unit in &units {
+            if unit.pip_id.0 == 0 {
+                return Err(ResolvedManaReplayInvariantError::UnstampedManaPip);
+            }
+        }
+        crate::game::mana_payment::remove_exact_mana_units(&mut player.mana_pool, &units).map_err(
+            |error| match error {
+                crate::game::mana_payment::ExactManaRemovalError::DuplicatePip(pip) => {
+                    ResolvedManaReplayInvariantError::DuplicateSpentManaPip(pip)
+                }
+                crate::game::mana_payment::ExactManaRemovalError::MissingPip(pip) => {
+                    ResolvedManaReplayInvariantError::MissingExactManaUnit(pip)
+                }
+                crate::game::mana_payment::ExactManaRemovalError::MismatchedUnit(pip) => {
+                    ResolvedManaReplayInvariantError::MismatchedExactManaUnit(pip)
+                }
+            },
+        )
+    }
+
+    fn advance_pip_high_water(
+        &mut self,
+        pip: ManaPipId,
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        let next = pip
+            .0
+            .checked_add(1)
+            .ok_or(ResolvedManaReplayInvariantError::ManaPipIdOverflow(pip))?;
+        self.next_pip_id = self.next_pip_id.max(next);
+        Ok(())
     }
 
     /// CR 605.3b: Begin the distinct, immediate execution node for one
@@ -15224,20 +15332,6 @@ impl GameState {
             Some(node) => self.with_rules_execution_node(node, operation),
             None => operation(self),
         }
-    }
-
-    /// CR 118.3a: Record the exact stamped pool units consumed for one mana
-    /// cost component. The payment solver remains authoritative for which
-    /// units leave the pool; this only captures its completed result.
-    pub(crate) fn record_mana_payment(
-        &mut self,
-        payer: PlayerId,
-        recipient: ManaPaymentRecipient,
-        spent: &[ManaUnit],
-    ) {
-        self.resolved_rules_journal
-            .record_spent_mana(payer, recipient, spent)
-            .expect("every paid mana pip must have one unique journal producer");
     }
 
     pub(crate) fn mana_payment_recipient(

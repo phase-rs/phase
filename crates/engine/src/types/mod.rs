@@ -75,8 +75,10 @@ pub use resolution::{
 };
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
-    ResolvedRulesJournal, ResolvedRulesJournalError, RulesExecutionNodeKind, RulesExecutionNodeRef,
-    SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
+    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
+    ResolvedManaSpentUnit, ResolvedRulesCommand, ResolvedRulesJournal, ResolvedRulesJournalError,
+    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
+    SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
