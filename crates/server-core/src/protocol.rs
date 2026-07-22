@@ -1911,7 +1911,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_20() {
-        assert_eq!(PROTOCOL_VERSION, 21);
+        assert_eq!(PROTOCOL_VERSION, 20);
     }
 
     #[test]
