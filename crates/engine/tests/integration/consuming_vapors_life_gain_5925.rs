@@ -19,8 +19,9 @@ use engine::types::zones::Zone;
 const ORACLE: &str = "Target player sacrifices a creature of their choice. You gain life equal to that creature's toughness.";
 
 /// CR 608.2c + CR 701.21a + CR 119.3 + CR 400.7j: two eligible creatures force
-/// `EffectZoneChoice`; choosing the toughness-5 creature must gain the
-/// controller exactly 5 life (not 0, not the other creature's 2).
+/// `EffectZoneChoice`; choosing the printed-toughness-5 creature with three
+/// +1/+1 counters must gain the controller exactly 8 life (not 0, not its
+/// printed toughness, and not the other creature's 2).
 #[test]
 fn consuming_vapors_gains_life_equal_to_chosen_sacrificed_toughness() {
     let mut scenario = GameScenario::new();
@@ -29,7 +30,13 @@ fn consuming_vapors_gains_life_equal_to_chosen_sacrificed_toughness() {
         .add_spell_to_hand_from_oracle(P0, "Consuming Vapors", false, ORACLE)
         .with_mana_cost(ManaCost::generic(0))
         .id();
-    let tough5 = scenario.add_creature(P1, "Five Toughness", 1, 5).id();
+    // The selected creature is a printed 1/5, but its effective battlefield
+    // toughness is 8. This makes the cast pipeline discriminate battlefield
+    // LKI from printed/base card data after the sacrifice.
+    let tough5 = scenario
+        .add_creature(P1, "Five Toughness", 1, 5)
+        .with_plus_counters(3)
+        .id();
     let tough2 = scenario.add_creature(P1, "Two Toughness", 1, 2).id();
 
     let mut runner = scenario.build();
@@ -39,7 +46,7 @@ fn consuming_vapors_gains_life_equal_to_chosen_sacrificed_toughness() {
         .effect_zone(&[tough5])
         .resolve();
 
-    outcome.assert_life_delta(P0, 5);
+    outcome.assert_life_delta(P0, 8);
     outcome.assert_life_delta(P1, 0);
     outcome.assert_zone(&[tough5], Zone::Graveyard);
     assert_eq!(
