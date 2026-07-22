@@ -535,5 +535,17 @@ class RootDriftGuardTests(unittest.TestCase):
         self.assertGreaterEqual(len(census.collect_gamestate_fields()), census.MIN_GAMESTATE_FIELDS)
 
 
+class ScanPopulationTests(unittest.TestCase):
+    """Population regressions: production authorities must be in the scan set."""
+
+    def test_dual_declared_zone_authority_is_scanned(self) -> None:
+        # game/zones.rs is visibility-gated (pub under test-support, pub(crate)
+        # in production) but always compiled — excluding it silently deletes
+        # the core zone-mutation authority from the census.
+        names = {path.name for path in census.production_rs_files()}
+        self.assertIn("zones.rs", names)
+        self.assertIn("zone_pipeline.rs", names)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
