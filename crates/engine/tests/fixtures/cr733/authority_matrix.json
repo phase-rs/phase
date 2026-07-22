@@ -2718,6 +2718,29 @@
    "excluded_non_gamestate_site_ids": []
   },
   {
+   "field": "last_gained_control_object_ids",
+   "classification": "proposed_authority",
+   "census_site_count": 3,
+   "reachable_site_count": 2,
+   "final_authority": "crate::game::effects::gain_control::resolve_all",
+   "authority_status": "existing_to_promote",
+   "owning_module": "crates/engine/src/game/effects/gain_control.rs",
+   "command_family": "Ledgers and once-per-* facts",
+   "command_scopes": [
+    {
+     "family": "Ledgers and once-per-* facts",
+     "scope": "resolution-scoped ledger of the objects the current chain's GainControlAll half just took, read by the chained GiveControlAll half's post-flush live-filter exclusion (issue #4731 two-way swap simultaneity); cleared at depth-0 chain entry, mirroring last_zone_changed_ids."
+    }
+   ],
+   "composition_policy": "write only from the GainControlAll resolver's exact affected-object set; consumers read-only; never reconstruct from live controller state after a layer flush.",
+   "reroute_site_ids": [
+    "crates/engine/src/game/effects/gain_control.rs:140:resolve_all:assign",
+    "crates/engine/src/game/effects/mod.rs:7112:resolve_ability_chain:mut_method:clear"
+   ],
+   "excluded_clone_site_ids": [],
+   "excluded_non_gamestate_site_ids": []
+  },
+  {
    "field": "last_loop_action_sequence",
    "classification": "proposed_authority",
    "census_site_count": 14,

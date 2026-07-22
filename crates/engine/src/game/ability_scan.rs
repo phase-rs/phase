@@ -726,8 +726,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::GiveControlAll { target, recipient } => {
             let mut acc = Axes::NONE;
-            acc = acc.or(scan_target_filter(target));
-            acc = acc.or(scan_target_filter(recipient));
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_target_filter(recipient, target_ctx, mode));
             acc
         }
         Effect::ControlNextTurn {
@@ -5136,6 +5136,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::DamageEachPlayer { .. }
         | Effect::DestroyAll { .. }
         | Effect::GainControlAll { .. }
+        // CR 732.2a: `GiveControlAll` is `GainControlAll`'s recipient-inverted
+        // sibling (issue #4731's two-way swap) — the same mass-population
+        // battlefield read, so the same fail-closed census classification.
+        | Effect::GiveControlAll { .. }
         | Effect::PumpAll { .. }
         | Effect::BounceAll { .. }
         | Effect::UnattachAll { .. }
@@ -5477,7 +5481,7 @@ enum RelaxReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CensusRole {
     /// Mass battlefield population read - enumerated over every matching object,
-    /// scales with the growing class => fail-CLOSED census. EXACTLY the 28
+    /// scales with the growing class => fail-CLOSED census. EXACTLY the 29
     /// `effect_target_ctx` `LiveBoardCensus` members.
     Census,
     Relax(RelaxReason),
@@ -5491,7 +5495,7 @@ enum CensusRole {
 #[cfg(test)]
 fn effect_census_role(e: &Effect) -> CensusRole {
     match e {
-        // -- CENSUS (28): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
+        // -- CENSUS (29): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
         // arm - mass battlefield population reads that scale with growth.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -5500,6 +5504,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::DamageEachPlayer { .. }
         | Effect::DestroyAll { .. }
         | Effect::GainControlAll { .. }
+        // CR 732.2a: `GiveControlAll` mirrors its `effect_target_ctx` census
+        // entry (issue #4731's two-way swap sibling of `GainControlAll`).
+        | Effect::GiveControlAll { .. }
         | Effect::PumpAll { .. }
         | Effect::BounceAll { .. }
         | Effect::UnattachAll { .. }
@@ -6928,6 +6935,10 @@ mod tests {
             "EachSourceDealsDamage",
             "ExploreAll",
             "GainControlAll",
+            // CR 732.2a: GiveControlAll — GainControlAll's recipient-inverted
+            // sibling (issue #4731's two-way swap), the same mass-population
+            // battlefield read.
+            "GiveControlAll",
             "GoadAll",
             "PumpAll",
             "PutCounterAll",
@@ -6957,7 +6968,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 28, "exactly 28 mass-population census tags");
+        assert_eq!(got.len(), 29, "exactly 29 mass-population census tags");
     }
 
     /// A7' (mitigation #4, replaces the void census-default A7): with SnapshotOrEvent the
@@ -6968,7 +6979,7 @@ mod tests {
     /// the SOLE effect with a DEDICATED SnapshotOrEvent arm (the region between the
     /// census arm and the single-object group); giving any OTHER census-role slot a
     /// dedicated Snapshot arm turns this RED. Dual-guard with
-    /// `census_tag_set_is_exactly_enumerated` (guard#3, pins the 28 census tags).
+    /// `census_tag_set_is_exactly_enumerated` (guard#3, pins the 29 census tags).
     #[test]
     fn obligation_ii_census_exception_is_exactly_settapstate() {
         use crate::types::ability::{EffectScope, TapStateChange};
@@ -7112,7 +7123,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 28, "exactly 28 census members");
+        assert_eq!(ecr_census.len(), 29, "exactly 29 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
