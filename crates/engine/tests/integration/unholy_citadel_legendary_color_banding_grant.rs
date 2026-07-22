@@ -16,7 +16,7 @@
 //! https://github.com/phase-rs/phase/issues/6332
 
 use engine::game::layers::evaluate_layers;
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard};
 
@@ -59,6 +59,12 @@ fn unholy_citadel_grants_bands_with_other_only_to_black_legendary_creatures() {
         .add_creature(P0, "Test Black Nonlegend", 2, 2)
         .with_mana_cost(black_cost())
         .id();
+    // Correct color and supertype, but wrong controller.
+    let opponent_black_legend = scenario
+        .add_creature(P1, "Opponent Black Legend", 2, 2)
+        .as_legendary()
+        .with_mana_cost(black_cost())
+        .id();
 
     let mut runner = scenario.build();
     // Force a full layer re-evaluation so the land's static ability is applied
@@ -83,5 +89,12 @@ fn unholy_citadel_grants_bands_with_other_only_to_black_legendary_creatures() {
         !state.objects[&black_nonlegend].keywords.contains(&granted),
         "a non-legendary Black creature must NOT receive the grant: {:?}",
         state.objects[&black_nonlegend].keywords
+    );
+    assert!(
+        !state.objects[&opponent_black_legend]
+            .keywords
+            .contains(&granted),
+        "an opponent's Black legendary creature must NOT receive a you-control grant: {:?}",
+        state.objects[&opponent_black_legend].keywords
     );
 }

@@ -2740,7 +2740,11 @@ pub fn normalize_bands_with_other_quality(raw: &str) -> String {
         .collect();
     let joined = words.join(" ");
     let singular = match joined.to_ascii_lowercase().as_str() {
-        "legends" | "legendary creatures" | "legendary creature" => "Legend".to_string(),
+        "legends"
+        | "legendary creatures"
+        | "legendary creature"
+        | "legendarycreatures"
+        | "legendarycreature" => "Legend".to_string(),
         "wolves" => "Wolf".to_string(),
         "walls" => "Wall".to_string(),
         other if other.ends_with("ies") && other.len() > 3 => {

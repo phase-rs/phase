@@ -125,9 +125,8 @@ pub(crate) fn parse_typed_you_control(
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
-                // CR 105.1 + CR 205.4a: a descriptor ending in a supertype word
-                // ("Black legendary", "Blue legendary", ...) compounds a color
-                // adjective with a trailing supertype — the Legends
+                // CR 105.1 + CR 205.4a: a compound color/supertype descriptor
+                // ("Black legendary", "Legendary black", ...) — the Legends
                 // banding-land cycle (Unholy Citadel, Seafarer's Quay,
                 // Adventurers' Guildhouse, Cathedral of Serra, Mountain
                 // Stronghold): "<Color> legendary creatures you control have
@@ -142,11 +141,7 @@ pub(crate) fn parse_typed_you_control(
                 // Declines unless the whole subject is consumed as a single
                 // Typed filter, so this cannot misfire into a fabricated
                 // filter for an unrelated descriptor shape.
-                } else if descriptor
-                    .rsplit(' ')
-                    .next()
-                    .is_some_and(descriptor_is_supertype)
-                {
+                } else {
                     let subject_and_type = tp.original[..creatures_pos + " creatures".len()].trim();
                     let (compound_filter, remainder) = parse_type_phrase(subject_and_type);
                     match compound_filter {
@@ -155,8 +150,6 @@ pub(crate) fn parse_typed_you_control(
                         }
                         _ => return None,
                     }
-                } else {
-                    return None;
                 }
             } else if desc_remaining.eq_ignore_ascii_case("commander") {
                 // CR 903.3d: Combat-status prefix + "Commander creature" — same
