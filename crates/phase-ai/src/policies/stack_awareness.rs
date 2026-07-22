@@ -394,10 +394,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target_id)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Target),
         };
         (decision, candidate)
     }

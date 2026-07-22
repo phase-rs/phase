@@ -145,6 +145,7 @@
       { "type": "PassPriority" }
     ],
     "auto_pass_recommended": false,
+    "mana_payment_shortcut_actions": [],
     "spell_costs": {}
   }
 }

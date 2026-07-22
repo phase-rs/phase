@@ -258,10 +258,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target)),
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
         }
     }
 
@@ -676,10 +673,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(flyer)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -745,10 +739,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(ground_opp)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,

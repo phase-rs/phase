@@ -24116,7 +24116,7 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
     // (1) P0 taps its own Island for mana. Simulate the base {U} the land
     // produced (CR 106.12a) and fire the delayed trigger; P0 must gain the
     // ADDITIONAL {U} on top (net +2 blue in the pool: base + bonus).
-    runner
+    let _ = runner
         .state_mut()
         .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
     check_delayed_triggers(
@@ -24138,7 +24138,7 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
     // (2) P1 (a DIFFERENT player, not the caster) taps THEIR Island. The bonus
     // must go to P1's pool — proving the recipient is TriggeringPlayer, not the
     // caster P0.
-    runner
+    let _ = runner
         .state_mut()
         .add_mana_to_pool(P1, ManaUnit::new(ManaType::Blue, isl1, false, vec![]));
     check_delayed_triggers(
@@ -24181,7 +24181,7 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
             .mana_pool
             .clear();
     }
-    runner
+    let _ = runner
         .state_mut()
         .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
     check_delayed_triggers(

@@ -1219,7 +1219,9 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
 /// CR 603.2c + CR 608.2c: For batched attack triggers, "those creatures"
 /// anaphorically refers to every attacker that satisfied the trigger subject
 /// in the contextual `AttackersDeclared` event (Champions from Beyond Full Party).
-fn parent_target_refs_from_attack_trigger_context(state: &GameState) -> Option<Vec<TargetRef>> {
+pub(crate) fn parent_target_refs_from_attack_trigger_context(
+    state: &GameState,
+) -> Option<Vec<TargetRef>> {
     let events: Vec<&GameEvent> = if state.current_trigger_events.is_empty() {
         state.current_trigger_event.iter().collect()
     } else {

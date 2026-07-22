@@ -215,11 +215,11 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
                 cmp_val(a0, b0)
             }
         }
-        GameAction::TapLandForMana { object_id: a0 } => {
-            let GameAction::TapLandForMana { object_id: b0 } = b else {
+        GameAction::TapLandForMana { selection: a0 } => {
+            let GameAction::TapLandForMana { selection: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
             };
-            cmp_val(a0, b0)
+            a0.cmp_stable(b0)
         }
         GameAction::UntapLandForMana { object_id: a0 } => {
             let GameAction::UntapLandForMana { object_id: b0 } = b else {

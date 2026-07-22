@@ -1917,7 +1917,7 @@ mod tests {
 
         // Three colorless pool units, each stamped with a distinct pip id.
         for _ in 0..3 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 p0,
                 ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
             );

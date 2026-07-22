@@ -5,13 +5,18 @@ import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
   encodeWireMessage,
+  legalActionsFromWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v13", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(13);
+  it("pins the P2P wire protocol to v14", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(14);
+  });
+
+  it("defaults shortcut actions for a v14 payload created before the additive field", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
   });
 
   // (a) Round-trip across P2PMessage variants.
@@ -88,6 +93,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
       events: [],
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
     },
     {
       type: "reconnect_ack",
@@ -104,6 +110,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
         },
       }),
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
     },
   ];
 
@@ -153,6 +160,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       state: buildGameState(),
       events: [],
       legalActions: [],
+      manaPaymentShortcutActions: [],
     })).toThrow(/Wire protocol mismatch/);
   });
 

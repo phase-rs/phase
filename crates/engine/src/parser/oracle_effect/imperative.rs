@@ -8044,6 +8044,22 @@ pub(super) fn parse_exile_ast(
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
 
+    // CR 608.2c + CR 115.10a: an anaphoric ALTERNATIVE referent — "… or the
+    // chosen creature/permanent" — composes this exile with an object chosen
+    // by an EARLIER instruction in the same ability ("choose target opponent
+    // and up to one target creature they control. … You may exile a nonland
+    // card from their hand or the chosen creature …", Cloak and Dagger,
+    // Entwined — issue #4235 review). No object-anaphor filter exists to
+    // represent that alternative yet, and every arm below would silently
+    // narrow the choice to its own operand (the hand-card leg), making the
+    // card look supported while dropping the printed alternative entirely.
+    // Decline the whole imperative so the clause stays an honest
+    // `Effect::Unimplemented` strict failure until the chosen-object anaphor
+    // is representable.
+    if nom_primitives::scan_contains(rest_lower, "or the chosen ") {
+        return None;
+    }
+
     // CR 701.13a: "exile a card from the top of your library" — synonymous with
     // "exile the top card of your library". Without ExileTop lowering the generic
     // path emits ChangeZone(Library→Exile) with a library-wide EffectZoneChoice

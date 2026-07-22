@@ -392,7 +392,8 @@ export function ActionButton() {
                 const { gameState: gs, gameMode } = useGameStore.getState();
                 // Only claim seats as AI-driven when an AI actually drives them,
                 // mirroring the controller each mode installs. "ai": every
-                // non-local seat (same prefs sourcing as scheduleBatchResolve).
+                // non-local seat. This explicit button is the only UI path that
+                // starts Resolve All; stack pressure never opts the player in.
                 // Draft matches: only a Bot pairing has an AI seat, and it uses
                 // the same binding installMatchRuntime gives the live controller.
                 // Everything else — "local" hotseat above all (#4978) — gets an

@@ -8994,6 +8994,42 @@ pub fn parse_you_sacrifice_this_way_clause(input: &str) -> OracleResult<'_, (Tar
     Ok((rest, (filter, false)))
 }
 
+/// CR 608.2c + CR 701.16a: Parse "you exile[d] [quantifier] [type] this way"
+/// — the active-voice reflexive gate created by a preceding "exile
+/// [quantifier] [type]" instruction in the same ability. Covers BOTH tenses
+/// of the printed idiom: the past-tense "If you exiled a card this way, …"
+/// (Ardyn, the Usurper's actual current Oracle text, issue #5989) and the
+/// present-tense "When you exile a card this way, …" sibling shape.
+///
+/// CR 400.2: exile is a public zone, so the exiled card is published into
+/// `state.last_zone_changed_ids` by the parent `ChangeZone` effect just like
+/// the discard/sacrifice siblings below. Semantically identical to the active
+/// `parse_you_discard_this_way_clause` / `parse_you_sacrifice_this_way_clause`
+/// existential check, differing only in the active verb ("exile"/"exiled")
+/// and its exile-zone destination — unlike those two, exile's destination is
+/// not fixed to the graveyard, so no destination is implied here.
+pub fn parse_you_exile_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you exile").parse(input)?;
+    let (rest, _) = opt(tag("d")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
 /// CR 608.2c + CR 205: Fold trailing " or <article/another> <type>" segments that
 /// share the leading clause's single verb into an `Or` filter. `remainder` is the
 /// slice immediately after the first parsed type phrase (untrimmed). Returns the

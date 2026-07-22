@@ -218,7 +218,16 @@ pub(super) fn apply_attack_exert(
         return;
     }
     let controller = obj.controller;
-    state.exerted_this_turn.insert(attacker);
+    let exerted = crate::game::object_state::resolve_and_apply_object_edit(
+        state,
+        attacker,
+        crate::types::resolved_commands::ResolvedObjectStatus::Exerted,
+        true,
+    )
+    .expect("declared attacker must remain a live exact object");
+    if !exerted {
+        return;
+    }
     state.add_transient_continuous_effect(
         attacker,
         controller,

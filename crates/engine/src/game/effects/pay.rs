@@ -36,6 +36,19 @@ pub fn resolve(
         Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
     };
+    // CR 118.12 + CR 608.2c: make the failure signal resolution-local to THIS
+    // `PayCost` instance. `cost_payment_failed_flag` is only ever SET on
+    // failure; without clearing it here, a stale `true` left by an earlier,
+    // unrelated resolution's unpayable cost would survive into this payment,
+    // suppress the `optional_effect_performed` seed for a payment that
+    // SUCCEEDED (`effects/mod.rs`'s mandatory-rider seed guards on
+    // `!cost_payment_failed_flag`), and make a `Not { OptionalEffectPerformed }`
+    // "If you can't" rider fire despite the cost having been paid (Greenbelt
+    // Rampager bouncing after a successful {E}{E} payment, issue #4955 review).
+    // Mirrors the established per-iteration clear in the repeated-payment
+    // driver ("clear the resolution failure flag before THIS payment so a
+    // prior iteration's failure can't be misread as this payment's outcome").
+    state.cost_payment_failed_flag = false;
     let Some(payer) = resolve_effect_player_ref(state, ability, payer_filter) else {
         state.cost_payment_failed_flag = true;
         return Ok(());
@@ -914,6 +927,42 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         assert_eq!(state.players[0].energy, 0);
         assert_eq!(state.last_effect_count, Some(5));
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a successful payment must REPLACE the stale failure signal, not keep it"
+        );
+    }
+
+    /// Maintainer review on PR #5869: the failure signal is resolution-local
+    /// to each `PayCost` instance. A stale `cost_payment_failed_flag` left by
+    /// an EARLIER, unrelated resolution must be cleared at this payment's
+    /// chain handoff, so a SUCCESSFUL mandatory payment reads as performed —
+    /// otherwise the mandatory-rider seed (guarded on
+    /// `!cost_payment_failed_flag`) skips `optional_effect_performed` and a
+    /// `Not { OptionalEffectPerformed }` "If you can't" rider fires despite
+    /// the cost having been paid (Greenbelt Rampager, issue #4955).
+    #[test]
+    fn resolution_pay_success_clears_stale_failed_flag() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 2;
+        state.cost_payment_failed_flag = true;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].energy, 0,
+            "the payment itself must succeed"
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a stale pre-set failure flag must not survive a successful PayCost"
+        );
     }
 
     #[test]

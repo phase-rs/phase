@@ -7,6 +7,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 pub(crate) fn add_energy_with_replacement(
     state: &mut GameState,
@@ -55,8 +56,14 @@ pub(crate) fn apply_energy_addition(
         return;
     }
 
-    let player = &mut state.players[player_id.0 as usize];
-    player.energy += amount;
+    state
+        .resolve_and_apply_player_edit(
+            player_id,
+            ResolvedPlayerEdit::Energy {
+                delta: amount as i32,
+            },
+        )
+        .expect("post-replacement energy gain must target a live player");
 
     // CR 122.1 + CR 107.14: Energy counters are counters placed on a player.
     events.push(GameEvent::EnergyChanged {

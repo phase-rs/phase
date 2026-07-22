@@ -255,6 +255,12 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
 mod tests {
     use super::*;
     use crate::game_action_payload_guard::MAX_ACTION_LIST_LEN;
+    use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+    use engine::types::game_state::ProductionOverride;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{
+        ManaRestriction, ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+    };
     use engine::types::{GameAction, ObjectId};
     use lobby_broker::validation::MAX_CONSUMED_TOKENS;
 
@@ -286,6 +292,61 @@ mod tests {
 
         let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
         assert!(err.contains("ReorderHand.order"));
+    }
+
+    #[test]
+    fn dispatch_guard_rejects_hostile_tap_land_restrictions_at_action_boundary() {
+        let msg = ClientMessage::Action {
+            action: GameAction::TapLandForMana {
+                selection: ManaSourceSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 1),
+                    ability_index: None,
+                    mana_type: ManaType::Green,
+                    atomic_combination: None,
+                    restrictions: vec![ManaRestriction::OnlyForAny(vec![
+                        ManaRestriction::OnlyForSpell;
+                        MAX_ACTION_LIST_LEN + 1
+                    ])],
+                    penalty: ManaSourcePenalty::None,
+                    taps_for_mana: Vec::new(),
+                },
+            },
+        };
+
+        let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
+        assert!(err.contains("TapLandForMana.selection.restrictions.OnlyForAny"));
+    }
+
+    #[test]
+    fn dispatch_guard_rejects_hostile_tap_land_trigger_production_at_preview_boundary() {
+        let msg = ClientMessage::PreviewManaPayment {
+            request_id: 7,
+            action: GameAction::TapLandForMana {
+                selection: ManaSourceSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 1),
+                    ability_index: None,
+                    mana_type: ManaType::Green,
+                    atomic_combination: None,
+                    restrictions: Vec::new(),
+                    penalty: ManaSourcePenalty::None,
+                    taps_for_mana: vec![TapsForManaSelection {
+                        source: ObjectIncarnationRef::of(ObjectId(2), 1),
+                        occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                            base_set: TriggerBaseSetInstanceRef::INITIAL,
+                            printed_index: 0,
+                        },
+                        production_override: ProductionOverride::Combination(vec![
+                            ManaType::Red;
+                            MAX_ACTION_LIST_LEN
+                                + 1
+                        ]),
+                    }],
+                },
+            },
+        };
+
+        let err = guard_client_message_before_dispatch(&msg, ServerMode::Full).unwrap_err();
+        assert!(err.contains("production_override.Combination"));
     }
 
     #[test]

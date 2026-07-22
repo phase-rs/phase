@@ -1685,19 +1685,13 @@ mod tests {
         let candidates = vec![
             CandidateAction {
                 action: GameAction::PassPriority,
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Pass,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
             },
             CandidateAction {
                 action: GameAction::MulliganDecision {
                     choice: MulliganChoice::Keep,
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
         ];
 
@@ -1726,19 +1720,13 @@ mod tests {
     fn rank_candidates_ties_break_by_cmp_stable_not_encounter_order() {
         let pass = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         };
         let mulligan = CandidateAction {
             action: GameAction::MulliganDecision {
                 choice: MulliganChoice::Keep,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let tied_scorer = |_candidate: &CandidateAction| 1.0;
 
@@ -1868,19 +1856,13 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(engine::types::ability::TargetRef::Player(PlayerId(0))),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             },
             CandidateAction {
                 action: GameAction::ChooseTarget {
                     target: Some(engine::types::ability::TargetRef::Player(PlayerId(1))),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Target,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
             },
         ];
 
@@ -2206,17 +2188,11 @@ mod tests {
                 source_id: ObjectId(99999),
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Utility,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
         let legal = CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
         };
 
         // Reach-guards: prove the fixtures take the intended apply branch.
@@ -2868,10 +2844,7 @@ mod tests {
         RankedCandidate {
             candidate: CandidateAction {
                 action,
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Pass,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
             },
             score,
         }

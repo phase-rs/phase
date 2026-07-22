@@ -261,10 +261,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::DecideOptionalEffect { accept },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Utility,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
         let context = crate::context::AiContext::empty(&config.weights);
         let ctx = PolicyContext {
@@ -411,10 +408,7 @@ mod tests {
             action: GameAction::SelectCards {
                 cards: vec![creature],
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let creature_ctx = PolicyContext {
             state: &state,
@@ -431,10 +425,7 @@ mod tests {
         // Score sacrificing the token
         let token_candidate = CandidateAction {
             action: GameAction::SelectCards { cards: vec![token] },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let token_ctx = PolicyContext {
             state: &state,
@@ -495,10 +486,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::SelectCards { cards: vec![big] },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -553,10 +541,7 @@ mod tests {
             action: GameAction::SelectCards {
                 cards: vec![ObjectId(1)],
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let ctx = PolicyContext {
             state: &state,
