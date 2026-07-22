@@ -1173,6 +1173,7 @@ fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
 
 fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
     match &item.node {
+        OracleNodeIr::Static(ir) => Some(&ir.definition),
         OracleNodeIr::PreLoweredStatic(def) => Some(def),
         _ => None,
     }
