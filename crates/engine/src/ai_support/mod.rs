@@ -52,6 +52,22 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     validated_candidate_actions_with_probe(state, None)
 }
 
+/// Return legal candidates owned by one semantic decision-maker. Candidates
+/// without an actor remain shared; actor-bearing candidates are validated as
+/// that owner's authorized submitter before this filter is applied.
+pub fn validated_candidate_actions_for_semantic_owner(
+    state: &GameState,
+    semantic_owner: PlayerId,
+) -> Vec<CandidateAction> {
+    let pipeline = FilterPipeline::default_pipeline();
+    let mut actions = pipeline.apply(
+        state,
+        candidates::candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None),
+    );
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
+}
+
 pub fn validated_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&crate::game::casting::PriorityCastProbe>,
@@ -644,15 +660,33 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _, cards, ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, Some(1)),
+        (
             WaitingFor::WardSacrificeChoice {
                 player: _,
                 permanents: cards,
+                min_total_power,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
+        ) => {
+            selection_mismatch(
+                chosen,
+                cards,
+                if min_total_power.is_some() {
+                    None
+                } else {
+                    Some(1)
+                },
+            ) || min_total_power.is_some_and(|threshold| {
+                chosen
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .map(|object| object.power.unwrap_or(0))
+                    .sum::<i32>()
+                    < threshold
+            })
+        }
         (
             WaitingFor::ManifestDreadChoice {
                 player: _, cards, ..
@@ -929,7 +963,7 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
 
-    activatable_object_mana_actions_for_player(state, player)
+    mana_sources::activatable_mana_actions_for_player(state, player)
         .iter()
         .any(|action| match action {
             GameAction::TapLandForMana { object_id } => {
@@ -1814,113 +1848,7 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    activatable_object_mana_actions_for_player(state, player)
-}
-
-fn can_use_tap_land_shortcut(
-    state: &GameState,
-    object_id: ObjectId,
-    option: &mana_sources::ManaSourceOption,
-) -> bool {
-    if option.atomic_combination.is_some() {
-        return false;
-    }
-    let Some(ability_index) = option.ability_index else {
-        return true;
-    };
-    state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
-        .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
-}
-
-pub(super) fn activatable_object_mana_actions_for_player(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<GameAction> {
-    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
-    // every land in this board-global sweep, so compute it once instead of
-    // re-scanning the whole battlefield per land inside `land_mana_options`.
-    let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
-    let mut actions = Vec::new();
-    for &obj_id in &state.battlefield {
-        let Some(obj) = state.objects.get(&obj_id) else {
-            continue;
-        };
-        if obj.controller != player {
-            continue;
-        }
-
-        let mut handled_indices = HashSet::new();
-        if obj.card_types.core_types.contains(&CoreType::Land) {
-            let options = mana_sources::activatable_land_mana_options_indexed_gated(
-                state,
-                obj_id,
-                player,
-                &aura_sources,
-                &mana_activation_gates,
-            );
-            if options.len() == 1
-                && options
-                    .first()
-                    .is_some_and(|option| can_use_tap_land_shortcut(state, obj_id, option))
-            {
-                actions.push(GameAction::TapLandForMana { object_id: obj_id });
-                if let Some(ability_index) = options[0].ability_index {
-                    handled_indices.insert(ability_index);
-                }
-            } else {
-                for option in options {
-                    if let Some(ability_index) = option.ability_index {
-                        if handled_indices.insert(ability_index) {
-                            actions.push(GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        for (idx, ability) in obj.abilities.iter().enumerate() {
-            if handled_indices.contains(&idx) {
-                continue;
-            }
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                continue;
-            }
-            // CR 302.6 + CR 602.5a: Only tap-cost abilities are gated by tapped state and
-            // summoning sickness. Free or mana-cost-only mana abilities are always
-            // activatable. The summoning-sickness check honors the
-            // CanActivateAbilitiesAsThoughHaste static (Tyvar) via the shared predicate.
-            if mana_sources::has_tap_component(&ability.cost)
-                && (obj.tapped
-                    || crate::game::restrictions::summoning_sick_for_tap_ability(state, obj))
-            {
-                continue;
-            }
-            // CR 605.3b: Activation restrictions still apply to mana abilities.
-            if mana_sources::activation_condition_satisfied(state, player, obj_id, idx, ability)
-                && mana_abilities::can_activate_mana_ability_now_gated(
-                    state,
-                    player,
-                    obj_id,
-                    idx,
-                    ability,
-                    &mana_activation_gates,
-                )
-            {
-                actions.push(GameAction::ActivateAbility {
-                    source_id: obj_id,
-                    ability_index: idx,
-                });
-            }
-        }
-    }
-    actions
+    mana_sources::activatable_mana_actions_for_player(state, player)
 }
 
 #[cfg(test)]

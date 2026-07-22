@@ -30,6 +30,7 @@ use super::identifiers::{
     CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
     TrackedSetId,
 };
+use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
@@ -64,6 +65,14 @@ fn default_rng() -> ChaCha20Rng {
 
 fn default_game_number() -> u8 {
     1
+}
+
+fn default_interaction_serial() -> String {
+    "1".to_string()
+}
+
+fn is_default_interaction_serial(value: &str) -> bool {
+    value == "1"
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -10944,6 +10953,21 @@ pub struct GameState {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// Trusted interaction capability scope. Viewer-filtered copies always
+    /// redact this field; only the engine uses it to mint opaque decision IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_session_id: Option<InteractionSessionId>,
+    /// Arbitrary-precision decimal monotonic serial. A decimal string keeps the
+    /// persisted counter JS-safe without imposing a 53-bit or 64-bit rollover.
+    #[serde(
+        default = "default_interaction_serial",
+        skip_serializing_if = "is_default_interaction_serial"
+    )]
+    pub next_interaction_serial: String,
+    /// Trusted semantic decision bindings. Viewer projections contain only the
+    /// authorized opportunity IDs, never this authority ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_interaction_slots: Vec<ActiveInteractionSlot>,
     /// Derived: true when waiting_for is part of the casting flow and can be
     /// backed out with CancelCast. Computed during derive_display_state so the
     /// frontend doesn't need to maintain a parallel list of casting states.
@@ -15283,7 +15307,6 @@ impl GameState {
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
         let starting_player = config.starting_player();
         let archenemy = config.archenemy_player();
-
         GameState {
             turn_number: 0,
             active_player: starting_player,
@@ -15316,6 +15339,9 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
+            interaction_session_id: None,
+            next_interaction_serial: default_interaction_serial(),
+            active_interaction_slots: Vec::new(),
             has_pending_cast: false,
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
@@ -15986,6 +16012,10 @@ impl GameState {
         // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
         // next_object_id) so two otherwise-identical loop states compare equal.
         clone.next_pip_id = 0;
+        // Interaction IDs are volatile capabilities, not game-position state.
+        clone.interaction_session_id = None;
+        clone.next_interaction_serial = "1".to_string();
+        clone.active_interaction_slots.clear();
         clone.layers_dirty = LayersDirty::full();
         clone.public_state_dirty = PublicStateDirty::all_dirty();
         // PR-3 (Option C): snapshots stored in `loop_detect_ring` are produced BY this
@@ -16533,6 +16563,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
+        interaction_session_id: _,
+        next_interaction_serial: _,
+        active_interaction_slots: _,
         has_pending_cast: _,
         lands_played_this_turn: _,
         max_lands_per_turn: _,

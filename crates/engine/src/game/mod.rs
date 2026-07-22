@@ -65,6 +65,7 @@ pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
 pub mod haunt;
+pub mod interaction;
 // Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
 // so `haunt.rs` stays implementation-only).
 #[cfg(test)]

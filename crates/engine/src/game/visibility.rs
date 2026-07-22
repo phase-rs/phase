@@ -12,6 +12,13 @@ use super::turn_control;
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
+pub(crate) fn interaction_object_identity_is_visible(state: &GameState, id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&id)
+        .is_some_and(|object| object.name != HIDDEN_CARD_NAME)
+}
+
 /// Capture the authoritative display characteristics learned at the search
 /// boundary, so later zone changes/redaction never require a live object lookup.
 pub(crate) fn capture_library_search_card_view(
@@ -72,6 +79,12 @@ pub(crate) fn capture_library_search_card_view(
 /// viewer is explicitly allowed to see them.
 pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState {
     let mut filtered = state.clone();
+    // Interaction capability authority is trusted persistence state. Viewer
+    // projections expose only the actor-scoped opaque opportunity IDs produced
+    // by `game::interaction`, never the session/serial/slot minting ledger.
+    filtered.interaction_session_id = None;
+    filtered.next_interaction_serial = "1".to_string();
+    filtered.active_interaction_slots.clear();
     // The replacement-resume cursor is server authority and can retain private
     // object IDs and last-known snapshots from a cost payment.
     filtered.pending_cost_move_resume = None;
@@ -664,25 +677,39 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 .iter()
                 .map(|point| {
                     let kind = match &point.kind {
-                        DecisionPointKind::Targets { legal_targets } => {
-                            DecisionPointKind::Targets {
-                                legal_targets: legal_targets
-                                    .iter()
-                                    .filter(|t| match t {
-                                        TargetRef::Object(id) => !target_hidden(*id),
-                                        TargetRef::Player(_) => true,
-                                    })
-                                    .cloned()
-                                    .collect(),
-                            }
-                        }
+                        DecisionPointKind::Targets {
+                            legal_targets,
+                            min_targets,
+                            max_targets,
+                            ordered,
+                        } => DecisionPointKind::Targets {
+                            legal_targets: legal_targets
+                                .iter()
+                                .filter(|t| match t {
+                                    TargetRef::Object(id) => !target_hidden(*id),
+                                    TargetRef::Player(_) => true,
+                                })
+                                .cloned()
+                                .collect(),
+                            min_targets: *min_targets,
+                            max_targets: *max_targets,
+                            ordered: *ordered,
+                        },
                         DecisionPointKind::ConvokeTaps { tappable } => {
                             DecisionPointKind::ConvokeTaps {
                                 tappable: tappable.clone(),
                             }
                         }
-                        DecisionPointKind::Mode { available_modes } => DecisionPointKind::Mode {
+                        DecisionPointKind::Mode {
+                            available_modes,
+                            min_modes,
+                            max_modes,
+                            allow_repeats,
+                        } => DecisionPointKind::Mode {
                             available_modes: available_modes.clone(),
+                            min_modes: *min_modes,
+                            max_modes: *max_modes,
+                            allow_repeats: *allow_repeats,
                         },
                         DecisionPointKind::MayChoice => DecisionPointKind::MayChoice,
                         DecisionPointKind::UnlessBreak => DecisionPointKind::UnlessBreak,

@@ -1458,7 +1458,7 @@ impl GameAction {
 
     /// The cast payment preference carried by this action, if it is one of
     /// the cast-family variants (CR 601.2g).
-    fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
+    pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
         match self {
             GameAction::CastSpell { payment_mode, .. }
             | GameAction::CastSpellForFree { payment_mode, .. }

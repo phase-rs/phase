@@ -1619,14 +1619,6 @@ fn sacrifice_pool_meets_aggregate_constraint(
     comparator.evaluate(total_positive_power, value)
 }
 
-fn selected_sacrifice_total_power(state: &GameState, chosen: &[ObjectId]) -> i32 {
-    chosen
-        .iter()
-        .filter_map(|id| state.objects.get(id))
-        .map(|obj| obj.power.unwrap_or(0))
-        .sum()
-}
-
 /// CR 702.21a + CR 701.21 + CR 616.1: Persist the exact unpaid ward payment
 /// work while the current sacrifice waits for a replacement choice. Preserve a
 /// delivery-tail prompt when it owns the action; otherwise expose the live
@@ -1766,7 +1758,7 @@ pub(super) fn handle_ward_sacrifice_choice(
                 "Duplicate selections are not allowed".to_string(),
             ));
         }
-        if selected_sacrifice_total_power(state, &chosen) < threshold {
+        if crate::game::sacrifice::selected_total_power(state, &chosen) < threshold {
             return Err(EngineError::InvalidAction(format!(
                 "Selected permanents' total power must be at least {threshold}"
             )));

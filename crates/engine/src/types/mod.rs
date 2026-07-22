@@ -10,6 +10,7 @@ pub mod events;
 pub mod format;
 pub mod game_state;
 pub mod identifiers;
+pub mod interaction;
 pub mod keywords;
 pub mod layers;
 pub mod log;
@@ -51,6 +52,10 @@ pub use game_state::{
 pub use identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,
     LEGACY_INCARNATION,
+};
+pub use interaction::{
+    ActiveInteractionSlot, InteractionChoiceId, InteractionId, InteractionSessionId,
+    InteractionSlotKind, PreviewRequestId, ViewerInteraction,
 };
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};

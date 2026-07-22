@@ -1070,6 +1070,56 @@ pub enum ManaCostShard {
 }
 
 impl ManaCostShard {
+    /// Canonical printed symbol for this mana-cost component.
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::White => "W",
+            Self::Blue => "U",
+            Self::Black => "B",
+            Self::Red => "R",
+            Self::Green => "G",
+            Self::Colorless => "C",
+            Self::Snow => "S",
+            Self::X => "X",
+            Self::TwoOrMoreColorSource => "Z",
+            Self::WhiteBlue => "W/U",
+            Self::WhiteBlack => "W/B",
+            Self::BlueBlack => "U/B",
+            Self::BlueRed => "U/R",
+            Self::BlackRed => "B/R",
+            Self::BlackGreen => "B/G",
+            Self::RedWhite => "R/W",
+            Self::RedGreen => "R/G",
+            Self::GreenWhite => "G/W",
+            Self::GreenBlue => "G/U",
+            Self::TwoWhite => "2/W",
+            Self::TwoBlue => "2/U",
+            Self::TwoBlack => "2/B",
+            Self::TwoRed => "2/R",
+            Self::TwoGreen => "2/G",
+            Self::PhyrexianWhite => "W/P",
+            Self::PhyrexianBlue => "U/P",
+            Self::PhyrexianBlack => "B/P",
+            Self::PhyrexianRed => "R/P",
+            Self::PhyrexianGreen => "G/P",
+            Self::PhyrexianWhiteBlue => "W/U/P",
+            Self::PhyrexianWhiteBlack => "W/B/P",
+            Self::PhyrexianBlueBlack => "U/B/P",
+            Self::PhyrexianBlueRed => "U/R/P",
+            Self::PhyrexianBlackRed => "B/R/P",
+            Self::PhyrexianBlackGreen => "B/G/P",
+            Self::PhyrexianRedWhite => "R/W/P",
+            Self::PhyrexianRedGreen => "R/G/P",
+            Self::PhyrexianGreenWhite => "G/W/P",
+            Self::PhyrexianGreenBlue => "G/U/P",
+            Self::ColorlessWhite => "C/W",
+            Self::ColorlessBlue => "C/U",
+            Self::ColorlessBlack => "C/B",
+            Self::ColorlessRed => "C/R",
+            Self::ColorlessGreen => "C/G",
+        }
+    }
+
     /// Returns true if this shard contributes to devotion for the given color.
     /// CR 700.5: Each mana symbol that is or contains the color counts.
     /// Hybrid symbols count toward each of their colors. A single hybrid symbol

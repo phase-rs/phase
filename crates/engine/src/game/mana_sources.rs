@@ -18,6 +18,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
     PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TriggerDefinitionRef, TypedFilter,
 };
+use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::card_type::Supertype;
 use crate::types::game_state::{GameState, ProductionOverride};
@@ -259,6 +260,105 @@ pub(crate) fn cost_has_component(
 
 pub(crate) fn has_tap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Tap))
+}
+
+fn can_use_tap_land_shortcut(
+    state: &GameState,
+    object_id: ObjectId,
+    option: &ManaSourceOption,
+) -> bool {
+    if option.atomic_combination.is_some() {
+        return false;
+    }
+    let Some(ability_index) = option.ability_index else {
+        return true;
+    };
+    state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.abilities.get(ability_index))
+        .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
+}
+
+/// Complete primitive actions for mana sources the player can currently activate.
+/// Shared by human interaction authority and AI enumeration so legality cannot drift.
+pub(crate) fn activatable_mana_actions_for_player(
+    state: &GameState,
+    player: PlayerId,
+) -> Vec<GameAction> {
+    let aura_sources = taps_for_mana_trigger_sources(state);
+    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
+    let mut actions = Vec::new();
+    for &object_id in &state.battlefield {
+        let Some(object) = state.objects.get(&object_id) else {
+            continue;
+        };
+        if object.controller != player {
+            continue;
+        }
+
+        let mut handled_indices = std::collections::HashSet::new();
+        if object.card_types.core_types.contains(&CoreType::Land) {
+            let options = activatable_land_mana_options_indexed_gated(
+                state,
+                object_id,
+                player,
+                &aura_sources,
+                &mana_activation_gates,
+            );
+            if options.len() == 1
+                && options
+                    .first()
+                    .is_some_and(|option| can_use_tap_land_shortcut(state, object_id, option))
+            {
+                actions.push(GameAction::TapLandForMana { object_id });
+                if let Some(ability_index) = options[0].ability_index {
+                    handled_indices.insert(ability_index);
+                }
+            } else {
+                for option in options {
+                    if let Some(ability_index) = option.ability_index {
+                        if handled_indices.insert(ability_index) {
+                            actions.push(GameAction::ActivateAbility {
+                                source_id: object_id,
+                                ability_index,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for (ability_index, ability) in object.abilities.iter().enumerate() {
+            if handled_indices.contains(&ability_index)
+                || ability.kind != AbilityKind::Activated
+                || !mana_abilities::is_mana_ability(ability)
+            {
+                continue;
+            }
+            if has_tap_component(&ability.cost)
+                && (object.tapped || restrictions::summoning_sick_for_tap_ability(state, object))
+            {
+                continue;
+            }
+            if activation_condition_satisfied(state, player, object_id, ability_index, ability)
+                && mana_abilities::can_activate_mana_ability_now_gated(
+                    state,
+                    player,
+                    object_id,
+                    ability_index,
+                    ability,
+                    &mana_activation_gates,
+                )
+            {
+                actions.push(GameAction::ActivateAbility {
+                    source_id: object_id,
+                    ability_index,
+                });
+            }
+        }
+    }
+    actions
 }
 
 /// CR 107.6 + CR 302.6: True when the cost includes the untap symbol ({Q}).

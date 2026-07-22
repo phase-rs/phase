@@ -38,6 +38,7 @@ use super::engine_priority;
 use super::engine_replacement;
 use super::engine_resolution_choices;
 use super::engine_stack;
+use super::interaction;
 use super::mana_abilities;
 use super::mana_payment;
 use super::mana_sources;
@@ -220,22 +221,83 @@ pub fn apply_for_simulation(
     apply_action_boundary(state, actor, action, PublicFinalizeMode::DeferredDisplay)
 }
 
+/// Interaction-contract action boundary. `authenticated_actor` is the trusted
+/// submitting connection; `semantic_owner` is the player whose decision slot
+/// the opaque interaction capability names. They differ when another player
+/// controls that player's decisions.
+pub(crate) fn apply_interaction(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    apply_action_boundary_for_semantic_owner(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        PublicFinalizeMode::Immediate,
+    )
+}
+
+pub(crate) fn apply_interaction_for_simulation(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+) -> Result<ActionResult, EngineError> {
+    apply_action_boundary_for_semantic_owner(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        PublicFinalizeMode::DeferredDisplay,
+    )
+}
+
 pub(super) fn apply_action_boundary(
     state: &mut GameState,
     actor: PlayerId,
     action: GameAction,
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
-    apply_action_boundary_with_stack_limit(state, actor, action, mode, None)
+    apply_action_boundary_with_stack_limit(state, actor, actor, action, mode, None)
+}
+
+fn apply_action_boundary_for_semantic_owner(
+    state: &mut GameState,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: GameAction,
+    mode: PublicFinalizeMode,
+) -> Result<ActionResult, EngineError> {
+    apply_action_boundary_with_stack_limit(
+        state,
+        authenticated_actor,
+        semantic_owner,
+        action,
+        mode,
+        None,
+    )
 }
 
 pub(super) fn apply_action_boundary_with_stack_limit(
     state: &mut GameState,
-    actor: PlayerId,
+    authenticated_actor: PlayerId,
+    semantic_owner: PlayerId,
     action: GameAction,
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    interaction::ensure_interaction_authority(state);
+    let previous_interaction_waiting = state.waiting_for.clone();
+    let previous_interaction_slots = state.active_interaction_slots.clone();
+    let submitted_interaction_owner = if authenticated_actor == semantic_owner {
+        interaction::semantic_owner_for_actor(state, authenticated_actor)
+    } else {
+        Some(semantic_owner)
+    };
+    let preserve_interaction = interaction::action_preserves_interaction(&action);
     // Clear transient inter-effect state at the start of each player action.
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
@@ -244,8 +306,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
-    check_actor_authorization(state, actor, &action)?;
-    let mut result = match apply_action(state, actor, action, stack_resolution_limit) {
+    check_actor_authorization(state, authenticated_actor, &action)?;
+    let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
             state.consumed_before_priority_trigger_events.clear();
@@ -256,7 +318,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    run_auto_pass_loop(state, &mut result);
+    let auto_pass_advanced = run_auto_pass_loop(state, &mut result);
     reconcile_terminal_result(state, &mut result);
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
@@ -274,6 +336,16 @@ pub(super) fn apply_action_boundary_with_stack_limit(
         finalize_display_state(state);
     }
     result.log_entries = super::log::resolve_log_entries(&result.events, state);
+    if preserve_interaction && !auto_pass_advanced {
+        interaction::preserve_interaction_slots(state, previous_interaction_slots);
+    } else {
+        interaction::rebind_interaction_slots_after_action(
+            state,
+            &previous_interaction_waiting,
+            previous_interaction_slots,
+            submitted_interaction_owner,
+        );
+    }
     #[cfg(debug_assertions)]
     debug_assert_runtime_resolution_invariants(state);
     Ok(result)
@@ -812,9 +884,15 @@ fn build_shortcut_schema(
                         crate::analysis::decision_template::resolve_target_ref(t, slot, 0, state)
                     })
                     .collect();
+                let count = targets.len().min(u32::MAX as usize) as u32;
                 Some(DecisionPoint {
                     slot: slot.clone(),
-                    kind: DecisionPointKind::Targets { legal_targets },
+                    kind: DecisionPointKind::Targets {
+                        legal_targets,
+                        min_targets: count,
+                        max_targets: count,
+                        ordered: true,
+                    },
                 })
             }
             // CR 608.2d: the latched mana color — a read-only fixed point (no legal set to bound).
@@ -822,18 +900,33 @@ fn build_shortcut_schema(
                 slot: slot.clone(),
                 kind: DecisionPointKind::ManaColor { color: *color },
             }),
-            // No Stage-1 offer path reifies a modal / may / unless decision (those loops reach the
-            // offer only after the Stage-2 gate-relax). Fail-loud in dev, fail-safe (drop) in prod
-            // — no producer emits one yet.
-            PinnedDecision::Mode { .. }
-            | PinnedDecision::MayChoice { .. }
-            | PinnedDecision::UnlessBreak { .. } => {
-                debug_assert!(
-                    false,
-                    "Stage-1 schema builder: only ConvokeTaps/Targets/ManaColor are reified; Mode/MayChoice/UnlessBreak are Stage-2 producers"
-                );
-                None
+            PinnedDecision::Mode { slot, indices } => {
+                let mut available_modes = indices.clone();
+                available_modes.sort_unstable();
+                available_modes.dedup();
+                let count = indices.len().min(u32::MAX as usize) as u32;
+                Some(DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Mode {
+                        available_modes,
+                        min_modes: count,
+                        max_modes: count,
+                        allow_repeats: indices.len()
+                            != indices
+                                .iter()
+                                .collect::<std::collections::HashSet<_>>()
+                                .len(),
+                    },
+                })
             }
+            PinnedDecision::MayChoice { slot, .. } => Some(DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::MayChoice,
+            }),
+            PinnedDecision::UnlessBreak { slot, .. } => Some(DecisionPoint {
+                slot: slot.clone(),
+                kind: DecisionPointKind::UnlessBreak,
+            }),
         })
         .collect();
     // CR 702.51a: engine-owned total of untapped convoke-eligible creatures across every
@@ -3345,7 +3438,7 @@ mod auto_pass_decision_tests;
 
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
-fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
+fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool {
     // CR 732.2: per-dispatch resource ceilings for a runaway mandatory cascade.
     // Sized above the largest legitimate single-dispatch burst (a Scute Swarm
     // landfall copies every Scute in one resolution — tested boards reach ~2,936
@@ -3368,6 +3461,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
 
     let max_iterations = auto_pass_loop_max_iterations(state);
     let mut iteration = 0usize;
+    let mut advanced = false;
     loop {
         // CR 732.2: the iteration cap was exhausted while a mandatory cascade is
         // still in flight (priority unsettled, non-empty stack, no meaningful
@@ -3418,6 +3512,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 let mut events = Vec::new();
                 match pass_priority_once_with_pipeline(state, &mut events, None) {
                     Ok(wf) => {
+                        advanced = true;
                         let stack_empty_or_grew =
                             finish_completed_or_interrupted_until_stack_empty_sessions(state);
                         result.events.extend(events);
@@ -3430,7 +3525,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                                 > MAX_OBJECT_GROWTH
                         {
                             emit_resolution_halt(state, result);
-                            return;
+                            return advanced;
                         }
 
                         // CR 104.4b: detect a repeating mandatory loop. Every
@@ -3461,7 +3556,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                                 result.waiting_for = WaitingFor::GameOver { winner: None };
                                 state.waiting_for = WaitingFor::GameOver { winner: None };
                                 match_flow::handle_game_over_transition(state);
-                                return;
+                                return advanced;
                             }
 
                             // PR-3 (Option C): the NET-PROGRESS mandatory-loop WIN
@@ -3511,6 +3606,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_attackers(state, &mut events) {
                     Ok(wf) => {
+                        advanced = true;
                         sync_waiting_for(state, &wf);
                         result.events.extend(events);
                         result.waiting_for = wf;
@@ -3538,6 +3634,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
                 let mut events = Vec::new();
                 match engine_combat::handle_empty_blockers(state, *player, &mut events) {
                     Ok(wf) => {
+                        advanced = true;
                         sync_waiting_for(state, &wf);
                         result.events.extend(events);
                         result.waiting_for = wf;
@@ -3550,6 +3647,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) {
             _ => break,
         }
     }
+    advanced
 }
 
 /// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
