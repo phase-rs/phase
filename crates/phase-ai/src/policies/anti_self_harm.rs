@@ -3276,13 +3276,9 @@ mod tests {
 
         // Set up combat with this creature as an attacker
         let mut combat = CombatState::default();
-        combat.attackers.push(AttackerInfo {
-            object_id: attacker_id,
-            defending_player: PlayerId(1),
-            attack_target: engine::game::combat::AttackTarget::Player(PlayerId(1)),
-            blocked: false,
-            band_id: None,
-        });
+        combat
+            .attackers
+            .push(AttackerInfo::attacking_player(attacker_id, PlayerId(1)));
         state.combat = Some(combat);
 
         let config = AiConfig::default();

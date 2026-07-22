@@ -4975,7 +4975,7 @@ mod tests {
     /// PassPriority, which is illegal during DeclareBlockers.
     #[test]
     fn declare_blockers_never_returns_pass_priority() {
-        use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+        use engine::game::combat::{AttackerInfo, CombatState};
         use std::collections::HashMap;
 
         let mut state = make_state();
@@ -4989,13 +4989,7 @@ mod tests {
 
         // Set up combat state with attacker
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo {
-                object_id: attacker,
-                defending_player: PlayerId(0),
-                attack_target: AttackTarget::Player(PlayerId(0)),
-                blocked: false,
-                band_id: None,
-            }],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(0))],
             blocker_assignments: HashMap::new(),
             blocker_to_attacker: HashMap::new(),
             damage_assignments: HashMap::new(),
