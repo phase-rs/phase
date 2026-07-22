@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -8,7 +9,6 @@ use serde_json::Value;
 // Fixtures are gzipped to keep the repo small; regenerating via
 // scripts/cr733_mutation_census.py requires re-gzipping (`gzip -9 -n`).
 fn gunzip(gz: &[u8]) -> String {
-    use std::io::Read;
     let mut json = String::new();
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
