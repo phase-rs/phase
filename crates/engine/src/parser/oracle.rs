@@ -4795,7 +4795,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 consumed = true;
             }
@@ -4825,7 +4826,7 @@ pub(crate) fn parse_oracle_ir(
             parse_static_replacement_compound(&static_line, &static_line_lower, card_name)
         {
             for __item in statics {
-                emitter.static_at(item_line, __item);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
             for replacement_ir in replacements {
                 emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
@@ -4846,7 +4847,7 @@ pub(crate) fn parse_oracle_ir(
         // silently drops it. Split so both layers see their conjunct.
         if let Some((statics, replacement)) = try_split_and_cant_become_untapped(&static_line) {
             for __item in statics {
-                emitter.static_at(item_line, __item);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
             emitter.replacement_at(item_line, replacement);
             i += 1;
