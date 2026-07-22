@@ -7,7 +7,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::ability::TriggerDefinitionRef;
+use super::ability::{
+    TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+};
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::SpellCastRecord;
@@ -1676,8 +1678,8 @@ mod tests {
                 edit: ResolvedLedgerEdit::TriggerFired {
                     trigger: TriggerDefinitionRef {
                         source: ObjectIncarnationRef::of(ObjectId(10), 0),
-                        occurrence: super::ability::TriggerDefinitionOccurrenceRef::Printed {
-                            base_set: super::ability::TriggerBaseSetInstanceRef::INITIAL,
+                        occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                            base_set: TriggerBaseSetInstanceRef::INITIAL,
                             printed_index: 0,
                         },
                     },
