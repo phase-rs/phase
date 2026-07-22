@@ -4836,18 +4836,31 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
     .parse(input)
 }
 
+/// Recognize the text that may legally follow a single-quoted span's CLOSING
+/// quote inside a token-list item: end of input, the outer `"` delimiter,
+/// sentence punctuation, or a list-separator phrase. A plural possessive
+/// (`opponents' creatures`, `opponents' turns`) is instead followed by ordinary
+/// continuing prose, which matches none of these.
+fn single_quote_close_boundary(i: &str) -> bool {
+    i.is_empty()
+        || i.starts_with(['"', ',', '.'])
+        || alt((tag::<_, _, nom::error::Error<&str>>(" or "), tag(" and ")))
+            .parse(i)
+            .is_ok()
+}
+
 /// Consume a single-quoted granted-ability span as one opaque unit:
 ///
 /// - the opener is anchored on `" '"` (a space then the quote), so a possessive
 ///   apostrophe (`owner's`, never space-preceded) can never START a span; and
-/// - the closer is the first `'` that is neither a contraction/singular
-///   possessive (`can't`, `owner's` — the apostrophe is glued to a following
-///   letter) nor a PLURAL possessive (`opponents'` — the apostrophe follows an
-///   `s` and is followed by whitespace, with prose continuing). A real closing
-///   quote is followed by punctuation, whitespace, `"` or end of input, and —
-///   because a granted ability's text ends with terminal punctuation (`.` or
-///   the Bronzehide-comma convention) or a non-`s` keyword — is never in the
-///   `s'␠` shape.
+/// - the closer is the first `'` that is not glued to a following alphanumeric
+///   (a contraction/singular possessive — `can't`, `owner's`) AND is either
+///   preceded by terminal punctuation (`.'` / `,'`) or followed by a close
+///   boundary ([`single_quote_close_boundary`]: end of input, `"`, punctuation,
+///   or a list-separator phrase). A PLURAL possessive (`opponents'`) fails both:
+///   it follows a letter and is followed by continuing prose (` creatures`,
+///   ` turns`). A bare-keyword close with no terminal punctuation
+///   (`…has prowess' or …`) is still a close: ` or ` is a boundary.
 ///
 /// This matters at depth 2 of a cascading token (Reef Worm): the Fish's trigger
 /// effect is `create a … Whale token with '…, create a … Kraken token.'`, and a
@@ -4859,9 +4872,9 @@ fn parse_choice_list_separator(input: &str) -> nom::IResult<&str, ()> {
 /// single token's suffix where the final `'` is unambiguous, but this combinator
 /// runs inside a LIST splitter, where a tail-wide `rfind` would let the first
 /// span swallow the separator and a sibling item's own quoted grant. The one
-/// shape the `s'␠` rule cannot hold is an ability whose quoted text ends in a
-/// bare `s`-word with NO terminal punctuation immediately before the close —
-/// Oracle's quoted-grant punctuation convention makes that unprintable.
+/// residual ambiguity is a possessive DIRECTLY followed by a separator word
+/// (`…all your opponents' or …`) — a dangling possessive that Oracle prose
+/// never prints.
 fn opaque_single_quoted_span<'a, E: nom::error::ParseError<&'a str>>(
     input: &'a str,
 ) -> nom::IResult<&'a str, &'a str, E> {
@@ -4879,18 +4892,18 @@ fn opaque_single_quoted_span<'a, E: nom::error::ParseError<&'a str>>(
             )));
         };
         let idx = search_from + rel;
-        let followed_by = after_open[idx + 1..].chars().next();
-        // Plural possessive (`opponents' creatures`): the apostrophe hangs off a
-        // trailing `s` and prose continues after whitespace. A genuine close never
-        // has this shape — the quoted ability ends with `.`/`,` or a non-`s` word.
-        let plural_possessive = matches!(followed_by, Some(c) if c.is_whitespace())
-            && after_open[..idx].ends_with(['s', 'S']);
-        match followed_by {
+        match after_open[idx + 1..].chars().next() {
             // Contraction / singular possessive: `'` glued to a letter or digit.
             Some(c) if c.is_ascii_alphanumeric() => search_from = idx + 1,
-            _ if plural_possessive => search_from = idx + 1,
-            // Punctuation, whitespace, `"`, or end of input: the span's close.
-            _ => break idx,
+            // A close is terminal-punctuation-preceded (`.'` / `,'`) or sits at
+            // an item boundary; anything else (a plural possessive with prose
+            // continuing after it) is span content.
+            _ if after_open[..idx].ends_with(['.', ','])
+                || single_quote_close_boundary(&after_open[idx + 1..]) =>
+            {
+                break idx;
+            }
+            _ => search_from = idx + 1,
         }
     };
     let consumed = input.len() - after_open.len() + close + '\''.len_utf8();

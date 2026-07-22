@@ -44897,26 +44897,44 @@ fn opaque_single_quoted_span_is_item_bounded_and_keeps_contractions() {
 /// still sees the boundary. The first span deliberately embeds a contraction.
 #[test]
 fn sibling_quoted_token_items_stay_separate() {
-    let items = super::split_choice_list_items(
-        "a 2/2 blue shark creature token with 'this token can't block.' or a 6/6 \
-         blue whale creature token with 'when this token dies, draw a card.'",
-    )
-    .expect("the disjunctive list must split");
-    assert_eq!(
-        items.len(),
-        2,
-        "two sibling quoted items must stay two list items, got {items:?}"
-    );
-    assert!(
-        items[0].contains("can't block") && !items[0].contains("whale"),
-        "first item keeps its own span only, got {:?}",
-        items[0]
-    );
-    assert!(
-        items[1].contains("whale") && items[1].contains("draw a card"),
-        "second item keeps its own span, got {:?}",
-        items[1]
-    );
+    // Two first-span shapes: a punctuation-terminated grant with an embedded
+    // contraction, and a BARE `s`-KEYWORD grant with no terminal punctuation
+    // (`prowess'` — the close is only recognizable from the ` or ` boundary
+    // after it, so an `s'␠`-is-possessive heuristic would eat it).
+    for (label, first_grant, first_marker) in [
+        (
+            "punctuated + contraction",
+            "'this token can't block.'",
+            "can't block",
+        ),
+        (
+            "bare s-keyword close",
+            "'this token has prowess'",
+            "prowess",
+        ),
+    ] {
+        let text = format!(
+            "a 2/2 blue shark creature token with {first_grant} or a 6/6 \
+             blue whale creature token with 'when this token dies, draw a card.'"
+        );
+        let items = super::split_choice_list_items(&text)
+            .unwrap_or_else(|| panic!("[{label}] the disjunctive list must split"));
+        assert_eq!(
+            items.len(),
+            2,
+            "[{label}] two sibling quoted items must stay two list items, got {items:?}"
+        );
+        assert!(
+            items[0].contains(first_marker) && !items[0].contains("whale"),
+            "[{label}] first item keeps its own span only, got {:?}",
+            items[0]
+        );
+        assert!(
+            items[1].contains("whale") && items[1].contains("draw a card"),
+            "[{label}] second item keeps its own span, got {:?}",
+            items[1]
+        );
+    }
 }
 
 /// CR 608.2d: The Reef Worm cascade must survive an embedded apostrophe in the
