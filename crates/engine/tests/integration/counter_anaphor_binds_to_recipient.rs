@@ -4,10 +4,13 @@
 //! it as `CountersOn { scope: Source }`, so the -1/-1 scaled off Toxrill's own
 //! (always empty) slime pile and never applied.
 //!
-//! The two tests here pin both sides of the gate, and each fails on revert:
-//!   * the anaphoric form must vary PER RECIPIENT, and
+//! The three tests here pin every side of the gate:
+//!   * the anaphoric form must vary PER RECIPIENT,
 //!   * the explicit `~` form (Joraga Warcaller class) must keep naming the
-//!     source — the far larger class a blanket rebind would break.
+//!     source — the far larger class a blanket rebind would break, and
+//!   * a static mixing BOTH reads must keep the two referents apart, which is
+//!     only possible because the scope carries per-quantity provenance
+//!     (`ObjectScope::Anaphoric`) instead of being inferred from the text.
 
 use engine::game::derived::derive_display_state;
 use engine::game::layers::evaluate_layers;
@@ -21,6 +24,13 @@ const TOXRILL: &str = "At the beginning of each end step, put a slime counter on
 
 const JORAGA_WARCALLER: &str =
     "Elf creatures you control get +1/+1 for each +1/+1 counter on Joraga Warcaller.";
+
+/// A single static reading counters on BOTH its own source (`~`, via the card
+/// name) and its recipient ("on it"). The two reads must keep separate
+/// referents — the defect a description-wide rebind would reintroduce.
+const MIXED_SCOPE: &str =
+    "Creatures you control get +1/+0 for each charge counter on Mixed Warden \
+     and +0/+1 for each +1/+1 counter on it.";
 
 fn power_toughness(
     runner: &engine::game::scenario::GameRunner,
@@ -97,5 +107,35 @@ fn explicit_self_named_counter_anthem_still_reads_the_source() {
         (3, 3),
         "\"counter on ~\" names the source outright: every Elf gets +2/+2 from \
          the Warcaller's own counters, even with none of its own"
+    );
+}
+
+#[test]
+fn mixed_source_and_recipient_counter_reads_keep_separate_referents() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let warden = scenario
+        .add_creature(P0, "Mixed Warden", 1, 1)
+        .from_oracle_text(MIXED_SCOPE)
+        .id();
+    let ally = scenario.add_creature(P0, "Ally", 2, 2).id();
+    // 3 charge counters on the SOURCE drive the power half; 4 +1/+1 counters on
+    // the RECIPIENT drive the toughness half. Distinct magnitudes so a rebind
+    // that collapsed both reads onto one referent cannot coincidentally pass.
+    scenario.with_counter(warden, CounterType::Generic("charge".to_string()), 3);
+    scenario.with_counter(ally, CounterType::Plus1Plus1, 4);
+
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    derive_display_state(runner.state_mut());
+
+    // Base 2/2, +4/+4 from its own four +1/+1 counters (CR 122.1a), then
+    // +3/+0 from the source's charge counters and +0/+4 from its own.
+    assert_eq!(
+        power_toughness(&runner, ally),
+        (9, 10),
+        "the `~` read must stay on the source (3 charge counters → +3/+0) while \
+         the \"on it\" read binds to the recipient (4 +1/+1 counters → +0/+4)"
     );
 }
