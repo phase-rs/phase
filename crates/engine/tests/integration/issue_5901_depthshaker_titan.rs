@@ -5,7 +5,8 @@
 //! Reported symptom: the Titan sacrificed ITSELF at the next end step.
 //!
 //! Root cause: the ETB trigger's "any number of target ..." slot may legally
-//! be filled with ZERO targets (CR 115.1d). The delayed trigger's inner
+//! be filled with ZERO targets (CR 115.6; target choice for this triggered
+//! ability follows CR 603.3d). The delayed trigger's inner
 //! `Sacrifice { target: ParentTarget }` snapshots its subject at creation time
 //! via `parent_target_snapshot` (`game/effects/delayed_trigger.rs`), whose
 //! referent ladder was: root-chain chosen targets → the node's own propagated
@@ -34,6 +35,7 @@ const DEPTHSHAKER_TITAN: &str = "When this creature enters, any number of target
 /// any `EffectZoneChoice`, so tests can assert none was offered.
 fn settle_to_end_step(runner: &mut super::rules::GameRunner) -> Vec<Vec<ObjectId>> {
     let mut pools = Vec::new();
+    let mut settled = false;
     for _ in 0..120 {
         let at_end = runner.state().phase == Phase::End;
         let stack_len = runner.state().stack.len();
@@ -47,6 +49,7 @@ fn settle_to_end_step(runner: &mut super::rules::GameRunner) -> Vec<Vec<ObjectId
             }
             WaitingFor::Priority { .. } => {
                 if at_end && stack_len == 0 {
+                    settled = true;
                     // End step reached and settled (whether or not the delayed
                     // trigger fired) — stop so the asserts see final zones.
                     break;
@@ -67,6 +70,10 @@ fn settle_to_end_step(runner: &mut super::rules::GameRunner) -> Vec<Vec<ObjectId
             other => panic!("unexpected WaitingFor while settling end step: {other:?}"),
         }
     }
+    assert!(
+        settled,
+        "did not reach a settled end step within 120 actions"
+    );
     pools
 }
 
