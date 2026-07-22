@@ -28093,7 +28093,7 @@ fn graveyard_spell_with_flashback_and_retrace_prompts_for_cast_variant() {
     ));
 }
 
-/// CR 601.2b + CR 110.4: Electing a Muldrotha-class permission from a
+/// CR 601.2b + CR 110.4 + CR 702.138a: Electing a Muldrotha-class permission from a
 /// multi-variant cast menu must preserve the subsequent permanent-type slot
 /// choice. The selected slot, rather than another carried permanent type, is
 /// consumed when the spell is finalized.
@@ -28124,34 +28124,11 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
 
-    let other_source = create_object(
-        &mut state,
-        CardId(28_102),
-        player,
-        "Second Graveyard Permission".to_string(),
-        Zone::Battlefield,
-    );
-    state
-        .objects
-        .get_mut(&other_source)
-        .unwrap()
-        .static_definitions
-        .push(
-            StaticDefinition::new(StaticMode::GraveyardCastPermission {
-                frequency: CastFrequency::OncePerTurnPerPermanentType,
-                play_mode: CardPlayMode::Play,
-                graveyard_destination_replacement: None,
-                extra_cost: None,
-                enters_with_counter: None,
-            })
-            .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
-        );
-
     let spell = create_object(
         &mut state,
         CardId(28_101),
         player,
-        "Multi-Permission Artifact Creature".to_string(),
+        "Escaping Artifact Creature".to_string(),
         Zone::Graveyard,
     );
     let card_id = state.objects[&spell].card_id;
@@ -28161,6 +28138,29 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
         object.base_card_types = object.card_types.clone();
         object.mana_cost = ManaCost::generic(0);
         object.base_mana_cost = object.mana_cost.clone();
+        let escape = Keyword::Escape(EscapeCost::NonMana(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(0),
+                },
+                AbilityCost::Exile {
+                    count: 3,
+                    zone: Some(Zone::Graveyard),
+                    filter: None,
+                },
+            ],
+        }));
+        object.keywords.push(escape.clone());
+        object.base_keywords.push(escape);
+    }
+    for index in 0..3 {
+        create_object(
+            &mut state,
+            CardId(28_102 + index),
+            player,
+            format!("Escape Fodder {index}"),
+            Zone::Graveyard,
+        );
     }
 
     let result = apply_as_current(
@@ -28240,12 +28240,6 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
             .graveyard_cast_permissions_used_per_type
             .contains(&(source, CoreType::Artifact)),
         "the unselected Artifact slot must remain available"
-    );
-    assert!(
-        !state
-            .graveyard_cast_permissions_used_per_type
-            .contains(&(other_source, CoreType::Creature)),
-        "the unselected casting permission must remain available"
     );
 }
 
