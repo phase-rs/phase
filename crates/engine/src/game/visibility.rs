@@ -83,6 +83,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // projections expose only the actor-scoped opaque opportunity IDs produced
     // by `game::interaction`, never the session/serial/slot minting ledger.
     filtered.interaction_session_id = None;
+    filtered.interaction_generation = 0;
     filtered.next_interaction_serial = "1".to_string();
     filtered.active_interaction_slots.clear();
     // The replacement-resume cursor is server authority and can retain private

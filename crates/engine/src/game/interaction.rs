@@ -598,7 +598,10 @@ fn increment_decimal(value: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn mint_interaction_id(state: &mut GameState) -> Option<InteractionId> {
+fn allocate_interaction_ids(
+    state: &GameState,
+    count: usize,
+) -> Option<(Vec<InteractionId>, u64, String)> {
     if !interaction_serial_is_valid(&state.next_interaction_serial) {
         return None;
     }
@@ -606,27 +609,43 @@ fn mint_interaction_id(state: &mut GameState) -> Option<InteractionId> {
     if !interaction_session_is_valid(session) {
         return None;
     }
-    let id = InteractionId(format!("{}.{}", session.0, state.next_interaction_serial));
-    if id.0.len() > MAX_INTERACTION_STRING_LEN {
-        return None;
+    let mut generation = state.interaction_generation;
+    let mut serial = state.next_interaction_serial.clone();
+    let mut ids = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = InteractionId(format!("{}.{}.{}", session.0, generation, serial));
+        if id.0.len() > MAX_INTERACTION_STRING_LEN {
+            return None;
+        }
+        ids.push(id);
+        if let Some(next) = increment_decimal(&serial) {
+            serial = next;
+        } else {
+            generation = generation.checked_add(1)?;
+            serial = "1".to_string();
+        }
     }
-    state.next_interaction_serial = increment_decimal(&state.next_interaction_serial)?;
-    Some(id)
+    Some((ids, generation, serial))
 }
 
 fn bind_all_current_slots(state: &mut GameState) -> bool {
-    let mut slots = Vec::new();
-    for (owner, slot_kind) in semantic_slots(&state.waiting_for) {
-        let Some(interaction_id) = mint_interaction_id(state) else {
-            state.active_interaction_slots.clear();
-            return false;
-        };
-        slots.push(ActiveInteractionSlot {
-            semantic_owner: owner.0,
-            slot_kind,
-            interaction_id,
-        });
-    }
+    let semantic = semantic_slots(&state.waiting_for);
+    let Some((ids, generation, serial)) = allocate_interaction_ids(state, semantic.len()) else {
+        return false;
+    };
+    let slots = semantic
+        .into_iter()
+        .zip(ids)
+        .map(
+            |((owner, slot_kind), interaction_id)| ActiveInteractionSlot {
+                semantic_owner: owner.0,
+                slot_kind,
+                interaction_id,
+            },
+        )
+        .collect();
+    state.interaction_generation = generation;
+    state.next_interaction_serial = serial;
     state.active_interaction_slots = slots;
     true
 }
@@ -647,6 +666,10 @@ pub fn bind_interaction_authority(
             code: InteractionReasonCode::InvalidAuthorityState,
         });
     }
+    let previous_session = state.interaction_session_id.clone();
+    let previous_generation = state.interaction_generation;
+    let previous_serial = state.next_interaction_serial.clone();
+    let previous_slots = state.active_interaction_slots.clone();
     let same_session = state.interaction_session_id.as_ref() == Some(&session);
     if same_session && !interaction_serial_is_valid(&state.next_interaction_serial) {
         state.active_interaction_slots.clear();
@@ -656,9 +679,14 @@ pub fn bind_interaction_authority(
     }
     state.interaction_session_id = Some(session);
     if !same_session {
+        state.interaction_generation = 0;
         state.next_interaction_serial = "1".to_string();
     }
     if !bind_all_current_slots(state) {
+        state.interaction_session_id = previous_session;
+        state.interaction_generation = previous_generation;
+        state.next_interaction_serial = previous_serial;
+        state.active_interaction_slots = previous_slots;
         return Err(InteractionBindError {
             code: InteractionReasonCode::InvalidAuthorityState,
         });
@@ -741,21 +769,23 @@ pub(crate) fn rebind_interaction_slots_after_action(
     previous_waiting: &WaitingFor,
     previous_slots: Vec<ActiveInteractionSlot>,
     submitted_owner: Option<PlayerId>,
-) {
-    if state.interaction_session_id.is_none()
-        || state
-            .interaction_session_id
-            .as_ref()
-            .is_some_and(|session| !interaction_session_is_valid(session))
+) -> Result<(), InteractionBindError> {
+    let Some(session) = state.interaction_session_id.as_ref() else {
+        state.active_interaction_slots.clear();
+        return Ok(());
+    };
+    if !interaction_session_is_valid(session)
         || !interaction_serial_is_valid(&state.next_interaction_serial)
     {
-        state.active_interaction_slots.clear();
-        return;
+        return Err(InteractionBindError {
+            code: InteractionReasonCode::InvalidAuthorityState,
+        });
     }
     let prior = classify_waiting_for(previous_waiting);
     let next = semantic_slots(&state.waiting_for);
     let preserve_other_simultaneous = prior.simultaneous.is_some();
     let mut rebound = Vec::with_capacity(next.len());
+    let mut needs_id = Vec::new();
     for (owner, slot_kind) in next {
         let preserved = if preserve_other_simultaneous && submitted_owner != Some(owner) {
             previous_slots
@@ -767,19 +797,27 @@ pub(crate) fn rebind_interaction_slots_after_action(
         if let Some(slot) = preserved {
             rebound.push(slot.clone());
         } else {
-            let Some(interaction_id) = mint_interaction_id(state) else {
-                state.active_interaction_slots.clear();
-                return;
-            };
+            needs_id.push((rebound.len(), owner, slot_kind));
             rebound.push(ActiveInteractionSlot {
                 semantic_owner: owner.0,
                 slot_kind,
-                interaction_id,
+                interaction_id: InteractionId(String::new()),
             });
         }
     }
+    let Some((ids, generation, serial)) = allocate_interaction_ids(state, needs_id.len()) else {
+        return Err(InteractionBindError {
+            code: InteractionReasonCode::InvalidAuthorityState,
+        });
+    };
+    for ((index, _, _), interaction_id) in needs_id.into_iter().zip(ids) {
+        rebound[index].interaction_id = interaction_id;
+    }
+    state.interaction_generation = generation;
+    state.next_interaction_serial = serial;
     state.active_interaction_slots = rebound;
     debug_assert_interaction_consistency(state);
+    Ok(())
 }
 
 pub(crate) fn debug_assert_interaction_consistency(state: &GameState) {
@@ -1820,19 +1858,23 @@ fn mana_payment_direct_actions(
             .filter(|object_id| undo_seen.insert(*object_id))
             .map(|object_id| GameAction::UntapLandForMana { object_id }),
     );
-    actions.extend(pool.mana_pool.mana.iter().filter_map(|unit| {
-        (unit.pip_id.0 != 0).then(|| {
-            if pinned.contains(&unit.pip_id) {
-                GameAction::UnspendPoolMana {
-                    pip_id: unit.pip_id,
+    actions.extend(
+        pool.mana_pool
+            .mana
+            .iter()
+            .filter(|unit| unit.pip_id.0 != 0)
+            .map(|unit| {
+                if pinned.contains(&unit.pip_id) {
+                    GameAction::UnspendPoolMana {
+                        pip_id: unit.pip_id,
+                    }
+                } else {
+                    GameAction::SpendPoolMana {
+                        pip_id: unit.pip_id,
+                    }
                 }
-            } else {
-                GameAction::SpendPoolMana {
-                    pip_id: unit.pip_id,
-                }
-            }
-        })
-    }));
+            }),
+    );
     match convoke_mode {
         None => {}
         Some(ConvokeMode::Delve) => {
@@ -2688,7 +2730,9 @@ fn selection_projection(
             ..
         } => Some(SelectionProjection {
             object_ids: eligible.clone(),
-            constraint: SelectionConstraint::AggregatePower {
+            constraint: SelectionConstraint::Aggregate {
+                function: InteractionAggregateFunction::Sum,
+                property: InteractionObjectProperty::Power,
                 comparator: AggregateComparator::AtMost,
                 amount: *cap,
             },
@@ -2729,7 +2773,9 @@ fn selection_projection(
                 PayCostKind::TapCreatures {
                     aggregate: Some(aggregate),
                 } => match aggregate.stat {
-                    TapCreaturesAggregateStat::TotalPower => SelectionConstraint::AggregatePower {
+                    TapCreaturesAggregateStat::TotalPower => SelectionConstraint::Aggregate {
+                        function: InteractionAggregateFunction::Sum,
+                        property: InteractionObjectProperty::Power,
                         comparator: comparator_dto(aggregate.comparator),
                         amount: aggregate.value,
                     },
@@ -2776,7 +2822,9 @@ fn selection_projection(
             object_ids: permanents.clone(),
             constraint: min_total_power.map_or_else(
                 || count_constraint(1, 1),
-                |amount| SelectionConstraint::AggregatePower {
+                |amount| SelectionConstraint::Aggregate {
+                    function: InteractionAggregateFunction::Sum,
+                    property: InteractionObjectProperty::Power,
                     comparator: AggregateComparator::AtLeast,
                     amount,
                 },
@@ -2797,7 +2845,9 @@ fn selection_projection(
             ..
         } => Some(SelectionProjection {
             object_ids: eligible_creatures.clone(),
-            constraint: SelectionConstraint::AggregatePower {
+            constraint: SelectionConstraint::Aggregate {
+                function: InteractionAggregateFunction::Sum,
+                property: InteractionObjectProperty::Power,
                 comparator: AggregateComparator::AtLeast,
                 amount: *crew_power as i32,
             },
@@ -2815,7 +2865,9 @@ fn selection_projection(
             ..
         } => Some(SelectionProjection {
             object_ids: eligible_creatures.clone(),
-            constraint: SelectionConstraint::AggregatePower {
+            constraint: SelectionConstraint::Aggregate {
+                function: InteractionAggregateFunction::Sum,
+                property: InteractionObjectProperty::Power,
                 comparator: AggregateComparator::AtLeast,
                 amount: *saddle_power as i32,
             },
@@ -5440,55 +5492,54 @@ fn selection_progress(
             None,
             selected_count >= *min && selected_count <= *max,
         ),
-        SelectionConstraint::AggregatePower { comparator, amount } => {
-            let total = selection_power(waiting_for, selected, filtered_state);
-            let minimum = if matches!(waiting_for, WaitingFor::WardSacrificeChoice { .. }) {
-                1
+        SelectionConstraint::Aggregate {
+            function,
+            property,
+            comparator,
+            amount,
+        } => {
+            let total = if matches!(
+                (function, property),
+                (
+                    InteractionAggregateFunction::Sum,
+                    InteractionObjectProperty::Power
+                )
+            ) {
+                selection_power(waiting_for, selected, filtered_state)
             } else {
-                0
+                super::quantity::aggregate_property_over(
+                    filtered_state,
+                    selected,
+                    match function {
+                        InteractionAggregateFunction::Max => AggregateFunction::Max,
+                        InteractionAggregateFunction::Min => AggregateFunction::Min,
+                        InteractionAggregateFunction::Sum => AggregateFunction::Sum,
+                    },
+                    match property {
+                        InteractionObjectProperty::Power => ObjectProperty::Power,
+                        InteractionObjectProperty::Toughness => ObjectProperty::Toughness,
+                        InteractionObjectProperty::ManaValue => ObjectProperty::ManaValue,
+                        InteractionObjectProperty::ManaSymbolCount { color } => {
+                            ObjectProperty::ManaSymbolCount(match color {
+                                InteractionManaColor::White => ManaColor::White,
+                                InteractionManaColor::Blue => ManaColor::Blue,
+                                InteractionManaColor::Black => ManaColor::Black,
+                                InteractionManaColor::Red => ManaColor::Red,
+                                InteractionManaColor::Green => ManaColor::Green,
+                            })
+                        }
+                    },
+                )
             };
+            let minimum = u32::from(matches!(
+                waiting_for,
+                WaitingFor::WardSacrificeChoice { .. }
+            ));
             (
                 minimum,
                 None,
                 Some(total),
                 selected_count >= minimum && compare_aggregate(*comparator, total, *amount),
-            )
-        }
-        SelectionConstraint::Aggregate {
-            comparator, amount, ..
-        } => {
-            let total = match waiting_for {
-                WaitingFor::PayCost {
-                    kind:
-                        PayCostKind::ExileAggregate {
-                            function, property, ..
-                        },
-                    ..
-                } => super::quantity::aggregate_property_over(
-                    filtered_state,
-                    selected,
-                    *function,
-                    *property,
-                ),
-                WaitingFor::SearchChoice {
-                    constraint: SearchSelectionConstraint::TotalManaValue { .. },
-                    ..
-                }
-                | WaitingFor::CollectEvidenceChoice { .. } => {
-                    super::quantity::aggregate_property_over(
-                        filtered_state,
-                        selected,
-                        AggregateFunction::Sum,
-                        ObjectProperty::ManaValue,
-                    )
-                }
-                _ => 0,
-            };
-            (
-                0,
-                None,
-                Some(total),
-                compare_aggregate(*comparator, total, *amount),
             )
         }
         SelectionConstraint::EngineValidatedCount { min, max } => (
@@ -5643,6 +5694,111 @@ fn action_advances_interaction(
             .active_interaction_slots
             .iter()
             .any(|slot| slot.interaction_id == *interaction_id)
+}
+
+fn selection_completion_response(
+    state: &GameState,
+    waiting_for: &WaitingFor,
+    interaction_id: &InteractionId,
+    selection: &SelectionProjection,
+) -> Option<InteractionResponse> {
+    let selected = match &selection.constraint {
+        SelectionConstraint::Count { min, .. } => {
+            let required = usize::try_from(*min).ok()?;
+            let mut seen = HashSet::with_capacity(required.min(selection.object_ids.len()));
+            let selected: Vec<_> = selection
+                .object_ids
+                .iter()
+                .copied()
+                .filter(|object_id| seen.insert(*object_id))
+                .take(required)
+                .collect();
+            (selected.len() == required).then_some(selected)?
+        }
+        SelectionConstraint::Aggregate {
+            function: InteractionAggregateFunction::Sum,
+            property: InteractionObjectProperty::Power,
+            comparator: AggregateComparator::AtLeast,
+            amount,
+        } if matches!(waiting_for, WaitingFor::WardSacrificeChoice { .. }) => {
+            crate::ai_support::power_threshold_witness(state, &selection.object_ids, *amount)?
+        }
+        SelectionConstraint::Aggregate { .. }
+        | SelectionConstraint::EngineValidatedCount { .. } => return None,
+    };
+    let choice_ids = selected
+        .iter()
+        .map(|object_id| {
+            selection
+                .object_ids
+                .iter()
+                .position(|candidate| candidate == object_id)
+                .map(|index| interaction_choice_id(interaction_id, 's', index))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(InteractionResponse::Select { choice_ids })
+}
+
+fn counter_assignment_completion_response(
+    interaction_id: &InteractionId,
+    projection: &CounterDistributionProjection,
+) -> Option<InteractionResponse> {
+    let mut remaining = projection.total;
+    let mut assignments = Vec::new();
+    for (index, candidate) in projection.candidates.iter().enumerate() {
+        let amount = remaining.min(candidate.available);
+        remaining -= amount;
+        if amount > 0 {
+            assignments.push(AmountAssignment {
+                choice_id: interaction_choice_id(interaction_id, 'a', index),
+                amount,
+            });
+        }
+    }
+    (remaining == 0).then_some(InteractionResponse::AssignAmounts { assignments })
+}
+
+fn schema_witness_availability(
+    authoritative_state: &GameState,
+    filtered_state: &GameState,
+    viewer: PlayerId,
+    semantic_owner: PlayerId,
+    interaction_id: &InteractionId,
+    response: Option<InteractionResponse>,
+) -> InteractionAvailability {
+    let Some(response) = response else {
+        return InteractionAvailability::InputRequired;
+    };
+    let authorized_owner = slot_for_submission(authoritative_state, viewer, interaction_id)
+        .ok()
+        .map(|slot| PlayerId(slot.semantic_owner));
+    if authorized_owner != Some(semantic_owner) {
+        return InteractionAvailability::InputRequired;
+    }
+    let Ok((action, _)) = materialize_response(
+        authoritative_state,
+        filtered_state,
+        interaction_id,
+        &response,
+    ) else {
+        return InteractionAvailability::InputRequired;
+    };
+    if action_advances_interaction(
+        authoritative_state,
+        viewer,
+        semantic_owner,
+        interaction_id,
+        &action,
+    ) {
+        InteractionAvailability::ProgressAvailable {
+            witness: InteractionSubmission {
+                interaction_id: interaction_id.clone(),
+                response,
+            },
+        }
+    } else {
+        InteractionAvailability::InputRequired
+    }
 }
 
 fn availability_for_candidates(
@@ -6195,6 +6351,16 @@ fn opportunity_for_slot(
             let projection = number_projection(&filtered_state.waiting_for)
                 .filter(|projection| projection.action == expected_action)
                 .expect("number model requires a matching projection");
+            let availability = schema_witness_availability(
+                authoritative_state,
+                filtered_state,
+                viewer,
+                semantic_owner,
+                &slot.interaction_id,
+                Some(InteractionResponse::Number {
+                    value: projection.min,
+                }),
+            );
             (
                 InteractionOpportunity {
                     interaction_id: slot.interaction_id.clone(),
@@ -6224,7 +6390,7 @@ fn opportunity_for_slot(
                         confirmable: false,
                     },
                 },
-                InteractionAvailability::InputRequired,
+                availability,
             )
         }
         HumanResponseModel::LoopShortcut => {
@@ -6296,6 +6462,14 @@ fn opportunity_for_slot(
                 Ok(None) => unreachable!("amount model requires amount projection"),
                 Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
             };
+            let availability = schema_witness_availability(
+                authoritative_state,
+                filtered_state,
+                viewer,
+                semantic_owner,
+                &slot.interaction_id,
+                counter_assignment_completion_response(&slot.interaction_id, &projection),
+            );
             (
                 InteractionOpportunity {
                     interaction_id: slot.interaction_id.clone(),
@@ -6324,7 +6498,7 @@ fn opportunity_for_slot(
                         confirmable: false,
                     },
                 },
-                InteractionAvailability::InputRequired,
+                availability,
             )
         }
         HumanResponseModel::AmountAssignments => {
@@ -6438,6 +6612,19 @@ fn opportunity_for_slot(
             };
             let progress =
                 selection_progress(&selection, &[], &filtered_state.waiting_for, filtered_state);
+            let availability = schema_witness_availability(
+                authoritative_state,
+                filtered_state,
+                viewer,
+                semantic_owner,
+                &slot.interaction_id,
+                selection_completion_response(
+                    filtered_state,
+                    &filtered_state.waiting_for,
+                    &slot.interaction_id,
+                    &selection,
+                ),
+            );
             (
                 InteractionOpportunity {
                     interaction_id: slot.interaction_id.clone(),
@@ -6469,7 +6656,7 @@ fn opportunity_for_slot(
                     .collect(),
                     progress,
                 },
-                InteractionAvailability::InputRequired,
+                availability,
             )
         }
         HumanResponseModel::ExactCandidates(AuditedExactCandidates) => {

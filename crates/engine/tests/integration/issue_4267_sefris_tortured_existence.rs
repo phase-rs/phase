@@ -3,6 +3,7 @@
 //!
 //! https://github.com/phase-rs/phase/issues/4267
 
+use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{PayCostKind, WaitingFor};
@@ -111,11 +112,14 @@ fn sefris_ventures_when_tortured_existence_discards_creature_cost() {
                     .expect("discard creature card to pay activation cost");
             }
             WaitingFor::ManaPayment { .. } => {
-                runner
-                    .act(GameAction::TapLandForMana {
-                        object_id: black_mana_source,
+                let action = legal_actions(runner.state())
+                    .into_iter()
+                    .find(|action| {
+                        matches!(action, GameAction::TapLandForMana { selection }
+                        if selection.source.object_id == black_mana_source)
                     })
-                    .expect("tap Swamp for {B}");
+                    .expect("Swamp must expose semantic mana action");
+                runner.act(action).expect("tap Swamp for {B}");
                 runner
                     .act(GameAction::PassPriority)
                     .expect("pay {B} from tapped land");

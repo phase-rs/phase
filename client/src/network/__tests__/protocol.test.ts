@@ -11,7 +11,7 @@ import type { P2PMessage } from "../protocol";
 
 describe("encodeWireMessage / decodeWireMessage", () => {
   it("pins the P2P wire protocol to v13", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(13);
+    expect(WIRE_PROTOCOL_VERSION).toBe(14);
   });
 
   // (a) Round-trip across P2PMessage variants.

@@ -12,6 +12,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
+use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolution::OptionalEffectFrame;
@@ -1385,7 +1386,7 @@ fn clear_echo_due_for_echo_payment(
 pub(super) fn handle_unless_payment_tap_land_for_mana(
     state: &mut GameState,
     waiting_for: WaitingFor,
-    object_id: ObjectId,
+    selection: &ManaSourceSelection,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let WaitingFor::UnlessPayment {
@@ -1402,21 +1403,20 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         ));
     };
 
-    handle_tap_land_for_mana(state, player, object_id, events)?;
-    state
-        .lands_tapped_for_mana
-        .entry(player)
-        .or_default()
-        .push(object_id);
-
-    Ok(WaitingFor::UnlessPayment {
+    handle_tap_land_for_mana(
+        state,
         player,
-        cost,
-        pending_effect,
-        trigger_event,
-        effect_description,
-        remaining,
-    })
+        selection,
+        crate::types::game_state::ManaAbilityResume::UnlessPayment {
+            outer_player: Some(player),
+            cost: Box::new(cost.clone()),
+            pending_effect: pending_effect.clone(),
+            trigger_event: trigger_event.clone(),
+            effect_description: effect_description.clone(),
+            remaining: remaining.clone(),
+        },
+        events,
+    )
 }
 
 pub(super) fn handle_unless_payment_untap_land_for_mana(

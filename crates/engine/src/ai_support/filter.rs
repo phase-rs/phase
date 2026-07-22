@@ -1219,39 +1219,40 @@ fn legality_equivalence_key(
             key.is_blocked = crate::game::restrictions::is_source_blocked(state, *source_id);
             Some(key)
         }
-        GameAction::TapLandForMana { object_id } | GameAction::UntapLandForMana { object_id } => {
+        GameAction::TapLandForMana { selection } => {
             if poison.has_activation {
                 return None;
             }
-            let controller = state.objects.get(object_id)?.controller;
-            let options = crate::game::mana_sources::activatable_land_mana_options(
-                state, *object_id, controller,
-            );
-            // Exactly one option ⇒ that ability index (or `None` for a legacy
-            // subtype-only record, folded at index 0). Zero or many ⇒ the
-            // verdict is not a single-ability legality question — don't memoize.
-            if options.len() != 1 {
-                return None;
-            }
-            let fp = interner.intern(state, *object_id)?;
+            let object_id = selection.source.object_id;
+            state.objects.get(&object_id)?;
+            let fp = interner.intern(state, object_id)?;
             let mut key = LegalityKey::new(LegalityClass::ManaTap, fp);
-            let ability_index = options[0].ability_index;
+            let ability_index = selection.ability_index;
             key.ability_index = ability_index;
             let lookup_index = ability_index.unwrap_or(0);
             key.activations_this_turn = state
                 .activated_abilities_this_turn
-                .get(&(*object_id, lookup_index))
+                .get(&(object_id, lookup_index))
                 .copied()
                 .unwrap_or(0);
             key.activations_this_game = state
                 .activated_abilities_this_game
-                .get(&(*object_id, lookup_index))
+                .get(&(object_id, lookup_index))
                 .copied()
                 .unwrap_or(0);
-            key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(object_id);
-            key.is_attacking = crate::game::restrictions::is_source_attacking(state, *object_id);
-            key.is_blocking = crate::game::restrictions::is_source_blocking(state, *object_id);
-            key.is_blocked = crate::game::restrictions::is_source_blocked(state, *object_id);
+            key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(&object_id);
+            key.is_attacking = crate::game::restrictions::is_source_attacking(state, object_id);
+            key.is_blocking = crate::game::restrictions::is_source_blocking(state, object_id);
+            key.is_blocked = crate::game::restrictions::is_source_blocked(state, object_id);
+            Some(key)
+        }
+        GameAction::UntapLandForMana { object_id } => {
+            if poison.has_activation {
+                return None;
+            }
+            let fp = interner.intern(state, *object_id)?;
+            let mut key = LegalityKey::new(LegalityClass::ManaTap, fp);
+            key.ability_index = None;
             Some(key)
         }
         GameAction::ChooseTarget {

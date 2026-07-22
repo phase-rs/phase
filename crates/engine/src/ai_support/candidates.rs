@@ -6485,13 +6485,15 @@ mod tests {
         assert!(actions.iter().any(|candidate| {
             matches!(
                 candidate.action,
-                GameAction::TapLandForMana { object_id } if object_id == island
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == island
             )
         }));
         assert!(!actions.iter().any(|candidate| {
             matches!(
                 candidate.action,
-                GameAction::TapLandForMana { object_id } if object_id == blank_land
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == blank_land
             )
         }));
     }

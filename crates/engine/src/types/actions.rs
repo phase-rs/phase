@@ -11,7 +11,7 @@ use super::game_state::{
 };
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
-use super::mana::{ManaPipId, ManaType};
+use super::mana::{ManaPipId, ManaSourceSelection, ManaType};
 use super::match_config::DeckCardCount;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
@@ -243,7 +243,7 @@ pub enum GameAction {
         order: Vec<ObjectId>,
     },
     TapLandForMana {
-        object_id: ObjectId,
+        selection: ManaSourceSelection,
     },
     /// CR 605.3a: Undo a manual mana ability activation — untap source, remove produced mana.
     /// Only valid for lands in `lands_tapped_for_mana` whose mana hasn't been spent.
@@ -1545,7 +1545,7 @@ impl GameAction {
             | GameAction::CastSpellAsMiracle { object_id, .. }
             | GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
-            GameAction::TapLandForMana { object_id } => Some(*object_id),
+            GameAction::TapLandForMana { selection } => Some(selection.source.object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),
             // CR 118.3a: act on a pool pip, not a battlefield object.
             GameAction::SpendPoolMana { .. } | GameAction::UnspendPoolMana { .. } => None,
@@ -1924,7 +1924,23 @@ mod tests {
                 },
                 Some(oid),
             ),
-            (GameAction::TapLandForMana { object_id: oid }, Some(oid)),
+            (
+                GameAction::TapLandForMana {
+                    selection: crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef {
+                            object_id: oid,
+                            incarnation: 0,
+                        },
+                        ability_index: None,
+                        mana_type: crate::types::mana::ManaType::Green,
+                        atomic_combination: None,
+                        restrictions: Vec::new(),
+                        penalty: crate::types::mana::ManaSourcePenalty::None,
+                        taps_for_mana: Vec::new(),
+                    },
+                },
+                Some(oid),
+            ),
             (GameAction::UntapLandForMana { object_id: oid }, Some(oid)),
             (
                 GameAction::Equip {

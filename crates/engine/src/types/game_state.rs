@@ -79,6 +79,10 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
 pub(crate) fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
@@ -1123,6 +1127,12 @@ pub enum LoopAction {
         source_id: ObjectId,
         ability_index: usize,
     },
+    /// CR 605.3a: re-activate the exact engine-authored land-mana option selected by
+    /// `TapLandForMana`. The semantic selection preserves either the printed ability index or
+    /// the typed subtype-derived fallback identity and is revalidated live on every iteration.
+    TapLandForMana {
+        selection: crate::types::mana::ManaSourceSelection,
+    },
 }
 
 impl LoopAction {
@@ -1135,7 +1145,9 @@ impl LoopAction {
     /// to declare its optionality at compile time rather than silently defaulting to offerable.
     pub fn is_voluntarily_repeatable(&self) -> bool {
         match self {
-            LoopAction::Recast { .. } | LoopAction::Activate { .. } => true,
+            LoopAction::Recast { .. }
+            | LoopAction::Activate { .. }
+            | LoopAction::TapLandForMana { .. } => true,
         }
     }
 }
@@ -10957,6 +10969,10 @@ pub struct GameState {
     /// redact this field; only the engine uses it to mint opaque decision IDs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction_session_id: Option<InteractionSessionId>,
+    /// Trusted rollover generation for the per-session interaction serial.
+    /// Viewer projections redact it with the rest of the capability ledger.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub interaction_generation: u64,
     /// Arbitrary-precision decimal monotonic serial. A decimal string keeps the
     /// persisted counter JS-safe without imposing a 53-bit or 64-bit rollover.
     #[serde(
@@ -15340,6 +15356,7 @@ impl GameState {
                 player: starting_player,
             },
             interaction_session_id: None,
+            interaction_generation: 0,
             next_interaction_serial: default_interaction_serial(),
             active_interaction_slots: Vec::new(),
             has_pending_cast: false,
@@ -16014,6 +16031,7 @@ impl GameState {
         clone.next_pip_id = 0;
         // Interaction IDs are volatile capabilities, not game-position state.
         clone.interaction_session_id = None;
+        clone.interaction_generation = 0;
         clone.next_interaction_serial = "1".to_string();
         clone.active_interaction_slots.clear();
         clone.layers_dirty = LayersDirty::full();
@@ -16564,6 +16582,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         combat: _,
         waiting_for: _,
         interaction_session_id: _,
+        interaction_generation: _,
         next_interaction_serial: _,
         active_interaction_slots: _,
         has_pending_cast: _,

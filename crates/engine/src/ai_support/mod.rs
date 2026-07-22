@@ -28,6 +28,7 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
@@ -167,7 +168,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::Transform { object_id })
         | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
-        | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::TapLandForMana {
+                selection:
+                    crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef { object_id, .. },
+                        ..
+                    },
+            },
+        )
         | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
         | (
             WaitingFor::Priority { .. },
@@ -966,11 +976,11 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     mana_sources::activatable_mana_actions_for_player(state, player)
         .iter()
         .any(|action| match action {
-            GameAction::TapLandForMana { object_id } => {
+            GameAction::TapLandForMana { selection } => {
                 tap_land_action_would_queue_non_mana_trigger(
                     state,
                     player,
-                    *object_id,
+                    selection.source.object_id,
                     &aura_sources,
                     &mana_activation_gates,
                 )
@@ -1232,7 +1242,7 @@ fn beneficial_mana_tap_trigger_hold(
         // component is trivially satisfied); an `ActivateAbility` may be a
         // non-tap mana ability, so consult the ability's cost.
         let mana_source = match action {
-            GameAction::TapLandForMana { object_id } => *object_id,
+            GameAction::TapLandForMana { selection } => selection.source.object_id,
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -2045,6 +2055,18 @@ mod tests {
         id
     }
 
+    fn bucket_has_tap_land(
+        grouped: &HashMap<ObjectId, Vec<GameAction>>,
+        object_id: ObjectId,
+    ) -> bool {
+        grouped.get(&object_id).is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == object_id)
+            })
+        })
+    }
+
     fn add_fixed_mana_ability(
         state: &mut GameState,
         object_id: ObjectId,
@@ -2679,19 +2701,11 @@ mod tests {
         let (flat, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            !bucket_has(
-                &grouped,
-                fetch,
-                &GameAction::TapLandForMana { object_id: fetch },
-            ),
+            !bucket_has_tap_land(&grouped, fetch),
             "fetch land with no mana-producing subtype or explicit mana ability must not be tappable"
         );
         assert!(
-            bucket_has(
-                &grouped,
-                forest,
-                &GameAction::TapLandForMana { object_id: forest },
-            ),
+            bucket_has_tap_land(&grouped, forest),
             "subtype-only basic land fallback must remain tappable"
         );
         assert!(bucket_has(
@@ -2713,7 +2727,7 @@ mod tests {
         assert!(
             !flat
                 .iter()
-                .any(|action| matches!(action, GameAction::TapLandForMana { object_id } if *object_id == forest)),
+                .any(|action| matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == forest)),
             "flat legal actions stay free of land mana actions"
         );
         assert!(
@@ -2961,11 +2975,7 @@ mod tests {
             let (_, _, grouped) = legal_actions_full(&state);
 
             assert!(
-                bucket_has(
-                    &grouped,
-                    forest,
-                    &GameAction::TapLandForMana { object_id: forest },
-                ),
+                bucket_has_tap_land(&grouped, forest),
                 "mana actions must be exposed during {:?}",
                 state.waiting_for
             );
@@ -5003,7 +5013,8 @@ mod tests {
         assert!(
             land_actions.iter().any(|action| matches!(
                 action,
-                GameAction::TapLandForMana { object_id } if *object_id == land_id
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == land_id
             )),
             "expected TapLandForMana in grouped actions, got {land_actions:?}"
         );
@@ -5025,11 +5036,16 @@ mod tests {
         );
         assert_eq!(state.objects[&land_id].abilities.len(), 2);
 
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .expect("TapLandForMana must succeed when flash ability is also legal");
+        let tap_action = land_actions
+            .iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == land_id)
+            })
+            .cloned()
+            .expect("land must expose semantic mana action");
+        apply_as_current(&mut state, tap_action)
+            .expect("TapLandForMana must succeed when flash ability is also legal");
         assert!(
             state.objects[&land_id].tapped,
             "Emergence Zone should be tapped after TapLandForMana"

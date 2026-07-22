@@ -1042,6 +1042,33 @@ export interface ObjectIncarnationRef {
   incarnation: number;
 }
 
+export type ManaSourcePenalty =
+  | "None"
+  | "HasIrreversibleContinuation"
+  | { DealsDamageOnResolution: { fixed_amount: number | null } }
+  | { PaysLifeOnActivation: { fixed_amount: number | null } }
+  | "Sacrifices";
+
+export type ProductionOverride =
+  | { type: "SingleColor"; data: ManaType }
+  | { type: "Combination"; data: ManaType[] };
+
+export interface TapsForManaSelection {
+  source: ObjectIncarnationRef;
+  occurrence: TriggerDefinitionOccurrenceRef;
+  production_override: ProductionOverride;
+}
+
+export interface ManaSourceSelection {
+  source: ObjectIncarnationRef;
+  ability_index: number | null;
+  mana_type: ManaType;
+  atomic_combination: ManaType[] | null;
+  restrictions: ManaRestriction[];
+  penalty: ManaSourcePenalty;
+  taps_for_mana: TapsForManaSelection[];
+}
+
 export interface CopyEffectInstanceRef {
   continuous_effect_id: number;
   modification_index: number;
@@ -2038,7 +2065,7 @@ export type GameAction =
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
   | { type: "ReorderHand"; data: { order: ObjectId[] } }
-  | { type: "TapLandForMana"; data: { object_id: ObjectId } }
+  | { type: "TapLandForMana"; data: { selection: ManaSourceSelection } }
   | { type: "UntapLandForMana"; data: { object_id: ObjectId } }
   // CR 118.3a: pin / unpin a specific pool unit during manual mana payment.
   | { type: "SpendPoolMana"; data: { pip_id: number } }

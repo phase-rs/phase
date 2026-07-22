@@ -506,7 +506,13 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use engine::types::format::GameFormat;
+    use engine::types::game_state::ProductionOverride;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{
+        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+    };
     use serde_json::Value;
 
     fn load_fixture(path: &str) -> Value {
@@ -556,14 +562,34 @@ mod tests {
 
     #[test]
     fn client_message_action_roundtrips() {
+        let action = GameAction::TapLandForMana {
+            selection: ManaSourceSelection {
+                source: ObjectIncarnationRef::of(ObjectId(7), 3),
+                ability_index: None,
+                mana_type: ManaType::Green,
+                atomic_combination: None,
+                restrictions: Vec::new(),
+                penalty: ManaSourcePenalty::None,
+                taps_for_mana: vec![TapsForManaSelection {
+                    source: ObjectIncarnationRef::of(ObjectId(9), 2),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                    production_override: ProductionOverride::SingleColor(ManaType::Red),
+                }],
+            },
+        };
         let msg = ClientMessage::Action {
-            action: GameAction::PassPriority,
+            action: action.clone(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::Action { action } => {
-                assert_eq!(action, GameAction::PassPriority);
+            ClientMessage::Action {
+                action: restored_action,
+            } => {
+                assert_eq!(restored_action, action);
             }
             _ => panic!("wrong variant"),
         }
@@ -1885,7 +1911,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_20() {
-        assert_eq!(PROTOCOL_VERSION, 20);
+        assert_eq!(PROTOCOL_VERSION, 21);
     }
 
     #[test]

@@ -37,7 +37,7 @@ export type InteractionManaColor = "white" | "blue" | "black" | "red" | "green";
 
 export type InteractionObjectProperty = { "type": "power" } | { "type": "toughness" } | { "type": "manaValue" } | { "type": "manaSymbolCount", "data": { color: InteractionManaColor, } };
 
-export type SelectionConstraint = { "type": "count", "data": { min: number, max: number, } } | { "type": "aggregatePower", "data": { comparator: AggregateComparator, amount: number, } } | { "type": "aggregate", "data": { function: InteractionAggregateFunction, property: InteractionObjectProperty, comparator: AggregateComparator, amount: number, } } | { "type": "engineValidatedCount", "data": { min: number, max: number, } };
+export type SelectionConstraint = { "type": "count", "data": { min: number, max: number, } } | { "type": "aggregate", "data": { function: InteractionAggregateFunction, property: InteractionObjectProperty, comparator: AggregateComparator, amount: number, } } | { "type": "engineValidatedCount", "data": { min: number, max: number, } };
 
 export type ConfirmSemantics = "immediate" | "explicit";
 

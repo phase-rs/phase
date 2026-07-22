@@ -3720,7 +3720,10 @@ fn cost_has_source_tap_component(cost: &Option<AbilityCost>) -> bool {
     }
 }
 
-fn resume_waiting_for(mana_source_controller: PlayerId, resume: ManaAbilityResume) -> WaitingFor {
+pub(crate) fn resume_waiting_for(
+    mana_source_controller: PlayerId,
+    resume: ManaAbilityResume,
+) -> WaitingFor {
     match resume {
         ManaAbilityResume::Priority => WaitingFor::Priority {
             player: mana_source_controller,

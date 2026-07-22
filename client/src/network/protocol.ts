@@ -73,7 +73,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 13 as const;
+export const WIRE_PROTOCOL_VERSION = 14 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

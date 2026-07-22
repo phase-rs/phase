@@ -4624,6 +4624,107 @@ struct CastingVariantChoiceSet {
     had_multiple_candidates: bool,
 }
 
+struct PreparedCastingVariant {
+    transformed_state: GameState,
+    prepared: PreparedSpellCast,
+}
+
+/// Apply every cast-method characteristic transform to a detached state and
+/// prepare against that exact transformed object. Offer projection and commit
+/// both use this seam, so the displayed cost is the cost that is later paid.
+fn prepare_casting_variant(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant: CastingVariant,
+) -> Result<PreparedCastingVariant, EngineError> {
+    let mut transformed_state = state.clone();
+    match variant {
+        CastingVariant::Bestow => {
+            if let Some(object) = transformed_state.objects.get_mut(&object_id) {
+                apply_bestow_aura_form(object);
+            }
+        }
+        CastingVariant::Mutate => {
+            if let Some(object) = transformed_state.objects.get_mut(&object_id) {
+                apply_mutate_form(object);
+            }
+        }
+        CastingVariant::Cleave => {
+            if let Some(object) = transformed_state.objects.get_mut(&object_id) {
+                apply_cleave_text_change(object);
+            }
+        }
+        CastingVariant::Prototype => {
+            if !transformed_state
+                .objects
+                .get_mut(&object_id)
+                .is_some_and(apply_prototype_form)
+            {
+                return Err(EngineError::InvalidAction(
+                    "Prototype characteristics are unavailable for this object".to_string(),
+                ));
+            }
+        }
+        CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb => {
+            if let Some(object) = transformed_state.objects.get_mut(&object_id) {
+                swap_to_alternative_spell_face(object);
+            }
+        }
+        CastingVariant::FaceDown => {
+            let profile = face_down_cast_profile(state, object_id);
+            super::zone_pipeline::apply_face_down_entry_profile(
+                &mut transformed_state,
+                object_id,
+                &profile,
+            );
+        }
+        CastingVariant::Normal
+        | CastingVariant::Adventure
+        | CastingVariant::Omen
+        | CastingVariant::Warp
+        | CastingVariant::Escape
+        | CastingVariant::Retrace
+        | CastingVariant::Harmonize
+        | CastingVariant::Mayhem
+        | CastingVariant::Flashback
+        | CastingVariant::Aftermath
+        | CastingVariant::GraveyardPermission { .. }
+        | CastingVariant::HandPermission { .. }
+        | CastingVariant::ExilePermission { .. }
+        | CastingVariant::Sneak { .. }
+        | CastingVariant::WebSlinging { .. }
+        | CastingVariant::Miracle
+        | CastingVariant::Madness
+        | CastingVariant::Evoke
+        | CastingVariant::Emerge
+        | CastingVariant::Dash
+        | CastingVariant::Blitz
+        | CastingVariant::Spectacle
+        | CastingVariant::Suspend
+        | CastingVariant::Plot
+        | CastingVariant::Foretell
+        | CastingVariant::Overload
+        | CastingVariant::Awaken
+        | CastingVariant::Impending
+        | CastingVariant::Freerunning
+        | CastingVariant::Prowl
+        | CastingVariant::JumpStart
+        | CastingVariant::Fuse
+        | CastingVariant::Surge => {}
+    }
+    let prepared = prepare_spell_cast_with_variant_override(
+        &transformed_state,
+        player,
+        object_id,
+        Some(variant),
+    )?;
+    Ok(PreparedCastingVariant {
+        transformed_state,
+        prepared,
+    })
+}
+
 fn casting_variant_choice_set(
     state: &GameState,
     player: PlayerId,
@@ -4636,17 +4737,20 @@ fn casting_variant_choice_set(
     let mut options = Vec::new();
 
     for variant in candidates {
-        let Ok(prepared) =
-            prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
-        else {
+        let Ok(candidate) = prepare_casting_variant(state, player, object_id, variant) else {
             continue;
         };
-        if !can_cast_prepared_now_with_probe(state, player, &prepared, probe) {
+        if !can_cast_prepared_now_with_probe(
+            &candidate.transformed_state,
+            player,
+            &candidate.prepared,
+            probe,
+        ) {
             continue;
         }
         options.push(CastingVariantChoiceOption {
-            variant: prepared.casting_variant,
-            mana_cost: prepared.mana_cost,
+            variant: candidate.prepared.casting_variant,
+            mana_cost: candidate.prepared.mana_cost,
         });
     }
 
@@ -9299,24 +9403,34 @@ fn continue_cast_with_variant(
     payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let candidate = prepare_casting_variant(state, player, object_id, variant)?;
+    continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
+}
+
+fn continue_with_prepared_casting_variant(
+    state: &mut GameState,
+    player: PlayerId,
+    candidate: PreparedCastingVariant,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if let CastingVariant::GraveyardPermission {
         source,
         frequency: CastFrequency::OncePerTurnPerPermanentType,
         slot_type: None,
         ..
-    } = variant
+    } = candidate.prepared.casting_variant
     {
-        let slots = available_permanent_type_slots(state, source, object_id);
+        let slots = available_permanent_type_slots(
+            &candidate.transformed_state,
+            source,
+            candidate.prepared.object_id,
+        );
         if slots.len() > 1 {
-            let card_id = state
-                .objects
-                .get(&object_id)
-                .map(|obj| obj.card_id)
-                .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
             return Ok(WaitingFor::ChoosePermanentTypeSlot {
                 player,
-                object_id,
-                card_id,
+                object_id: candidate.prepared.object_id,
+                card_id: candidate.prepared.card_id,
                 source,
                 payment_mode,
                 available_slots: slots,
@@ -9324,117 +9438,11 @@ fn continue_cast_with_variant(
         }
     }
 
-    if variant == CastingVariant::Bestow {
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            apply_bestow_aura_form(obj);
-        }
-        let mut prepared =
-            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
-            {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    revert_bestow_form(state, object_id);
-                    return Err(err);
-                }
-            };
-        prepared.payment_mode = payment_mode;
-        return continue_with_prepared(state, player, prepared, events);
-    }
-
-    // CR 702.140a: Mutate marks the spell BEFORE prepare so the
-    // `continue_with_prepared` target-attachment branch requests the non-Human
-    // creature target — the generic prepare-by-variant path skips this pre-stack
-    // mutation, so an elected Mutate variant needs this dedicated arm (mirrors
-    // Bestow). Reverted on a preparation error (CR 702.140b).
-    if variant == CastingVariant::Mutate {
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            apply_mutate_form(obj);
-        }
-        let mut prepared =
-            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
-            {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    revert_mutate_form(state, object_id);
-                    return Err(err);
-                }
-            };
-        prepared.payment_mode = payment_mode;
-        return continue_with_prepared(state, player, prepared, events);
-    }
-
-    // CR 702.148a-b + CR 612: Cleave swaps in the bracket-removed ability set
-    // BEFORE prepare so `combined_spell_ability_def` reads the cleaved text — a
-    // pre-stack mutation the generic path skips. Reverted on a preparation error.
-    if variant == CastingVariant::Cleave {
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            apply_cleave_text_change(obj);
-        }
-        let mut prepared =
-            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
-            {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        revert_cleave_text_change(obj);
-                    }
-                    return Err(err);
-                }
-            };
-        prepared.payment_mode = payment_mode;
-        return continue_with_prepared(state, player, prepared, events);
-    }
-
-    // CR 702.160a: Prototype applies the secondary mana cost and P/T BEFORE prepare
-    // so the announced stack spell already has prototype characteristics — a
-    // pre-stack mutation the generic path skips. Restored on a preparation error.
-    if variant == CastingVariant::Prototype {
-        if !state
-            .objects
-            .get_mut(&object_id)
-            .is_some_and(apply_prototype_form)
-        {
-            return Err(EngineError::InvalidAction(
-                "Prototype characteristics are unavailable for this object".to_string(),
-            ));
-        }
-        let mut prepared =
-            match prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))
-            {
-                Ok(prepared) => prepared,
-                Err(err) => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        clear_prototype_form(obj);
-                    }
-                    return Err(err);
-                }
-            };
-        prepared.payment_mode = payment_mode;
-        return continue_with_prepared(state, player, prepared, events);
-    }
-
-    if matches!(
-        variant,
-        CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
-    ) {
-        return continue_cast_with_alternative_spell_face(
-            state,
-            player,
-            object_id,
-            variant,
-            payment_mode,
-            events,
-        );
-    }
-
-    // CR 708.4: face-down casts blank the object to a 2/2 before the stack via
-    // the dedicated single authority.
-    if variant == CastingVariant::FaceDown {
-        return continue_cast_face_down(state, player, object_id, payment_mode, events);
-    }
-
-    let mut prepared =
-        prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))?;
+    let PreparedCastingVariant {
+        transformed_state,
+        mut prepared,
+    } = candidate;
+    *state = transformed_state;
     prepared.payment_mode = payment_mode;
     continue_with_prepared(state, player, prepared, events)
 }
@@ -9483,23 +9491,33 @@ pub fn handle_casting_variant_choice_with_payment_mode(
     let option = options
         .get(index)
         .ok_or_else(|| EngineError::InvalidAction("Invalid cast variant choice".to_string()))?;
-    let fresh_options = casting_variant_choice_set(state, player, object_id, None).options;
-    if !fresh_options
+    if !casting_variant_choice_set(state, player, object_id, None)
+        .options
         .iter()
-        .any(|fresh| fresh.variant == option.variant)
+        .any(|fresh| fresh == option)
     {
         return Err(EngineError::ActionNotAllowed(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
-    continue_cast_with_variant(
-        state,
-        player,
-        object_id,
-        option.variant,
-        payment_mode,
-        events,
-    )
+    let candidate = prepare_casting_variant(state, player, object_id, option.variant)?;
+    let fresh = CastingVariantChoiceOption {
+        variant: candidate.prepared.casting_variant,
+        mana_cost: candidate.prepared.mana_cost.clone(),
+    };
+    if fresh != *option
+        || !can_cast_prepared_now_with_probe(
+            &candidate.transformed_state,
+            player,
+            &candidate.prepared,
+            None,
+        )
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Chosen cast variant is no longer legal".to_string(),
+        ));
+    }
+    continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
 
 /// CR 702.190a + b: Cast a spell from HAND via the Sneak alternative cost.

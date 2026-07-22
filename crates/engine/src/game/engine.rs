@@ -11,8 +11,9 @@ use crate::types::actions::{
 use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
-    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, MayTriggerAutoChoiceKey,
-    PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    ConvokeMode, CostResume, GameState, LandPlayRecord, LoopDetectionMode, ManaAbilityResume,
+    MayTriggerAutoChoiceKey, PayCostKind, PendingCostMoveResume, RetargetScope, StackEntry,
+    StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::match_config::MatchType;
@@ -289,6 +290,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     mode: PublicFinalizeMode,
     stack_resolution_limit: Option<u32>,
 ) -> Result<ActionResult, EngineError> {
+    mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
+    let boundary_snapshot = state.clone();
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -339,12 +342,19 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     if preserve_interaction && !auto_pass_advanced {
         interaction::preserve_interaction_slots(state, previous_interaction_slots);
     } else {
-        interaction::rebind_interaction_slots_after_action(
+        if interaction::rebind_interaction_slots_after_action(
             state,
             &previous_interaction_waiting,
             previous_interaction_slots,
             submitted_interaction_owner,
-        );
+        )
+        .is_err()
+        {
+            *state = boundary_snapshot;
+            return Err(EngineError::InvalidAction(
+                "Unable to allocate interaction authority for the resulting decision".to_string(),
+            ));
+        }
     }
     #[cfg(debug_assertions)]
     debug_assert_runtime_resolution_invariants(state);
@@ -1585,10 +1595,10 @@ fn materialize_fixed_shortcut(
 #[derive(Debug)]
 struct RecastAbort;
 
-/// CR 602.2a / CR 732.2a (G4): capture the `AbilityDefinition` an `Activate` loop-action
-/// names, so the drive can re-validate the positional `ability_index` by `Eq` each iteration
-/// (a layer re-eval that reorders/removes the granted ability ⇒ fail-closed abort). `None`
-/// for a `Recast` (which re-finds its card + combined spell def live instead).
+/// CR 602.2a / CR 605.3a / CR 732.2a (G4): capture the `AbilityDefinition` an indexed
+/// activation names, so the drive can re-validate the positional `ability_index` by `Eq` each
+/// iteration (a layer re-eval that reorders/removes the granted ability ⇒ fail-closed abort).
+/// `None` for a `Recast` or a subtype-derived land-mana fallback with no printed definition.
 fn loop_action_expected_def(
     state: &GameState,
     ctx: &crate::types::game_state::LoopActionContext,
@@ -1604,6 +1614,16 @@ fn loop_action_expected_def(
             .abilities
             .get(*ability_index)
             .cloned(),
+        crate::types::game_state::LoopAction::TapLandForMana { selection } => {
+            selection.ability_index.and_then(|ability_index| {
+                state
+                    .objects
+                    .get(&selection.source.object_id)?
+                    .abilities
+                    .get(ability_index)
+                    .cloned()
+            })
+        }
     }
 }
 
@@ -1628,6 +1648,37 @@ fn accumulate_loop_action_step(
         state.last_loop_action_sequence.clear();
     }
     state.last_loop_action_sequence.push(step);
+}
+
+/// CR 605.3a + CR 732.2a: record one successful off-stack mana activation as a driving
+/// action in the current loop period. Both public mana-action surfaces delegate here so
+/// sampling/probe gates, battlefield-source validation, and context construction cannot drift.
+fn record_mana_loop_action_step(
+    state: &mut GameState,
+    controller: PlayerId,
+    source_id: ObjectId,
+    action: crate::types::game_state::LoopAction,
+) {
+    if !state.loop_detection.samples() || in_simulation_probe() {
+        return;
+    }
+    let Some(source) = state
+        .objects
+        .get(&source_id)
+        .filter(|object| object.zone == Zone::Battlefield)
+    else {
+        state.last_loop_action_sequence.clear();
+        return;
+    };
+    let step = crate::types::game_state::LoopActionContext {
+        card_id: source.card_id,
+        controller,
+        action,
+        convoke: None,
+        // Fixed in-cycle choices are appended at their own reducer arms via `record_loop_pin`.
+        pins: Vec::new(),
+    };
+    accumulate_loop_action_step(state, step);
 }
 
 /// FIX-1 (CR 732.2a): append a recorded fixed in-cycle player choice (tap-cost target, mana
@@ -1801,6 +1852,37 @@ fn drive_loop_action_iteration(
                 GameAction::ActivateAbility {
                     source_id: *source_id,
                     ability_index: *ability_index,
+                },
+                None,
+            )
+            .map_err(|_| RecastAbort)?;
+        }
+        // CR 605.3a: replay the exact semantic land-mana choice. Indexed rows retain their
+        // captured definition identity; subtype-derived fallback rows have no definition and
+        // retain their typed mana identity in `selection`. The reducer re-enumerates live options
+        // and requires one exact semantic match before it mutates the clone.
+        LoopAction::TapLandForMana { selection } => {
+            let source_id = selection.source.object_id;
+            let source = clone.objects.get(&source_id).ok_or(RecastAbort)?;
+            if source.zone != Zone::Battlefield
+                || source.controller != ctx.controller
+                || source.card_id != ctx.card_id
+            {
+                return Err(RecastAbort);
+            }
+            match selection.ability_index {
+                Some(ability_index) if source.abilities.get(ability_index) != expected_def => {
+                    return Err(RecastAbort);
+                }
+                Some(_) => {}
+                None if expected_def.is_some() => return Err(RecastAbort),
+                None => {}
+            }
+            apply_action(
+                clone,
+                ctx.controller,
+                GameAction::TapLandForMana {
+                    selection: selection.clone(),
                 },
                 None,
             )
@@ -2289,6 +2371,14 @@ fn try_offer_object_growth_shortcut(
             }
             crate::types::game_state::LoopAction::Activate { .. } => {
                 crate::game::ability_scan::spell_ability_bears_randomness(expected_def.as_ref()?)
+            }
+            crate::types::game_state::LoopAction::TapLandForMana { selection } => {
+                match selection.ability_index {
+                    Some(_) => crate::game::ability_scan::spell_ability_bears_randomness(
+                        expected_def.as_ref()?,
+                    ),
+                    None => false,
+                }
             }
         };
         if bears_randomness {
@@ -4142,13 +4232,26 @@ fn apply_action(
             // CR 305.2: Playing a land is a special action, not a spell.
             handle_play_land(state, *player, object_id, card_id, &mut events)?
         }
-        (WaitingFor::Priority { player }, GameAction::TapLandForMana { object_id }) => {
+        (WaitingFor::Priority { player }, GameAction::TapLandForMana { selection }) => {
             if state.priority_player
                 != turn_control::authorized_submitter_for_player(state, *player)
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_tap_land_for_mana(state, *player, object_id, &mut events)?
+            let waiting_for = handle_tap_land_for_mana(
+                state,
+                *player,
+                &selection,
+                ManaAbilityResume::Priority,
+                &mut events,
+            )?;
+            record_mana_loop_action_step(
+                state,
+                *player,
+                selection.source.object_id,
+                crate::types::game_state::LoopAction::TapLandForMana { selection },
+            );
+            waiting_for
         }
         (WaitingFor::Priority { player }, GameAction::UntapLandForMana { object_id }) => {
             if state.priority_player
@@ -4243,40 +4346,18 @@ fn apply_action(
                         .or_default()
                         .push(source_id);
                 }
-                // P7 v3 (CR 605.3b + CR 732.2a): accumulate this off-stack mana activation as a
-                // driving step of the current loop period — the OPENER of a multi-activation engine
-                // (e.g. Basalt Monolith's `{T}: Add {C}{C}{C}` before its separate `{3}: Untap`
-                // beat). Gated by `samples()` (#4603 Off never writes) + `!in_simulation_probe()`
-                // (the detection/materialize drive must NOT grow the seq — it is COMPARED across the
-                // cover frames). A lone mana tap seeds a 1-step period whose drive aborts fast
-                // (re-tapping a now-tapped source), so no false offer. Off / a probe leave the
-                // field untouched (mana-arm was a no-op pre-P7). A non-battlefield mana source
-                // clears the accumulator (an invalid loop driver).
-                if state.loop_detection.samples() && !in_simulation_probe() {
-                    match state
-                        .objects
-                        .get(&source_id)
-                        .filter(|o| o.zone == Zone::Battlefield)
-                    {
-                        Some(o) => {
-                            let step = crate::types::game_state::LoopActionContext {
-                                card_id: o.card_id,
-                                controller: *player,
-                                action: crate::types::game_state::LoopAction::Activate {
-                                    source_id,
-                                    ability_index,
-                                },
-                                convoke: None,
-                                // FIX-1: the driving-action step is recorded pinless here; the
-                                // fixed in-cycle choices (tap-cost/color/proliferate) are appended
-                                // to this step's `pins` at their own apply arms via `record_loop_pin`.
-                                pins: Vec::new(),
-                            };
-                            accumulate_loop_action_step(state, step);
-                        }
-                        None => state.last_loop_action_sequence.clear(),
-                    }
-                }
+                // P7 v3 (CR 605.3b + CR 732.2a): this off-stack activation is the opener of a
+                // multi-activation loop period. The shared recorder also owns semantic
+                // `TapLandForMana` actions so the two public mana surfaces cannot drift.
+                record_mana_loop_action_step(
+                    state,
+                    *player,
+                    source_id,
+                    crate::types::game_state::LoopAction::Activate {
+                        source_id,
+                        ability_index,
+                    },
+                );
                 wf
             } else if obj.loyalty.is_some()
                 && ability_index < obj.abilities.len()
@@ -4704,10 +4785,15 @@ fn apply_action(
                 card_id,
                 source,
                 payment_mode,
-                ..
+                available_slots,
             },
             GameAction::ChoosePermanentTypeSlot { slot },
         ) => {
+            if !available_slots.contains(&slot) {
+                return Err(EngineError::InvalidAction(
+                    "Selected permanent type is not available for this cast".to_string(),
+                ));
+            }
             let is_land_play = slot == crate::types::card_type::CoreType::Land;
             if is_land_play {
                 state.pending_permanent_type_slot = Some((*source, slot));
@@ -5664,11 +5750,11 @@ fn apply_action(
         // Allow mana abilities during unless-payment choice (CR 118.12)
         (
             waiting_for @ WaitingFor::UnlessPayment { .. },
-            GameAction::TapLandForMana { object_id },
+            GameAction::TapLandForMana { selection },
         ) => engine_payment_choices::handle_unless_payment_tap_land_for_mana(
             state,
             waiting_for.clone(),
-            object_id,
+            &selection,
             &mut events,
         )?,
         (
@@ -6182,28 +6268,30 @@ fn apply_action(
                 player,
                 convoke_mode,
             },
-            GameAction::TapLandForMana { object_id },
+            GameAction::TapLandForMana { selection },
         ) => {
             let events_before = events.len();
-            handle_tap_land_for_mana(state, *player, object_id, &mut events)?;
-            state
-                .lands_tapped_for_mana
-                .entry(state.priority_player)
-                .or_default()
-                .push(object_id);
+            let wf = handle_tap_land_for_mana(
+                state,
+                *player,
+                &selection,
+                ManaAbilityResume::ManaPayment {
+                    outer_player: Some(*player),
+                    convoke_mode: *convoke_mode,
+                },
+                &mut events,
+            )?;
             // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
             // Fertile Ground, Mana Flare class) must resolve inline when mana is
             // produced during cost payment. The ManaPayment path does not flow through
             // run_post_action_pipeline, so process triggers explicitly here so the
             // bonus mana reaches the pool before the payment check.
-            if events.len() > events_before {
+            if events.len() > events_before
+                && !casting::mana_ability_cost_payment_is_paused(state)
+            {
                 let mana_events: Vec<_> = events[events_before..].to_vec();
                 super::triggers::process_triggers(state, &mana_events);
             }
-            let wf = WaitingFor::ManaPayment {
-                player: *player,
-                convoke_mode: *convoke_mode,
-            };
             if let Some(order_wf) =
                 super::triggers::preserve_order_triggers_resume(state, wf.clone())
             {
@@ -9279,110 +9367,16 @@ fn handle_play_land(
 pub(super) fn handle_tap_land_for_mana(
     state: &mut GameState,
     player: PlayerId,
-    object_id: ObjectId,
+    selection: &crate::types::mana::ManaSourceSelection,
+    resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let obj = state
-        .objects
-        .get(&object_id)
-        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-
     // CR 117.1d + CR 605.3a: the player with priority, or the player making a
-    // mana payment, activates their own mana abilities even during another
-    // player's turn.
-    if obj.zone != Zone::Battlefield {
-        return Err(EngineError::InvalidAction(
-            "Object is not on the battlefield".to_string(),
-        ));
-    }
-    if obj.controller != player {
-        return Err(EngineError::NotYourPriority);
-    }
-    if !obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-    {
-        return Err(EngineError::InvalidAction(
-            "Object is not a land".to_string(),
-        ));
-    }
-    if obj.tapped {
-        return Err(EngineError::InvalidAction(
-            "Land is already tapped".to_string(),
-        ));
-    }
-
-    let mana_options = mana_sources::activatable_land_mana_options(state, object_id, player);
-    if mana_options.is_empty() {
-        return Err(EngineError::ActionNotAllowed(
-            "Land has no activatable mana ability".to_string(),
-        ));
-    }
-    // Lands with multiple mana options (dual lands, triomes, etc.) must use
-    // ActivateAbility with a specific ability_index to select which color.
-    // TapLandForMana is a convenience shortcut for single-option lands only.
-    if mana_options.len() > 1 {
-        return Err(EngineError::ActionNotAllowed(
-            "Land has multiple mana options — use ActivateAbility to choose".to_string(),
-        ));
-    }
-    let mana_option = mana_options.into_iter().next().unwrap();
-
-    let ability_to_resolve = mana_option.ability_index.and_then(|ability_index| {
-        state
-            .objects
-            .get(&object_id)
-            .and_then(|land| land.abilities.get(ability_index))
-            .cloned()
-    });
-
-    if let Some(ability_def) = ability_to_resolve {
-        mana_abilities::resolve_mana_ability(state, object_id, player, &ability_def, events, None)?;
-        // CR 605.3b: Only record for `UntapLandForMana` when the activation is
-        // fully reversible — painlands / pay-life sources commit irreversible
-        // state during inline resolution and must not be eligible for undo.
-        if mana_option.penalty.is_undoable() {
-            state
-                .lands_tapped_for_mana
-                .entry(player)
-                .or_default()
-                .push(object_id);
-        }
-    } else {
-        // Legacy fallback for subtype-only lands.
-        let obj = state.objects.get_mut(&object_id).unwrap();
-        obj.tapped = true;
-        events.push(GameEvent::PermanentTapped {
-            object_id,
-            caused_by: None,
-        });
-        mana_payment::produce_mana(
-            state,
-            object_id,
-            mana_option.mana_type,
-            player,
-            true,
-            events,
-        );
-        // CR 106.12 + CR 106.12a: a basic/subtype-only land's intrinsic mana
-        // ability always includes `{T}`. Emit one `TappedForMana` per
-        // resolution so `TapsForMana` triggers fire exactly once (mirrors the
-        // ability-resolution path in `produce_mana_from_ability`).
-        events.push(GameEvent::TappedForMana {
-            player_id: player,
-            source_id: object_id,
-            produced: vec![mana_option.mana_type],
-            tap_state: crate::types::events::ManaTapState::FromTap,
-        });
-        state
-            .lands_tapped_for_mana
-            .entry(player)
-            .or_default()
-            .push(object_id);
-    }
-
-    Ok(WaitingFor::Priority { player })
+    // mana payment, activates their own mana ability. The semantic selection
+    // is revalidated against live engine-authored options before any cost or
+    // production is applied.
+    let option = mana_sources::live_land_mana_option_for_selection(state, player, selection)?;
+    mana_sources::activate_mana_source_option(state, player, &option, events, resume)
 }
 
 /// CR 605.3b: Reverse a manual land tap — untap source and remove its mana from pool.

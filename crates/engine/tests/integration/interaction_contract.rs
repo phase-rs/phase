@@ -6,6 +6,7 @@ use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, preview_interaction, submit_interaction,
 };
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, Effect, QuantityExpr,
@@ -15,9 +16,8 @@ use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, CastingVariant,
-    CastingVariantChoiceOption, GameState, LoopCollapseAxis, MulliganBottomEntry,
-    MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason, PayableResource,
+    AlternativeCastKeyword, AutoPassMode, CastPaymentMode, CastingVariant, GameState,
+    MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase, OpeningHandBottomReason,
     PendingTriggerSummary, TurnBoundary, WaitingFor,
 };
 use engine::types::identifiers::CardId;
@@ -33,6 +33,9 @@ use engine::types::interaction::{
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
+
+use crate::support::shared_card_db as load_db;
 
 fn priority_view(state: &GameState) -> engine::types::interaction::ViewerInteraction {
     let filtered = filter_state_for_viewer(state, P0);
@@ -468,8 +471,12 @@ fn malformed_same_session_serial_is_rejected_without_resurrecting_an_old_id() {
 #[test]
 fn legacy_unbound_state_still_accepts_normal_actions_without_minting_authority() {
     let mut state = GameState::new_two_player(42);
+    let initial_revision = state.state_revision;
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
     apply(&mut state, P0, GameAction::PassPriority)
         .expect("legacy unbound states continue through the normal reducer");
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+    assert!(state.state_revision > initial_revision);
     assert!(state.interaction_session_id.is_none());
     assert!(state.active_interaction_slots.is_empty());
 }
@@ -622,35 +629,43 @@ fn reordering_hand_rotates_indexed_choices_before_the_new_projection_is_usable()
 
 #[test]
 fn exact_casting_variant_choices_include_index_variant_and_mana_cost() {
+    let Some(db) = load_db() else {
+        return;
+    };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let spell = scenario
-        .add_spell_to_hand(P0, "Exact Variant Spell", false)
-        .id();
+    let spell = scenario.add_real_card(P0, "Breaking", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana_type| ManaUnit::new(mana_type, spell, false, Vec::new()))
+        .collect(),
+    );
     let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
     let card_id = runner.state().objects[&spell].card_id;
     runner
-        .state_mut()
-        .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, spell, false, Vec::new()));
-    runner.state_mut().waiting_for = WaitingFor::CastingVariantChoice {
-        player: P0,
-        object_id: spell,
-        card_id,
-        payment_mode: Default::default(),
-        options: vec![
-            CastingVariantChoiceOption {
-                variant: CastingVariant::Normal,
-                mana_cost: ManaCost::NoCost,
-            },
-            CastingVariantChoiceOption {
-                variant: CastingVariant::Normal,
-                mana_cost: ManaCost::Cost {
-                    shards: vec![ManaCostShard::WhiteBlue],
-                    generic: 0,
-                },
-            },
-        ],
-    };
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the real split card produces its casting-variant prompt");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CastingVariantChoice { .. }
+    ));
     bind(runner.state_mut(), "cast-variant-surfaces");
 
     let view = priority_view(runner.state());
@@ -685,16 +700,39 @@ fn exact_casting_variant_choices_include_index_variant_and_mana_cost() {
         indices,
         ["0".to_string(), "1".to_string()].into_iter().collect()
     );
-    assert!(choices[1].surfaces.iter().any(|surface| {
-        matches!(
-            surface,
+    let variants: std::collections::HashSet<_> = choices
+        .iter()
+        .flat_map(|choice| &choice.surfaces)
+        .filter_map(|surface| match surface {
+            InteractionPresentationSurface::Value {
+                role: InteractionRoleCode::CastingVariant,
+                value,
+                ..
+            } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(variants, ["Normal", "Fuse"].into_iter().collect());
+    let costs: std::collections::HashSet<_> = choices
+        .iter()
+        .flat_map(|choice| &choice.surfaces)
+        .filter_map(|surface| match surface {
             InteractionPresentationSurface::Mana {
                 role: InteractionRoleCode::CastingCost,
                 symbols,
                 ..
-            } if symbols == &["W/U".to_string()]
-        )
-    }));
+            } => Some(symbols.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(costs.contains(&vec!["U".to_string(), "B".to_string()]));
+    assert!(costs.contains(&vec![
+        "4".to_string(),
+        "U".to_string(),
+        "B".to_string(),
+        "B".to_string(),
+        "R".to_string(),
+    ]));
 }
 
 #[test]
@@ -769,14 +807,29 @@ fn modal_schema_includes_mode_indices_and_engine_descriptions() {
 
     let view = priority_view(runner.state());
     let InteractionOpportunityResponse::Schema {
-        spec: InteractionResponseSpec::Sequence { min, max, .. },
+        spec: InteractionResponseSpec::Sequence {
+            min, max, escape, ..
+        },
         candidates: choices,
     } = &view.opportunities[0].response
     else {
         panic!("modal responses use a sequence schema");
     };
     assert_eq!((*min, *max), (1, 1));
-    assert_eq!(choices.len(), 2);
+    assert_eq!(choices.len(), 3, "two semantic modes plus one escape");
+    let escape = escape
+        .as_ref()
+        .expect("an in-progress cast exposes its cancel escape separately");
+    let escape_choice = choices
+        .iter()
+        .find(|choice| &choice.id == escape)
+        .expect("the schema escape references a projected choice");
+    assert!(escape_choice.surfaces.iter().any(|surface| matches!(
+        surface,
+        InteractionPresentationSurface::Action {
+            code: InteractionActionCode::CancelCast,
+        }
+    )));
     let descriptions: std::collections::HashSet<_> = choices
         .iter()
         .flat_map(|choice| &choice.surfaces)
@@ -790,15 +843,21 @@ fn modal_schema_includes_mode_indices_and_engine_descriptions() {
         })
         .collect();
     assert_eq!(descriptions.len(), 2);
-    assert!(choices
+    let semantic_choices: Vec<_> = choices
         .iter()
-        .all(|choice| choice.surfaces.iter().any(|surface| matches!(
-            surface,
-            InteractionPresentationSurface::Value {
-                role: InteractionRoleCode::ModeIndex,
-                ..
-            }
-        ))));
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Value {
+                        role: InteractionRoleCode::ModeIndex,
+                        ..
+                    }
+                )
+            })
+        })
+        .collect();
+    assert_eq!(semantic_choices.len(), 2);
 }
 
 #[test]
@@ -836,21 +895,33 @@ fn exact_player_and_number_schema_siblings_are_self_describing() {
     assert_eq!(seats, [P1.0, 2].into_iter().collect());
 
     let mut amount_scenario = GameScenario::new();
+    amount_scenario.at_phase(Phase::PreCombatMain);
     let source = amount_scenario
-        .add_creature(P0, "Amount Surface Source", 1, 1)
+        .add_creature_from_oracle(
+            P0,
+            "Amount Surface Source",
+            0,
+            1,
+            "Pay X speed: Add X mana in any combination of colors.",
+        )
         .id();
     let mut amount_runner = amount_scenario.build();
-    amount_runner.state_mut().waiting_for = WaitingFor::PayAmountChoice {
-        player: P0,
-        resource: PayableResource::LoopCollapse {
-            axis: LoopCollapseAxis::Tokens,
-        },
-        min: 0,
-        max: 2,
-        accumulated: 0,
-        source_id: source,
-        pending_mana_ability: None,
-    };
+    amount_runner.state_mut().players[0].speed = Some(2);
+    let ability_index = amount_runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost.is_some())
+        .expect("the parsed Pay X speed ability has a cost");
+    amount_runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        })
+        .expect("the real activation reaches its amount prompt");
+    assert!(matches!(
+        amount_runner.state().waiting_for,
+        WaitingFor::PayAmountChoice { min: 0, max: 2, .. }
+    ));
     bind(amount_runner.state_mut(), "amount-surfaces");
     let amount_view = priority_view(amount_runner.state());
     let InteractionOpportunityResponse::Schema {
@@ -1094,7 +1165,12 @@ fn second_simultaneous_opening_bottom_owner_gets_its_own_validated_candidates() 
     );
     assert!(!visible_references.contains(&p0_card.0.to_string()));
     let p1_id = opportunity.interaction_id.clone();
-    assert_eq!(p1_view.availability, InteractionAvailability::InputRequired);
+    assert!(matches!(
+        &p1_view.availability,
+        InteractionAvailability::ProgressAvailable { witness }
+            if witness.interaction_id == p1_id
+                && matches!(&witness.response, InteractionResponse::Select { choice_ids } if choice_ids.len() == 1)
+    ));
     let choice_id = schema_choice_id_for_object(&p1_view, p1_card);
     submit_interaction(
         runner.state_mut(),
@@ -1640,6 +1716,7 @@ fn from_among_counter_cost_projects_and_submits_typed_amount_assignments() {
 fn persistence_roundtrip_retains_authority_while_viewer_filtering_redacts_it() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "persisted");
+    state.interaction_generation = 7;
     let session = state
         .interaction_session_id
         .clone()
@@ -1648,6 +1725,10 @@ fn persistence_roundtrip_retains_authority_while_viewer_filtering_redacts_it() {
     let restored: GameState =
         serde_json::from_str(&serialized).expect("deserialize authoritative state");
     assert_eq!(restored.interaction_session_id, Some(session));
+    assert_eq!(
+        restored.interaction_generation,
+        state.interaction_generation
+    );
     assert_eq!(
         restored.next_interaction_serial,
         state.next_interaction_serial
@@ -1663,6 +1744,7 @@ fn persistence_roundtrip_retains_authority_while_viewer_filtering_redacts_it() {
     assert!(filtered.active_interaction_slots.is_empty());
     let filtered_json = serde_json::to_value(&filtered).expect("serialize viewer-filtered state");
     assert!(filtered_json.get("interaction_session_id").is_none());
+    assert!(filtered_json.get("interaction_generation").is_none());
     assert!(filtered_json.get("next_interaction_serial").is_none());
     assert!(filtered_json.get("active_interaction_slots").is_none());
 
@@ -2195,7 +2277,7 @@ fn interaction_serial_increments_within_the_protocol_bound() {
 }
 
 #[test]
-fn oversized_session_and_serial_fail_closed_without_emitting_oversized_ids() {
+fn oversized_session_fails_closed_and_serial_rolls_to_next_generation() {
     let mut oversized_session = GameState::new_two_player(42);
     let error = bind_interaction_authority(
         &mut oversized_session,
@@ -2209,11 +2291,13 @@ fn oversized_session_and_serial_fail_closed_without_emitting_oversized_ids() {
     bind(&mut serial, &"s".repeat(128));
     serial.next_interaction_serial = "9".repeat(32);
     apply(&mut serial, P0, GameAction::PassPriority).expect("normal action still resolves");
-    assert!(
-        serial.active_interaction_slots.is_empty(),
-        "a serial whose increment would exceed 32 digits must not mint a capability"
-    );
-    assert!(priority_view(&serial).opportunities.is_empty());
+    assert_eq!(serial.interaction_generation, 1);
+    assert_eq!(serial.next_interaction_serial, "1");
+    assert!(serial.active_interaction_slots[0]
+        .interaction_id
+        .as_str()
+        .ends_with(&format!(".0.{}", "9".repeat(32))));
+    assert_eq!(priority_view(&serial).opportunities.len(), 1);
 
     let mut longest_valid = GameState::new_two_player(42);
     bind(&mut longest_valid, &"v".repeat(128));

@@ -256,10 +256,6 @@ pub enum SelectionConstraint {
         min: u32,
         max: u32,
     },
-    AggregatePower {
-        comparator: AggregateComparator,
-        amount: i32,
-    },
     Aggregate {
         function: InteractionAggregateFunction,
         property: InteractionObjectProperty,
