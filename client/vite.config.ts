@@ -261,7 +261,12 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /engine_wasm_bg-.*\.wasm$/,
+            // Workbox accepts cross-origin RegExpRoute matches only when they
+            // begin at index 0. The anchored R2 branch covers production and
+            // staging uploads; the existing unanchored branch preserves
+            // same-origin bundled-WASM behavior.
+            urlPattern:
+              /(?:^https:\/\/data\.phase-rs\.dev\/(?:staging\/)?wasm\/engine_wasm_bg-.*\.wasm$|engine_wasm_bg-.*\.wasm$)/,
             handler: "CacheFirst",
             options: {
               cacheName: "engine-wasm",
