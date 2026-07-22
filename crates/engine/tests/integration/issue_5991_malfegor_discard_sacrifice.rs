@@ -112,7 +112,8 @@ fn hand_len(state: &GameState, player: PlayerId) -> usize {
         .len()
 }
 
-/// CR 701.9a + CR 701.17a + CR 608.2c: P0 (the caster) discards a 2-card hand
+/// CR 701.9a (discard) + CR 701.21a (sacrifice) + CR 608.2c: P0 (the caster)
+/// discards a 2-card hand
 /// (a mandatory whole-hand discard, no choice needed since hand size ==
 /// discard count), then P1 (the lone opponent, controlling 3 creatures) must
 /// sacrifice exactly 2 of them — the discarded-card count, not a fixed 1 and
@@ -230,5 +231,107 @@ fn malfegor_empty_hand_discard_causes_no_sacrifice() {
         !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
         "an empty discard must not raise a sacrifice prompt, got {:?}",
         state.waiting_for
+    );
+}
+
+/// CR 608.2c + CR 122.6: matcher-boundary sibling of the Malfegor shape, from
+/// the #5991 review — a producer (whole-hand discard) chained into a token
+/// with FIXED count and FIXED P/T whose only tracked-set reference is a
+/// SECONDARY quantity slot: `enter_with_counters: [(+1/+1, TrackedSetSize)]`
+/// ("... with a +1/+1 counter on it for each card discarded this way").
+///
+/// The chain is hand-built (the parent discard comes from the real parser;
+/// the token continuation is constructed directly) because this guards the
+/// tracked-set publish CLASSIFICATION at the `resolve_ability_chain`
+/// production boundary, not any single card's parse. With a primary-count-only
+/// classification (`count`/`power`/`toughness` inspection), the discard never
+/// publishes its set and the token enters with ZERO counters; the exhaustive
+/// `for_each_quantity_expr` walk makes it enter with one counter per
+/// discarded card.
+#[test]
+fn tracked_entry_counter_token_receives_discarded_count_counters() {
+    use engine::types::ability::Effect;
+    use engine::types::ability::{PtValue, QuantityExpr, QuantityRef, TargetFilter};
+    use engine::types::counter::CounterType;
+    use engine::types::mana::ManaColor;
+
+    let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Entry Counter Producer".to_string(),
+        Zone::Battlefield,
+    );
+
+    add_hand_cards(&mut state, 100, PlayerId(0), 2);
+
+    // Parent: the same real-parser whole-hand discard the Malfegor test uses.
+    let def = parse_effect_chain("discard your hand.", AbilityKind::Spell);
+    let mut ability = build_resolved_from_def(&def, source, PlayerId(0));
+    assert!(
+        ability.sub_ability.is_none(),
+        "the bare discard must have no continuation before we attach one"
+    );
+
+    // Continuation: fixed-count, fixed-P/T token whose ONLY tracked-set
+    // reference is the entry-counter quantity.
+    ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+        Effect::Token {
+            name: "Zombie".to_string(),
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(2),
+            types: vec!["Creature".to_string(), "Zombie".to_string()],
+            colors: vec![ManaColor::Black],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![(
+                CounterType::Plus1Plus1,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::TrackedSetSize,
+                },
+            )],
+        },
+        vec![],
+        source,
+        PlayerId(0),
+    )));
+
+    let before: Vec<ObjectId> = state.battlefield.iter().copied().collect();
+    let mut events = Vec::new();
+    resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+    assert_eq!(
+        hand_len(&state, PlayerId(0)),
+        0,
+        "the whole hand must be discarded before the token is created"
+    );
+
+    let new_tokens: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| !before.contains(id))
+        .copied()
+        .collect();
+    assert_eq!(
+        new_tokens.len(),
+        1,
+        "exactly one token must be created (fixed count 1)"
+    );
+    let token = state
+        .objects
+        .get(&new_tokens[0])
+        .expect("token object exists");
+    assert_eq!(
+        token.counters.get(&CounterType::Plus1Plus1).copied(),
+        Some(2),
+        "the token must enter with one +1/+1 counter per discarded card (2), \
+         not zero — zero means the discard never published its tracked set"
     );
 }
