@@ -21814,6 +21814,54 @@ fn exile_then_copy_that_card_as_enchantment_uses_tracked_set_and_set_card_types(
     );
 }
 
+/// Issue #5989 — Ardyn, the Usurper (exact current Oracle wording of the
+/// trigger body): "Exile up to one target creature card from a graveyard.
+/// If you exiled a card this way, create a token that's a copy of that card,
+/// except it's a 5/5 black Demon." Unlike the sentence-connected "then
+/// create" sibling above, the copy here sits behind the active-PAST
+/// reflexive gate "If you exiled a card this way," (CR 603.12 + CR 701.16a)
+/// — an "if "-prefixed, subject-first form neither the passive article-first
+/// combinator nor the "when "-only active arms could consume, so the whole
+/// clause previously fell through to `Effect::Unimplemented`.
+#[test]
+fn issue_5989_if_you_exiled_this_way_gates_copy_of_that_card() {
+    let def = parse_effect_chain(
+        "Exile up to one target creature card from a graveyard. If you exiled a card \
+         this way, create a token that's a copy of that card, except it's a 5/5 black \
+         Demon.",
+        AbilityKind::Spell,
+    );
+
+    let Effect::ChangeZone { destination, .. } = def.effect.as_ref() else {
+        panic!("expected ChangeZone, got {:?}", def.effect);
+    };
+    assert_eq!(*destination, Zone::Exile);
+
+    let copy = def.sub_ability.as_deref().expect("copy sub-ability");
+    assert!(
+        matches!(
+            &copy.condition,
+            Some(AbilityCondition::ZoneChangedThisWay { .. })
+        ),
+        "the reflexive \"If you exiled a card this way\" clause must lower to a \
+         ZoneChangedThisWay gate, got {:?}",
+        copy.condition
+    );
+    let Effect::CopyTokenOf { target, .. } = copy.effect.as_ref() else {
+        panic!(
+            "expected CopyTokenOf behind the reflexive gate, got {:?}",
+            copy.effect
+        );
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        },
+        "\"that card\" must rebind to the exiled tracked set"
+    );
+}
+
 /// Issue #377 — Anikthea, Hand of Erebos: "exile up to one target non-Aura
 /// enchantment card from your graveyard and create a token that's a copy of
 /// it, except it's a 3/3 black Zombie creature in addition to its other

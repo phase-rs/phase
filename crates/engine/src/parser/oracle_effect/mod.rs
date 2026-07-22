@@ -349,6 +349,55 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
     condition
 }
 
+/// CR 603.12 + CR 701.16a + CR 608.2c: rebind an active-past "you exiled …
+/// this way" reflexive gate to the zone-change ledger when its antecedent is
+/// an EXILE EFFECT in the same chain (Ardyn, the Usurper: "exile up to one
+/// target creature card from a graveyard. If you exiled a card this way,
+/// create a token that's a copy of that card…", issue #5989).
+///
+/// The context-free condition grammar reads "you exiled a[n] X this way" as
+/// `CostPaidObjectMatchesFilter` — correct for its original cost-paid class
+/// (the Shilgengar shape, where the exile happened as a COST and the
+/// `cost_paid_object` snapshot answers the check), but wrong when the exile
+/// is the immediately-preceding EFFECT instruction: no cost snapshot exists,
+/// and the runtime fallback constrains the moved object's controller to the
+/// ability controller — a card exiled from an OPPONENT's graveyard fails that
+/// check, which is exactly the reported "only works on my own graveyard"
+/// symptom. Only the clause context can disambiguate the two classes, so this
+/// rewrite (mirroring `rewrite_cant_rider_for_non_zone_change_parent` above)
+/// fires ONLY when the previous non-continuation clause is a
+/// `ChangeZone { destination: Exile }` effect; the cost-paid class (no such
+/// preceding clause) and the subject-scoped sacrifice class (Deadly Brew's
+/// "If you sacrificed a permanent this way" after a per-player sacrifice,
+/// whose `Sacrifice` parent is not a `ChangeZone`) are untouched.
+fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
+    condition: Option<AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> Option<AbilityCondition> {
+    let Some(AbilityCondition::CostPaidObjectMatchesFilter { filter }) = &condition else {
+        return condition;
+    };
+    let prev_is_effect_exile = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        });
+    if prev_is_effect_exile {
+        return Some(AbilityCondition::ZoneChangedThisWay {
+            filter: filter.clone(),
+        });
+    }
+    condition
+}
+
 fn merge_clause_conditions(
     outer: AbilityCondition,
     inner: Option<AbilityCondition>,
@@ -27739,6 +27788,13 @@ pub(crate) fn parse_effect_chain_ir(
         // zone-change ledger (a successful turn-up changes no zone). See the
         // helper for the full rationale (Etrata, Deadly Fugitive).
         let condition = rewrite_cant_rider_for_non_zone_change_parent(condition, builder.clauses());
+        // CR 603.12 + CR 701.16a: "If you exiled … this way" after an exile
+        // EFFECT is the reflexive zone-change gate, not the cost-paid class —
+        // see the helper for the full disambiguation rationale (issue #5989).
+        let condition = rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
+            condition,
+            builder.clauses(),
+        );
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude
