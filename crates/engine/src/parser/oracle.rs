@@ -3923,13 +3923,57 @@ pub(crate) fn parse_oracle_ir(
             let cost_lower = cost_line.to_lowercase();
             // CR 603.12: peel a trailing reflexive "When you do, [effect]"
             // sentence (Casualty/Replicate/Squad shape reproduced without a
-            // named keyword — Plumb the Forbidden class, issue #1108) BEFORE
-            // the cost line reaches `parse_additional_cost_line`, so the cost
-            // parser never sees the trigger sentence as unconsumed remainder.
-            let (cost_line, reflexive_trigger_text) =
+            // named keyword — Plumb the Forbidden class, issue #1108) — but
+            // COMMIT the split only when the WHOLE continuation is the
+            // supported form: an optional ranged-sacrifice additional cost
+            // followed by the recognized copy-trigger body. Coverage honesty:
+            // an unconditional strip made ANY "When you do" continuation
+            // disappear before the swallow audit could see it, so a card with
+            // an unsupported reflexive tail (e.g. a non-copy body, or a
+            // supported body behind an unsupported cost shape) appeared
+            // supported while its trigger was silently dropped. On decline,
+            // nothing is recorded for the line at all (see below), so the
+            // untouched text surfaces as a `SwallowedClause` diagnostic.
+            let (split_cost_line, reflexive_trigger_text) =
                 split_additional_cost_trailing_reflexive_trigger(cost_line, &cost_lower);
-            let cost_lower = cost_line.to_lowercase();
-            result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
+            let mut reflexive_trigger = None;
+            let mut declined_reflexive_tail = false;
+            if let Some(trigger_text) = reflexive_trigger_text {
+                let split_cost_lower = split_cost_line.to_lowercase();
+                let candidate = parse_additional_cost_line(&split_cost_lower, split_cost_line);
+                // CR 603.12: the synthesized trigger is only correct for the
+                // optional ranged-sacrifice shape (its count plumbs through
+                // `chosen_x`/`cost_x_paid`), so both halves must match.
+                if matches!(
+                    &candidate,
+                    Some(AdditionalCost::Optional {
+                        cost: AbilityCost::Sacrifice(_),
+                        ..
+                    })
+                ) {
+                    if let Some(trigger) =
+                        build_additional_cost_reflexive_copy_trigger(trigger_text)
+                    {
+                        result.additional_cost = candidate;
+                        reflexive_trigger = Some(trigger);
+                    }
+                }
+                declined_reflexive_tail = reflexive_trigger.is_none();
+            }
+            if declined_reflexive_tail {
+                // Decline: record NOTHING for this line. Re-parsing the
+                // un-split two-sentence text is not a safe fallback — the
+                // cost grammar can partially match it into a wrong cost
+                // (e.g. "sacrifice one" out of "sacrifice one or more
+                // creatures. When you do, …"). With no cost and no trigger
+                // emitted, the untouched line has zero lowered evidence, so
+                // the swallow audit flags it as a `SwallowedClause` strict
+                // failure — the card stays honestly unsupported instead of
+                // silently losing its reflexive rider.
+                result.additional_cost = None;
+            } else if reflexive_trigger.is_none() {
+                result.additional_cost = parse_additional_cost_line(&cost_lower, cost_line);
+            }
             if result.additional_cost.is_some() {
                 additional_cost_line.get_or_insert(item_line);
             }
@@ -3946,25 +3990,8 @@ pub(crate) fn parse_oracle_ir(
                     emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
                 }
             }
-            // CR 603.12: only synthesize the reflexive-copy trigger when the
-            // additional cost is actually the ranged-sacrifice shape this
-            // pattern requires — an unrelated "When you do" tail on a cost
-            // shape we don't otherwise recognize is left for the swallow-check
-            // to flag honestly rather than mis-wired.
-            if let Some(trigger_text) = reflexive_trigger_text {
-                if matches!(
-                    &result.additional_cost,
-                    Some(AdditionalCost::Optional {
-                        cost: AbilityCost::Sacrifice(_),
-                        ..
-                    })
-                ) {
-                    if let Some(trigger) =
-                        build_additional_cost_reflexive_copy_trigger(trigger_text)
-                    {
-                        emitter.trigger_at(item_line, trigger);
-                    }
-                }
+            if let Some(trigger) = reflexive_trigger {
+                emitter.trigger_at(item_line, trigger);
             }
             i += 1;
             continue;

@@ -3719,6 +3719,84 @@ fn thought_partition_choose_one_of_those_cards_has_no_target_fallback() {
     );
 }
 
+/// Issue #1108 review (coverage honesty): the Plumb the Forbidden shape —
+/// optional ranged-sacrifice additional cost + the recognized
+/// "copy this spell for each … sacrificed this way" reflexive tail — must
+/// parse fully supported: cost recorded, exactly one synthesized SpellCast
+/// trigger, and no swallowed-clause diagnostic for the line.
+#[test]
+fn additional_cost_supported_reflexive_copy_tail_parses_clean() {
+    let r = parse(
+        "As an additional cost to cast this spell, you may sacrifice one or more creatures. When you do, copy this spell for each creature sacrificed this way.\nYou draw a card and lose 1 life.",
+        "Plumb the Forbidden",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        matches!(
+            r.additional_cost,
+            Some(AdditionalCost::Optional {
+                cost: AbilityCost::Sacrifice(_),
+                ..
+            })
+        ),
+        "the optional ranged sacrifice must be recorded, got {:?}",
+        r.additional_cost
+    );
+    assert_eq!(
+        r.triggers.len(),
+        1,
+        "exactly one reflexive copy trigger must be synthesized, got {:?}",
+        r.triggers
+    );
+    assert!(
+        !r.parse_warnings
+            .iter()
+            .any(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. })),
+        "the fully supported form must leave no swallowed clause, got {:?}",
+        r.parse_warnings
+    );
+}
+
+/// Issue #1108 review (coverage honesty): a "When you do, [NON-copy body]"
+/// continuation behind the same optional ranged-sacrifice cost is NOT the
+/// supported synthesis shape and must remain a strict failure — no trigger,
+/// no silently recorded cost with a dropped rider, and the untouched sentence
+/// pair surfacing as a `SwallowedClause` diagnostic. Guards the decline
+/// branch of the tail split: previously the tail was unconditionally stripped
+/// BEFORE supported-build validation, so this card appeared supported while
+/// its "draw a card" trigger silently vanished.
+#[test]
+fn additional_cost_non_copy_when_you_do_tail_stays_a_strict_failure() {
+    let r = parse(
+        "As an additional cost to cast this spell, you may sacrifice one or more creatures. When you do, draw a card for each creature sacrificed this way.",
+        "Test Non-Copy Reflexive Tail",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    assert!(
+        r.triggers.is_empty(),
+        "no trigger may be synthesized for an unsupported reflexive body, got {:?}",
+        r.triggers
+    );
+    assert!(
+        r.additional_cost.is_none(),
+        "the cost must not be recorded as supported while its reflexive rider is \
+         dropped, got {:?}",
+        r.additional_cost
+    );
+    assert!(
+        r.parse_warnings
+            .iter()
+            .any(|w| matches!(w, OracleDiagnostic::SwallowedClause { .. })),
+        "the unconsumed cost+trigger sentence pair must surface as a SwallowedClause \
+         diagnostic, got {:?}",
+        r.parse_warnings
+    );
+}
+
 #[test]
 fn nonmodal_spell_contiguous_resolution_lines_chain_once() {
     let r = parse("Scry 1.\nDraw a card.", "Test Opt", &[], &["Instant"], &[]);
