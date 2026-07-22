@@ -1255,6 +1255,7 @@ mod tests {
         let input = r#"destroy it "gains unless you pay {2}" unless its controller pays {1}"#;
         let masked = mask_double_quoted_spans_preserving_len(input);
         let outer = masked
+            // allow-noncombinator: test-only structural offset assertion on masked output.
             .find("unless its controller")
             .expect("outer unless in mask");
         assert_eq!(
@@ -1276,6 +1277,7 @@ mod tests {
         // remainder (including a following clause) visible.
         let input = r#"destroy it unless you pay {1}. "unterminated"#;
         let out = mask_double_quoted_spans_preserving_len(input);
+        // allow-noncombinator: test-only assertion that masking preserves the tail.
         assert!(out.contains("unless you pay"), "outer clause stays visible");
         assert_eq!(out.len(), input.len());
     }

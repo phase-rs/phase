@@ -47944,17 +47944,15 @@ fn sole_granted_static(effect: &Effect) -> &crate::types::ability::StaticDefinit
     else {
         panic!("expected a GenericEffect grant, got {effect:?}");
     };
-    static_abilities
+    let grants: Vec<_> = static_abilities
         .iter()
         .flat_map(|sd| sd.modifications.iter())
-        .find_map(|m| match m {
-            CM::GrantStaticAbility { definition } => Some(&**definition),
-            // `ContinuousModification` has ~50 variants; a full exhaustive arm here
-            // is noise for a test selector. The assertion below still proves the
-            // grant carries UnlessPay, so a shape regression cannot pass silently.
-            _ => None,
-        })
-        .expect("effect must carry exactly one GrantStaticAbility")
+        .filter(|modification| matches!(modification, CM::GrantStaticAbility { .. }))
+        .collect();
+    let [CM::GrantStaticAbility { definition }] = grants.as_slice() else {
+        panic!("effect must carry exactly one GrantStaticAbility, got {grants:?}");
+    };
+    definition
 }
 
 /// Card-path (`parse_oracle_text`) regression for the two parse-diff siblings of
