@@ -64,9 +64,9 @@ interface CardChoice {
 
 /**
  * Centered spread of a host permanent plus every permanent attached to it
- * (Aura / Equipment / Fortification), fanned out at HAND size using the SAME
- * `fanGeometry` the player's hand uses — so it reads as a familiar held hand of
- * large, legible cards rather than a bespoke overlay. Solves the reachability
+ * (Aura / Equipment / Fortification), fanned out at HAND size using the shared
+ * compact `fanGeometry` profile — so it reads as a familiar held hand of large,
+ * legible cards rather than a bespoke overlay. Solves the reachability
  * problem where an attached Equipment/Aura renders only as a narrow peek behind
  * its host: during a target or board-choice prompt the overlapping objects are
  * all legal picks (CR 301.5 / 303.4: an attached permanent is its own
@@ -193,8 +193,8 @@ export function AttachmentFan() {
 
   if (hostId == null || !host || cardIds.length === 0) return null;
 
-  // Same whole-row fan the hand uses — sized by the total card count so the
-  // host + its attachments tuck into the identical overlap / tilt / arc curve.
+  // Shared compact whole-row fan — sized by the total card count so the host +
+  // its attachments stay within the overlay's viewport budget.
   // The overlap basis is `--fan-card-w` (the fan's larger card width) so the
   // spread stays proportional to the bigger cards.
   const fan = fanGeometry(cardIds.length, "--fan-card-w");

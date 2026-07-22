@@ -12560,18 +12560,20 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
     None
 }
 
-/// CR 701.15a + CR 701.15b: Recognize the verbatim goad *definition* —
+/// CR 508.1d + CR 701.15b: Recognize the printed goad *requirement pair* —
 /// "attack[s] each combat if able and attack[s] a player other than you if able".
-/// This compound is precisely what goad does (CR 701.15a: must attack each combat
-/// if able; CR 701.15b: must attack a player other than the goading player),
-/// printed in full on cards that grant the effect without the "goad" keyword
-/// (Maximum Carnage chapter I). Mapping it to the goad mechanic is the correct
-/// class reuse: the goading player is the resolving controller ("you"), so the
-/// subject's own creatures are forced onto opponents, and `goaded_by` cleanup at
-/// the goading player's next turn matches the card's "Until your next turn"
-/// duration (CR 701.15a). Returns the bare marker; `subject.rs` binds the affected
-/// set to `Effect::GoadAll`.
-pub(super) fn try_parse_goad_equivalent(lower: &str) -> bool {
+/// CR 701.15b attaches exactly these two combat requirements to a goaded
+/// creature; two cards print them in full without the "goad" keyword (Kardur,
+/// Doomscourge; Maximum Carnage chapter I).
+///
+/// This compound does NOT lower to the goad mechanic. CR 701.15a: only a spell
+/// or ability that *goads* a creature makes it goaded, and the official Maximum
+/// Carnage ruling (2025-09-19) is explicit — "Although the effects of the first
+/// chapter ability are the same as the goad keyword action, that ability doesn't
+/// cause any creatures to become goaded. Effects that refer to 'goaded
+/// creatures' won't apply." Returns the bare marker; `subject.rs` binds the
+/// affected set to a `MustAttack` + `MustAttackAwayFromSource` static grant.
+pub(super) fn try_parse_attack_away_requirement(lower: &str) -> bool {
     let trimmed = lower.trim_end_matches('.').trim();
     let parsed: Result<(&str, ()), nom::Err<OracleError<'_>>> = (
         alt((tag("attacks"), tag("attack"))),
@@ -12654,6 +12656,40 @@ pub(super) fn must_attack_static_definition() -> StaticDefinition {
     StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
         ContinuousModification::AddStaticMode {
             mode: StaticMode::MustAttack,
+        },
+    ])
+}
+
+/// CR 508.1d + CR 701.15b: Build the transient `StaticDefinition` for the printed
+/// goad-requirement compound ("… attacks each combat if able and attacks a player
+/// other than you if able"). CR 701.15b attaches TWO requirements to a goaded
+/// creature; a card that prints them in full creates the same two requirements
+/// and NO goaded designation (CR 701.15a — only a spell or ability that *goads*
+/// makes a creature goaded; official Maximum Carnage ruling 2025-09-19).
+///
+/// Both requirements ride ONE definition so `register_transient_effect` sees them
+/// in a single `modifications` vec and keeps the affected filter intact for both
+/// (CR 611.2c — the set stays dynamic). `mode` carries the away-from requirement
+/// so the coverage/registry surface classifies the def by its distinguishing
+/// mode; `mode` is otherwise inert for transient grants
+/// (`snapshot_transient_modifications` reads only `modifications`), which is why
+/// both modes are also listed explicitly.
+pub(super) fn must_attack_away_static_definition() -> StaticDefinition {
+    use crate::types::statics::StaticMode;
+    // DELIBERATE GAP (plan §5.9): keying `mode` on the away-from requirement also
+    // excludes this def from `is_mass_coerce_static` (oracle_effect/mod.rs), which
+    // publishes the chain tracked set only for `MustAttack`/`MustAttackPlayer`. A
+    // future card printing this compound followed by a "those creatures" anaphor
+    // (CR 608.2c) would therefore not publish the set, unlike the plain-`MustAttack`
+    // sibling above. Unreachable today and not a regression: neither card-data key
+    // carrying this compound has a following anaphor, and the `Effect::GoadAll` path
+    // this replaces never published the set either.
+    StaticDefinition::new(StaticMode::MustAttackAwayFromSource).modifications(vec![
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::MustAttack,
+        },
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::MustAttackAwayFromSource,
         },
     ])
 }

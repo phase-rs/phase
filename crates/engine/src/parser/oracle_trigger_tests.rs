@@ -1833,6 +1833,55 @@ fn parse_wave_of_rats_dies_dealt_combat_damage_intervening_if() {
     );
 }
 
+/// CR 603.4 + CR 107.1: Shadowborn Demon — the hoisted intervening-"if"
+/// gate ("if there are fewer than six creature cards in your graveyard")
+/// must lift to a strict-inequality `QuantityComparison` on the controller's
+/// graveyard creature count (LT 6), the same seam Impending Disaster's
+/// "or more" suffix uses in the opposite comparator direction. Pre-fix the
+/// "fewer than" prefix was unrecognized and the condition silently swallowed,
+/// so the demon sacrificed a creature on every upkeep regardless of graveyard
+/// size.
+#[test]
+fn parse_shadowborn_demon_upkeep_fewer_than_creatures_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if there are fewer than six creature cards in your \
+         graveyard, sacrifice a creature.",
+        "Shadowborn Demon",
+    );
+
+    // Revert-guard: pre-fix `def.condition` is None (swallowed).
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Creature],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        }),
+        "upkeep intervening-if must lift to ZoneCardCount(Graveyard, Creature, Controller) LT 6, got {:?}",
+        def.condition,
+    );
+
+    // Positive reach-guard: the sacrifice body still parses (not swallowed into
+    // the condition, not Unimplemented, no residual "if …" text).
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::Sacrifice { .. }),
+        "execute must be Sacrifice, got {:?}",
+        execute.effect,
+    );
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "execute must not be Unimplemented",
+    );
+}
+
 #[test]
 fn parse_deathknell_berserker_dies_power_lki_intervening_if() {
     let def = parse_trigger_line(
@@ -14793,6 +14842,69 @@ fn phase_trigger_exactly_thirteen_cards_in_hand_win_the_game() {
         Some(Effect::WinTheGame { .. }) => {}
         other => panic!("expected WinTheGame effect, got {other:?}"),
     }
+}
+
+/// CR 401.3 + CR 603.4 + CR 104.2b: Battle of Wits' full Oracle text must
+/// preserve its controller-library threshold as an intervening-if on the upkeep
+/// trigger, then execute the ordinary controller-scoped win effect.
+#[test]
+fn battle_of_wits_full_oracle_parses_library_threshold_win_trigger() {
+    const ORACLE: &str = "At the beginning of your upkeep, if you have 200 or more cards in your library, you win the game.";
+
+    let parsed = parse_oracle_text(ORACLE, "Battle of Wits", &[], &[], &[]);
+    assert!(
+        parsed.abilities.is_empty(),
+        "trigger text must not leak into spell abilities"
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected exactly one upkeep trigger"
+    );
+
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 200 },
+        })
+    );
+
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("win trigger must have an effect");
+    assert!(matches!(execute.effect.as_ref(), Effect::WinTheGame { .. }));
+    assert!(
+        execute.condition.is_none(),
+        "the leading intervening-if must exist only on the trigger"
+    );
+
+    fn assert_no_unimplemented(ability: &AbilityDefinition) {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "Battle of Wits must not contain Unimplemented effects: {ability:?}"
+        );
+        if let Some(sub_ability) = ability.sub_ability.as_deref() {
+            assert_no_unimplemented(sub_ability);
+        }
+    }
+    assert_no_unimplemented(execute);
 }
 
 /// CR 603.2b + CR 603.4 + CR 102.1: Ghirapur Orrery — the intervening-if

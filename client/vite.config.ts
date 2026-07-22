@@ -30,6 +30,33 @@ function wasmEnvShim(): Plugin {
   };
 }
 
+// wasm-bindgen's web glue defaults to `new URL("engine_wasm_bg.wasm",
+// import.meta.url)`. Vite recognizes that static URL and emits the WASM asset
+// even when every caller supplies an R2 URL explicitly. For external builds,
+// replace only that generated fallback with the build-time URL so Rollup has no
+// local engine WASM asset to emit. Without ENGINE_WASM_URL this plugin leaves
+// the generated glue untouched, preserving local/self-hosted behavior.
+function externalEngineWasm(): Plugin {
+  const engineGlue = path.resolve(__dirname, "src/wasm/engine_wasm.js");
+  const bundledWasmUrl = "new URL('engine_wasm_bg.wasm', import.meta.url)";
+  return {
+    name: "external-engine-wasm",
+    apply: "build",
+    transform(code, id) {
+      if (!process.env.ENGINE_WASM_URL || id !== engineGlue) return;
+      if (!code.includes(bundledWasmUrl)) {
+        this.error(
+          "engine_wasm.js no longer contains the expected wasm-bindgen fallback URL",
+        );
+      }
+      return {
+        code: code.replace(bundledWasmUrl, "__ENGINE_WASM_URL__"),
+        map: null,
+      };
+    },
+  };
+}
+
 // mana-font ships a legacy @font-face (eot/woff/ttf/svg) for BOTH the "Mana"
 // glyph family AND an unused "MPlantin" text family. Imported verbatim, Vite
 // emits every referenced url() — ~3.4 MB of fonts (a 1.8 MB SVG among them,
@@ -112,6 +139,12 @@ function dataFileDefines(mode: string): Record<string, string> {
     __ENGINE_FINGERPRINT__: process.env.ENGINE_FINGERPRINT
       ? JSON.stringify(process.env.ENGINE_FINGERPRINT)
       : "undefined",
+    // Release/staging builds pin the engine binary to an immutable R2 object.
+    // Keep the local bundled WASM fallback when this is unset (dev, Tauri, and
+    // self-hosted builds).
+    __ENGINE_WASM_URL__: process.env.ENGINE_WASM_URL
+      ? JSON.stringify(process.env.ENGINE_WASM_URL)
+      : "undefined",
     __AUDIO_BASE_URL__: JSON.stringify(process.env.AUDIO_BASE_URL || ""),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
     __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
@@ -169,6 +202,7 @@ export default defineConfig(({ mode }) => ({
   },
   plugins: [
     wasmEnvShim(),
+    externalEngineWasm(),
     trimManaFont(),
     react(),
     tailwindcss(),
@@ -227,7 +261,12 @@ export default defineConfig(({ mode }) => ({
             },
           },
           {
-            urlPattern: /engine_wasm_bg-.*\.wasm$/,
+            // Workbox accepts cross-origin RegExpRoute matches only when they
+            // begin at index 0. The anchored R2 branch covers production and
+            // staging uploads; the existing unanchored branch preserves
+            // same-origin bundled-WASM behavior.
+            urlPattern:
+              /(?:^https:\/\/data\.phase-rs\.dev\/(?:staging\/)?wasm\/engine_wasm_bg-.*\.wasm$|engine_wasm_bg-.*\.wasm$)/,
             handler: "CacheFirst",
             options: {
               cacheName: "engine-wasm",
@@ -341,7 +380,7 @@ export default defineConfig(({ mode }) => ({
   ],
   define: dataFileDefines(mode),
   worker: {
-    plugins: () => [wasmEnvShim()],
+    plugins: () => [wasmEnvShim(), externalEngineWasm()],
   },
   // Vite's host-check rejects requests with a Host header outside its
   // known list — required to allow the Caddy proxy at local.phase-rs.dev

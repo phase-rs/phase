@@ -1695,6 +1695,24 @@ pub enum StaticMode {
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
     Goaded,
+    /// CR 508.1d + CR 701.15b: This creature attacks each combat if able AND
+    /// attacks a player other than the *granting effect's* controller if able —
+    /// the two combat requirements CR 701.15b attaches to goad, WITHOUT the
+    /// goaded designation.
+    ///
+    /// CR 701.15a: only a spell or ability that *goads* a creature makes it
+    /// goaded, so a card that prints the requirements in full creates no
+    /// designation. Official Maximum Carnage ruling (2025-09-19): "Although the
+    /// effects of the first chapter ability are the same as the goad keyword
+    /// action, that ability doesn't cause any creatures to become goaded.
+    /// Effects that refer to 'goaded creatures' won't apply." Kardur,
+    /// Doomscourge and Maximum Carnage chapter I are the two printed members.
+    ///
+    /// The avoided player is `StaticDefinition::source_controller`, snapshotted
+    /// at graft time: CR 109.5 fixes "you" in a resolving ability to that
+    /// ability's controller. Nullary and registry-registered (mirrors [`Goaded`]);
+    /// runtime enforcement lives in `combat.rs`.
+    MustAttackAwayFromSource,
     /// CR 506.5 + CR 508.1c + CR 509.1b: Parameterized "alone" combat
     /// restriction.  `action` selects whether it applies to attacking or
     /// blocking; `requirement` selects the polarity:
@@ -2086,6 +2104,7 @@ pub enum StaticModeKind {
     MustBeBlocked,
     MustBeBlockedByAll,
     Goaded,
+    MustAttackAwayFromSource,
     CombatAlone,
     CantCrew,
     CantPhaseIn,
@@ -2228,6 +2247,7 @@ impl StaticMode {
             StaticMode::MustBeBlocked { .. } => StaticModeKind::MustBeBlocked,
             StaticMode::MustBeBlockedByAll { .. } => StaticModeKind::MustBeBlockedByAll,
             StaticMode::Goaded => StaticModeKind::Goaded,
+            StaticMode::MustAttackAwayFromSource => StaticModeKind::MustAttackAwayFromSource,
             StaticMode::CombatAlone { .. } => StaticModeKind::CombatAlone,
             StaticMode::CantCrew => StaticModeKind::CantCrew,
             StaticMode::CantPhaseIn => StaticModeKind::CantPhaseIn,
@@ -2581,6 +2601,7 @@ impl StaticMode {
             | StaticMode::MustBeBlocked { .. }
             | StaticMode::MustBeBlockedByAll { .. }
             | StaticMode::Goaded
+            | StaticMode::MustAttackAwayFromSource
             | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
             | StaticMode::CantPhaseIn
@@ -2949,6 +2970,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "MustBeBlockedByAll:By({filter:?})")
             }
             StaticMode::Goaded => write!(f, "Goaded"),
+            StaticMode::MustAttackAwayFromSource => write!(f, "MustAttackAwayFromSource"),
             StaticMode::CombatAlone {
                 action,
                 requirement,
@@ -3429,6 +3451,7 @@ impl FromStr for StaticMode {
             "CantPhaseIn" => StaticMode::CantPhaseIn,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll { blockers: None },
             "Goaded" => StaticMode::Goaded,
+            "MustAttackAwayFromSource" => StaticMode::MustAttackAwayFromSource,
             "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
                 action: CombatAloneAction::Attack,
                 requirement: CombatAloneRequirement::NeedsCompanion,
@@ -4117,6 +4140,10 @@ mod tests {
                 action: CombatAloneAction::Attack,
                 requirement: CombatAloneRequirement::MustBeSole,
             },
+            // CR 508.1d + CR 701.15b: nullary requirement leaf — `Display` and
+            // `FromStr` must stay symmetric (Kardur, Doomscourge; Maximum
+            // Carnage chapter I).
+            StaticMode::MustAttackAwayFromSource,
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // CR 702.170a grant + CR 702.170f permission — nullary plot-from-
@@ -4278,6 +4305,7 @@ mod tests {
             StaticMode::CantBeBlocked,
             StaticMode::Flying,
             StaticMode::MustBeBlocked { by: None },
+            StaticMode::MustAttackAwayFromSource,
             StaticMode::GrantsExtraVote,
             // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
             StaticMode::CastWithAlternativeCost {

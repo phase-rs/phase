@@ -309,6 +309,13 @@ describe("GameProvider native AI routing", () => {
     await waitFor(() => {
       expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
     });
+    const nativeEngineModeCall = gameStoreState.setEngineMode.mock.calls.findIndex(
+      ([mode]) => mode === "native",
+    );
+    expect(nativeEngineModeCall).toBeGreaterThanOrEqual(0);
+    expect(gameStoreState.setEngineMode.mock.invocationCallOrder[nativeEngineModeCall]).toBeLessThan(
+      gameStoreState.initGame.mock.invocationCallOrder[0],
+    );
     expect(clearActiveGame).toHaveBeenCalledOnce();
     expect(saveActiveGame).not.toHaveBeenCalled();
     expect(multiplayerGetState).not.toHaveBeenCalled();

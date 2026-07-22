@@ -400,6 +400,30 @@ jobs:
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
+      - name: Compute content-addressed engine WASM filename
+        id: engine-wasm-hash
+        run: |
+          ENGINE_WASM_SHA256=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | awk '{print $1}')
+          ENGINE_WASM_HASH16=${ENGINE_WASM_SHA256:0:16}
+          echo "sha256=$ENGINE_WASM_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$ENGINE_WASM_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=engine_wasm_bg-$ENGINE_WASM_HASH16.wasm" >> "$GITHUB_OUTPUT"
+
+      - name: Upload engine WASM to R2 (staging)
+        # Keep the binary raw: wasm-bindgen uses streaming instantiation, which
+        # requires R2 to serve the object as application/wasm. The immutable
+        # content-addressed URL is baked into the frontend build below.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
+        run: |
+          npx wrangler r2 object put "phase-rs-data/staging/wasm/$ENGINE_WASM_FILENAME" \
+            --file client/src/wasm/engine_wasm_bg.wasm \
+            --remote \
+            --content-type application/wasm \
+            --cache-control "public, max-age=31536000, immutable"
+
       - name: Use preview icons
         run: |
           cp client/public/preview-icons/favicon.ico client/public/favicon.ico
@@ -418,6 +442,7 @@ jobs:
           # card-data it was built against (filename from the card-data job).
           DATA_BASE_URL: "https://data.phase-rs.dev/staging"
           CARD_DATA_URL: "https://data.phase-rs.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
+          ENGINE_WASM_URL: "https://data.phase-rs.dev/staging/wasm/${{ steps.engine-wasm-hash.outputs.filename }}"
           ENGINE_FINGERPRINT: ${{ needs.card-data.outputs.engine_fingerprint }}
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
@@ -452,6 +477,19 @@ jobs:
           rm -f client/dist/card-data.json client/dist/card-data.json.br \
             client/dist/card-data-????????????????.json \
             client/dist/card-data-????????????????.json.br
+
+      - name: Guard Cloudflare Pages asset size limit
+        # Preview publishes to GitHub Pages today, but production Cloudflare
+        # Pages has a hard 25 MiB per-file ceiling. Keep the preview artifact
+        # within that ceiling so release cannot fail only at Pages deployment.
+        shell: bash
+        run: |
+          oversized=$(find client/dist -type f -size +25M -print -quit)
+          if [ -n "$oversized" ]; then
+            size=$(du -h "$oversized" | awk '{print $1}')
+            echo "::error::Cloudflare Pages 25 MiB file limit exceeded: $oversized ($size)"
+            exit 1
+          fi
 
       - name: SPA fallback for GitHub Pages
         run: cp client/dist/index.html client/dist/404.html

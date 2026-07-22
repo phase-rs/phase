@@ -1671,23 +1671,28 @@ fn try_parse_subject_restriction_clause(
                 unless_pay: None,
             });
         }
-        // CR 701.15a + CR 701.15b: "[subject] attacks each combat if able and
-        // attacks a player other than you if able" is the printed goad definition
-        // (Maximum Carnage chapter I). Map it to `Effect::GoadAll` over the subject
-        // population so the goad mechanic (goaded_by mark, "attack a player other
-        // than the goading player", goading-player next-turn cleanup) handles it.
-        // Tried before the plain attack recognizer since the goad compound is the
-        // strict superset and must win. The subject is a population ("each
-        // creature"), so the GoadAll target is `application.affected`.
-        if imperative::try_parse_goad_equivalent(&predicate) {
+        // CR 508.1d + CR 701.15b + CR 611.2c: "[subject] attacks each combat if
+        // able and attacks a player other than you if able" is the goad
+        // *requirement pair* printed in full (Kardur, Doomscourge; Maximum
+        // Carnage chapter I). CR 701.15a: only a spell or ability that *goads*
+        // makes a creature goaded, so this lowers to combat requirements and NOT
+        // to the goad mechanic — official Maximum Carnage ruling (2025-09-19):
+        // "that ability doesn't cause any creatures to become goaded. Effects
+        // that refer to 'goaded creatures' won't apply."
+        // Tried before the plain attack recognizer since the compound is the
+        // strict superset. `duration: None` — the stated duration ("Until your
+        // next turn,") arrives on `ability.duration` and wins in
+        // `effects/effect.rs::resolve`.
+        if imperative::try_parse_attack_away_requirement(&predicate) {
             let application = parse_subject_application(subject, ctx)?;
-            let goad_target = application
-                .target
-                .clone()
-                .unwrap_or_else(|| application.affected.clone());
+            let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
-                effect: Effect::GoadAll {
-                    target: goad_target,
+                effect: Effect::GenericEffect {
+                    static_abilities: vec![
+                        imperative::must_attack_away_static_definition().affected(affected)
+                    ],
+                    duration: None,
+                    target: application.target,
                 },
                 distribute: None,
                 multi_target: application.multi_target,

@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 178,
+      "date": "2026-07-21",
+      "title": "Aetherworks Marvel finally casts for free",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "multiplayer",
+        "interface"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Ward of Bones stops each opponent who controls more creatures, artifacts, or enchantments than you from casting spells of that type\n• Hotheaded Giant and Steel Exemplar now check their \"unless\" conditions before entering with -1/-1 counters (another red spell cast this turn, colors of mana spent)\n• Alpine Moon, Lithoform Blight, and Ultima strip land types along with everything else the land loses\n\n🛠️ Cards That Now Work Right\n• \"Look at your top cards and cast one for free\" actually offers the cast and puts the rest on the bottom — fixes Kiora, Sovereign of the Deep; Aetherworks Marvel; Velomachus Lorehold; Svella, Ice Shaper; Perception Bobblehead (with its mana value cap); and Construct a Cosmic Cube\n• Mount triggers reading \"whenever this creature attacks while saddled\" only fire while actually saddled — fixes Alacrian Jaguar and 26 other Mounts\n• Kitchen Finks' persist keeps working across repeated deaths\n• Mana abilities with sacrifice costs (like Gilded Goose eating a Food) now fire death and sacrifice triggers while paying for spells, so Scavenger's Talent and friends see them\n• Vorinclex, Monstrous Raider doubles and halves counters based on who is placing them, and loyalty activations no longer crash when replacement-ordering choices come up (your Doubling Season plus an opponent's Vorinclex)\n• Kellan, the Kid casts the permanent you pick from your hand instead of erroring out\n• Equipment triggers like Kusari-Gama's \"deals damage to a blocking creature\" no longer fire on damage dealt to players\n• Disorder in the Court returns exactly the creatures it exiled at the end of turn\n\n⚔️ Combat & Gameplay\n• A creature forced to attack can no longer be forced to attack itself\n• Huge token swarms alongside life-gain or life-drain triggers (Pest Infestation with Bogwater Lumaret) resolve in one batch instead of softlocking the game\n• Loop shortcut polish: counters that go infinite show ∞ in their tooltip, and the token label pluralizes correctly in every language\n\n🌐 Multiplayer\n• Manual mana payment works in multiplayer again — previously you could tap your lands but the server rejected every cast\n\n🖥️ Interface\n• Permanents that a copy effect turned into copies now wear a Copy badge, so a Phantasmal Image posing as Reveillark is tellable at a glance\n• Holding Alt pins the hover card preview in place, so you can mouse onto the abilities panel to scroll rulings or click Report a Problem\n• Mobile gets a current-phase chip — tap it to see all 12 turn steps and set phase stops, which previously required desktop\n• The desktop app can now download and run a native game engine for smoother AI games (with automatic browser-engine fallback) and remembers your release/preview channel choice\n• Fixed broken rendering on Linux desktops with NVIDIA graphics, and removed duplicate card data on iOS to save memory",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1529249897998454967"
+    },
+    {
       "id": 177,
       "date": "2026-07-20",
       "title": "Choose how to cast under Omniscience",
