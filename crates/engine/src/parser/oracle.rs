@@ -4883,7 +4883,10 @@ pub(crate) fn parse_oracle_ir(
                     let rider_gap =
                         TriggerDefinition::new(TriggerMode::Unknown("when you do".to_string()))
                             .description(line.to_string());
-                    emitter.static_at(item_line, static_def.description(line.to_string()));
+                    emitter.static_ir_at(
+                        item_line,
+                        StaticIr::from_definition(&line, static_def.description(line.to_string())),
+                    );
                     emitter.trigger_at(item_line, rider_gap);
                     i += 1;
                     continue;
