@@ -710,8 +710,10 @@ mod tests {
             journal.begin_proposal(),
             Err(ResolvedRulesJournalError::CommandOrdinalOverflow)
         );
-        let mut nodes = ResolvedRulesJournal::default();
-        nodes.next_settlement_node_ordinal = u64::MAX;
+        let mut nodes = ResolvedRulesJournal {
+            next_settlement_node_ordinal: u64::MAX,
+            ..ResolvedRulesJournal::default()
+        };
         assert_eq!(
             nodes.begin_activated_mana(ObjectIncarnationRef::of(ObjectId(1), 1), None),
             Err(ResolvedRulesJournalError::SettlementNodeOrdinalOverflow)
@@ -739,7 +741,7 @@ mod tests {
             .record_spent_mana(
                 PlayerId(0),
                 ManaPaymentRecipient::Object(ObjectIncarnationRef::of(ObjectId(4), 5)),
-                &[produced.clone()],
+                std::slice::from_ref(&produced),
             )
             .unwrap()
             .unwrap();
