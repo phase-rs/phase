@@ -1481,8 +1481,38 @@ fn serde_round_trip_text_word_types() {
         duration: None,
     };
     let json = serde_json::to_string(&effect).expect("serialize Effect");
+    assert!(
+        json.contains("excluded_to"),
+        "a non-empty excluded_to must be emitted: {json}"
+    );
     let back: Effect = serde_json::from_str(&json).expect("deserialize Effect");
     assert_eq!(effect, back);
+
+    // The `skip_serializing_if = "Vec::is_empty"` path itself: an EMPTY
+    // `excluded_to` (Artificial Evolution without its "can't be Wall" rider, and
+    // every Sleight of Mind / Magical Hack) must be OMITTED from the JSON and
+    // come back as an empty vec via `#[serde(default)]`. This is the case the
+    // non-empty fixture above cannot exercise.
+    let bare = Effect::ChangeTextWords {
+        target: engine::types::ability::TargetFilter::Any,
+        allowed_categories: vec![TextWordCategory::ColorWord],
+        excluded_to: Vec::new(),
+        duration: None,
+    };
+    let bare_json = serde_json::to_string(&bare).expect("serialize bare Effect");
+    assert!(
+        !bare_json.contains("excluded_to"),
+        "an empty excluded_to must be skipped by skip_serializing_if: {bare_json}"
+    );
+    let bare_back: Effect = serde_json::from_str(&bare_json).expect("deserialize bare Effect");
+    assert_eq!(bare, bare_back);
+    match bare_back {
+        Effect::ChangeTextWords { excluded_to, .. } => assert!(
+            excluded_to.is_empty(),
+            "the omitted field must default back to an empty vec: {excluded_to:?}"
+        ),
+        other => panic!("expected ChangeTextWords, got {other:?}"),
+    }
 }
 
 /// CR 612.1 + CR 508.1 (review finding 1): a creature type that lives ONLY inside
@@ -2209,5 +2239,553 @@ fn creature_type_in_amass_subtype_is_replaced() {
     assert!(
         !after.iter().any(|s| s == "Goblin"),
         "Goblin must be gone from the Amass subtype: {after:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 612.2a — token-creation specs (name + creature types)
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle ability line from Ib Halfheart, Goblin Tactician. Chosen
+/// because the SAME line carries all three word categories at once: a basic land
+/// type in the sacrifice cost (Mountain), a color word in the token spec (red),
+/// and a creature type used simultaneously as the token's type and its name
+/// (Goblin) — so the three category-discipline tests below share one fixture and
+/// each one's "unaffected sibling" assertion is about a word that is genuinely
+/// present, never about an absent word.
+const IB_HALFHEART_TOKEN_ABILITY: &str =
+    "Sacrifice a Mountain: Create two 1/1 red Goblin creature tokens.";
+
+/// Every token permanent currently on the battlefield.
+fn battlefield_tokens(
+    state: &engine::types::game_state::GameState,
+) -> Vec<&engine::game::game_object::GameObject> {
+    state
+        .objects
+        .values()
+        .filter(|o| o.is_token && o.zone == engine::types::zones::Zone::Battlefield)
+        .collect()
+}
+
+/// Index of the `Effect::Token` activated ability on `obj`.
+fn token_ability_index(obj: &engine::game::game_object::GameObject) -> usize {
+    obj.abilities
+        .iter()
+        .position(|a| matches!(&*a.effect, Effect::Token { .. }))
+        .expect("the fixture must expose a token-creating activated ability")
+}
+
+/// The live `(name, types)` pair of the object's token-creation spec.
+fn token_spec_identity(obj: &engine::game::game_object::GameObject) -> (String, Vec<String>) {
+    obj.abilities
+        .iter()
+        .find_map(|a| match &*a.effect {
+            Effect::Token { name, types, .. } => Some((name.clone(), types.clone())),
+            _ => None,
+        })
+        .expect("the fixture must expose a token-creation spec")
+}
+
+/// CR 612.2a (maintainer HIGH blocker): "Most spells and abilities that create
+/// creature tokens use creature types to define both the creature types and the
+/// names of the tokens. A text-changing effect that affects such a spell or an
+/// object with such an ability can change these words because they're being used
+/// as creature types, even though they're also being used as names."
+///
+/// Full production path: parse the real Oracle line -> cast Artificial Evolution
+/// -> resolve -> `WaitingFor::TextWordReplacement` ->
+/// `GameAction::ChooseTextWordReplacement` (Goblin -> Elf) -> activate the token
+/// ability -> pay the sacrifice cost -> resolve -> inspect the CREATED TOKEN
+/// OBJECTS.
+///
+/// Revert-failing assertions: each created token's `card_types.subtypes` contains
+/// "Elf" and its `name` / `base_name` are "Elf". Before this fix `walk_effect`'s
+/// `Effect::Token` arm descended only into `static_abilities`, so both the spec's
+/// `types` and its `name` stayed "Goblin" and the ability still created Goblin
+/// tokens named Goblin — exactly the reported defect.
+#[test]
+fn creature_type_change_rewrites_created_token_name_and_subtypes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ib = scenario
+        .add_creature(P0, "Ib Halfheart, Goblin Tactician", 3, 3)
+        .from_oracle_text(IB_HALFHEART_TOKEN_ABILITY)
+        .id();
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Artificial Evolution", true, ARTIFICIAL_EVOLUTION)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Goblin".to_string(), "Elf".to_string()];
+
+    // Fixture reach guard: the PRINTED spec really is a Goblin token named Goblin
+    // (so this test cannot pass on a degenerate typeless/nameless spec), and the
+    // CR 612.2 enumerator offers Goblin as a legal `from` word.
+    let (printed_name, printed_types) = token_spec_identity(&runner.state().objects[&ib]);
+    assert_eq!(printed_name, "Goblin", "printed token name");
+    assert!(
+        printed_types.iter().any(|t| t == "Goblin"),
+        "printed token types must declare Goblin: {printed_types:?}"
+    );
+    let offered =
+        collect_present_words(&runner.state().objects[&ib], TextWordCategory::CreatureType);
+    assert!(
+        offered.contains(&TextWord::CreatureType("Goblin".to_string())),
+        "the token spec must contribute Goblin to the CR 612.2 `from` set: {offered:?}"
+    );
+
+    runner.cast(spell).target_object(ib).resolve();
+    apply_replacement(
+        &mut runner,
+        TextWord::CreatureType("Goblin".to_string()),
+        TextWord::CreatureType("Elf".to_string()),
+    );
+
+    // The live spec now names Elf in BOTH halves of the CR 612.2a pair.
+    let (live_name, live_types) = token_spec_identity(&runner.state().objects[&ib]);
+    assert_eq!(
+        live_name, "Elf",
+        "CR 612.2a: the token's NAME is changed too, because the word is used as a creature type"
+    );
+    assert!(
+        live_types.iter().any(|t| t == "Elf") && !live_types.iter().any(|t| t == "Goblin"),
+        "the token spec's types must now name Elf, not Goblin: {live_types:?}"
+    );
+
+    // Drive the real token creation.
+    let index = token_ability_index(&runner.state().objects[&ib]);
+    runner.activate(ib, index).pay_with(&[mountain]).resolve();
+
+    let tokens = battlefield_tokens(runner.state());
+    assert_eq!(
+        tokens.len(),
+        2,
+        "the ability creates two tokens: {:?}",
+        tokens.iter().map(|t| &t.name).collect::<Vec<_>>()
+    );
+    for token in &tokens {
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Elf"),
+            "the created token must be an Elf: {:?}",
+            token.card_types.subtypes
+        );
+        assert!(
+            !token.card_types.subtypes.iter().any(|s| s == "Goblin"),
+            "the created token must NOT still be a Goblin: {:?}",
+            token.card_types.subtypes
+        );
+        assert_eq!(
+            token.name, "Elf",
+            "CR 612.2a: the created token is NAMED Elf, not Goblin"
+        );
+        assert_eq!(token.base_name, "Elf", "the token's base name too");
+    }
+}
+
+/// CR 612.2 category isolation (the maintainer's "unaffected sibling"): a
+/// BASIC-LAND-TYPE text change must not touch the creature-type half of the same
+/// token-creation spec.
+///
+/// Positive reach guard (not vacuous): the fixture has NO Mountain on the
+/// battlefield — only an Island. The ability is therefore activatable at all only
+/// because Magical Hack rewrote its "Sacrifice a Mountain" cost to "Sacrifice an
+/// Island"; if the change had not applied, `ActivateAbility` / the cost payment
+/// would be rejected and the driver would panic before any assertion runs.
+///
+/// Revert-failing assertions: the created token is still a Goblin NAMED Goblin.
+/// If `WordCursor::token_spec` dropped its `category != CreatureType` guard and
+/// rewrote names under every category, or if the `types` walk ignored the
+/// category, these flip.
+#[test]
+fn basic_land_type_change_leaves_created_token_creature_type() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ib = scenario
+        .add_creature(P0, "Ib Halfheart, Goblin Tactician", 3, 3)
+        .from_oracle_text(IB_HALFHEART_TOKEN_ABILITY)
+        .id();
+    // Deliberately NO Mountain: the cost is only payable after Mountain -> Island.
+    let island = scenario.add_basic_land(P0, ManaColor::Blue);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Magical Hack", true, MAGICAL_HACK)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Goblin".to_string(), "Elf".to_string()];
+
+    runner.cast(spell).target_object(ib).resolve();
+    apply_replacement(
+        &mut runner,
+        TextWord::BasicLandType(BasicLandType::Mountain),
+        TextWord::BasicLandType(BasicLandType::Island),
+    );
+
+    let index = token_ability_index(&runner.state().objects[&ib]);
+    runner.activate(ib, index).pay_with(&[island]).resolve();
+
+    // Reach guard: the Island really was sacrificed, so the cost text DID change.
+    assert_eq!(
+        runner.state().objects.get(&island).map(|o| o.zone),
+        Some(engine::types::zones::Zone::Graveyard),
+        "the rewritten 'Sacrifice an Island' cost must have consumed the Island"
+    );
+
+    let tokens = battlefield_tokens(runner.state());
+    assert_eq!(tokens.len(), 2, "the ability creates two tokens");
+    for token in &tokens {
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Goblin"),
+            "a basic-land-type change must not retype the token: {:?}",
+            token.card_types.subtypes
+        );
+        assert_eq!(
+            token.name, "Goblin",
+            "CR 612.2: only the CR 612.2a creature-type carve-out reaches a token's name"
+        );
+    }
+}
+
+/// CR 612.2 (the second half of the category-discipline pair): a COLOR-WORD text
+/// change rewrites the color word printed in the token spec ("a 1/1 **red**
+/// Goblin creature token") and leaves the creature-type / name half alone.
+///
+/// This is the rules-correct reading of CR 612.2 — "red" there is a Magic color
+/// word being used as a color word — so the sibling assertion is not "the token
+/// spec is inert under a color change" but "a color change touches only the color
+/// axis".
+///
+/// Revert-failing assertions: the created token's `color` is `[Blue]` (drop the
+/// `colors` walk in the `Effect::Token` arm and it stays `[Red]`), while its
+/// subtype and name stay Goblin (drop the `category != CreatureType` guard in
+/// `WordCursor::token_spec` and the name would be rewritten by a color change).
+#[test]
+fn color_word_change_rewrites_created_token_color_not_its_creature_type() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ib = scenario
+        .add_creature(P0, "Ib Halfheart, Goblin Tactician", 3, 3)
+        .from_oracle_text(IB_HALFHEART_TOKEN_ABILITY)
+        .id();
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Sleight of Mind", true, SLEIGHT_OF_MIND)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Goblin".to_string(), "Elf".to_string()];
+
+    runner.cast(spell).target_object(ib).resolve();
+    apply_replacement(
+        &mut runner,
+        TextWord::Color(ManaColor::Red),
+        TextWord::Color(ManaColor::Blue),
+    );
+
+    let index = token_ability_index(&runner.state().objects[&ib]);
+    runner.activate(ib, index).pay_with(&[mountain]).resolve();
+
+    let tokens = battlefield_tokens(runner.state());
+    assert_eq!(tokens.len(), 2, "the ability creates two tokens");
+    for token in &tokens {
+        assert!(
+            token.color.contains(&ManaColor::Blue),
+            "the color word 'red' in the token spec must have become blue: {:?}",
+            token.color
+        );
+        assert!(
+            !token.color.contains(&ManaColor::Red),
+            "the token must no longer be red: {:?}",
+            token.color
+        );
+        // Category discipline: the creature-type half is untouched.
+        assert!(
+            token.card_types.subtypes.iter().any(|s| s == "Goblin"),
+            "a color-word change must not retype the token: {:?}",
+            token.card_types.subtypes
+        );
+        assert_eq!(
+            token.name, "Goblin",
+            "a color-word change must not rename the token (CR 612.2)"
+        );
+    }
+}
+
+/// CR 612.2 + CR 608.2c (CodeRabbit item): the "The new <category> can't be
+/// <word>." rider is a complete sentence. A truncated or continued rider must NOT
+/// parse into `excluded_to` — an under-restricted exclusion silently offers an
+/// illegal `to` word at resolution.
+///
+/// Paired positive (so none of the negatives is vacuous): the well-formed rider
+/// on the same base text DOES populate `excluded_to` with Wall.
+#[test]
+fn partial_excluded_to_rider_does_not_parse() {
+    const BASE: &str = "Change the text of target spell or permanent by replacing \
+        all instances of one creature type with another.";
+
+    // Positive control: the complete rider is absorbed.
+    assert_eq!(
+        change_text_snapshots(
+            "Artificial Evolution",
+            &format!("{BASE} The new creature type can't be Wall.")
+        ),
+        vec![(
+            vec![TextWordCategory::CreatureType],
+            vec![TextWord::CreatureType("Wall".to_string())],
+            None
+        )],
+        "the complete rider must still populate excluded_to"
+    );
+
+    // Each of these carries text past the excluded word that the recognizer does
+    // not model. Keeping the leading word and dropping the rest would install a
+    // WRONGLY-narrow restriction, so the rider must not be absorbed at all.
+    for tail in [
+        "The new creature type can't be Wall or Wizard.",
+        "The new creature type can't be Wall until end of turn.",
+        "The new creature type can't be Wall unless you control a Wall.",
+    ] {
+        let snapshots = change_text_snapshots("Artificial Evolution", &format!("{BASE} {tail}"));
+        assert!(
+            snapshots.iter().all(|(_, excluded, _)| excluded.is_empty()),
+            "an unmodelled rider tail must not populate excluded_to ({tail}): {snapshots:?}"
+        );
+    }
+
+    // Truncated riders (no recognizable word) must likewise not parse.
+    for tail in [
+        "The new creature type can't be.",
+        "The new creature type can't be .",
+    ] {
+        let snapshots = change_text_snapshots("Artificial Evolution", &format!("{BASE} {tail}"));
+        assert!(
+            snapshots.iter().all(|(_, excluded, _)| excluded.is_empty()),
+            "a truncated rider must not populate excluded_to ({tail}): {snapshots:?}"
+        );
+    }
+}
+
+/// CR 708.2a + CR 612.2 (sibling creation-spec, `FaceDownProfile.subtypes`): the
+/// creature subtype an effect specifies for a permanent it puts onto the
+/// battlefield face down ("They're 2/2 Cyberman artifact creatures.") is a word
+/// used as a subtype, so a creature-type text change rewrites it. Same shape as
+/// the token-creation spec above; `FaceDownProfile` was in the same
+/// deliberately-red bucket before this change.
+///
+/// Full cast pipeline (parse Artificial Evolution -> cast -> resolve -> choose).
+/// Revert guard: without the `walk_face_down_profile` call on `Effect::Manifest`,
+/// Cyberman is never collected, no option offers Cyberman -> Elf and
+/// `apply_replacement` panics; the live `profile.subtypes` also stays Cyberman.
+#[test]
+fn creature_type_in_face_down_profile_is_replaced() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, FaceDownProfile, QuantityExpr, TargetFilter,
+    };
+
+    let manifest = Effect::Manifest {
+        target: TargetFilter::Controller,
+        count: QuantityExpr::Fixed { value: 1 },
+        profile: Some(FaceDownProfile {
+            subtypes: vec!["Cyberman".to_string()],
+            ..FaceDownProfile::vanilla_2_2()
+        }),
+        enters_under: None,
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature(P0, "Cyber Controller", 2, 2)
+        .with_ability_definition(AbilityDefinition::new(AbilityKind::Activated, manifest))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Artificial Evolution", true, ARTIFICIAL_EVOLUTION)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Cyberman".to_string(), "Elf".to_string()];
+
+    let before = collect_present_words(
+        &runner.state().objects[&creature],
+        TextWordCategory::CreatureType,
+    );
+    assert!(
+        before.contains(&TextWord::CreatureType("Cyberman".to_string())),
+        "the face-down profile should contribute Cyberman: {before:?}"
+    );
+
+    runner.cast(spell).target_object(creature).resolve();
+    apply_replacement(
+        &mut runner,
+        TextWord::CreatureType("Cyberman".to_string()),
+        TextWord::CreatureType("Elf".to_string()),
+    );
+
+    let after = ability_effect_subtypes(&runner.state().objects[&creature], |e, out| {
+        if let Effect::Manifest {
+            profile: Some(p), ..
+        } = e
+        {
+            out.extend(p.subtypes.iter().cloned());
+        }
+    });
+    assert_eq!(
+        after,
+        vec!["Elf".to_string()],
+        "the face-down body must now specify Elf, not Cyberman"
+    );
+}
+
+/// CR 612.2a + CR 614.1a (sibling creation-spec, replacement `TokenSpec`): the
+/// replacement-side token-creation spec (Chatterfang's "plus that many 1/1 green
+/// Squirrel creature tokens") carries the same CR 612.2a name/creature-type pair
+/// as `Effect::Token`, so a creature-type change rewrites both halves.
+///
+/// Full cast pipeline. Revert guard: without the `walk_token_spec` calls in
+/// `walk_replacement_definition`, Squirrel is never collected, no option offers
+/// Squirrel -> Elf and `apply_replacement` panics; the spec's `display_name` and
+/// `subtypes` also stay Squirrel.
+#[test]
+fn creature_type_in_replacement_token_spec_is_replaced() {
+    use engine::types::card_type::CoreType;
+    use engine::types::identifiers::ObjectId as OId;
+    use engine::types::proposed_event::{TokenCharacteristics, TokenSpec};
+    use engine::types::replacements::ReplacementEvent;
+
+    let spec = TokenSpec {
+        characteristics: TokenCharacteristics {
+            display_name: "Squirrel".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Squirrel".to_string()],
+            supertypes: vec![],
+            colors: vec![ManaColor::Green],
+            keywords: vec![],
+        },
+        script_name: String::new(),
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+        tapped: false,
+        enters_attacking: false,
+        sacrifice_at: None,
+        source_id: OId(0),
+        controller: P0,
+        attach_to: None,
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature(P0, "Chatterfang, Squirrel General", 4, 4)
+        .with_replacement_definition(
+            engine::types::ability::ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .additional_token_spec(spec),
+        )
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Artificial Evolution", true, ARTIFICIAL_EVOLUTION)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Squirrel".to_string(), "Elf".to_string()];
+
+    let before = collect_present_words(
+        &runner.state().objects[&creature],
+        TextWordCategory::CreatureType,
+    );
+    assert!(
+        before.contains(&TextWord::CreatureType("Squirrel".to_string())),
+        "the replacement token spec should contribute Squirrel: {before:?}"
+    );
+
+    runner.cast(spell).target_object(creature).resolve();
+    apply_replacement(
+        &mut runner,
+        TextWord::CreatureType("Squirrel".to_string()),
+        TextWord::CreatureType("Elf".to_string()),
+    );
+
+    let obj = &runner.state().objects[&creature];
+    let live = obj
+        .replacement_definitions
+        .iter_unchecked()
+        .find_map(|r| r.additional_token_spec.as_ref())
+        .expect("the replacement's additional token spec must survive the walk");
+    assert_eq!(
+        live.characteristics.subtypes,
+        vec!["Elf".to_string()],
+        "the appended token spec must now be an Elf"
+    );
+    assert_eq!(
+        live.characteristics.display_name, "Elf",
+        "CR 612.2a: the appended token's NAME changes with its creature type"
+    );
+}
+
+/// CR 707.2 + CR 707.9 (sibling creation-spec, `CopyTokenOf`): a copy-token
+/// effect prints no token name or type list of its own — those come from the
+/// COPIED object (CR 707.2), so CR 612.2a has nothing to reach there. What it
+/// DOES print is the non-targeting copy-source `source_filter` ("for each Goblin
+/// you control, create a token that's a copy of it") and the "except it has …"
+/// riders, and those are words used as words.
+///
+/// Full cast pipeline. Revert guard: with `CopyTokenOf` back in the no-op bucket,
+/// Goblin is never collected, no option offers Goblin -> Elf and
+/// `apply_replacement` panics; the live `source_filter` also stays Goblin.
+#[test]
+fn creature_type_in_copy_token_source_filter_is_replaced() {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+
+    let copy = Effect::CopyTokenOf {
+        target: TargetFilter::SelfRef,
+        owner: TargetFilter::Controller,
+        source_filter: Some(creature_subtype_filter("Goblin")),
+        enters_attacking: false,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        extra_keywords: vec![],
+        additional_modifications: vec![],
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creature = scenario
+        .add_creature(P0, "Goblin Duplicator", 2, 2)
+        .with_ability_definition(AbilityDefinition::new(AbilityKind::Activated, copy))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Artificial Evolution", true, ARTIFICIAL_EVOLUTION)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().all_creature_types = vec!["Goblin".to_string(), "Elf".to_string()];
+
+    let before = collect_present_words(
+        &runner.state().objects[&creature],
+        TextWordCategory::CreatureType,
+    );
+    assert!(
+        before.contains(&TextWord::CreatureType("Goblin".to_string())),
+        "the copy-token source filter should contribute Goblin: {before:?}"
+    );
+
+    runner.cast(spell).target_object(creature).resolve();
+    apply_replacement(
+        &mut runner,
+        TextWord::CreatureType("Goblin".to_string()),
+        TextWord::CreatureType("Elf".to_string()),
+    );
+
+    let after = ability_effect_subtypes(&runner.state().objects[&creature], |e, out| {
+        if let Effect::CopyTokenOf {
+            source_filter: Some(f),
+            ..
+        } = e
+        {
+            filter_subtypes(f, out);
+        }
+    });
+    assert!(
+        after.iter().any(|s| s == "Elf"),
+        "the copy-token source filter must now name Elf: {after:?}"
+    );
+    assert!(
+        !after.iter().any(|s| s == "Goblin"),
+        "Goblin must be gone from the copy-token source filter: {after:?}"
     );
 }

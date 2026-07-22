@@ -1147,8 +1147,8 @@
   },
   "cardChoice": {
     "textWordReplacement": {
-      "title": "Change Text",
-      "subtitle": "Choose a word to replace"
+      "title": "Cambia testo",
+      "subtitle": "Scegli una parola da sostituire"
     },
     "eachPlayerCopyChosen": {
       "title": "Choose creatures to copy",

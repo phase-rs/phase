@@ -9940,11 +9940,14 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
 /// enumeration. Composes: prefix → `parse_target` (target axis) → connector →
 /// one or two categories → optional trailing duration.
 fn try_parse_change_text(tp: TextPair) -> Option<ParsedEffectClause> {
-    // CR 115.1: "change the text of <target>". `TextPair::strip_prefix` advances
-    // both cases in lockstep, then `parse_target` claims the target noun phrase
-    // off the original-case slice and `TextPair::split_at` re-pairs the
-    // remainder — no hand-rolled byte-offset arithmetic on either side.
-    let after_prefix = tp.strip_prefix("change the text of ")?;
+    // CR 115.1: "change the text of <target>". `tag()` stays the parsing-dispatch
+    // authority (nom mandate); `TextPair::split_at` re-pairs the original-case
+    // slice from each combinator's remainder, so neither the prefix hop nor the
+    // `parse_target` hop hand-rolls a `&text[..]` byte-offset slice.
+    let (rest_lower, _) = tag::<_, _, OracleError<'_>>("change the text of ")
+        .parse(tp.lower)
+        .ok()?;
+    let (_, after_prefix) = tp.split_at(tp.len() - rest_lower.len());
     let (target, after_target_orig) = super::oracle_target::parse_target(after_prefix.original);
     let (_, after_target) = after_prefix.split_at(after_prefix.len() - after_target_orig.len());
 

@@ -20,6 +20,16 @@
 //! color-set-size predicate is not a color WORD (CR 612.2 + CR 107.4), so those
 //! carriers are explicit no-ops below.
 //!
+//! CR 612.2a is the one documented exception to the name exclusion, and it is
+//! about a token a spell/ability CREATES, not about the object's own name:
+//! "Most spells and abilities that create creature tokens use creature types to
+//! define both the creature types and the names of the tokens. A text-changing
+//! effect that affects such a spell or an object with such an ability can change
+//! these words because they're being used as creature types, even though they're
+//! also being used as names." So a token-creation spec's creature-type words are
+//! rewritten in BOTH the token's types and its name — see
+//! [`WordCursor::token_spec`]. The object's OWN name is still never touched.
+//!
 //! Every enum match here is exhaustive with no `_` wildcard: a future
 //! word-bearing variant fails to compile until it is classified as a carrier,
 //! a recursion point, or an explicit no-op.
@@ -146,6 +156,64 @@ impl WordCursor<'_> {
             self.subtype(category, s);
         }
     }
+
+    /// CR 612.2a + CR 612.4: visit a token-creation spec's declared subtype list
+    /// and the token NAME those subtypes define.
+    ///
+    /// CR 612.2 normally protects names ("An effect that changes a color word or
+    /// a subtype can't change a card name"), but CR 612.2a is the explicit
+    /// carve-out: "Most spells and abilities that create creature tokens use
+    /// creature types to define both the creature types and the names of the
+    /// tokens. A text-changing effect that affects such a spell or an object with
+    /// such an ability can change these words because they're being used as
+    /// creature types, even though they're also being used as names." So after
+    /// Artificial Evolution changes Goblin to Elf, a "create a 1/1 red Goblin
+    /// creature token" ability creates an Elf token *named* Elf.
+    ///
+    /// `types` routes through the shared [`Self::subtype`] path, so the walk's
+    /// `category` still disambiguates land types from creature types and the
+    /// resolver's live-creature-type intersection still applies.
+    ///
+    /// The `name` rewrite is deliberately narrower than the `types` rewrite:
+    /// - it applies ONLY under [`TextWordCategory::CreatureType`], because
+    ///   CR 612.2a names creature types specifically — a color word or basic land
+    ///   type appearing in a token's name is still a NAME under CR 612.2;
+    /// - it applies ONLY to name words the same spec also declares in `types`,
+    ///   which is exactly CR 612.2a's "use creature types to define ... the
+    ///   names" condition. A predefined token name that is not backed by a
+    ///   declared creature type (Treasure, Food, a Role name) is a name used as a
+    ///   name and stays untouched.
+    ///
+    /// Collection needs no name pass: every word the name can legally contribute
+    /// is, by that same condition, already declared in `types`.
+    fn token_spec(&mut self, category: TextWordCategory, name: &mut String, types: &mut [String]) {
+        // Snapshot the PRINTED type words before substituting, so the CR 612.2a
+        // "the name is defined by these creature types" test reads the spec as
+        // printed rather than as already-rewritten.
+        let declared: Vec<String> = types.to_vec();
+        for token_type in types.iter_mut() {
+            self.subtype(category, token_type);
+        }
+        if category != TextWordCategory::CreatureType {
+            return;
+        }
+        let WordCursor::Replace { from, to } = self else {
+            return;
+        };
+        let (TextWord::CreatureType(f), TextWord::CreatureType(t)) = (&**from, &**to) else {
+            return;
+        };
+        if !declared.iter().any(|d| d == f) {
+            return;
+        }
+        if name.split_whitespace().any(|word| word == f) {
+            *name = name
+                .split_whitespace()
+                .map(|word| if word == f { t.as_str() } else { word })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
 }
 
 /// CR 612.2 enumerator: collect every text word of `category` currently present
@@ -243,6 +311,27 @@ pub fn collect_present_words(obj: &GameObject, category: TextWordCategory) -> BT
 ///   count/amount (`Draw.count`, `DealDamage.amount`, `Discover.mana_value_limit`,
 ///   …) or `PtValue`-wrapped quantity (`Pump.power/toughness`, `Animate.power`),
 ///   and `UntilCondition::NextMatches` (`ExileFromTopUntil.until`);
+/// - CR 612.2a CARVE-OUT — token-creation specs ARE walked, name included. CR
+///   612.2 says a subtype/color change "can't change a card name", but CR 612.2a
+///   is the explicit exception: "Most spells and abilities that create creature
+///   tokens use creature types to define both the creature types and the names of
+///   the tokens. A text-changing effect that affects such a spell or an object
+///   with such an ability can change these words because they're being used as
+///   creature types, even though they're also being used as names." So
+///   `Effect::Token`'s `name` + `types` (and `colors` / `keywords` / `count` /
+///   `enter_with_counters` / `static_abilities`), the replacement-side
+///   `TokenSpec.characteristics.display_name` + `.subtypes`
+///   (`additional_token_spec` / `ensure_token_specs`, see [`walk_token_spec`]),
+///   and the face-down body `FaceDownProfile.subtypes` on
+///   `ChangeZone`/`ChangeZoneAll`/`Manifest`/`TurnFaceDown` (CR 708.2a, see
+///   [`walk_face_down_profile`]) are all rewritten under the same category
+///   discipline as a printed type line. The name half of the carve-out is
+///   deliberately narrower than the type half — see [`WordCursor::token_spec`].
+///   `CopyTokenOf` / `CreateTokenCopyFromPool` take their name and types from the
+///   COPIED object (CR 707.2) and print none of their own, so CR 612.2a has
+///   nothing to reach there; their printed carriers (`source_filter`, `count`,
+///   the "except it has …" `extra_keywords` / `additional_modifications`,
+///   `type_filter`, `mv_bound`) are walked instead;
 /// - the ONLY deliberately-red `Effect` surfaces (coverage stays red rather than
 ///   silently mis-substituting; no covered card changes a word inside one):
 ///   the mass-population object `target`/`filter` of every `*All` /
@@ -251,12 +340,13 @@ pub fn collect_present_words(obj: &GameObject, category: TextWordCategory) -> BT
 ///   `GoadAll`/`ExploreAll`/… — but a non-object carrier on the SAME effect, e.g.
 ///   `PumpAll.power`/`DamageAll.amount`/`ChangeZoneAll.enter_with_counters`, IS
 ///   walked), `PreventDamage.damage_source_filter`, `CastFromZone.alt_ability_cost`,
-///   the token / `CopyTokenOf` / face-down (`FaceDownProfile`) creation-spec fields,
 ///   the `EpicCopy` resolved-spell snapshot, the specialized non-listed sub-enums
 ///   (`DamageTargetFilter`/`DamageRedirectTarget`, `GuessSubject`,
 ///   `PerpetualModification`, `IntensityScope`, `ForEachCategoryAction`,
-///   name/label `String`s), and the replacement token-spec / `runtime_execute`
-///   fields (see [`walk_replacement_definition`]);
+///   name/label `String`s), the Forge-script token identifier
+///   (`TokenSpec.script_name` — a serialized import identifier, not printed rules
+///   text), and the replacement `runtime_execute` field
+///   (see [`walk_replacement_definition`]);
 /// - alternative / additional CAST-cost riders on keywords and statics
 ///   (`AbilityCost` on Evoke/Bestow/…, `StaticMode::CastWithAlternativeCost` /
 ///   `ImposeAdditionalCost.cost` / `AlternativeKeywordCost.cost` / permission
@@ -2174,6 +2264,52 @@ fn walk_static_definition(
     }
 }
 
+/// CR 612.2a + CR 612.4 + CR 111.1: Walk a resolved [`TokenSpec`] creation
+/// payload — the replacement-side sibling of the `Effect::Token` spec walked in
+/// [`walk_effect`] (Chatterfang's "plus that many 1/1 green Squirrel creature
+/// tokens", Academy Manufactor's Clue/Food/Treasure set).
+///
+/// The `display_name` + `subtypes` pair goes through [`WordCursor::token_spec`],
+/// so CR 612.2a's "these words define both the creature types and the names"
+/// carve-out applies here exactly as it does to `Effect::Token`. `colors` are
+/// color words used as color words, `keywords` carry the usual landwalk /
+/// protection color params, `static_abilities` are full granted statics, and a
+/// `sacrifice_at` duration can gate on a word-bearing `StaticCondition`.
+///
+/// Not walked, and each is genuinely wordless or structurally excluded:
+/// `core_types` / `supertypes` (CR 205.1a marker enums), `power` / `toughness`
+/// and the already-resolved `enter_with_counters` counts (numbers), `source_id`
+/// / `controller` / `attach_to` (runtime identity refs, CR 612.2), and
+/// `script_name` — a serialized Forge script identifier (`r_1_1_goblin`), not
+/// printed rules text. A spec that carries ONLY a script name declares no
+/// `subtypes`, so CR 612.2a's "defined by these creature types" precondition is
+/// unmet and the walk leaves it alone rather than guessing: coverage for that
+/// import-only shape stays red instead of silently mis-substituting.
+fn walk_token_spec(
+    spec: &mut crate::types::proposed_event::TokenSpec,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    let characteristics = &mut spec.characteristics;
+    cursor.token_spec(
+        category,
+        &mut characteristics.display_name,
+        &mut characteristics.subtypes,
+    );
+    for color in characteristics.colors.iter_mut() {
+        cursor.color(category, color);
+    }
+    for keyword in characteristics.keywords.iter_mut() {
+        walk_keyword(keyword, category, cursor);
+    }
+    for static_def in spec.static_abilities.iter_mut() {
+        walk_static_definition(static_def, category, cursor);
+    }
+    if let Some(dur) = &mut spec.sacrifice_at {
+        walk_duration(dur, category, cursor);
+    }
+}
+
 /// CR 614.1 + CR 612.1: Walk the word-bearing children of a replacement effect.
 /// A creature type / land type / color word can live in the event-shape filter
 /// (`valid_card` — "whenever a Goblin would enter"), the applicability
@@ -2181,11 +2317,14 @@ fn walk_static_definition(
 /// resulting `execute` ability (its effects/filters), the damage source /
 /// redirect filters, or the additional-token replacement's own subtypes.
 ///
+/// CR 612.2a: the token-spec creation fields (`additional_token_spec` /
+/// `ensure_token_specs`) ARE walked, via [`walk_token_spec`] — their creature-type
+/// words define both the created token's types and its name, matching the
+/// `Effect::Token` treatment in [`walk_effect`].
+///
 /// Intentionally NOT walked (coverage stays red rather than silently
 /// mis-substituting): `runtime_execute` (a resolution-time `ResolvedAbility`
-/// continuation snapshot, not printed rules text); the token-spec creation
-/// fields (`additional_token_spec` / `ensure_token_specs` — token subtypes,
-/// consistent with the `Effect::Token` subtype exclusion in [`walk_effect`]);
+/// continuation snapshot, not printed rules text);
 /// `mana_modification` (a mana SYMBOL, CR 612.2 + CR 107.4); `counter_match`
 /// (a counter kind, CR 122.1, not a color/land/creature word); and the scalar
 /// scope / expiry / player-axis fields.
@@ -2213,6 +2352,15 @@ fn walk_replacement_definition(
     }
     if let Some(redirect) = &mut replacement.redirect_target {
         walk_target_filter(redirect, category, cursor);
+    }
+    // CR 612.2a + CR 614.1a: the appended / ensured token-creation specs.
+    if let Some(spec) = &mut replacement.additional_token_spec {
+        walk_token_spec(spec, category, cursor);
+    }
+    if let Some(specs) = &mut replacement.ensure_token_specs {
+        for spec in specs.iter_mut() {
+            walk_token_spec(spec, category, cursor);
+        }
     }
     // CR 614.10 + CR 118.12a: an optional / pay-cost replacement carries a
     // `decline` continuation ability (and a `MayCost` payment) that are word-
@@ -2478,6 +2626,27 @@ fn walk_exiled_spell_rider(
     }
 }
 
+/// CR 612.2 + CR 708.2a: Walk a face-down-entry characteristics spec. The
+/// `subtypes` an effect specifies for a face-down permanent ("They're 2/2
+/// **Cyberman** artifact creatures.", "It's a **Forest** land.") are words used
+/// as subtypes in exactly the sense of CR 612.2, so they route through the same
+/// category-disciplined [`WordCursor::subtype`] path as a printed type line —
+/// the CR 612.2a token-spec sibling for face-down bodies.
+///
+/// The remaining fields are genuinely wordless: `power` / `toughness` are
+/// numbers, `body` / `extra_core_types` are `CoreType` markers (CR 205.1a — not
+/// a color/land/creature WORD), and `ward` is a mana-symbol cost (CR 107.4 — a
+/// pip, not a color word), consistent with the module-level pip exclusion.
+fn walk_face_down_profile(
+    profile: &mut crate::types::ability::FaceDownProfile,
+    category: TextWordCategory,
+    cursor: &mut WordCursor,
+) {
+    for subtype in profile.subtypes.iter_mut() {
+        cursor.subtype(category, subtype);
+    }
+}
+
 /// CR 612.1: Walk the word-bearing children of an ability's effect. Descends into
 /// nested-ability composites (so granted statics/keywords/subtype filters are
 /// reached) and the two nested-effect replacement builders.
@@ -2662,11 +2831,40 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
                 walk_duration(dur, category, cursor);
             }
         }
+        // CR 612.2a + CR 612.4: the token-creation spec is a first-class word
+        // carrier, not a red surface. Its `types` are subtypes used as subtypes
+        // and its `name` is defined by those creature types (the CR 612.2a
+        // carve-out from the CR 612.2 name protection) — both go through
+        // [`WordCursor::token_spec`]. The spec's `colors` are color words used as
+        // color words ("a 1/1 **red** Goblin creature token"), its granted
+        // `keywords` carry the same landwalk / protection color params as any
+        // printed keyword, and its `count` / `enter_with_counters` quantities can
+        // embed a typed `ObjectCount` filter ("for each Goblin you control").
+        // The `owner` / `attach_to` axes are already reached above via
+        // `target_filter_mut`.
         Effect::Token {
-            static_abilities, ..
+            name,
+            types,
+            colors,
+            keywords,
+            static_abilities,
+            count,
+            enter_with_counters,
+            ..
         } => {
+            cursor.token_spec(category, name, types);
+            for color in colors.iter_mut() {
+                cursor.color(category, color);
+            }
+            for keyword in keywords.iter_mut() {
+                walk_keyword(keyword, category, cursor);
+            }
             for static_def in static_abilities.iter_mut() {
                 walk_static_definition(static_def, category, cursor);
+            }
+            walk_quantity_expr(count, category, cursor);
+            for (_, qty) in enter_with_counters.iter_mut() {
+                walk_quantity_expr(qty, category, cursor);
             }
         }
         // CR 611.2b: effects that install a continuous modification carry a
@@ -2935,6 +3133,33 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
             walk_target_filter(source_filter, category, cursor);
             walk_target_filter(partner_filter, category, cursor);
         }
+        // CR 707.2 + CR 707.9: `CopyTokenOf` takes its name / types / colors from
+        // the COPIED object (CR 707.2), so it has no printed token name or type
+        // list of its own and CR 612.2a has nothing to reach there — the copied
+        // object's own words are text-changed on that object, not here. What it
+        // does print is the non-targeting copy-source `source_filter` ("for each
+        // Goblin you control, create a token that's a copy of it"), the "except it
+        // has …" `extra_keywords` / `additional_modifications` riders, and the
+        // token `count`. The `target` / `owner` pair follows the shared
+        // `target_filter_mut` convention documented on [`walk_effect`].
+        Effect::CopyTokenOf {
+            source_filter,
+            count,
+            extra_keywords,
+            additional_modifications,
+            ..
+        } => {
+            if let Some(f) = source_filter {
+                walk_target_filter(f, category, cursor);
+            }
+            walk_quantity_expr(count, category, cursor);
+            for keyword in extra_keywords.iter_mut() {
+                walk_keyword(keyword, category, cursor);
+            }
+            for modification in additional_modifications.iter_mut() {
+                walk_continuous_modification(modification, category, cursor);
+            }
+        }
         Effect::CopyTokenBlockingAttacker {
             source_filter,
             owner,
@@ -3017,9 +3242,27 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
 
         // ---- Effects with a `target`/`player` primary NOT surfaced by
         // `target_filter_mut` (in its `None` group) plus a count / filter ----
-        Effect::Manifest { target, count, .. } => {
+        // CR 708.2a: the manifest body's effect-specified `profile` subtypes are
+        // words used as subtypes (see [`walk_face_down_profile`]).
+        Effect::Manifest {
+            target,
+            count,
+            profile,
+            ..
+        } => {
             walk_target_filter(target, category, cursor);
             walk_quantity_expr(count, category, cursor);
+            if let Some(p) = profile {
+                walk_face_down_profile(p, category, cursor);
+            }
+        }
+        // CR 708.2a + CR 708.2b: "Turn target creature face down. It's a 2/2
+        // Cyberman artifact creature." — the specified body's subtypes are words
+        // used as subtypes; `target` is reached via `target_filter_mut`.
+        Effect::TurnFaceDown { profile, .. } => {
+            if let Some(p) = profile {
+                walk_face_down_profile(p, category, cursor);
+            }
         }
         Effect::Cloak {
             target,
@@ -3132,6 +3375,7 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
             enter_with_counters,
             conditional_enter_with_counters,
             enters_modified_if,
+            face_down_profile,
             ..
         } => {
             for (_, count) in enter_with_counters.iter_mut() {
@@ -3144,13 +3388,21 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
             if let Some(f) = enters_modified_if {
                 walk_target_filter(f, category, cursor);
             }
+            // CR 708.2a: the face-down entry body's subtypes.
+            if let Some(p) = face_down_profile {
+                walk_face_down_profile(p, category, cursor);
+            }
         }
         Effect::ChangeZoneAll {
             enter_with_counters,
+            face_down_profile,
             ..
         } => {
             for (_, count) in enter_with_counters.iter_mut() {
                 walk_quantity_expr(count, category, cursor);
+            }
+            if let Some(p) = face_down_profile {
+                walk_face_down_profile(p, category, cursor);
             }
         }
 
@@ -3212,10 +3464,13 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
         // `target_filter_mut()` walk above, (b) carries no color/land/creature WORD
         // (fixed counts, markers, ids, name/label strings, mana pips), or (c) holds
         // a deliberately-red carrier: a mass-population `*All` object filter, a
-        // token / CopyTokenOf / face-down / perpetual creation-spec, a resolved-spell
-        // snapshot (`EpicCopy`), a secondary cast cost, or a specialized non-listed
-        // sub-enum (`FaceDownProfile`, `GuessSubject`, `PerpetualModification`,
-        // `IntensityScope`, `ForEachCategoryAction`, `DamageTargetFilter`, etc.).
+        // perpetual creation-spec, a resolved-spell snapshot (`EpicCopy`), a
+        // secondary cast cost, or a specialized non-listed sub-enum
+        // (`GuessSubject`, `PerpetualModification`, `IntensityScope`,
+        // `ForEachCategoryAction`, `DamageTargetFilter`, etc.). Token-creation
+        // and face-down creation specs are NO LONGER in this bucket — CR 612.2a /
+        // CR 708.2a route them through `WordCursor::token_spec` /
+        // `walk_face_down_profile` above.
         Effect::ApplyPostReplacementDamage { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
@@ -3245,7 +3500,6 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
         | Effect::EndCombatPhase
         | Effect::SwitchPT { .. }
         | Effect::EpicCopy { .. }
-        | Effect::CopyTokenOf { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
@@ -3314,7 +3568,6 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
         | Effect::Detain { .. }
         | Effect::SetRoomDoorLock { .. }
         | Effect::ManifestDread
-        | Effect::TurnFaceDown { .. }
         | Effect::ExtraTurn { .. }
         | Effect::Double { .. }
         | Effect::RuntimeHandled { .. }

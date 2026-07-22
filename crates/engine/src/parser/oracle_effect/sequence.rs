@@ -7123,13 +7123,34 @@ pub(super) fn parse_followup_continuation_ast(
     }
 }
 
+/// CR 608.2c: The excluded-`to` rider is a COMPLETE, self-contained sentence, so
+/// nothing but optional whitespace and one sentence-terminating period may follow
+/// the excluded word. Anchoring the tail with `all_consuming` is what keeps a
+/// truncated or continued sentence ("The new creature type can't be Wall or
+/// Wizard.", "… can't be Wall until end of turn.") from silently degrading into
+/// the first recognizable word and dropping the rest of the restriction.
+fn is_terminal_rider_tail(tail: &str) -> bool {
+    all_consuming(terminated(
+        opt(multispace1::<_, OracleError<'_>>),
+        opt(tag::<_, _, OracleError<'_>>(".")),
+    ))
+    .parse(tail)
+    .is_ok()
+}
+
 /// CR 612.2 + CR 608.2c: Parse "the new <color word|creature type|basic land
-/// type> can't be <word>[.]" — the excluded-`to` rider on a text-changing
-/// effect. Combinator-only: `tag`/`alt`/`value` dispatch on the category phrase,
-/// then the excluded word is parsed in that same category (colors via
-/// `parse_color`, creature/land types via the canonical subtype matcher). One
-/// `alt` per axis — no permutation enumeration. Returns the parsed [`TextWord`],
-/// or `None` when the sentence is not this rider or the word is unrecognized.
+/// type> can't be <word>." — the excluded-`to` rider on a text-changing effect.
+/// Combinator-only: `tag`/`alt`/`value` dispatch on the category phrase, then the
+/// excluded word is parsed in that same category (colors via `parse_color`,
+/// creature/land types via the canonical subtype matcher). One `alt` per axis —
+/// no permutation enumeration.
+///
+/// The whole production is anchored: the head via `tag`, the tail via
+/// [`is_terminal_rider_tail`]. Returns the parsed [`TextWord`], or `None` when
+/// the sentence is not this rider, the word is unrecognized, or the sentence
+/// carries text this parser does not model past the excluded word — the last case
+/// stays red (an under-restricted `excluded_to` would silently offer an illegal
+/// `to` word).
 fn parse_text_change_excluded_to(lower: &str) -> Option<TextWord> {
     let (rest, _) = tag::<_, _, OracleError<'_>>("the new ").parse(lower).ok()?;
     let (rest, category) = alt((
@@ -7142,25 +7163,22 @@ fn parse_text_change_excluded_to(lower: &str) -> Option<TextWord> {
     ))
     .parse(rest)
     .ok()?;
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" can't be ")
+    let (word, _) = tag::<_, _, OracleError<'_>>(" can't be ")
         .parse(rest)
         .ok()?;
-    let word = rest.trim().trim_end_matches('.').trim();
     match category {
         TextWordCategory::ColorWord => {
-            let (_, color) = nom_primitives::parse_color(word).ok()?;
-            Some(TextWord::Color(color))
+            let (tail, color) = nom_primitives::parse_color(word).ok()?;
+            is_terminal_rider_tail(tail).then_some(TextWord::Color(color))
         }
         TextWordCategory::BasicLandType => {
-            let (canonical, _) = crate::parser::oracle_util::parse_subtype(word)?;
-            canonical
-                .parse::<BasicLandType>()
-                .ok()
-                .map(TextWord::BasicLandType)
+            let (canonical, consumed) = crate::parser::oracle_util::parse_subtype(word)?;
+            let land = canonical.parse::<BasicLandType>().ok()?;
+            is_terminal_rider_tail(&word[consumed..]).then_some(TextWord::BasicLandType(land))
         }
         TextWordCategory::CreatureType => {
-            let (canonical, _) = crate::parser::oracle_util::parse_subtype(word)?;
-            Some(TextWord::CreatureType(canonical))
+            let (canonical, consumed) = crate::parser::oracle_util::parse_subtype(word)?;
+            is_terminal_rider_tail(&word[consumed..]).then_some(TextWord::CreatureType(canonical))
         }
     }
 }

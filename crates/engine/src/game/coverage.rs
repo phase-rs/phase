@@ -2207,11 +2207,35 @@ fn fmt_count_scope(scope: &CountScope) -> &'static str {
 fn effect_details(effect: &Effect) -> Vec<(String, String)> {
     let mut d = Vec::new();
     match effect {
-        // CR 612.1: text-change — record which word categories it may replace.
+        // CR 612.1: text-change — record which word categories it may replace,
+        // the object it rewrites (CR 612.1 applies to one object), the CR 612.2
+        // `to`-word exclusions from a "The new <category> can't be <word>" rider,
+        // and the CR 611.2b duration. Mirrors the sibling effect arms, which all
+        // report their `target` via `fmt_target` and their duration via
+        // `fmt_duration`; without them two structurally different text-changers
+        // (Sleight of Mind vs. Crystal Spray, Artificial Evolution with and
+        // without its "can't be Wall" rider) share one coverage signature.
         Effect::ChangeTextWords {
-            allowed_categories, ..
+            target,
+            allowed_categories,
+            excluded_to,
+            duration,
         } => {
             d.push(("categories".into(), format!("{allowed_categories:?}")));
+            d.push(("target".into(), fmt_target(target)));
+            if !excluded_to.is_empty() {
+                d.push((
+                    "excluded to".into(),
+                    excluded_to
+                        .iter()
+                        .map(|w| w.label())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ));
+            }
+            if let Some(dur) = duration {
+                d.push(("duration".into(), fmt_duration(dur)));
+            }
         }
         Effect::StartYourEngines { player_scope } => {
             d.push(("players".into(), fmt_player_filter(player_scope)));
