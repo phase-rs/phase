@@ -9,8 +9,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CounterCostSelection, Effect, QuantityExpr,
-    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CounterCostSelection,
+    Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TypedFilter, ZoneOwner,
 };
 use engine::types::actions::{GameAction, MulliganChoice};
 use engine::types::counter::{CounterMatch, CounterType};
@@ -944,6 +944,67 @@ fn exact_player_and_number_schema_siblings_are_self_describing() {
         },
     );
     assert_eq!(preview.status, InteractionPreviewStatus::Confirmable);
+}
+
+#[test]
+fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_code() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let source = scenario
+        .add_creature(P0, "Zone Opponent Chooser Source", 1, 1)
+        .id();
+    scenario.add_creature_to_exile(P0, "Zone Opponent Chooser Card", 1, 1);
+    let mut runner = scenario.build();
+    runner.state_mut().waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+        player: P0,
+        candidates: vec![P1, PlayerId(2)],
+        ability: Box::new(ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: vec![],
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Opponent,
+                up_to: false,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+            vec![],
+            source,
+            P0,
+        )),
+    };
+    bind(runner.state_mut(), "zone-opponent-chooser");
+
+    let view = priority_view(runner.state());
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("zone opponent chooser responses are exact choices");
+    };
+    assert_eq!(choices.len(), 2);
+    assert!(choices.iter().all(|choice| {
+        choice.surfaces.iter().any(|surface| {
+            matches!(
+                surface,
+                InteractionPresentationSurface::Action {
+                    code: InteractionActionCode::ChooseZoneOpponentChooser
+                }
+            )
+        })
+    }));
+    let seats: std::collections::HashSet<_> = choices
+        .iter()
+        .flat_map(|choice| &choice.surfaces)
+        .filter_map(|surface| match surface {
+            InteractionPresentationSurface::Player {
+                role: InteractionRoleCode::Opponent,
+                seat,
+                ..
+            } => Some(*seat),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(seats, [P1.0, 2].into_iter().collect());
 }
 
 #[test]

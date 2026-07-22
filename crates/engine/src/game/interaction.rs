@@ -291,6 +291,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
@@ -517,6 +518,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
@@ -3235,6 +3237,7 @@ fn selection_projection(
         | WaitingFor::TopOrBottomChoice { .. }
         | WaitingFor::PopulateChoice { .. }
         | WaitingFor::ClashChooseOpponent { .. }
+        | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
@@ -3854,6 +3857,7 @@ fn project_action_payload(
             }
         }
         GameAction::ChooseClashOpponent { opponent }
+        | GameAction::ChooseZoneOpponentChooser { opponent }
         | GameAction::ChoosePileOpponent { opponent }
         | GameAction::ChooseAnnouncingOpponent { opponent } => {
             push_player_surface(surfaces, *opponent, InteractionRoleCode::Opponent)
@@ -4531,6 +4535,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseExert { .. } => InteractionActionCode::ChooseExert,
         GameAction::ChooseEnlist { .. } => InteractionActionCode::ChooseEnlist,
         GameAction::ChooseClashOpponent { .. } => InteractionActionCode::ChooseClashOpponent,
+        GameAction::ChooseZoneOpponentChooser { .. } => {
+            InteractionActionCode::ChooseZoneOpponentChooser
+        }
         GameAction::ChoosePileOpponent { .. } => InteractionActionCode::ChoosePileOpponent,
         GameAction::ChooseAnnouncingOpponent { .. } => {
             InteractionActionCode::ChooseAnnouncingOpponent

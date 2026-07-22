@@ -298,6 +298,7 @@ pub enum InteractionActionCode {
     ChooseExert,
     ChooseEnlist,
     ChooseClashOpponent,
+    ChooseZoneOpponentChooser,
     ChoosePileOpponent,
     ChooseAnnouncingOpponent,
     ChooseAssistPlayer,
