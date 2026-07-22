@@ -3986,6 +3986,21 @@ mod tests {
     }
 
     #[test]
+    fn plain_for_each_counter_pronoun_settles_to_source() {
+        let qty = parse_for_each_clause("counter on it");
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                })
+            ),
+            "plain entry must settle the pronoun to Source, got {qty:?}"
+        );
+    }
+
+    #[test]
     fn for_each_singular_counter_on_self() {
         // Singular "counter on it" (not "counters on it") — same deferred
         // referent, exercising the singular arm of the counter-word axis.
