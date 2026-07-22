@@ -47888,3 +47888,94 @@ fn token_grant_soft_counter_keeps_unless_pay_on_the_token() {
         "the soft-counter's unless-pay must live on the granted ability"
     );
 }
+
+/// CR 118.12: The quote-aware `unless` extraction must select an OUTER
+/// (unquoted) resolution `unless` even when an earlier quoted grant carries its
+/// own inner `unless`. The byte-length-preserving mask hides the inner clause but
+/// keeps the outer one, and the matched offset still indexes the original text.
+#[test]
+fn inner_quoted_unless_does_not_shadow_a_real_outer_unless() {
+    // Inner quoted grant has "unless you pay {2}"; the effect itself is a real
+    // "destroy … unless its controller pays {1}" soft removal.
+    let def = parse_effect_chain(
+        "destroy target creature with an ability that reads \"whenever this dies, \
+         draw a card unless you pay {2}\" unless its controller pays {1}",
+        AbilityKind::Spell,
+    );
+    let up = def
+        .unless_pay
+        .as_ref()
+        .expect("the OUTER 'unless its controller pays {1}' must be extracted");
+    assert_eq!(
+        up.payer,
+        TargetFilter::ParentTargetController,
+        "outer payer is the target's controller, not the inner grant's 'you'"
+    );
+    // The cleaned effect text must not still carry the outer unless tail.
+    assert!(
+        !format!("{:?}", def.effect)
+            .to_lowercase()
+            .contains("its controller pays"),
+        "outer unless tail must be stripped from the effect"
+    );
+}
+
+/// CR 118.12: An UNTERMINATED quoted span must not swallow a following real
+/// resolution `unless` — the mask (like `strip_double_quoted_spans`) leaves the
+/// unterminated remainder visible, so the outer clause is still extracted.
+#[test]
+fn unterminated_quote_still_exposes_outer_unless() {
+    let def = parse_effect_chain(
+        "destroy target creature unless its controller pays {1}. \"unterminated",
+        AbilityKind::Spell,
+    );
+    assert!(
+        def.unless_pay.is_some(),
+        "an unterminated quote must not hide a legitimate outer unless-pay"
+    );
+}
+
+/// Card-path (`parse_oracle_text`) regression for the two parse-diff siblings of
+/// the Mage's Attendant fix. Both grant an ability whose text contains an inner
+/// `unless … pay`; that clause must stay ON THE GRANT, never hoisted onto the
+/// outer activated ability.
+#[test]
+fn granted_ability_inner_unless_stays_on_the_grant() {
+    // Whipgrass Entangler: grants a can't-attack-or-block-unless-pay static. The
+    // inner `unless its controller pays {1}` belongs to the granted static.
+    let whip = parse_oracle_text(
+        "{1}{W}: Until end of turn, target creature gains \"This creature can't \
+         attack or block unless its controller pays {1} for each Cleric on the \
+         battlefield.\"",
+        "Whipgrass Entangler",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let ability = whip
+        .abilities
+        .iter()
+        .find(|a| a.unless_pay.is_none())
+        .expect("the {1}{W} activation must not carry a hoisted unless_pay");
+    let dump = format!("{ability:?}");
+    assert!(
+        dump.contains("UnlessPay"),
+        "the granted static must retain its 'unless … pays' condition, got {dump}"
+    );
+
+    // Musician: conditionally grants a quoted upkeep-destroy-unless-pay trigger.
+    // The activation must not hoist the inner `unless you pay {1}`.
+    let musician = parse_oracle_text(
+        "{T}: Put a music counter on target creature. If it doesn't have \"At the \
+         beginning of your upkeep, destroy this creature unless you pay {1} for \
+         each music counter on it,\" it gains that ability.",
+        "Musician",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        musician.abilities.iter().all(|a| a.unless_pay.is_none()),
+        "Musician's activation must not carry a hoisted unless_pay"
+    );
+}
