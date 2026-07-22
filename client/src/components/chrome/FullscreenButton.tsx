@@ -28,6 +28,34 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
   useEffect(() => {
+    if (isTauri()) {
+      let active = true;
+      let unlisten: (() => void) | undefined;
+
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          const appWindow = getCurrentWindow();
+          const syncFullscreen = async () => {
+            const fullscreen = await appWindow.isFullscreen();
+            if (active) setIsFullscreen(fullscreen);
+          };
+
+          await syncFullscreen();
+          unlisten = await appWindow.onResized(() => {
+            void syncFullscreen();
+          });
+        } catch (error) {
+          console.warn("[phase.rs] Could not synchronize Tauri fullscreen state.", error);
+        }
+      })();
+
+      return () => {
+        active = false;
+        unlisten?.();
+      };
+    }
+
     function onChange() {
       setIsFullscreen(!!document.fullscreenElement);
     }
@@ -36,19 +64,23 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   }, []);
 
   const toggle = useCallback(async () => {
-    if (isTauri()) {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const appWindow = getCurrentWindow();
-      const nextFullscreen = !(await appWindow.isFullscreen());
-      await appWindow.setFullscreen(nextFullscreen);
-      setIsFullscreen(nextFullscreen);
-      return;
-    }
+    try {
+      if (isTauri()) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const appWindow = getCurrentWindow();
+        const nextFullscreen = !(await appWindow.isFullscreen());
+        await appWindow.setFullscreen(nextFullscreen);
+        setIsFullscreen(nextFullscreen);
+        return;
+      }
 
-    if (document.fullscreenElement) {
-      await document.exitFullscreen();
-    } else {
-      await document.documentElement.requestFullscreen();
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (error) {
+      console.warn("[phase.rs] Could not toggle fullscreen.", error);
     }
   }, []);
 

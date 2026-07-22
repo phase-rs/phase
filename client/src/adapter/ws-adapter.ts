@@ -690,6 +690,9 @@ export class WebSocketAdapter implements EngineAdapter {
       clearInterval(this.pingInterval);
       this.pingInterval = null;
     }
+    this.rejectInitialization(
+      new AdapterError("WS_CLOSED", "Adapter disposed before initialization completed", true),
+    );
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -707,8 +710,6 @@ export class WebSocketAdapter implements EngineAdapter {
       new AdapterError("WS_CLOSED", "Adapter disposed during seat mutation", true),
     );
     this.rejectAbandon(new AdapterError("WS_CLOSED", "Adapter disposed while abandoning game", true));
-    this.initResolve = null;
-    this.initReject = null;
     this.reconnectInFlight = false;
     this._serverInfo = null;
     this.receivedGameStarted = false;
@@ -1328,17 +1329,13 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string };
-        this.rejectInitialization(actionRejectionError(data.message));
+        const initializationError = data.message.includes("Deck not legal")
+          ? new AdapterError("DECK_REJECTED", data.message, false)
+          : actionRejectionError(data.message);
+        this.rejectInitialization(initializationError);
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
         this.emit({ type: "error", message: data.message });
-        if (data.message.includes("Deck not legal") && this.initReject) {
-          this.initReject(
-            new AdapterError("DECK_REJECTED", data.message, false),
-          );
-          this.initResolve = null;
-          this.initReject = null;
-        }
         break;
       }
     }

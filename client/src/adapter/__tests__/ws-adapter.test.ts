@@ -5,6 +5,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
+import { AdapterError } from "../types";
 import type { GameState } from "../types";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
@@ -354,6 +355,71 @@ describe("WebSocketAdapter", () => {
       );
 
       await expect(attached).rejects.toThrow("Native setup failed");
+    });
+
+    it("rejects native lifecycle waiters when disposed before the socket is attached", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const gameStarted = nativeAdapter.waitForGameStarted();
+      nativeAdapter.dispose();
+
+      await expect(attached).rejects.toMatchObject({
+        code: "WS_CLOSED",
+        recoverable: true,
+      } satisfies Partial<AdapterError>);
+      await expect(gameStarted).rejects.toMatchObject({
+        code: "WS_CLOSED",
+        recoverable: true,
+      } satisfies Partial<AdapterError>);
+    });
+
+    it("preserves the non-recoverable deck rejection code", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "Error", data: { message: "Deck not legal for this format" } }),
+      );
+
+      await expect(attached).rejects.toMatchObject({
+        code: "DECK_REJECTED",
+        recoverable: false,
+      } satisfies Partial<AdapterError>);
     });
   });
 
