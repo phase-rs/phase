@@ -15129,6 +15129,14 @@ impl GameState {
     /// CR 118.3a: Mint the next stable `ManaPipId` for a pool unit. Monotonic,
     /// never returns the `ManaPipId(0)` unstamped sentinel (counter starts at 1).
     fn next_pip_id(&mut self) -> ManaPipId {
+        // ManaPipId(0) is the "unstamped" sentinel the resolved-mana appliers
+        // fail closed on. Two legitimate states carry a zero allocator: a
+        // pre-provenance save (`#[serde(default)]`) and a loop-normalized
+        // clone (`normalize_for_loop` zeroes it for CR 104.4b comparison).
+        // Self-heal at mint so neither can ever stamp the sentinel.
+        if self.next_pip_id == 0 {
+            self.next_pip_id = 1;
+        }
         let id = self.next_pip_id;
         self.next_pip_id += 1;
         ManaPipId(id)

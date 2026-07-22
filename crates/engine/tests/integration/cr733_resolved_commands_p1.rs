@@ -155,6 +155,26 @@ fn provenance_journal_is_truncated_at_the_turn_boundary() {
     );
 }
 
+/// A pre-provenance save deserializes `next_pip_id` to 0 (serde default). The
+/// allocator must self-heal rather than mint the ManaPipId(0) sentinel, which
+/// the resolved-mana appliers fail closed on (this panicked the phase-ai
+/// community scenarios in PR #6331's first CI run).
+#[test]
+fn legacy_zero_pip_allocator_self_heals_instead_of_minting_the_sentinel() {
+    let mut state = GameState::new_two_player(11);
+    state.next_pip_id = 0;
+    let inserted = state
+        .add_mana_to_pool(
+            P0,
+            ManaUnit::new(ManaType::Red, ObjectId(7), false, Vec::new()),
+        )
+        .expect("insert into a known player's pool must succeed");
+    assert_ne!(
+        inserted.pip_id.0, 0,
+        "a legacy zero allocator must never stamp the unstamped sentinel"
+    );
+}
+
 #[test]
 fn provenance_journal_is_not_exposed_in_a_viewer_projection() {
     let mut state = GameState::new_two_player(11);
