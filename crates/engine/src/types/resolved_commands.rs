@@ -1350,12 +1350,15 @@ fn object_counter_edit_is_empty(edit: &ResolvedObjectCounterEdit) -> bool {
 fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
     match edit {
         ResolvedLedgerEdit::SpellCast {
-            expected_turn_count,
             expected_game_count,
             expected_turn_history_len,
             expected_game_history_len,
             ..
         } => {
+            // `expected_turn_count` is a u8 advanced via saturating_add in the
+            // applier, so 255 is a legitimate saturated value, not a reserved
+            // sentinel — only the u32 count fields carry the u32::MAX
+            // "never recorded" marker this pre-screen fails closed on.
             *expected_game_count == u32::MAX
                 || *expected_turn_history_len == u32::MAX
                 || *expected_game_history_len == u32::MAX
