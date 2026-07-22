@@ -5754,8 +5754,13 @@ pub(super) fn handle_resolution_choice(
         }
         // CR 612.1 + CR 613.1c: the controller picked one (category, from, to)
         // substitution; install it as a Layer-3 text-changing continuous effect
-        // keyed to the target, then drain any parked follow-up (Crystal Spray's
-        // "Draw a card").
+        // keyed to the target, then hand off to the shared resolution-choice
+        // completion boundary. `finish_with_continuation` drains the immediate
+        // parked follow-up (Crystal Spray's "Draw a card") AND resumes any
+        // higher-level typed resolution frame still parked beneath this choice
+        // (`resume_resolution_frames`) plus eligible cost-move roots — a local
+        // `drain_pending_continuation` would return priority with those frames
+        // stranded.
         (
             WaitingFor::TextWordReplacement {
                 player,
@@ -5783,9 +5788,7 @@ pub(super) fn handle_resolution_choice(
                 ],
                 None,
             );
-            set_priority(state, player);
-            effects::drain_pending_continuation(state, events);
-            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
             WaitingFor::ChooseRingBearer { player, candidates },

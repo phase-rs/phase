@@ -2209,6 +2209,10 @@ fn walk_static_mode(mode: &mut StaticMode, category: TextWordCategory, cursor: &
         | StaticMode::CantTap
         | StaticMode::CantUntap
         | StaticMode::Goaded
+        // CR 508.1d + CR 701.15b: nullary combat requirement — the avoided
+        // player rides `StaticDefinition::source_controller`, so this mode
+        // prints no color/land/creature-type word for CR 612.2 to reach.
+        | StaticMode::MustAttackAwayFromSource
         | StaticMode::CombatAlone { .. }
         | StaticMode::CantCrew
         | StaticMode::CantPhaseIn
@@ -3268,6 +3272,10 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
             target,
             count,
             object_source,
+            // CR 110.2a: `enters_under` is an `Option<ControllerRef>` — a
+            // player-role reference, not a printed word, so CR 612.2 has
+            // nothing to replace in it (mirrors `Effect::Manifest`).
+            enters_under: _,
         } => {
             walk_target_filter(target, category, cursor);
             walk_quantity_expr(count, category, cursor);
