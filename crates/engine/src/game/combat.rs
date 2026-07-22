@@ -2640,14 +2640,6 @@ pub(crate) fn must_attack_player_directives_for_creature(
         .collect()
 }
 
-/// CR 508.1d: does `obj` carry an intrinsic generic `MustAttack` static? The
-/// single authority both `creature_must_attack_with_attackable_players_gated`
-/// and `must_attack_sources_gated` consume for the local must-attack arm.
-fn has_local_must_attack(state: &GameState, obj: &GameObject) -> bool {
-    super::functioning_abilities::active_static_definitions(state, obj)
-        .any(|sd| sd.mode == StaticMode::MustAttack)
-}
-
 /// CR 508.1d + CR 701.15b/c: sorted, deduped carriers of every must-attack cause
 /// on `obj`. Called by the producer ONLY when the enforcement bool already
 /// returned true (all exemptions cleared), so no exemption re-check is needed.
@@ -2657,16 +2649,18 @@ fn has_local_must_attack(state: &GameState, obj: &GameObject) -> bool {
 /// Direct `goaded_by` designations contribute NO source (CR 701.15b, player-level).
 fn must_attack_sources_gated(
     state: &GameState,
-    obj: &GameObject,
     obj_id: ObjectId,
     gates: &CombatStaticGates,
     attackable_must_player_carriers: &[ObjectId],
 ) -> Vec<ObjectId> {
     let mut sources = Vec::new();
-    // CR 508.1d: intrinsic generic MustAttack (Juggernaut) → carrier = the creature.
-    if has_local_must_attack(state, obj) {
-        sources.push(obj_id);
-    }
+    // CR 508.1d + CR 109.5: every functioning generic MustAttack carrier whose
+    // `affected` filter matches this creature — an intrinsic self static
+    // (Juggernaut's SelfRef → carrier = the creature) OR a cross-permanent scope
+    // ("All creatures attack each combat if able"). The affected filter is the
+    // single authority for WHO must attack, so a remote-scoped carrier (Fumiko
+    // the Lowblood's "creatures your opponents control attack each combat") is
+    // NOT reported as a source against ITSELF.
     if gates.has_must_attack {
         sources.extend(crate::game::static_abilities::check_static_ability_sources(
             state,
@@ -2723,15 +2717,19 @@ fn creature_must_attack_with_attackable_players_gated(
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
         return false;
     }
-    // CR 508.1d: MustAttack — either directly on this creature or from a
-    // cross-permanent static (e.g., "All creatures attack each combat if able").
-    let has_must_attack = has_local_must_attack(state, obj)
-        || (gates.has_must_attack
-            && crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::MustAttack,
-                &static_target_ctx(obj_id),
-            ));
+    // CR 508.1d + CR 109.5: MustAttack — from any functioning static whose
+    // `affected` filter matches this creature: an intrinsic self static
+    // (Juggernaut's SelfRef) or a cross-permanent scope ("All creatures attack
+    // each combat if able"). The affected filter is the single authority for WHO
+    // is required to attack, so a remote-scoped carrier (Fumiko the Lowblood's
+    // "creatures your opponents control attack each combat") never forces ITSELF
+    // to attack.
+    let has_must_attack = gates.has_must_attack
+        && crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::MustAttack,
+            &static_target_ctx(obj_id),
+        );
     // CR 701.15b: Goaded creatures must attack each combat if able.
     let is_goaded = !goading_players_for_creature_gated(state, obj_id, gates.has_goad).is_empty();
     let has_attackable_must_attack_player = must_attack_players_for_creature(state, obj)
@@ -3339,19 +3337,17 @@ impl AttackDeclarationConstraints {
             let Some(obj) = state.objects.get(&cid) else {
                 continue;
             };
-            // CR 508.1d: generic "attacks each combat if able" (local or remote).
-            let has_generic_must =
-                super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::MustAttack)
-                    || (gates.has_must_attack
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::MustAttack,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(cid),
-                                ..Default::default()
-                            },
-                        ));
+            // CR 508.1d + CR 109.5: generic "attacks each combat if able" — any
+            // functioning static whose `affected` filter matches this creature.
+            // The affected filter is the single authority for WHO is required to
+            // attack; a remote-scoped carrier (Fumiko the Lowblood's "creatures
+            // your opponents control attack each combat") never forces itself.
+            let has_generic_must = gates.has_must_attack
+                && crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::MustAttack,
+                    &static_target_ctx(cid),
+                );
             // CR 701.15b: goaders (distinct players).
             let goaders = goading_players_for_creature_gated(state, cid, gates.has_goad);
             // CR 701.15b (first clause): a goaded creature ALSO "attacks each
@@ -4426,7 +4422,7 @@ pub fn attacker_constraints_for_active_player(
                     .map(|(_, src)| src.unwrap_or(obj_id))
                     .collect();
                 let sources =
-                    must_attack_sources_gated(state, obj, obj_id, &gates, &attackable_carriers);
+                    must_attack_sources_gated(state, obj_id, &gates, &attackable_carriers);
                 constraints.insert(obj_id, CombatRequirement::MustAttack { players, sources });
             }
         } else if creature_cant_attack_gated(state, obj_id, &gates) {

@@ -7986,9 +7986,12 @@ fn static_erebos_god_of_the_dead_type_removal() {
 
 #[test]
 fn static_type_removal_with_nondevotion_condition() {
-    // The Warring Triad: non-devotion condition path. We don't assert the
-    // condition variant (may or may not type via parse_static_condition),
-    // but modifications MUST be non-empty regardless.
+    // CR 611.3a + CR 613.1d + CR 107.1: The Warring Triad — the "as long as"
+    // gate is a strict-inequality graveyard-size comparison that now types
+    // exactly (LT 8) via the shared comparator-prefix combinator in
+    // parse_there_are_conditions. Pre-fix the "fewer than" prefix was
+    // unrecognized, leaving the condition Unrecognized (always-true), so the
+    // Layer-4 type removal applied even with eight or more cards in the yard.
     let def = parse_static_line(
         "As long as there are fewer than eight cards in your graveyard, ~ isn't a creature.",
     )
@@ -8000,7 +8003,20 @@ fn static_type_removal_with_nondevotion_condition() {
             core_type: CoreType::Creature,
         }]
     );
-    assert!(def.condition.is_some(), "condition must be extracted");
+    assert_eq!(
+        def.condition,
+        Some(StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 8 },
+        }),
+        "gate must type to GraveyardSize(Controller) LT 8, got {:?}",
+        def.condition,
+    );
 }
 
 // CR 613.1d (Layer 4) + CR 205.1b/205.2: Luxior — attached-permanent type SWAP.

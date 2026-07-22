@@ -13,9 +13,12 @@ import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
-import { WebSocketAdapter } from "../adapter/ws-adapter";
+import {
+  NativeEngineVersionMismatchError,
+  WebSocketAdapter,
+} from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
-import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
+import type { DeckData, NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
 import {
   ACTIVE_DECK_KEY,
   isRandomDeckSelection,
@@ -43,6 +46,12 @@ import { loadDraftRun } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
+import {
+  canAttemptNativeEngine,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
+import { NativeEngineSocket } from "../services/nativeEngineSocket";
 import {
   clearGame,
   clearActiveGame,
@@ -241,6 +250,45 @@ type DeckListPayload = {
    *  deck bracket tier. */
   ai_difficulties: string[];
 };
+
+function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
+  return [deckList.opponent, ...deckList.ai_decks].map((deck, index) => ({
+    seatIndex: index + 1,
+    difficulty: deckList.ai_difficulties[index] ?? "Medium",
+    deck,
+  }));
+}
+
+/** Restores normal local resume behavior only after native setup has failed. */
+function saveWasmAiResumePointer(
+  gameId: string,
+  fallbackDifficulty: string | undefined,
+  playerCount: number | undefined,
+  formatConfig: FormatConfig | undefined,
+): void {
+  const { aiSeats, cedhMode } = usePreferencesStore.getState();
+  const opponentCount = Math.max(1, (playerCount ?? 2) - 1);
+  const seats = Array.from({ length: opponentCount }, (_, index) => {
+    const seat = aiSeats[index];
+    return {
+      difficulty: effectiveAiDifficulty(seat?.difficulty ?? fallbackDifficulty ?? "Medium", cedhMode),
+      deckId: seat?.deckId === AI_DECK_RANDOM ? null : seat?.deckId ?? null,
+    };
+  });
+  saveActiveGame({
+    id: gameId,
+    mode: "ai",
+    difficulty: seats[0]?.difficulty ?? fallbackDifficulty ?? "Medium",
+    aiSeats: seats,
+    formatConfig,
+  });
+}
+
+function nativeFallbackReason(error: unknown): string {
+  return error instanceof NativeEngineVersionMismatchError
+    ? "server_version_mismatch"
+    : "native_engine_unavailable";
+}
 
 function candidatePassesFilters(
   candidate: AiDeckCandidate,
@@ -545,7 +593,13 @@ export function GameProvider({
   tRef.current = t;
 
   useEffect(() => {
-    if (mode !== "ai") return;
+    const nativeEngineEnabled = usePreferencesStore.getState().nativeEngineEnabled;
+    const nativeAiCandidate =
+      source !== "draft"
+      && source !== "multiplayer"
+      && firstPlayer === undefined
+      && canAttemptNativeEngine(nativeEngineEnabled);
+    if (mode !== "ai" || nativeAiCandidate) return;
     let applied = false;
     const unsub = useGameStore.subscribe((state) => {
       if (applied || !state.gameState?.command_zone?.length) return;
@@ -560,7 +614,7 @@ export function GameProvider({
       unsub();
     }
     return unsub;
-  }, [mode, gameId]);
+  }, [mode, gameId, source, firstPlayer]);
 
   useEffect(() => {
     if (mode !== "online" && mode !== "p2p-host" && mode !== "p2p-join") return;
@@ -592,15 +646,33 @@ export function GameProvider({
     // responds.
     clearPromptOverlayState();
 
-    const { initGame, resumeGame, resumeP2PHost, reset, setGameMode } = useGameStore.getState();
+    const {
+      initGame,
+      resumeGame,
+      resumeP2PHost,
+      reset,
+      setEngineMode,
+      setGameMode,
+    } = useGameStore.getState();
+    const nativeEngineKey = nativeEngineKeyForCurrentOrigin();
+    const shouldUseNativeAi =
+      mode === "ai"
+      && source !== "draft"
+      && source !== "multiplayer"
+      && firstPlayer === undefined
+      && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+      && nativeEngineKey !== null;
     setGameMode(mode);
+    setEngineMode(mode === "ai" ? (shouldUseNativeAi ? null : "wasm") : null);
 
     const isOnline = mode === "online" || mode === "spectate";
     const isSpectate = mode === "spectate";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
-        setupRandomAvatars(playerCount ?? 2, gameId);
+        if (!shouldUseNativeAi) {
+          setupRandomAvatars(playerCount ?? 2, gameId);
+        }
       } else if (mode === "draft-match") {
         setupDraftMatchAvatars(gameId);
       } else {
@@ -632,6 +704,7 @@ export function GameProvider({
     // direct `peer.destroy()` calls would double-destroy and also skip the
     // per-session cleanup that `dispose()` performs.
     let p2pAdapter: P2PHostAdapter | P2PGuestAdapter | null = null;
+    let nativeAdapter: WebSocketAdapter | null = null;
     let controller: ReturnType<typeof createGameLoopController> | null = null;
 
     if (mode === "draft-match") {
@@ -1371,7 +1444,135 @@ export function GameProvider({
       }
     };
 
-    setupLocal();
+    if (shouldUseNativeAi && nativeEngineKey) {
+      const setupNativeAi = async () => {
+        try {
+          // Native sessions deliberately do not resume a local snapshot. A
+          // pre-existing state belongs to the established WASM path instead.
+          if (await loadGame(gameId)) {
+            setEngineMode("wasm");
+            await setupLocal();
+            return;
+          }
+          if (cancelled) return;
+
+          const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+          const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+          const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
+          const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
+          if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
+            onNoDeckRef.current?.();
+            return;
+          }
+
+          const deckList = await buildLocalAiDeckList(
+            tRef.current,
+            randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
+            playerCount ?? 2,
+            formatConfig,
+            matchConfig?.match_type,
+            loadActiveDeckBracket(),
+          );
+          if (cancelled) return;
+
+          // Native games are server-authoritative and have no client resume
+          // contract in v1, so remove the setup-page pointer before hosting.
+          clearActiveGame();
+          await ensureNativeEngine(nativeEngineKey);
+          if (cancelled) return;
+
+          nativeAdapter = new WebSocketAdapter(
+            "native-engine",
+            "host",
+            deckList.player,
+            undefined,
+            undefined,
+            undefined,
+            "Player",
+            {
+              nativeAi: {
+                socketFactory: () => new NativeEngineSocket(),
+                aiSeats: nativeAiSeatsFromDeckList(deckList),
+                playerCount: playerCount ?? 2,
+                formatConfig,
+                matchConfig,
+                expectedServerVersion:
+                  "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+              },
+            },
+          );
+          wsUnsubscribe = nativeAdapter.onEvent((event) => {
+            if (event.type === "stateChanged") {
+              const adapter = nativeAdapter;
+              if (!useGameStore.getState().adapter && adapter) {
+                useGameStore.setState({ adapter });
+              }
+              processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            }
+            if (event.type === "gameOver") {
+              useGameStore.setState({
+                waitingFor: { type: "GameOver", data: { winner: event.winner } },
+              });
+            }
+            if (event.type === "reconnectFailed" || event.type === "error") {
+              const adapter = nativeAdapter;
+              nativeAdapter = null;
+              controller?.dispose();
+              controller = null;
+              adapter?.dispose();
+              if (useGameStore.getState().adapter === adapter) {
+                useGameStore.setState({ adapter: null });
+              }
+              // GamePage's existing reconnect-failed/error surface is terminal
+              // and provides the Return-to-Menu action for this native session.
+              onWsEventRef.current?.(event);
+            }
+          });
+
+          setEngineMode("native");
+          await initGame(
+            gameId,
+            nativeAdapter,
+            undefined,
+            formatConfig,
+            playerCount,
+            matchConfig,
+          );
+          if (cancelled) {
+            nativeAdapter.dispose({ concede: true });
+            return;
+          }
+
+          setGameMode("native-ai");
+          controller = createGameLoopController({ mode: "online" });
+          controller.start();
+          audioManager.setContext("battlefield");
+        } catch (error) {
+          nativeAdapter?.dispose({ concede: true });
+          nativeAdapter = null;
+          if (cancelled) return;
+
+          setGameMode("ai");
+          setEngineMode("wasm", nativeFallbackReason(error));
+          saveWasmAiResumePointer(gameId, difficulty, playerCount, formatConfig);
+          await setupLocal();
+        }
+      };
+
+      void setupNativeAi();
+
+      return () => {
+        cancelled = true;
+        if (controller) controller.dispose();
+        if (wsUnsubscribe) wsUnsubscribe();
+        nativeAdapter?.dispose({ concede: true });
+        audioManager.setContext("menu");
+        clearPromptOverlayState();
+        scheduleStoreReset(reset);
+      };
+    }
+
+    void setupLocal();
 
     return () => {
       cancelled = true;

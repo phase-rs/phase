@@ -28,6 +28,8 @@
     "logDefault": "Domyślny dziennik",
     "spellPayment": "Płatność za czary",
     "manualManaPayment": "Ręczna płatność many za czary",
+    "nativeEngine": "Natywny silnik dla gier z AI",
+    "nativeEngineDescription": "Używaj pobranego natywnego silnika do lokalnych gier z AI. Gdy jest niedostępny, automatycznie przełącza się na wbudowany silnik.",
     "boardBackground": "Tło pola bitwy",
     "boardBackgroundGroups": {
       "automatic": "Automatyczne",

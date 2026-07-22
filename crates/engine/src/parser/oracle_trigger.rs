@@ -3,7 +3,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{one_of, space1};
 use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, rest, value};
-use nom::multi::{many1, separated_list1};
+use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
@@ -25,7 +25,7 @@ use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::condition::{parse_source_counters_exist, parse_source_has_counters};
 use super::oracle_nom::error::{oracle_err, OracleResult};
 use super::oracle_nom::filter::{
-    parse_color_property, parse_enters_origin_zone, parse_with_property,
+    parse_color_property, parse_enters_origin_zone, parse_property_filter, parse_with_property,
 };
 use super::oracle_nom::primitives::{
     self as nom_primitives, scan_contains, scan_preceded, scan_split_at_phrase,
@@ -9229,7 +9229,16 @@ fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFil
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
     let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
-    let (rest, filter) = parse_type_phrase_nom(rest)?;
+    // CR 509.1g + CR 120.3: optional state/combat-status adjective prefix on the
+    // damage recipient — "a blocking creature" (Kusari-Gama), "an attacking
+    // creature", "a tapped creature". `parse_type_phrase_nom` only handles
+    // type/color/supertype words, so without this the whole recipient failed to
+    // parse and the trigger fell back to `valid_target = None` (fires on ANY
+    // recipient, including a player). Consume the leading `FilterProp`s and merge
+    // them into the typed recipient so the trigger gates on the damaged object's
+    // combat state. Mirrors the prefix loop in `oracle_target::parse_type_phrase`.
+    let (rest, prefix_props) = many0(terminated(parse_property_filter, space1)).parse(rest)?;
+    let (rest, mut filter) = parse_type_phrase_nom(rest)?;
     // Phrase-terminator guard: accept only end-of-string or a non-alphanumeric
     // terminator (comma, period, space-before-clause), and explicitly reject the
     // " or <player-word>" disjunction. Declines "creature or player",
@@ -9251,6 +9260,17 @@ fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFil
             rest,
             nom::error::ErrorKind::Eof,
         )));
+    }
+    // CR 509.1g: merge the consumed combat-status prefixes onto the typed
+    // recipient so the trigger matcher gates on them.
+    if !prefix_props.is_empty() {
+        if let TargetFilter::Typed(ref mut tf) = filter {
+            for prop in prefix_props {
+                if !tf.properties.contains(&prop) {
+                    tf.properties.push(prop);
+                }
+            }
+        }
     }
     Ok((rest, filter))
 }

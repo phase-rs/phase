@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::native_bridge::BridgeHandle;
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -396,16 +398,90 @@ impl RunningEngine {
     }
 }
 
-#[derive(Default)]
 struct NativeEngineState {
     running: Option<RunningEngine>,
+    bridges: BTreeMap<u64, BridgeHandle>,
+    next_bridge_id: u64,
+}
+
+impl Default for NativeEngineState {
+    fn default() -> Self {
+        Self {
+            running: None,
+            bridges: BTreeMap::new(),
+            next_bridge_id: 1,
+        }
+    }
 }
 
 static ENGINE_STATE: OnceLock<Mutex<NativeEngineState>> = OnceLock::new();
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) enum NativeBridgeRegistryError {
+    NotRunning,
+    Internal(String),
+}
+
 fn engine_state() -> &'static Mutex<NativeEngineState> {
     ENGINE_STATE.get_or_init(|| Mutex::new(NativeEngineState::default()))
+}
+
+pub(crate) fn register_native_engine_bridge(
+    bridge: BridgeHandle,
+) -> Result<(u64, u16, &'static str), NativeBridgeRegistryError> {
+    let mut state = engine_state().lock().map_err(|error| {
+        NativeBridgeRegistryError::Internal(format!("native engine state lock poisoned: {error}"))
+    })?;
+    let running = state
+        .running
+        .as_ref()
+        .ok_or(NativeBridgeRegistryError::NotRunning)?;
+    let port = running.port();
+    let origin = running.key().origin();
+    let bridge_id = state.next_bridge_id;
+    state.next_bridge_id = state.next_bridge_id.checked_add(1).ok_or_else(|| {
+        NativeBridgeRegistryError::Internal("native engine bridge IDs are exhausted".to_owned())
+    })?;
+    state.bridges.insert(bridge_id, bridge);
+    Ok((bridge_id, port, origin))
+}
+
+pub(crate) fn native_engine_bridge_sender(
+    bridge_id: u64,
+) -> Option<tokio::sync::mpsc::UnboundedSender<tokio_tungstenite::tungstenite::Message>> {
+    let state = engine_state().lock().ok()?;
+    state.bridges.get(&bridge_id).map(BridgeHandle::outbound)
+}
+
+pub(crate) fn close_native_engine_bridge(bridge_id: u64) -> bool {
+    let bridge = engine_state()
+        .lock()
+        .ok()
+        .and_then(|mut state| state.bridges.remove(&bridge_id));
+    if let Some(bridge) = bridge {
+        bridge.abort();
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn remove_native_engine_bridge(bridge_id: u64) {
+    if let Ok(mut state) = engine_state().lock() {
+        state.bridges.remove(&bridge_id);
+    }
+}
+
+pub(crate) fn abort_native_engine_bridges_on_navigation() {
+    if let Ok(mut state) = engine_state().lock() {
+        abort_all_native_engine_bridges(&mut state.bridges);
+    }
+}
+
+fn abort_all_native_engine_bridges(bridges: &mut BTreeMap<u64, BridgeHandle>) {
+    for (_, bridge) in std::mem::take(bridges) {
+        bridge.abort();
+    }
 }
 
 /// Resolves, verifies, provisions, and starts the native server for a typed key.
@@ -460,7 +536,7 @@ fn ensure_native_engine_sync(
     }
 
     if let Some(running) = state.running.take() {
-        stop_running_engine(running, &files);
+        stop_running_engine(running, &files, &mut state.bridges);
         clear_spawn_record(&files)?;
     }
 
@@ -525,7 +601,7 @@ fn ensure_native_engine_sync(
             child,
             stdin: Some(stdin),
         };
-        stop_running_engine(running, &files);
+        stop_running_engine(running, &files, &mut state.bridges);
         return Err(error);
     }
 
@@ -562,9 +638,10 @@ fn stop_native_engine_sync(app: &AppHandle) -> Result<(), NativeEngineError> {
             detail: format!("native engine state lock poisoned: {error}"),
         })?;
     if let Some(running) = state.running.take() {
-        stop_running_engine(running, &files);
+        stop_running_engine(running, &files, &mut state.bridges);
         clear_spawn_record(&files)
     } else {
+        abort_all_native_engine_bridges(&mut state.bridges);
         // This process owns no engine, so leave the shared on-disk spawn
         // record alone: it may describe another live instance's server
         // (single-instance secondaries hard-exit inside plugin init today,
@@ -981,7 +1058,12 @@ fn can_adopt(record: &SpawnRecord, requested: &NativeEngineKey, healthy: bool) -
     record.key == *requested && healthy
 }
 
-fn stop_running_engine(running: RunningEngine, files: &NativeEngineFiles) {
+fn stop_running_engine(
+    running: RunningEngine,
+    files: &NativeEngineFiles,
+    bridges: &mut BTreeMap<u64, BridgeHandle>,
+) {
+    abort_all_native_engine_bridges(bridges);
     match running {
         RunningEngine::Child {
             key: _,
@@ -1406,7 +1488,7 @@ mod tests {
         write_atomically(&files.cache_blob(&file.sha256), bytes).unwrap();
         assert_eq!(fs::read(files.cache_blob(&file.sha256)).unwrap(), bytes);
         let client = http_client().unwrap();
-        assemble_data(&client, None, &files, &key, &[file.clone()]).unwrap();
+        assemble_data(&client, None, &files, &key, std::slice::from_ref(&file)).unwrap();
         let destination = files.data_directory(&key).join(&file.name);
         assert_eq!(fs::read(destination).unwrap(), bytes);
         fs::remove_dir_all(files.app_directory).unwrap();
@@ -1480,5 +1562,22 @@ mod tests {
     fn health_timeout_constant_is_short_and_bounded() {
         assert!(HEALTH_TIMEOUT >= Duration::from_secs(10));
         assert!(HEALTH_TIMEOUT <= Duration::from_secs(30));
+    }
+
+    #[test]
+    fn stop_without_running_engine_sweeps_bridge_registry() {
+        let (abort, registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = NativeEngineState::default();
+        state.bridges.insert(1, BridgeHandle::new(abort, outbound));
+
+        abort_all_native_engine_bridges(&mut state.bridges);
+
+        assert!(state.running.is_none());
+        assert!(state.bridges.is_empty());
+        let result = tauri::async_runtime::block_on(async {
+            futures_util::future::Abortable::new(std::future::pending::<()>(), registration).await
+        });
+        assert!(result.is_err());
     }
 }

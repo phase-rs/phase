@@ -28,6 +28,8 @@
     "logDefault": "Protokoll-Standard",
     "spellPayment": "Zauberspruch-Bezahlung",
     "manualManaPayment": "Manuelle Manabezahlung für Zaubersprüche",
+    "nativeEngine": "Native Engine für KI-Spiele",
+    "nativeEngineDescription": "Verwende die heruntergeladene native Engine für lokale KI-Spiele. Fällt automatisch auf die integrierte Engine zurück, wenn sie nicht verfügbar ist.",
     "boardBackground": "Spielfeldhintergrund",
     "boardBackgroundGroups": {
       "automatic": "Automatisch",

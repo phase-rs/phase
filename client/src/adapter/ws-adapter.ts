@@ -6,11 +6,13 @@ import type {
   GameLogEntry,
   GameState,
   LegalActionsResult,
+  MatchConfig,
   ManaCost,
   ObjectId,
   PlayerId,
   PersistedGameState,
   SubmitResult,
+  FormatConfig,
 } from "./types";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, nextSnapshotSeq } from "./types";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
@@ -18,6 +20,8 @@ import {
   HandshakeError,
   openPhaseSocket,
   type PhaseSocket,
+  type PhaseSocketFactory,
+  type PhaseSocketTransport,
 } from "../services/openPhaseSocket";
 import { isValidWebSocketUrl, mixedContentBlockReason } from "../services/serverDetection";
 import type { WsSessionData } from "../services/multiplayerSession";
@@ -32,6 +36,42 @@ export interface DeckData {
   planar_deck?: string[];
   scheme_deck?: string[];
   sticker_sheets?: string[];
+}
+
+/** AI seat configuration for the private native-engine host path. */
+export interface NativeAiSeat {
+  seatIndex: number;
+  difficulty: string;
+  deck: DeckData;
+}
+
+/**
+ * Native single-player configuration. This stays deliberately separate from
+ * lobby hosting: the native server receives a private, all-AI game request and
+ * never registers a public room or emits multiplayer-store session state.
+ */
+export interface NativeAiAdapterOptions {
+  socketFactory: PhaseSocketFactory;
+  aiSeats: NativeAiSeat[];
+  playerCount: number;
+  formatConfig?: FormatConfig;
+  matchConfig?: MatchConfig;
+  /** Present on release only; preview parity is verified by the shell. */
+  expectedServerVersion?: string;
+}
+
+export interface WebSocketAdapterOptions {
+  nativeAi?: NativeAiAdapterOptions;
+}
+
+export class NativeEngineVersionMismatchError extends Error {
+  constructor(
+    public readonly expected: string,
+    public readonly actual: string,
+  ) {
+    super("Native engine version does not match this release");
+    this.name = "NativeEngineVersionMismatchError";
+  }
 }
 
 /**
@@ -130,7 +170,7 @@ function playerNamesFromWire(names: string[]): Record<number, string> {
  * for multiplayer games.
  */
 export class WebSocketAdapter implements EngineAdapter {
-  private ws: WebSocket | null = null;
+  private ws: PhaseSocketTransport | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
    * state-bearing message. `getState`/`getLegalActions` both read from THIS
@@ -156,7 +196,9 @@ export class WebSocketAdapter implements EngineAdapter {
   private initStartEvents: GameEvent[] = [];
   private listeners: WsAdapterEventListener[] = [];
   private reconnectAttempt = 0;
-  private readonly maxReconnectAttempts = 8;
+  // A native bridge has no resumable server session: a dead loopback engine
+  // cannot recover through the multiplayer reconnect protocol.
+  private readonly maxReconnectAttempts: number;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private disposed = false;
@@ -189,7 +231,10 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly joinPassword?: string,
     private readonly reservationToken?: string,
     private readonly displayName = "Player",
-  ) {}
+    private readonly options: WebSocketAdapterOptions = {},
+  ) {
+    this.maxReconnectAttempts = options.nativeAi ? 0 : 8;
+  }
 
   get gameCode(): string | null {
     return this._gameCode;
@@ -233,7 +278,7 @@ export class WebSocketAdapter implements EngineAdapter {
       this.initResolve = resolve;
       this.initReject = reject;
 
-      if (!isValidWebSocketUrl(this.serverUrl)) {
+      if (!this.options.nativeAi && !isValidWebSocketUrl(this.serverUrl)) {
         reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
         this.initResolve = null;
         this.initReject = null;
@@ -242,7 +287,9 @@ export class WebSocketAdapter implements EngineAdapter {
 
       // A ws:// target from an HTTPS page is blocked by the browser before the
       // handshake — surface why instead of letting it fail as "unreachable".
-      const blockReason = mixedContentBlockReason(this.serverUrl);
+      const blockReason = this.options.nativeAi
+        ? null
+        : mixedContentBlockReason(this.serverUrl);
       if (blockReason) {
         reject(new AdapterError("WS_ERROR", blockReason, false));
         this.initResolve = null;
@@ -251,7 +298,9 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       const setupFrame =
-        this.mode === "host"
+        this.options.nativeAi
+          ? this.nativeAiSetupFrame(this.options.nativeAi)
+          : this.mode === "host"
           ? { type: "CreateGame", data: { deck: this.deckData } }
           : this.mode === "spectate"
             ? { type: "SpectatorJoin", data: { game_code: this.joinGameCode! } }
@@ -280,9 +329,11 @@ export class WebSocketAdapter implements EngineAdapter {
    * so the handshake policy lives in exactly one place.
    */
   private async attachSocket(setupFrame: unknown): Promise<void> {
-    let socket: PhaseSocket;
+    let socket: PhaseSocket<PhaseSocketTransport>;
     try {
-      socket = await openPhaseSocket(this.serverUrl);
+      socket = await openPhaseSocket(this.serverUrl, {
+        socketFactory: this.options.nativeAi?.socketFactory,
+      });
     } catch (err) {
       if (err instanceof HandshakeError) {
         const retryable = err.kind !== "protocol_mismatch" && err.kind !== "invalid_url";
@@ -317,6 +368,23 @@ export class WebSocketAdapter implements EngineAdapter {
       return;
     }
 
+    if (
+      this.options.nativeAi?.expectedServerVersion !== undefined
+      && socket.serverInfo.version !== this.options.nativeAi.expectedServerVersion
+    ) {
+      socket.close();
+      const error = new NativeEngineVersionMismatchError(
+        this.options.nativeAi.expectedServerVersion,
+        socket.serverInfo.version,
+      );
+      if (this.initReject) {
+        this.initReject(error);
+        this.initResolve = null;
+        this.initReject = null;
+      }
+      return;
+    }
+
     this.ws = socket.ws;
     this._serverInfo = socket.serverInfo;
     this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
@@ -332,6 +400,8 @@ export class WebSocketAdapter implements EngineAdapter {
         this.initReject(err);
         this.initResolve = null;
         this.initReject = null;
+      } else {
+        this.emit({ type: "error", message: err.message });
       }
     };
 
@@ -500,7 +570,10 @@ export class WebSocketAdapter implements EngineAdapter {
     this.send({ type: "StartGame" });
   }
 
-  dispose(): void {
+  dispose(options?: { concede?: boolean }): void {
+    if (options?.concede && !this.gameEnded) {
+      this.sendConcede();
+    }
     this.disposed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -540,7 +613,7 @@ export class WebSocketAdapter implements EngineAdapter {
     this._gameCode = session.gameCode;
     this.playerToken = session.playerToken;
 
-    if (!isValidWebSocketUrl(this.serverUrl)) {
+    if (!this.options.nativeAi && !isValidWebSocketUrl(this.serverUrl)) {
       this.emit({ type: "reconnectFailed" });
       return false;
     }
@@ -589,6 +662,31 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pingInterval = setInterval(() => {
       this.send({ type: "Ping", data: { timestamp: Date.now() } });
     }, 5000);
+  }
+
+  private nativeAiSetupFrame(options: NativeAiAdapterOptions) {
+    return {
+      type: "CreateGameWithSettings",
+      data: {
+        deck: this.deckData,
+        display_name: this.displayName,
+        public: false,
+        password: null,
+        timer_seconds: null,
+        player_count: options.playerCount,
+        match_config: options.matchConfig ?? { match_type: "Bo1" },
+        ai_seats: options.aiSeats.map((seat) => ({
+          seatIndex: seat.seatIndex,
+          difficulty: seat.difficulty,
+          deckName: null,
+          deck: { type: "DeckList", data: seat.deck },
+        })),
+        format_config: options.formatConfig ?? null,
+        room_name: null,
+        start_when_full: true,
+        ranked: false,
+      },
+    };
   }
 
   /**

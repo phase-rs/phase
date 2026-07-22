@@ -28,6 +28,8 @@
     "logDefault": "Journal par défaut",
     "spellPayment": "Paiement des sorts",
     "manualManaPayment": "Paiement manuel du mana pour les sorts",
+    "nativeEngine": "Moteur natif pour les parties contre l’IA",
+    "nativeEngineDescription": "Utilisez le moteur natif téléchargé pour les parties locales contre l’IA. Utilise automatiquement le moteur intégré lorsqu’il n’est pas disponible.",
     "boardBackground": "Arrière-plan du plateau",
     "boardBackgroundGroups": {
       "automatic": "Automatique",
