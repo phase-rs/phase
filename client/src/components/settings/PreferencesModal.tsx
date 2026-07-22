@@ -1237,7 +1237,7 @@ function MultiplierSlider({
           onChange={(e) => onChange(Number(e.target.value))}
           onDoubleClick={() => onChange(defaultValue)}
           aria-label={label}
-          className="flex-1 accent-cyan-500"
+          className="h-2 flex-1 cursor-pointer rounded-full bg-slate-700 accent-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-400/70 focus-visible:outline-none"
         />
         <button
           type="button"
