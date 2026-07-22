@@ -818,7 +818,7 @@ export function GameProvider({
             // before publishing a PeerJS lobby entry; if it cannot start, the
             // established WASM host remains the fallback for this attempt.
             let nativeP2P: { expectedServerVersion?: string } | undefined;
-            if ((shouldUseNativeP2P || isNativeResume) && nativeEngineKey) {
+            if (((shouldUseNativeP2P && !isWasmResume) || isNativeResume) && nativeEngineKey) {
               try {
                 await ensureNativeEngine(nativeEngineKey);
                 signal.throwIfAborted();

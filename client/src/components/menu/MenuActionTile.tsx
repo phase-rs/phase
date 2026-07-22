@@ -88,7 +88,7 @@ export function MenuActionTile({
       initial="rest"
       animate="rest"
       whileHover={disabled ? undefined : "hover"}
-      className={`group relative flex flex-col gap-2 rounded-[10px] border p-[7px] text-left transition-colors duration-150 surface-card ${
+      className={`group relative flex flex-col items-stretch gap-2 rounded-[10px] border p-[7px] text-left transition-colors duration-150 surface-card ${
         disabled ? "cursor-not-allowed opacity-50" : `cursor-pointer ${t.border} hover:border-hairline-hover hover:bg-slate-900/88`
       }`}
     >

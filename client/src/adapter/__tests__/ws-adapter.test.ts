@@ -326,6 +326,35 @@ describe("WebSocketAdapter", () => {
         playerToken: "guest-token",
       });
     });
+
+    it("rejects native pregame attachment when the server returns an error", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "Error", data: { message: "Native setup failed" } }),
+      );
+
+      await expect(attached).rejects.toThrow("Native setup failed");
+    });
   });
 
   describe("Bug C: stateChanged emission", () => {

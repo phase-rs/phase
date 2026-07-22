@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn protocol_version_tracks_priority_passing_wire_additions() {
         assert_eq!(PROTOCOL_VERSION, 21);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 19);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 20);
     }
 
     #[test]

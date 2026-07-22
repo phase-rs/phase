@@ -1328,6 +1328,7 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "Error": {
         const data = msg.data as { message: string };
+        this.rejectInitialization(actionRejectionError(data.message));
         this.rejectPregameMutation(actionRejectionError(data.message));
         this.rejectAbandon(actionRejectionError(data.message));
         this.emit({ type: "error", message: data.message });
