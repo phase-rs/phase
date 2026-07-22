@@ -128,13 +128,18 @@ fn apply_generate_pairings(
     let mut rng =
         ChaCha20Rng::seed_from_u64(session.config.rng_seed ^ (round as u64 * 0xDEAD_BEEF));
 
-    let new_pairings = match session.config.tournament_format {
+    let (new_pairings, swiss_bye) = match session.config.tournament_format {
         TournamentFormat::Swiss => generate_swiss_pairings(session, round, &mut rng),
-        TournamentFormat::SingleElimination => generate_se_pairings(session, round),
+        TournamentFormat::SingleElimination => (generate_se_pairings(session, round), None),
     };
 
     for p in &new_pairings {
         session.pairings.push(p.clone());
+    }
+    // A Swiss bye counts as a match win for the unpaired player; without this credit an
+    // odd-pod bye scores nothing and Swiss standings (sorted by match_wins) are wrong.
+    if let Some(bye) = swiss_bye {
+        ensure_match_record(&mut session.match_records, bye).match_wins += 1;
     }
     session.status = DraftStatus::MatchInProgress;
     session.current_round = round;
@@ -147,11 +152,14 @@ fn apply_generate_pairings(
     ])
 }
 
+/// Returns the round's pairings plus the bye player, if any. An odd pod leaves one player
+/// unpaired; in Swiss that player takes a bye, which counts as a match win — the caller
+/// credits it (`Some(pid)`). `None` when every player was paired.
 fn generate_swiss_pairings(
     session: &DraftSession,
     round: u8,
     rng: &mut ChaCha20Rng,
-) -> Vec<DraftPairing> {
+) -> (Vec<DraftPairing>, Option<PlayerId>) {
     let seat_indices: Vec<u8> = session
         .seats
         .iter()
@@ -222,11 +230,12 @@ fn generate_swiss_pairings(
         }
     }
 
-    // If there's still an unpaired player (odd count), they get a bye (no pairing generated)
-    // For 8-player pods this shouldn't happen.
+    // An unpaired player (odd pod) takes a bye — reported to the caller so the bye can be
+    // credited as a match win. Common only in non-8-player pods.
+    let bye = carry.map(|(pid, _)| pid);
 
     // Generate DraftPairing structs
-    paired
+    let pairings = paired
         .iter()
         .enumerate()
         .map(|(table, (p1, p2))| DraftPairing {
@@ -237,7 +246,9 @@ fn generate_swiss_pairings(
             status: PairingStatus::Pending,
             winner: None,
         })
-        .collect()
+        .collect();
+
+    (pairings, bye)
 }
 
 fn generate_se_pairings(session: &DraftSession, round: u8) -> Vec<DraftPairing> {
@@ -1720,5 +1731,24 @@ mod tests {
         assert!(!flags.get(1)); // preserved
         assert!(flags.get(2)); // new slot, default true
         assert!(flags.get(3)); // new slot, default true
+    }
+
+    #[test]
+    fn swiss_bye_in_odd_pod_is_credited_a_match_win() {
+        // Odd pod -> exactly one player takes a bye each round.
+        let (mut session, _) = test_session(3);
+        session.status = DraftStatus::Deckbuilding; // satisfy the pairing-generation guard
+        apply_generate_pairings(&mut session, 1).unwrap();
+
+        // Three players: one two-player pairing plus one bye.
+        assert_eq!(
+            session.pairings.iter().filter(|p| p.round == 1).count(),
+            1,
+            "the two paired players get exactly one pairing",
+        );
+        // The unpaired (bye) player is credited exactly one match win. Without the credit an
+        // odd-pod bye scores nothing and Swiss standings (sorted by match_wins) undercount it.
+        let total_match_wins: u8 = session.match_records.values().map(|r| r.match_wins).sum();
+        assert_eq!(total_match_wins, 1, "the bye player earns a match win");
     }
 }
