@@ -13718,6 +13718,16 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
     )
 }
 
+/// CR 601.2b + CR 106.6: SPELL-payment feasibility of `cost` including the
+/// tap-to-help mechanic (`ConvokeMode`). Builds `PaymentContext::Spell`, so
+/// restricted mana is admitted per `allows_spell` — use ONLY for costs paid
+/// as part of casting a spell (the "additional cost: you may waterbend N"
+/// path). Activated-ability affordability must go through
+/// `can_feasibly_pay_activation_mana_cost_with_tap_payment_mode` instead:
+/// spell-only and activation-only mana restrictions diverge between the two
+/// contexts, so probing an activation with a spell context can both offer an
+/// unpayable activation (spell-only mana) and suppress a payable one
+/// (activation-only mana).
 pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode(
     state: &GameState,
     player: PlayerId,
@@ -13741,12 +13751,88 @@ pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode(
     super::layers::flush_layers(&mut simulated);
     let spell_meta = build_spell_meta(&simulated, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    feasibly_payable_with_tap_payment_mode_in_context(
+        &simulated,
+        player,
+        source_id,
+        cost,
+        tap_payment_mode,
+        spell_ctx.as_ref(),
+    )
+}
+
+/// CR 601.2b + CR 106.6: ACTIVATION-payment sibling of
+/// `can_feasibly_pay_mana_cost_with_tap_payment_mode`. Builds
+/// `PaymentContext::Activation` from the source permanent's current types
+/// (mirroring the real payment path's context construction), so the
+/// affordability gate agrees with the later payment step about which
+/// restricted mana is eligible: activation-only mana
+/// (`ManaRestriction::OnlyForActivation`) counts, spell-only mana
+/// (`ManaRestriction::OnlyForSpell` etc.) does not. `ability_tag` is
+/// threaded into the context for tag-scoped restrictions
+/// (`OnlyForTaggedActivation`, Quinjet's power-up mana); pass `None` when the
+/// activation being probed did not originate from a tagged keyword ability —
+/// the conservative reading, matching `can_pay_ability_cost_after_auto_tap`'s
+/// documented preview behavior (the exact tag-scoped gate runs at payment
+/// time per CR 601.2g).
+pub(super) fn can_feasibly_pay_activation_mana_cost_with_tap_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    tap_payment_mode: ConvokeMode,
+    ability_tag: Option<crate::types::ability::AbilityTag>,
+) -> bool {
+    if super::casting_costs::cost_has_x(cost) {
+        let mut concrete = cost.clone();
+        concrete.concretize_x(0);
+        return can_feasibly_pay_activation_mana_cost_with_tap_payment_mode(
+            state,
+            player,
+            source_id,
+            &concrete,
+            tap_payment_mode,
+            ability_tag,
+        );
+    }
+
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    let (source_types, source_subtypes) = activation_source_types(&simulated, source_id);
+    let activation_ctx = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+        ability_tag,
+    };
+    feasibly_payable_with_tap_payment_mode_in_context(
+        &simulated,
+        player,
+        source_id,
+        cost,
+        tap_payment_mode,
+        Some(&activation_ctx),
+    )
+}
+
+/// Shared feasibility core for the two context wrappers above: first the
+/// plain auto-tap probe (pool/land funding), then the tap-to-help
+/// (`ConvokeMode`) fallback — both consulting the SAME `PaymentContext` so a
+/// single payment class's restriction rules govern the whole probe.
+/// `simulated` must already have layers flushed.
+fn feasibly_payable_with_tap_payment_mode_in_context(
+    simulated: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+    tap_payment_mode: ConvokeMode,
+    ctx: Option<&PaymentContext>,
+) -> bool {
     if can_pay_mana_cost_after_auto_tap_with_context_and_cache(
         simulated.clone(),
         player,
         Some(source_id),
         cost,
-        spell_ctx.as_ref(),
+        ctx,
         &HashSet::new(),
         AutoTapProbeOptions {
             source_cache: None,
@@ -13756,22 +13842,11 @@ pub(super) fn can_feasibly_pay_mana_cost_with_tap_payment_mode(
         return true;
     }
 
-    let any_color = player_can_spend_as_any_color_for_payment(
-        &simulated,
-        player,
-        Some(source_id),
-        spell_ctx.as_ref(),
-    );
+    let any_color =
+        player_can_spend_as_any_color_for_payment(simulated, player, Some(source_id), ctx);
     let permissions =
-        super::static_abilities::build_cost_permission_context(&simulated, player, any_color);
-    can_pay_with_tap_payment_mode(
-        &simulated,
-        player,
-        tap_payment_mode,
-        cost,
-        spell_ctx.as_ref(),
-        permissions,
-    )
+        super::static_abilities::build_cost_permission_context(simulated, player, any_color);
+    can_pay_with_tap_payment_mode(simulated, player, tap_payment_mode, cost, ctx, permissions)
 }
 
 /// Castability-gate feasibility predicate. Returns true if `player` could pay
@@ -15692,7 +15767,12 @@ fn activation_cost_passes_early_affordability_gate(
     if find_one_of_cost(cost).is_some() {
         can_pay_ability_cost_now(state, player, source_id, cost, ability_tag)
     } else {
-        cost.is_payable(state, player, source_id)
+        // CR 106.6: the tag reaches the payability gate for the same reason it
+        // reaches `can_pay_ability_cost_now` above — tag-scoped mana
+        // (`OnlyForTaggedActivation`) is spendable at the real payment step,
+        // so a gate that judged the cost without the tag would refuse
+        // activations the payment step would have allowed.
+        cost.is_payable_for_activation(state, player, source_id, ability_tag)
     }
 }
 

@@ -23,10 +23,14 @@
 //! eligible creatures to tap was therefore told the ability wasn't payable
 //! at all — the exact "remains blockable" symptom reported, since the
 //! ability could never be activated to begin with. Fixed by delegating to
-//! `can_feasibly_pay_mana_cost_with_tap_payment_mode` (already used by the
-//! spell-cast "additional cost: you may waterbend N" path), which falls
-//! back to the plain auto-tap check first, so pool/land-funded payment is
-//! unaffected.
+//! `can_feasibly_pay_activation_mana_cost_with_tap_payment_mode` — the
+//! `PaymentContext::Activation` sibling of the helper the spell-cast
+//! "additional cost: you may waterbend N" path uses — which falls back to
+//! the plain auto-tap check first, so pool/land-funded payment is
+//! unaffected. The activated ability's `ability_tag` is threaded into that
+//! probe so CR 106.6 tag-scoped mana is judged exactly as the real payment
+//! step judges it (unit-covered in `game::cost_payability`'s
+//! `waterbend_payability_sees_tag_scoped_activation_mana`).
 //!
 //! No prior test paired a Waterbend-cost *activated* ability with a real
 //! target (creature) selection driven through the full
@@ -40,7 +44,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaRestriction, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 const WATERBENDER_ASCENSION_ORACLE: &str = "Whenever a creature you control deals combat damage to a player, put a quest counter on this enchantment. Then if it has four or more quest counters on it, draw a card.\nWaterbend {4}: Target creature can't be blocked this turn.";
@@ -199,5 +203,119 @@ fn waterbend_tap_to_help_makes_targeted_creature_unblockable() {
         "issue #4966: \"Waterbend {{4}}: Target creature can't be blocked \
          this turn.\" must make the targeted creature unblockable even when \
          the cost is paid via tap-to-help, not a pre-funded mana pool"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Payment-context boundary — maintainer review on PR #6097
+// ---------------------------------------------------------------------------
+//
+// CR 106.6: the affordability pre-check for an ACTIVATED ability must consult
+// the activation half of every mana restriction, exactly like the later
+// payment step (`PaymentContext::Activation`), never the spell half. The two
+// halves diverge in both directions:
+//   - activation-only mana (`ManaRestriction::OnlyForActivation`) counts for
+//     the activation but not for a spell;
+//   - spell-only mana (`ManaRestriction::OnlyForSpell`) counts for a spell
+//     but not for the activation.
+// Probing the Waterbend activation with a SPELL context therefore (a)
+// suppressed a payable activation when the player's only funding was
+// activation-only mana, and (b) offered an unpayable activation when the only
+// funding was spell-only mana. Both directions are pinned below; the runtime
+// gate surfaces as `ActivateAbility` being accepted vs. rejected
+// ("Cannot pay activation cost").
+
+/// Direction (a): activation-only restricted mana MUST make the Waterbend
+/// activation available — it is fully spendable by the actual activation
+/// payment. With the old spell-context probe, `allows_spell(OnlyForActivation)`
+/// is false, no other funding exists, and the activation was wrongly rejected.
+#[test]
+fn waterbend_activation_only_mana_makes_ability_available() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ascension = scenario
+        .add_creature(P0, "Waterbender Ascension", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(WATERBENDER_ASCENSION_ORACLE)
+        .with_mana_cost(ManaCost::NoCost)
+        .id();
+
+    let attacker = scenario.add_creature(P0, "Swift Raider", 2, 2).id();
+    let blocker = scenario.add_creature(P1, "Guard", 2, 2).id();
+
+    // The ONLY funding: 4 colorless restricted to ability activation. No
+    // helpers to tap, no other mana sources.
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(9_999),
+                false,
+                vec![ManaRestriction::OnlyForActivation],
+            );
+            4
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    runner
+        .activate(ascension, 0)
+        .target_object(attacker)
+        .resolve();
+
+    assert!(
+        !can_block_pair(runner.state(), blocker, attacker),
+        "activation-only mana must fund the Waterbend activation: the \
+         affordability gate must consult allows_activation, not allows_spell"
+    );
+}
+
+/// Direction (b): spell-only restricted mana must NOT make the Waterbend
+/// activation available — the actual payment step could never spend it. With
+/// the old spell-context probe, `allows_spell(OnlyForSpell)` is true and the
+/// gate offered an activation the payment pipeline must reject.
+#[test]
+fn waterbend_spell_only_mana_does_not_make_ability_available() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let ascension = scenario
+        .add_creature(P0, "Waterbender Ascension", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(WATERBENDER_ASCENSION_ORACLE)
+        .with_mana_cost(ManaCost::NoCost)
+        .id();
+
+    scenario.add_creature(P0, "Swift Raider", 2, 2);
+
+    // The ONLY funding: 4 colorless restricted to spell casting. No helpers
+    // to tap, no other mana sources — the activation is genuinely unpayable.
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(9_999),
+                false,
+                vec![ManaRestriction::OnlyForSpell],
+            );
+            4
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: ascension,
+        ability_index: 0,
+    });
+    assert!(
+        result.is_err(),
+        "spell-only mana must not satisfy the activation affordability gate — \
+         offering this activation would strand the player in an unpayable \
+         ManaPayment window; got {result:?}"
     );
 }
