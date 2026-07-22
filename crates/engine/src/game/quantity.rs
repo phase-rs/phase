@@ -296,6 +296,14 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
                 ..
+            }
+            // CR 122.1 + CR 613.4c: "…for each [kind] counter on it/them" in a
+            // per-recipient continuous static counts the counters on the
+            // affected object, so the magnitude varies per recipient (Toxrill,
+            // Clamavus, Thelon of Havenwood, Luxior, Spark Rupture).
+            | QuantityRef::CountersOn {
+                scope: ObjectScope::Recipient,
+                ..
             } => true,
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
