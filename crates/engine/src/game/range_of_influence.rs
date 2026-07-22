@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// CR 801.2c: the players within each player's range of influence, fixed at the
 /// start of the current turn.
@@ -69,6 +70,16 @@ impl RangeOfInfluenceSnapshot {
 
 /// CR 801.2 + CR 801.2c: compute the range-of-influence snapshot for the CURRENT
 /// seating, or `None` when the game does not use the option.
+///
+/// # Uniform range is the implemented subset
+///
+/// CR 801.2a notes "different players may have different ranges of influence."
+/// This reads one match-wide range from `FormatConfig::range_of_influence`,
+/// which covers CR 809 Emperor (all players share range 1) and every
+/// configuration the format layer can express today. The stored snapshot is
+/// deliberately *observer-keyed* rather than a single shared set, so
+/// per-player ranges are a config-layer extension (a per-seat range map feeding
+/// this loop) rather than a redesign of the snapshot or its consumers.
 ///
 /// Distance is measured over the seats still in the game: CR 801.2c's example
 /// has a departed player's neighbours become adjacent, so an eliminated seat
@@ -136,7 +147,14 @@ pub fn player_in_range(state: &GameState, observer: PlayerId, other: PlayerId) -
     }
 }
 
-/// CR 801.2d: an object is within a player's range if its controller is.
+/// CR 801.2d: an object is within a player's range if the player whose range it
+/// belongs to is.
+///
+/// On the battlefield and the stack an object has a controller, and range
+/// follows the controller (CR 801.2d, CR 108.4). In every other zone a card has
+/// no controller — only an owner (CR 108.3) — so range follows the owner there;
+/// reading the residual `controller` field for a graveyard or hand card would
+/// judge range by stale, non-authoritative state.
 ///
 /// An object that no longer exists is reported out of range rather than in it,
 /// so a stale id can never widen what a player may reach.
@@ -144,8 +162,11 @@ pub fn object_in_range(state: &GameState, observer: PlayerId, object: ObjectId) 
     if state.range_of_influence.is_none() {
         return true;
     }
-    state
-        .objects
-        .get(&object)
-        .is_some_and(|object| player_in_range(state, observer, object.controller))
+    state.objects.get(&object).is_some_and(|object| {
+        let seat = match object.zone {
+            Zone::Battlefield | Zone::Stack => object.controller,
+            _ => object.owner,
+        };
+        player_in_range(state, observer, seat)
+    })
 }

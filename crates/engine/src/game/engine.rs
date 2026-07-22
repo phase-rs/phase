@@ -10372,6 +10372,14 @@ pub fn start_game_with_starting_player(
     }
     state.phase = Phase::Untap;
 
+    // CR 801.2c: the players in each player's range of influence are determined
+    // "as each turn begins" — including turn 1. `start_next_turn` handles every
+    // later turn, but the first turn is set up here, so seed the snapshot now
+    // that seat order is final. Without this a limited-range game would treat
+    // every target as in range for the whole first turn. No-op unless the
+    // format opts in.
+    super::range_of_influence::refresh_for_turn(state);
+
     events.push(GameEvent::TurnStarted {
         player_id: starting_player,
         turn_number: 1,
@@ -10418,6 +10426,11 @@ pub fn start_game_skip_mulligan(state: &mut GameState) -> ActionResult {
     state.priority_player = starting_player;
     state.current_starting_player = starting_player;
     state.phase = Phase::Untap;
+
+    // CR 801.2c: seed the turn-1 range-of-influence snapshot (see the mirrored
+    // comment in `start_game_with_starting_player`). No-op unless the format
+    // uses a limited range.
+    super::range_of_influence::refresh_for_turn(state);
 
     events.push(GameEvent::TurnStarted {
         player_id: starting_player,

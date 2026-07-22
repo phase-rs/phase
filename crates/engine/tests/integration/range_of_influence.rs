@@ -75,11 +75,16 @@ fn a_departure_only_changes_range_at_the_next_turn_start() {
     // separated by Rob. When Rob leaves, Carissa enters Alex's range — but not
     // until the next turn begins. Recomputing live (what #6279 did) would move
     // her into range immediately and change legality mid-turn.
+    //
+    // Uses a 5-seat table, not 3: in a 3-seat circle every seat is within
+    // distance 1 of every other via the wrap, so Rob would not actually sit
+    // "between" Alex and Carissa and the example's topology wouldn't hold. With
+    // 5 seats Carissa starts at distance 2 and drops to 1 only once Rob leaves.
     let alex = PlayerId(0);
     let rob = PlayerId(1);
     let carissa = PlayerId(2);
 
-    let mut state = table(3, Some(1));
+    let mut state = table(5, Some(1));
     refresh_for_turn(&mut state);
     assert!(
         !player_in_range(&state, alex, carissa),
@@ -97,6 +102,76 @@ fn a_departure_only_changes_range_at_the_next_turn_start() {
         player_in_range(&state, alex, carissa),
         "CR 801.2c: she enters Alex's range at the start of the next turn"
     );
+}
+
+#[test]
+fn target_enumeration_drops_out_of_range_players_through_the_real_pipeline() {
+    // CR 801.4 through the production targeting path, not the snapshot helpers:
+    // `find_legal_targets` is the authority every spell/ability targeting query
+    // routes through. At range 1 on a 5-seat table, player 0 casting a
+    // player-targeting effect may reach only seats 4, 0, 1 — seats 2 and 3 must
+    // be filtered out even though they are legal players otherwise.
+    use engine::game::targeting::find_legal_targets;
+    use engine::types::ability::{TargetFilter, TargetRef};
+
+    let mut state = table(5, Some(1));
+    refresh_for_turn(&mut state);
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Targeter".into(),
+        Zone::Battlefield,
+    );
+
+    let legal: Vec<PlayerId> =
+        find_legal_targets(&state, &TargetFilter::Player, PlayerId(0), source)
+            .into_iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+
+    for reachable in [PlayerId(0), PlayerId(1), PlayerId(4)] {
+        assert!(
+            legal.contains(&reachable),
+            "seat {reachable:?} is within range 1 and must be targetable; got {legal:?}"
+        );
+    }
+    for unreachable in [PlayerId(2), PlayerId(3)] {
+        assert!(
+            !legal.contains(&unreachable),
+            "CR 801.4: seat {unreachable:?} is out of range and must not be a legal target; got {legal:?}"
+        );
+    }
+}
+
+#[test]
+fn the_first_turn_snapshot_is_seeded_at_game_start() {
+    // CR 801.2c determines range "as each turn begins", including turn 1. The
+    // maintainer's blocker: `refresh_for_turn` runs at every LATER turn via
+    // `start_next_turn`, but turn 1 is set up by the game-start path — so
+    // without seeding there, a limited-range game would treat every target as
+    // in range for the entire first turn.
+    use engine::game::engine::start_game_skip_mulligan;
+
+    let mut state = table(5, Some(1));
+    assert!(
+        state.range_of_influence.is_none(),
+        "precondition: no snapshot before the game starts"
+    );
+
+    start_game_skip_mulligan(&mut state);
+
+    let snapshot = state
+        .range_of_influence
+        .as_ref()
+        .expect("turn-1 snapshot must be seeded at game start");
+    // Range 1 from seat 0 reaches 0, 1, 4 but not 2 or 3 — the snapshot is real,
+    // not a permissive placeholder.
+    assert!(snapshot.contains(PlayerId(0), PlayerId(1)));
+    assert!(!snapshot.contains(PlayerId(0), PlayerId(2)));
 }
 
 #[test]

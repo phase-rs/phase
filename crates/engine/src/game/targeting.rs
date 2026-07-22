@@ -106,6 +106,30 @@ fn find_legal_targets_with_context(
     source_id: ObjectId,
     target_ctx: &super::filter::FilterContext,
 ) -> Vec<TargetRef> {
+    let mut targets = find_legal_targets_with_context_unfiltered(
+        state,
+        filter,
+        source_controller,
+        source_id,
+        target_ctx,
+    );
+    // CR 801.4: objects and players outside a player's range of influence can't
+    // be the targets of spells or abilities that player controls. Applied here,
+    // wrapping the enumeration, so EVERY early return inside the unfiltered body
+    // (SpecificPlayer, player-only typed filters, stack-ability filters, the Or
+    // recursion, …) is covered — no single interior return can bypass it. A
+    // no-op unless the format opts into a limited range.
+    retain_targets_in_range(state, source_controller, &mut targets);
+    targets
+}
+
+fn find_legal_targets_with_context_unfiltered(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    target_ctx: &super::filter::FilterContext,
+) -> Vec<TargetRef> {
     let mut targets = Vec::new();
 
     // SpecificObject is runtime-bound (not used for target selection)
@@ -122,7 +146,10 @@ fn find_legal_targets_with_context(
     if let TargetFilter::Or { filters } = filter {
         let mut seen = HashSet::new();
         for branch in filters {
-            for target in find_legal_targets_with_context(
+            // Recurse into the UNFILTERED body: the single wrapper applies the
+            // CR 801.4 range filter once to the unioned result, so filtering per
+            // branch here would be redundant work.
+            for target in find_legal_targets_with_context_unfiltered(
                 state,
                 branch,
                 source_controller,
@@ -382,13 +409,6 @@ fn find_legal_targets_with_context(
         }
     }
 
-    // CR 801.4: objects and players outside a player's range of influence can't
-    // be the targets of spells or abilities that player controls. Applied once
-    // here, at the single enumeration funnel every targeting path routes
-    // through, rather than inside each filter branch — so no branch can forget
-    // it. A no-op unless the format opts into a limited range.
-    retain_targets_in_range(state, source_controller, &mut targets);
-
     targets
 }
 
@@ -421,6 +441,24 @@ fn has_legal_target_with_context(
     source_id: ObjectId,
     target_ctx: &super::filter::FilterContext,
 ) -> bool {
+    // CR 801.4: under a limited range of influence, "has a legal target" must
+    // agree with the range-filtered enumeration — a target the caller could
+    // never legally choose does not count. Rather than thread the range check
+    // through this function's own early returns (the same trap the enumeration
+    // path had), defer to the filtered enumeration when the option is on. The
+    // unlimited case (every shipped format) keeps the short-circuit fast path
+    // below untouched.
+    if state.range_of_influence.is_some() {
+        return !find_legal_targets_with_context(
+            state,
+            filter,
+            source_controller,
+            source_id,
+            target_ctx,
+        )
+        .is_empty();
+    }
+
     if matches!(
         filter,
         TargetFilter::SpecificObject { .. } | TargetFilter::ParentTarget
