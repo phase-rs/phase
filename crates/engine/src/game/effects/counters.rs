@@ -413,6 +413,7 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                     events.push(GameEvent::PlayerPerformedAction {
                         player_id: action.player_id,
                         action: action.action,
+                        look_count: None,
                     });
                 }
             }
@@ -469,7 +470,11 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::RecordPlayerAction { player_id, action } => {
-            events.push(GameEvent::PlayerPerformedAction { player_id, action });
+            events.push(GameEvent::PlayerPerformedAction {
+                player_id,
+                action,
+                look_count: None,
+            });
             true
         }
         PendingCounterPostAction::AddSubtype { object_id, subtype } => {

@@ -289,7 +289,9 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" passes priority")]
         }
 
-        GameEvent::PlayerPerformedAction { player_id, action } => vec![
+        GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } => vec![
             player_seg(state, *player_id),
             text(" performed action "),
             text(&format!("{action:?}")),

@@ -466,6 +466,7 @@ fn natural_balance_collects_two_local_x_searches_before_one_shuffle_each() {
             engine::types::events::GameEvent::PlayerPerformedAction {
                 player_id,
                 action: engine::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
             } => Some(*player_id),
             _ => None,
         })

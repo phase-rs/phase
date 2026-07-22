@@ -511,6 +511,7 @@ fn prepare_scoped_group(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: player,
                 action: PlayerActionKind::SearchedLibrary,
+                look_count: None,
             });
             state.players_who_searched_library_this_turn.insert(player);
             state

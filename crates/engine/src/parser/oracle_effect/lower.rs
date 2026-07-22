@@ -8698,18 +8698,15 @@ fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> 
 /// CR 701.22a: "where X is the number of cards looked at while scrying this
 /// way" (Elrond, Master of Healing) binds X to the effective (post-clamp)
 /// look count of the scry that fired the enclosing "whenever you scry"
-/// trigger — `QuantityRef::TriggeringScryLookCount`, read from
-/// `GameState::last_scry_look_count` at resolution time. Mirrors
-/// `parse_where_x_kicker_count`'s bare full-phrase match.
+/// trigger — `QuantityRef::TriggeringScryLookCount`, resolved per-trigger
+/// from that trigger's own preserved scry event. Delegates to the composed
+/// grammar in `oracle_nom::quantity` (shared with the general quantity-ref
+/// channel); the where-X binder additionally requires the phrase to own the
+/// entire expression.
 fn parse_where_x_scry_look_count(where_x_expression: &str) -> Option<QuantityExpr> {
     let lower = where_x_expression.to_ascii_lowercase();
-    let (rest, _) =
-        tag::<_, _, OracleError<'_>>("the number of cards looked at while scrying this way")
-            .parse(lower.as_str())
-            .ok()?;
-    rest.is_empty().then_some(QuantityExpr::Ref {
-        qty: QuantityRef::TriggeringScryLookCount,
-    })
+    let (rest, qty) = nom_quantity::parse_scry_look_count_ref(lower.as_str()).ok()?;
+    rest.is_empty().then_some(QuantityExpr::Ref { qty })
 }
 
 /// CR 107.3c: A "where X is …" clause DEFINES the value of X in the ability's

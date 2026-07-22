@@ -7781,6 +7781,7 @@ fn apply_action(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: p,
                 action: PlayerActionKind::Proliferate,
+                look_count: None,
             });
             let pending = state
                 .take_active_proliferate_frame()

@@ -1253,6 +1253,18 @@ pub enum GameEvent {
     PlayerPerformedAction {
         player_id: PlayerId,
         action: PlayerActionKind,
+        /// CR 701.22a: For `PlayerActionKind::Scry`, the effective number of
+        /// cards looked at — the requested amount clamped to library size.
+        /// This is the PER-EVENT provenance for "the number of cards looked
+        /// at while scrying this way" (Elrond, Master of Healing →
+        /// `QuantityRef::TriggeringScryLookCount`): each queued "whenever you
+        /// scry" trigger preserves its own event through target selection and
+        /// stack resolution (`PendingTriggerContext`), so two scries with
+        /// different look counts in one resolution keep distinct values —
+        /// a global scalar could be overwritten before the queued triggers
+        /// are constructed. `None` for actions without a magnitude.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        look_count: Option<u32>,
     },
     /// Engine-authored diagnostic for top-card predicate
     /// guesses. This is intentionally a log/debug event rather than rules input:

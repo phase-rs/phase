@@ -241,7 +241,6 @@ mod issue_1025_rishkars_expertise;
 mod issue_1092_chthonian_nightmare;
 mod issue_1120_warden_of_the_grove;
 mod issue_1124_ohran_frostfang_attacking_deathtouch;
-mod issue_1128_elrond_becomes_target;
 mod issue_1128_elrond_scry_counter;
 mod issue_1135_ents_fury_fight;
 mod issue_1156_coin_of_mastery;

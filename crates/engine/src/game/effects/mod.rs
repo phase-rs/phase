@@ -9230,7 +9230,10 @@ fn resolve_chain_body(
     // `last_zone_changed_ids`: "searched this way" keys off the player action
     // even when the search finds no card.
     for event in &events[events_before..] {
-        if let GameEvent::PlayerPerformedAction { player_id, action } = event {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = event
+        {
             state.player_actions_this_way.insert((*player_id, *action));
             state.player_actions_this_turn.push((*player_id, *action));
         }
@@ -12982,6 +12985,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
+            look_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {

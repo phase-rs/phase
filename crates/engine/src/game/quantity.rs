@@ -2149,11 +2149,31 @@ fn resolve_ref(
         // "whenever you discover" trigger (Curator of Sun's Creation, "the same
         // value"). 0 outside a discover-trigger context.
         QuantityRef::TriggeringDiscoverValue => state.last_discover_value.unwrap_or(0),
-        // CR 701.22a: the effective (clamped) look count of the scry that
-        // fired the current "whenever you scry" trigger (Elrond, Master of
-        // Healing, "the number of cards looked at while scrying this way").
-        // 0 outside a scry-trigger context.
-        QuantityRef::TriggeringScryLookCount => state.last_scry_look_count.unwrap_or(0),
+        // CR 701.22a + CR 701.22d: the effective (clamped) look count of the
+        // scry that fired the CURRENT "whenever you scry" trigger (Elrond,
+        // Master of Healing, "the number of cards looked at while scrying
+        // this way"). Read from the trigger's own preserved event — the
+        // resolution-time `current_trigger_event`, falling back to the
+        // detection-time thread-local during announce-time target-slot
+        // construction — NOT from any global scalar: a resolution that
+        // scries more than once queues one trigger per scry, and each must
+        // expose ITS scry's look count, not the last one recorded. 0 outside
+        // a scry-trigger context.
+        QuantityRef::TriggeringScryLookCount => state
+            .current_trigger_event
+            .as_ref()
+            .cloned()
+            .or_else(detection_trigger_event)
+            .and_then(|event| match event {
+                crate::types::events::GameEvent::PlayerPerformedAction {
+                    action: crate::types::events::PlayerActionKind::Scry,
+                    look_count,
+                    ..
+                } => look_count,
+                _ => None,
+            })
+            .map(u32_to_i32_saturating)
+            .unwrap_or(0),
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
             resolve_per_player_scalar(state, player, controller, ctx, targets, ability, |p| {
