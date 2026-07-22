@@ -44925,59 +44925,69 @@ fn sibling_quoted_token_items_stay_separate() {
 /// inner `, create …`, splitting Whale and Kraken into siblings.
 #[test]
 fn nested_token_cascade_survives_embedded_apostrophe() {
-    let def = parse_effect_chain(
-        "create a 3/3 blue Fish creature token with \"When this token dies, create \
-         a 6/6 blue Whale creature token with 'When this token dies during your \
-         opponent's turn, create a 9/9 blue Kraken creature token.'\"",
-        AbilityKind::Spell,
-    );
-    // Fish must remain a single Token, not a ChooseOneOf/sequence.
-    let Effect::Token {
-        name,
-        static_abilities,
-        ..
-    } = &*def.effect
-    else {
-        panic!("Fish must stay one Token, got {:?}", def.effect);
-    };
-    assert_eq!(name, "Fish");
-    // The Fish's dies-trigger must create a Whale that itself carries a grant
-    // whose effect creates a Kraken — i.e. the apostrophe did not split them.
-    let whale_effect = static_abilities
-        .iter()
-        .flat_map(|sd| sd.modifications.iter())
-        .find_map(|m| match m {
-            crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
-                trigger.execute.as_ref().map(|e| &e.effect)
-            }
-            _ => None,
-        })
-        .expect("Fish carries a dies-trigger that creates the Whale");
-    let Effect::Token {
-        name: whale_name,
-        static_abilities: whale_statics,
-        ..
-    } = &**whale_effect
-    else {
-        panic!("Fish's trigger must create a Whale Token, got {whale_effect:?}");
-    };
-    assert_eq!(whale_name, "Whale");
-    let makes_kraken = whale_statics
-        .iter()
-        .flat_map(|sd| sd.modifications.iter())
-        .any(|m| {
-            matches!(
-                m,
-                crate::types::ability::ContinuousModification::GrantTrigger { trigger }
-                    if trigger.execute.as_ref().is_some_and(|e|
-                        matches!(&*e.effect, Effect::Token { name, .. } if name == "Kraken"))
-            )
-        });
-    assert!(
-        makes_kraken,
-        "the Whale must carry a grant that creates the Kraken — the embedded \
-         apostrophe must not have split them into siblings. Whale statics: {whale_statics:?}"
-    );
+    // Both apostrophe shapes must stay content: a singular possessive
+    // (`opponent's`, glued to a following letter) and a PLURAL possessive
+    // (`opponents'`, apostrophe then space) — each sitting in the nested grant
+    // BEFORE the internal `, create` separator.
+    for (label, timing) in [
+        ("singular possessive", "during your opponent's turn"),
+        ("plural possessive", "during one of your opponents' turns"),
+    ] {
+        let text = format!(
+            "create a 3/3 blue Fish creature token with \"When this token dies, \
+             create a 6/6 blue Whale creature token with 'When this token dies \
+             {timing}, create a 9/9 blue Kraken creature token.'\""
+        );
+        let def = parse_effect_chain(&text, AbilityKind::Spell);
+        // Fish must remain a single Token, not a ChooseOneOf/sequence.
+        let Effect::Token {
+            name,
+            static_abilities,
+            ..
+        } = &*def.effect
+        else {
+            panic!("[{label}] Fish must stay one Token, got {:?}", def.effect);
+        };
+        assert_eq!(name, "Fish", "[{label}]");
+        // The Fish's dies-trigger must create a Whale that itself carries a grant
+        // whose effect creates a Kraken — i.e. the apostrophe did not split them.
+        let whale_effect = static_abilities
+            .iter()
+            .flat_map(|sd| sd.modifications.iter())
+            .find_map(|m| match m {
+                crate::types::ability::ContinuousModification::GrantTrigger { trigger } => {
+                    trigger.execute.as_ref().map(|e| &e.effect)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("[{label}] Fish carries a dies-trigger for the Whale"));
+        let Effect::Token {
+            name: whale_name,
+            static_abilities: whale_statics,
+            ..
+        } = &**whale_effect
+        else {
+            panic!("[{label}] Fish's trigger must create a Whale Token, got {whale_effect:?}");
+        };
+        assert_eq!(whale_name, "Whale", "[{label}]");
+        let makes_kraken = whale_statics
+            .iter()
+            .flat_map(|sd| sd.modifications.iter())
+            .any(|m| {
+                matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::GrantTrigger { trigger }
+                        if trigger.execute.as_ref().is_some_and(|e|
+                            matches!(&*e.effect, Effect::Token { name, .. } if name == "Kraken"))
+                )
+            });
+        assert!(
+            makes_kraken,
+            "[{label}] the Whale must carry a grant that creates the Kraken — the \
+             embedded apostrophe must not have split them into siblings. Whale \
+             statics: {whale_statics:?}"
+        );
+    }
 }
 
 /// CR 111.2 + CR 608.2d: Production-path (`parse_oracle_text`) regression for
