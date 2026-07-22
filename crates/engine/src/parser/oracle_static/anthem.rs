@@ -138,14 +138,35 @@ pub(crate) fn parse_typed_you_control(
                 // in either order (see its leading and post-negation
                 // supertype/color passes in `oracle_target.rs`) — rather than
                 // growing a second bespoke color+supertype combinator here.
-                // Declines unless the whole subject is consumed as a single
-                // Typed filter, so this cannot misfire into a fabricated
-                // filter for an unrelated descriptor shape.
+                //
+                // Accept ONLY when the fully-consumed result carries BOTH a
+                // `HasColor` and a `HasSupertype` property — i.e. genuinely a
+                // color+supertype compound, not merely "some descriptor
+                // `parse_type_phrase` happens to accept." A full-consumption
+                // check alone is not narrow enough: descriptors this function
+                // has no OTHER arm for (e.g. Saryth, the Viper's Fang / Augusta,
+                // Dean of Order's "Other tapped creatures you control .../Other
+                // untapped creatures you control ...") also fully consume
+                // through `parse_type_phrase`, and unconditionally accepting
+                // them here would silently reroute cards that are unrelated to
+                // this fix onto a different (and untested, for them) filter
+                // path. Requiring both properties scopes acceptance to exactly
+                // the class this fix targets.
                 } else {
                     let subject_and_type = tp.original[..creatures_pos + " creatures".len()].trim();
                     let (compound_filter, remainder) = parse_type_phrase(subject_and_type);
                     match compound_filter {
-                        TargetFilter::Typed(typed) if remainder.trim().is_empty() => {
+                        TargetFilter::Typed(typed)
+                            if remainder.trim().is_empty()
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasColor { .. }))
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasSupertype { .. })) =>
+                        {
                             TargetFilter::Typed(typed.controller(ControllerRef::You))
                         }
                         _ => return None,
