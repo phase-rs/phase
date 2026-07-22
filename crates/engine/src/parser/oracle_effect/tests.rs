@@ -47935,14 +47935,38 @@ fn unterminated_quote_still_exposes_outer_unless() {
     );
 }
 
+/// The single `GrantStaticAbility` definition a `GenericEffect` carries.
+fn sole_granted_static(effect: &Effect) -> &crate::types::ability::StaticDefinition {
+    use crate::types::ability::ContinuousModification as CM;
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        panic!("expected a GenericEffect grant, got {effect:?}");
+    };
+    static_abilities
+        .iter()
+        .flat_map(|sd| sd.modifications.iter())
+        .find_map(|m| match m {
+            CM::GrantStaticAbility { definition } => Some(&**definition),
+            // `ContinuousModification` has ~50 variants; a full exhaustive arm here
+            // is noise for a test selector. The assertion below still proves the
+            // grant carries UnlessPay, so a shape regression cannot pass silently.
+            _ => None,
+        })
+        .expect("effect must carry exactly one GrantStaticAbility")
+}
+
 /// Card-path (`parse_oracle_text`) regression for the two parse-diff siblings of
-/// the Mage's Attendant fix. Both grant an ability whose text contains an inner
-/// `unless … pay`; that clause must stay ON THE GRANT, never hoisted onto the
-/// outer activated ability.
+/// the Mage's Attendant fix. Their granted ability's inner `unless … pay` must
+/// stay ON THE GRANT, never hoisted onto the outer activated ability.
 #[test]
 fn granted_ability_inner_unless_stays_on_the_grant() {
-    // Whipgrass Entangler: grants a can't-attack-or-block-unless-pay static. The
-    // inner `unless its controller pays {1}` belongs to the granted static.
+    use crate::types::ability::StaticCondition;
+
+    // Whipgrass Entangler: the `{1}{W}` activation grants a can't-attack-or-block
+    // static whose `unless its controller pays {1}` is a per-Cleric UnlessPay
+    // condition ON THE GRANTED static, not on the activation.
     let whip = parse_oracle_text(
         "{1}{W}: Until end of turn, target creature gains \"This creature can't \
          attack or block unless its controller pays {1} for each Cleric on the \
@@ -47952,19 +47976,34 @@ fn granted_ability_inner_unless_stays_on_the_grant() {
         &["Creature".to_string()],
         &[],
     );
-    let ability = whip
-        .abilities
-        .iter()
-        .find(|a| a.unless_pay.is_none())
-        .expect("the {1}{W} activation must not carry a hoisted unless_pay");
-    let dump = format!("{ability:?}");
+    assert_eq!(
+        whip.abilities.len(),
+        1,
+        "Whipgrass has one activated ability"
+    );
+    let activation = &whip.abilities[0];
+    assert_eq!(
+        activation.kind,
+        AbilityKind::Activated,
+        "the {{1}}{{W}} ability is activated"
+    );
     assert!(
-        dump.contains("UnlessPay"),
-        "the granted static must retain its 'unless … pays' condition, got {dump}"
+        activation.unless_pay.is_none(),
+        "the activation itself must NOT carry a hoisted unless_pay"
+    );
+    let granted = sole_granted_static(&activation.effect);
+    assert!(
+        matches!(granted.condition, Some(StaticCondition::UnlessPay { .. })),
+        "the granted static must carry the per-Cleric 'unless … pays' condition, \
+         got {:?}",
+        granted.condition
     );
 
-    // Musician: conditionally grants a quoted upkeep-destroy-unless-pay trigger.
-    // The activation must not hoist the inner `unless you pay {1}`.
+    // Musician: the `{T}` activation puts a music counter and conditionally grants
+    // a quoted upkeep-destroy-unless-pay ability. That conditional self-referential
+    // grant is a separate, still-unimplemented parse (the quoted ability is not
+    // lowered to a typed grant), so the only invariant this fix owns is that the
+    // inner `unless you pay {1}` is NOT hoisted onto the `{T}` activation.
     let musician = parse_oracle_text(
         "{T}: Put a music counter on target creature. If it doesn't have \"At the \
          beginning of your upkeep, destroy this creature unless you pay {1} for \
@@ -47974,8 +48013,42 @@ fn granted_ability_inner_unless_stays_on_the_grant() {
         &["Creature".to_string()],
         &[],
     );
+    assert_eq!(
+        musician.abilities.len(),
+        1,
+        "Musician has one activated ability (reach guard — not a vacuous empty list)"
+    );
+    let tap = &musician.abilities[0];
     assert!(
-        musician.abilities.iter().all(|a| a.unless_pay.is_none()),
-        "Musician's activation must not carry a hoisted unless_pay"
+        matches!(&*tap.effect, Effect::PutCounter { .. }),
+        "the {{T}} ability puts a music counter, got {:?}",
+        tap.effect
+    );
+    assert!(
+        tap.unless_pay.is_none(),
+        "the {{T}} activation must NOT carry a hoisted unless_pay"
+    );
+}
+
+/// CR 118.12: The `unless` scan's mask offsets are used to slice the ORIGINAL
+/// text, so the case-fold that builds the scan buffer MUST preserve byte length.
+/// `İ` (U+0130) is 2 bytes but Unicode-lowercases to `i̇` (3 bytes); an ASCII fold
+/// keeps it 2 bytes. A quoted prefix containing `İ` before a real outer `unless`
+/// therefore exposes the offset defect: with `to_lowercase` the cleaned-effect
+/// slice is misaligned (or panics mid-char); with `to_ascii_lowercase` it is exact
+/// AND the quoted prefix is preserved (the mask is only for locating `unless`).
+#[test]
+fn unless_extraction_offsets_survive_unicode_case_fold() {
+    let text = "destroy target creature named \"İX\" unless its controller pays {1}";
+    let (cleaned, unless_pay) = super::extract_resolution_unless_pay_modifier(text, None);
+    assert!(
+        unless_pay.is_some(),
+        "the outer unless-pay must still be extracted with a non-ASCII prefix"
+    );
+    assert_eq!(
+        cleaned, "destroy target creature named \"İX\"",
+        "the cleaned effect must be sliced at the correct byte offset and keep the \
+         quoted prefix (the `İ` expansion under Unicode lowercasing must not shift \
+         the boundary, and the mask must not eat the quote)"
     );
 }
