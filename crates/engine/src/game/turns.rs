@@ -1369,8 +1369,14 @@ pub fn execute_untap_with_choices(
                                 count: 1,
                             });
                         }
-                    } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
+                    } else if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .expect("untap-step object must remain a live exact object")
+                    {
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }
@@ -1693,8 +1699,14 @@ fn execute_seedborn_statics(state: &mut GameState, events: &mut Vec<GameEvent>, 
                                     count: 1,
                                 });
                             }
-                        } else if let Some(obj) = state.objects.get_mut(&object_id) {
-                            obj.tapped = false;
+                        } else if crate::game::object_state::resolve_and_apply_object_edit(
+                            state,
+                            object_id,
+                            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                            false,
+                        )
+                        .expect("Seedborn untap object must remain a live exact object")
+                        {
                             events.push(GameEvent::PermanentUntapped { object_id });
                         }
                     }

@@ -412,10 +412,14 @@ pub(crate) fn activate_mana_source_option(
             production_override,
         )?
     } else {
-        let object = state.objects.get_mut(&option.object_id).ok_or_else(|| {
-            EngineError::InvalidAction("Mana source no longer exists".to_string())
-        })?;
-        object.tapped = true;
+        let tapped = super::object_state::resolve_and_apply_object_edit(
+            state,
+            option.object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            true,
+        )
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        debug_assert!(tapped, "preflighted land tap must transition status");
         events.push(GameEvent::PermanentTapped {
             object_id: option.object_id,
             caused_by: None,

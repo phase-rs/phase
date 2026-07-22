@@ -423,8 +423,14 @@ pub(super) fn handle_replacement_choice(
                 }
                 // CR 701.26a: Tap accepted after replacement choice.
                 ProposedEvent::Tap { object_id, .. } => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = true;
+                    if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        true,
+                    )
+                    .is_ok()
+                    {
                         events.push(GameEvent::PermanentTapped {
                             object_id,
                             caused_by: None,
@@ -433,8 +439,14 @@ pub(super) fn handle_replacement_choice(
                 }
                 // CR 701.26b: Untap accepted after replacement choice.
                 ProposedEvent::Untap { object_id, .. } => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        obj.tapped = false;
+                    if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .is_ok()
+                    {
                         events.push(GameEvent::PermanentUntapped { object_id });
                     }
                 }

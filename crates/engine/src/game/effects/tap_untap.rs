@@ -10,6 +10,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolved_commands::ResolvedObjectStatus;
 use crate::types::zones::Zone;
 
 /// CR 603.7e + CR 608.2c: Resolve the objects a `Tap`/`Untap` effect acts on.
@@ -167,15 +168,19 @@ pub(crate) fn process_one_tap(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             if let ProposedEvent::Tap { object_id, .. } = event {
-                let obj = state
-                    .objects
-                    .get_mut(&object_id)
-                    .ok_or(EffectError::ObjectNotFound(object_id))?;
-                obj.tapped = true;
-                events.push(GameEvent::PermanentTapped {
+                if crate::game::object_state::resolve_and_apply_object_edit(
+                    state,
                     object_id,
-                    caused_by: Some(source_id),
-                });
+                    ResolvedObjectStatus::Tapped,
+                    true,
+                )
+                .map_err(|_| EffectError::ObjectNotFound(object_id))?
+                {
+                    events.push(GameEvent::PermanentTapped {
+                        object_id,
+                        caused_by: Some(source_id),
+                    });
+                }
             }
             Ok(TapUntapOutcome::Complete)
         }
@@ -229,12 +234,16 @@ pub(crate) fn process_one_untap(
                         });
                     }
                 } else {
-                    let obj = state
-                        .objects
-                        .get_mut(&object_id)
-                        .ok_or(EffectError::ObjectNotFound(object_id))?;
-                    obj.tapped = false;
-                    events.push(GameEvent::PermanentUntapped { object_id });
+                    if crate::game::object_state::resolve_and_apply_object_edit(
+                        state,
+                        object_id,
+                        ResolvedObjectStatus::Tapped,
+                        false,
+                    )
+                    .map_err(|_| EffectError::ObjectNotFound(object_id))?
+                    {
+                        events.push(GameEvent::PermanentUntapped { object_id });
+                    }
                 }
             }
             Ok(TapUntapOutcome::Complete)
