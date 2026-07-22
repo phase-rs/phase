@@ -98,7 +98,8 @@ fn choose_branch_and_settle(runner: &mut GameRunner, keyword: &str) {
         match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() && runner.state().deferred_triggers.is_empty() {
-                    break;
+                    evaluate_layers(runner.state_mut());
+                    return;
                 }
                 runner.pass_both_players();
             }
@@ -106,7 +107,7 @@ fn choose_branch_and_settle(runner: &mut GameRunner, keyword: &str) {
         }
     }
 
-    evaluate_layers(runner.state_mut());
+    panic!("stack/deferred_triggers did not settle within 16 priority passes");
 }
 
 /// Self-target: Golem Artisan activates its choice ability targeting ITSELF and
