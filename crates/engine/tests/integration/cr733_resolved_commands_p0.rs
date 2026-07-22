@@ -5,10 +5,36 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const AUTHORITY_MATRIX: &str = include_str!("../fixtures/cr733/authority_matrix.json");
-const WRITE_SITE_CLASSIFICATIONS: &str = include_str!("../fixtures/cr733/blocked_write_sites.json");
-const RNG_ALLOCATOR_MAP: &str = include_str!("../fixtures/cr733/rng_allocator_map.json");
-const SIDE_EFFECT_MAP: &str = include_str!("../fixtures/cr733/side_effect_map.json");
+// Fixtures are gzipped to keep the repo small; regenerating via
+// scripts/cr733_mutation_census.py requires re-gzipping (`gzip -9 -n`).
+fn gunzip(gz: &[u8]) -> String {
+    use std::io::Read;
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(gz)
+        .read_to_string(&mut json)
+        .expect("fixture .json.gz must inflate to UTF-8 JSON");
+    json
+}
+
+fn authority_matrix_json() -> String {
+    gunzip(include_bytes!("../fixtures/cr733/authority_matrix.json.gz"))
+}
+
+fn write_site_classifications_json() -> String {
+    gunzip(include_bytes!(
+        "../fixtures/cr733/blocked_write_sites.json.gz"
+    ))
+}
+
+fn rng_allocator_map_json() -> String {
+    gunzip(include_bytes!(
+        "../fixtures/cr733/rng_allocator_map.json.gz"
+    ))
+}
+
+fn side_effect_map_json() -> String {
+    gunzip(include_bytes!("../fixtures/cr733/side_effect_map.json.gz"))
+}
 
 fn write_site_identity(site: &Value) -> String {
     format!(
@@ -64,13 +90,13 @@ fn non_write_site_identity(site: &Value) -> String {
 
 #[test]
 fn cr733_authority_matrix_covers_the_fresh_write_census() {
-    let matrix: Value = serde_json::from_str(AUTHORITY_MATRIX)
+    let matrix: Value = serde_json::from_str(&authority_matrix_json())
         .expect("CR733 authority matrix fixture must be valid JSON");
     let matrix_fields = matrix["fields"]
         .as_array()
         .expect("CR733 authority matrix must contain a fields array");
 
-    let site_classifications: Value = serde_json::from_str(WRITE_SITE_CLASSIFICATIONS)
+    let site_classifications: Value = serde_json::from_str(&write_site_classifications_json())
         .expect("CR733 write-site classification fixture must be valid JSON");
     let classified_sites = site_classifications["sites"]
         .as_array()
@@ -92,12 +118,12 @@ fn cr733_authority_matrix_covers_the_fresh_write_census() {
                 .to_owned()
         })
         .collect();
-    let rng_allocator_map: Value = serde_json::from_str(RNG_ALLOCATOR_MAP)
+    let rng_allocator_map: Value = serde_json::from_str(&rng_allocator_map_json())
         .expect("CR733 RNG/allocator map fixture must be valid JSON");
     let rng_allocator_sites = rng_allocator_map["sites"]
         .as_array()
         .expect("CR733 RNG/allocator map must contain a sites array");
-    let side_effect_map: Value = serde_json::from_str(SIDE_EFFECT_MAP)
+    let side_effect_map: Value = serde_json::from_str(&side_effect_map_json())
         .expect("CR733 side-effect map fixture must be valid JSON");
     let side_effect_sites = side_effect_map["sites"]
         .as_array()
