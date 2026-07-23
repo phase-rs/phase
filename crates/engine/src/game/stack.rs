@@ -9,8 +9,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
+    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -236,6 +236,58 @@ fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
         zone_pipeline::move_object(state, req, events)
     } else {
         ZoneMoveResult::Done
+    }
+}
+
+/// CR 608.3 + CR 400.7d: Snapshot cast-link / target facts for a permanent spell
+/// paused mid-resolution (delivery-tail `NeedsChoice`, replacement-choice
+/// `NeedsChoice`, or CallerEpilogue `CopyTargetChoice`). Single authority so a
+/// new cast-metadata field cannot be threaded into only two of three stash sites.
+fn pending_spell_resolution_snapshot(
+    state: &GameState,
+    entry: &StackEntry,
+    ability: Option<&ResolvedAbility>,
+    casting_variant: CastingVariant,
+    actual_mana_spent: u32,
+    spell_targets: &[TargetRef],
+) -> PendingSpellResolution {
+    let obj = state.objects.get(&entry.id);
+    let cast_from_zone = ability
+        .and_then(|a| a.context.cast_from_zone)
+        .or_else(|| obj.and_then(|o| o.cast_from_zone));
+    let cast_timing_permission =
+        obj.and_then(|o| o.cast_timing_permission.map(|(permission, _)| permission));
+    let kickers_paid = ability
+        .map(|a| a.context.kickers_paid.clone())
+        .unwrap_or_else(|| obj.map(|o| o.kickers_paid.clone()).unwrap_or_default());
+    let additional_cost_payment_count = ability
+        .map(|a| a.context.additional_cost_payment_count)
+        .unwrap_or_else(|| {
+            obj.map(|o| o.additional_cost_payment_count)
+                .unwrap_or_default()
+        });
+    let additional_cost_payments = ability
+        .map(|a| a.context.additional_cost_payments.clone())
+        .unwrap_or_else(|| {
+            obj.map(|o| o.additional_cost_payments.clone())
+                .unwrap_or_default()
+        });
+    let convoked_creatures = obj
+        .map(|o| o.convoked_creatures.clone())
+        .unwrap_or_default();
+    PendingSpellResolution {
+        object_id: entry.id,
+        controller: entry.controller,
+        casting_variant,
+        cast_from_zone,
+        cast_controller: Some(entry.controller),
+        cast_timing_permission,
+        spell_targets: spell_targets.to_vec(),
+        actual_mana_spent,
+        kickers_paid,
+        additional_cost_payment_count,
+        additional_cost_payments,
+        convoked_creatures,
     }
 }
 
@@ -979,11 +1031,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
-            let convoked_creatures = state
-                .objects
-                .get(&entry.id)
-                .map(|obj| obj.convoked_creatures.clone())
-                .unwrap_or_default();
             // CR 702.33d + CR 400.7d + CR 603.4: Normalize the authoritative
             // cast-link provenance onto the stack object BEFORE `replace_event`,
             // so the pipeline's `CastLinkSnapshot` (captured inside
@@ -1014,11 +1061,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ability.context.cast_controller.or(Some(entry.controller));
                 }
             }
-            let cast_timing_permission = state
-                .objects
-                .get(&entry.id)
-                .and_then(|obj| obj.cast_timing_permission.map(|(permission, _)| permission));
-
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -1087,61 +1129,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 // attachment / cast-link stamps — mirrors the
                                 // ReplacementResult::NeedsChoice arm below.
                                 zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
-                                    let cast_from_zone = ability
-                                        .as_ref()
-                                        .and_then(|a| a.context.cast_from_zone)
-                                        .or_else(|| {
-                                            state
-                                                .objects
-                                                .get(&entry.id)
-                                                .and_then(|o| o.cast_from_zone)
-                                        });
-                                    let kickers_paid = ability
-                                        .as_ref()
-                                        .map(|a| a.context.kickers_paid.clone())
-                                        .unwrap_or_else(|| {
-                                            state
-                                                .objects
-                                                .get(&entry.id)
-                                                .map(|o| o.kickers_paid.clone())
-                                                .unwrap_or_default()
-                                        });
-                                    let additional_cost_payment_count = ability
-                                        .as_ref()
-                                        .map(|a| a.context.additional_cost_payment_count)
-                                        .unwrap_or_else(|| {
-                                            state
-                                                .objects
-                                                .get(&entry.id)
-                                                .map(|o| o.additional_cost_payment_count)
-                                                .unwrap_or_default()
-                                        });
-                                    let additional_cost_payments = ability
-                                        .as_ref()
-                                        .map(|a| a.context.additional_cost_payments.clone())
-                                        .unwrap_or_else(|| {
-                                            state
-                                                .objects
-                                                .get(&entry.id)
-                                                .map(|o| o.additional_cost_payments.clone())
-                                                .unwrap_or_default()
-                                        });
-                                    state.push_spell_resolution(
-                                        crate::types::game_state::PendingSpellResolution {
-                                            object_id: entry.id,
-                                            controller: entry.controller,
-                                            casting_variant,
-                                            cast_from_zone,
-                                            cast_controller: Some(entry.controller),
-                                            cast_timing_permission,
-                                            spell_targets: spell_targets.clone(),
-                                            actual_mana_spent,
-                                            kickers_paid,
-                                            additional_cost_payment_count,
-                                            additional_cost_payments,
-                                            convoked_creatures: convoked_creatures.clone(),
-                                        },
-                                    );
+                                    state.push_spell_resolution(pending_spell_resolution_snapshot(
+                                        state,
+                                        &entry,
+                                        ability.as_ref(),
+                                        casting_variant,
+                                        actual_mana_spent,
+                                        &spell_targets,
+                                    ));
                                     events.push(GameEvent::StackResolved {
                                         object_id: entry.id,
                                     });
@@ -1274,60 +1269,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     // A replacement needs player choice (e.g., Clone "enter as a copy").
                     // Store context so handle_replacement_choice can complete post-resolution.
-                    let cast_from_zone = ability
-                        .as_ref()
-                        .and_then(|a| a.context.cast_from_zone)
-                        .or_else(|| state.objects.get(&entry.id).and_then(|o| o.cast_from_zone));
                     // CR 702.33d + CR 400.7d: Use the authoritative kicker payments
                     // (resolving spell's `SpellContext` when present, else the stack
                     // object's stamped value) so placeholder permanent spells with
                     // `ability == None` are not silently de-kicked when a replacement
                     // needs a player choice. `engine_replacement` restores this onto
                     // the permanent unconditionally after the choice resolves.
-                    let kickers_paid = ability
-                        .as_ref()
-                        .map(|a| a.context.kickers_paid.clone())
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.kickers_paid.clone())
-                                .unwrap_or_default()
-                        });
-                    let additional_cost_payment_count = ability
-                        .as_ref()
-                        .map(|a| a.context.additional_cost_payment_count)
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.additional_cost_payment_count)
-                                .unwrap_or_default()
-                        });
-                    let additional_cost_payments = ability
-                        .as_ref()
-                        .map(|a| a.context.additional_cost_payments.clone())
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.additional_cost_payments.clone())
-                                .unwrap_or_default()
-                        });
-                    state.push_spell_resolution(crate::types::game_state::PendingSpellResolution {
-                        object_id: entry.id,
-                        controller: entry.controller,
+                    state.push_spell_resolution(pending_spell_resolution_snapshot(
+                        state,
+                        &entry,
+                        ability.as_ref(),
                         casting_variant,
-                        cast_from_zone,
-                        cast_controller: Some(entry.controller),
-                        cast_timing_permission,
-                        spell_targets: spell_targets.clone(),
                         actual_mana_spent,
-                        kickers_paid,
-                        additional_cost_payment_count,
-                        additional_cost_payments,
-                        convoked_creatures,
-                    });
+                        &spell_targets,
+                    ));
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
                     // Emit StackResolved now — the spell has left the stack even though
@@ -1548,67 +1503,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // Tribute NamedChoice) so resolve_top settles normally;
                         // the answer path still prefers spell_targets.
                         WaitingFor::CopyTargetChoice { .. } => {
-                            let cast_from_zone = ability
-                                .as_ref()
-                                .and_then(|a| a.context.cast_from_zone)
-                                .or_else(|| {
-                                    state.objects.get(&entry.id).and_then(|o| o.cast_from_zone)
-                                });
-                            let cast_timing_permission = state
-                                .objects
-                                .get(&entry.id)
-                                .and_then(|o| o.cast_timing_permission.map(|(p, _)| p));
-                            let kickers_paid = ability
-                                .as_ref()
-                                .map(|a| a.context.kickers_paid.clone())
-                                .unwrap_or_else(|| {
-                                    state
-                                        .objects
-                                        .get(&entry.id)
-                                        .map(|o| o.kickers_paid.clone())
-                                        .unwrap_or_default()
-                                });
-                            let additional_cost_payment_count = ability
-                                .as_ref()
-                                .map(|a| a.context.additional_cost_payment_count)
-                                .unwrap_or_else(|| {
-                                    state
-                                        .objects
-                                        .get(&entry.id)
-                                        .map(|o| o.additional_cost_payment_count)
-                                        .unwrap_or_default()
-                                });
-                            let additional_cost_payments = ability
-                                .as_ref()
-                                .map(|a| a.context.additional_cost_payments.clone())
-                                .unwrap_or_else(|| {
-                                    state
-                                        .objects
-                                        .get(&entry.id)
-                                        .map(|o| o.additional_cost_payments.clone())
-                                        .unwrap_or_default()
-                                });
-                            let convoked_creatures = state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.convoked_creatures.clone())
-                                .unwrap_or_default();
-                            state.push_spell_resolution(
-                                crate::types::game_state::PendingSpellResolution {
-                                    object_id: entry.id,
-                                    controller: entry.controller,
-                                    casting_variant,
-                                    cast_from_zone,
-                                    cast_controller: Some(entry.controller),
-                                    cast_timing_permission,
-                                    spell_targets: spell_targets.clone(),
-                                    actual_mana_spent,
-                                    kickers_paid,
-                                    additional_cost_payment_count,
-                                    additional_cost_payments,
-                                    convoked_creatures,
-                                },
-                            );
+                            state.push_spell_resolution(pending_spell_resolution_snapshot(
+                                state,
+                                &entry,
+                                ability.as_ref(),
+                                casting_variant,
+                                actual_mana_spent,
+                                &spell_targets,
+                            ));
                             state.waiting_for = wf;
                         }
                         WaitingFor::Priority { .. } => {}

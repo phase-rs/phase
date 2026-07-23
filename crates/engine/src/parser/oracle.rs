@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChoosePermanentPersist, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
+    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -1709,9 +1709,9 @@ fn detect_linked_choice_copy_chosen_host(
 }
 
 /// CR 607.2d + CR 707.2c + CR 614.12a: Replace the proven chooser gap ability
-/// with a Moved `ChoosePermanent { CopiableSnapshot }` replacement. Filter is
-/// re-derived from the Unimplemented description so line-local parse never
-/// assigns copy-host semantics without this relation.
+/// with a Moved `ChoosePermanent` replacement. Filter is re-derived from the
+/// Unimplemented description so line-local parse never assigns copy-host
+/// semantics without this relation.
 fn apply_linked_choice_copy_chosen_host(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
@@ -1739,13 +1739,8 @@ fn apply_linked_choice_copy_chosen_host(
         };
         result.abilities.remove(ability_pos);
         ability_ids.remove(ability_pos);
-        let execute = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ChoosePermanent {
-                filter,
-                persist: ChoosePermanentPersist::CopiableSnapshot,
-            },
-        );
+        let execute =
+            AbilityDefinition::new(AbilityKind::Spell, Effect::ChoosePermanent { filter });
         result.replacements.push(
             ReplacementDefinition::new(ReplacementEvent::Moved)
                 .execute(execute)

@@ -1489,6 +1489,19 @@ fn handle_persist_chosen_attribute_choice(
     // the same prompt until its 64-iteration cap, leaving sequential Metamorphic
     // casts blocked (two_auras). Nested prompts raised during copy install /
     // entry replay still overwrite `waiting_for` and propagate below.
+    //
+    // Divergence from the BecomeCopy completion tail (`:1878+`): that sibling
+    // retires the drain *after* replay and brackets replay with
+    // `capture_paused_zone_change_delivery_for_member` +
+    // `drain_pending_batch_deliveries`. Those steps are for liminal / multi-
+    // member batch deliveries (meld, ninjutsu copy tokens) that can park further
+    // co-arrivers behind the mid-entry choice. An Aura *spell* entry is a
+    // single-object `CallerEpilogue` delivery with no active batch frame — there
+    // is nothing for delivery-capture or batch-drain to preserve — so this path
+    // intentionally omits them. Retiring before replay is required here because
+    // `Effect::ChoosePermanent` (unlike `BecomeCopy`) is itself the post-
+    // replacement continuation being answered; leaving it paused through replay
+    // lets a nested prompt return and then re-surface the same ChoosePermanent.
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
@@ -2144,7 +2157,7 @@ pub(super) fn apply_post_replacement_effect(
     // choice, not targeting — hexproof/shroud don't apply, CR 115.10a) but is
     // discriminated by `purpose`. Empty legal-choice set → no prompt (CR 609.3:
     // an effect does only as much as possible).
-    if let Effect::ChoosePermanent { ref filter, .. } = *real_work.effect {
+    if let Effect::ChoosePermanent { ref filter } = *real_work.effect {
         let valid_targets = find_copy_targets(state, filter, source_id, controller, None);
         if valid_targets.is_empty() {
             return None;

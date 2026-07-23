@@ -3164,7 +3164,7 @@ fn legacy_effect(x: &Effect) -> bool {
         } => legacy_target_filter(target) || odur(duration),
         // CR 707.2c (Metamorphic Alteration): the copy-source choice pool is a
         // target filter; walk it for legacy event-refs like every other filter.
-        Effect::ChoosePermanent { filter, .. } => legacy_target_filter(filter),
+        Effect::ChoosePermanent { filter } => legacy_target_filter(filter),
         Effect::GenericEffect {
             duration,
             target,

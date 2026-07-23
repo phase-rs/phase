@@ -2290,7 +2290,7 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
 ///
 /// Used by `LinkedChoiceKind::CopyChosenHost` to identify Unimplemented ability
 /// gaps that pair with a CopyChosen static and to derive the injected
-/// `ChoosePermanent { CopiableSnapshot }` filter — never by line-local
+/// `ChoosePermanent` filter — never by line-local
 /// replacement classification (that would claim Moved for every
 /// permanent-choose card).
 pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {

@@ -17,8 +17,7 @@ use engine::game::game_object::{AttachTarget, DisplaySource};
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    ChoosePermanentPersist, ChosenAttribute, ContinuousModification, Effect, FilterProp,
-    TargetFilter, TypedFilter,
+    ChosenAttribute, ContinuousModification, Effect, FilterProp, TargetFilter, TypedFilter,
 };
 use engine::types::card::TokenImageRef;
 use engine::types::card_type::CoreType;
@@ -666,7 +665,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
 
 /// SHAPE: the full Metamorphic Oracle (choose line + CopyChosen static) lowers
 /// the choose gap via `CopyChosenHost` to an as-enters
-/// `Effect::ChoosePermanent { persist: CopiableSnapshot }` over a creature
+/// `Effect::ChoosePermanent` over a creature
 /// copy-source pool — never a `BecomeCopy` on the entering Aura. A bare choose
 /// line without CopyChosen stays an Unimplemented ability (see honesty test).
 #[test]
@@ -691,11 +690,7 @@ fn as_enters_choose_a_creature_parses_to_choose_permanent() {
         .expect("as-enters choose-a-creature must lower to an Effect::ChoosePermanent replacement");
 
     match replacement.execute.as_ref().unwrap().effect.as_ref() {
-        Effect::ChoosePermanent { filter, persist } => {
-            assert!(
-                matches!(persist, ChoosePermanentPersist::CopiableSnapshot),
-                "the choice must persist as a copiable snapshot latched onto the Aura"
-            );
+        Effect::ChoosePermanent { filter } => {
             assert_eq!(
                 filter,
                 &TargetFilter::Typed(TypedFilter::creature()),

@@ -1335,14 +1335,14 @@ pub enum ChosenAttribute {
     /// prior `Direction` before pushing, so only the "last chosen" survives.
     Direction(SeatDirection),
     /// CR 707.2c + CR 614.12a + CR 400.7: The copiable-values snapshot chosen as
-    /// an `Effect::ChoosePermanent { persist: CopiableSnapshot }` Aura entered
-    /// (Metamorphic Alteration: "choose a creature"). Like `Card` and
-    /// `TributeOutcome`, this is ENGINE-SET (written directly at the
-    /// `CopyTargetChoice` answer, not produced through `ChoiceType`/`from_choice`)
-    /// — it records the frozen snapshot the companion copy effect was installed
-    /// from, and, being stored in `chosen_attributes`, is cleared automatically
-    /// when the Aura changes zones (CR 400.7), which is exactly the copy's
-    /// lifetime. Boxed to keep the enum small (mirrors the copy-value box idiom).
+    /// an `Effect::ChoosePermanent` Aura entered (Metamorphic Alteration:
+    /// "choose a creature"). Like `Card` and `TributeOutcome`, this is
+    /// ENGINE-SET (written directly at the `CopyTargetChoice` answer, not
+    /// produced through `ChoiceType`/`from_choice`) — it records the frozen
+    /// snapshot the companion copy effect was installed from, and, being stored
+    /// in `chosen_attributes`, is cleared automatically when the Aura changes
+    /// zones (CR 400.7), which is exactly the copy's lifetime. Boxed to keep
+    /// the enum small (mirrors the copy-value box idiom).
     CopiableSnapshot(Box<LatchedCopiableSnapshot>),
 }
 
@@ -10869,17 +10869,16 @@ pub enum Effect {
     /// (CR 614.12a: the choice is made before the permanent enters). Unlike
     /// `BecomeCopy` — where the *entering* object becomes the copy — this effect
     /// latches the chosen permanent's copiable values and applies them to a
-    /// *separate* recipient determined by `persist`. For
-    /// `ChoosePermanentPersist::CopiableSnapshot` (Metamorphic Alteration) the
-    /// recipient is the Aura's enchanted host; the companion static
-    /// (`ContinuousModification::CopyChosen`) is a parse-time marker only — the
+    /// *separate* recipient: the Aura's enchanted host (Metamorphic Alteration).
+    /// Runtime discrimination is `CopyTargetPurpose::PersistChosenAttribute`;
+    /// emission is gated on `LinkedChoiceKind::CopyChosenHost` (companion
+    /// `ContinuousModification::CopyChosen` is a parse-time marker only). The
     /// copy is materialized once, at the choice answer, as a Layer-1
     /// `CopyValues` transient continuous effect whose values are fixed per
     /// CR 707.2c (determined when the copy effect first starts to apply).
     ChoosePermanent {
         #[serde(default = "default_target_filter_any")]
         filter: TargetFilter,
-        persist: ChoosePermanentPersist,
     },
     /// CR 113.1a + CR 113.10 + CR 611.2 + CR 611.2c + CR 613.1f: Grant the
     /// recipient(s) all activated abilities of a chosen target object, for a
@@ -20556,25 +20555,8 @@ pub struct CopiableValues {
     pub static_definitions: Arc<Vec<StaticDefinition>>,
 }
 
-/// CR 707.2c: How the permanent chosen by `Effect::ChoosePermanent` is
-/// consumed. Extensible axis (build-for-the-class): today only the
-/// copiable-snapshot form is printed (Metamorphic Alteration). A future
-/// as-enters "choose a permanent" clause with a different persisted
-/// consequence adds a sibling leaf here, never a new `Effect` variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ChoosePermanentPersist {
-    /// CR 707.2c + CR 613.1a + CR 707.2b: Latch the chosen permanent's copiable
-    /// values (fixed at the moment the copy effect first starts to apply per
-    /// CR 707.2c; unaffected by later changes to the chosen object per
-    /// CR 707.2b) and install them as a Layer-1 copy effect on the source
-    /// Aura's enchanted host. Persisted as `ChosenAttribute::CopiableSnapshot`
-    /// on the Aura.
-    CopiableSnapshot,
-}
-
 /// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an
-/// `Effect::ChoosePermanent { persist: CopiableSnapshot }` choice is answered.
+/// `Effect::ChoosePermanent` choice is answered (`CopyTargetPurpose::PersistChosenAttribute`).
 /// Per CR 707.2c the copiable values a static copy effect grants are determined
 /// only when the effect first starts to apply, and per CR 707.2b later changes
 /// to the chosen object never propagate — so the values are frozen here rather

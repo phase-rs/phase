@@ -2334,7 +2334,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         // CR 707.2c (Metamorphic Alteration): report the copy-source choice pool.
-        Effect::ChoosePermanent { filter, .. } => {
+        Effect::ChoosePermanent { filter } => {
             d.push(("choose".into(), fmt_target(filter)));
         }
         Effect::Destroy { target, .. }

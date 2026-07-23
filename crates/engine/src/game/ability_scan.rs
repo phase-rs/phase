@@ -893,9 +893,8 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         // CR 707.2c: the chosen creature's copiable values are latched onto the
         // Aura's host at the answer — a copy-family continuous effect, same
         // conservative classification as `BecomeCopy`. `filter` scans no
-        // per-source projected resource (it just bounds the choice pool);
-        // `persist` is a compile-time selector.
-        Effect::ChoosePermanent { filter, persist: _ } => {
+        // per-source projected resource (it just bounds the choice pool).
+        Effect::ChoosePermanent { filter } => {
             scan_target_filter(filter, target_ctx, mode).or(Axes::CONSERVATIVE)
         }
         Effect::GainActivatedAbilitiesOfTarget {
