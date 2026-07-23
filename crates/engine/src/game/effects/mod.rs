@@ -1849,13 +1849,26 @@ fn moved_object_context_from_events(events: &[GameEvent]) -> Option<CostPaidObje
     let mut moved = events.iter().filter_map(|event| match event {
         GameEvent::ZoneChanged {
             object_id,
-            from: Some(_),
+            from: Some(from_zone),
             to,
             record,
-        } if is_public_zone(*to) => Some(CostPaidObjectSnapshot {
-            object_id: *object_id,
-            lki: lki_snapshot_from_zone_change_record(record),
-        }),
+        } if is_public_zone(*to)
+            // CR 608.2c: a later instruction may refer to an object an earlier
+            // instruction returned to hand, provided its identity was established
+            // in a PUBLIC source zone — Volcanic Vision ("Return target instant
+            // or sorcery card from your graveyard to your hand. ~ deals damage
+            // equal to THAT CARD'S MANA VALUE ..."). The reference reads the
+            // move-time LKI snapshot, so the hidden destination is immaterial. A
+            // move from a hidden source (a draw, library -> hand) establishes no
+            // such referent and is excluded. Library-destination moves stay
+            // excluded entirely (a shuffle/reorder loses the object's identity).
+            || (*to == Zone::Hand && is_public_zone(*from_zone)) =>
+        {
+            Some(CostPaidObjectSnapshot {
+                object_id: *object_id,
+                lki: lki_snapshot_from_zone_change_record(record),
+            })
+        }
         _ => None,
     });
     let first = moved.next()?;
@@ -11244,6 +11257,54 @@ mod tests {
     use crate::types::statics::CastFrequency;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    // CR 608.2c (#6486): Volcanic Vision — "Return target instant or sorcery card
+    // from your graveyard to your hand. ~ deals damage equal to that card's mana
+    // value to each creature your opponents control. Exile ~." The card is
+    // returned to HAND (a hidden zone); "that card's mana value" must still read
+    // the returned card's move-time mana value, so each opponent creature takes
+    // that much damage. Before the fix the returned card was not bound as the
+    // earlier-instruction referent (only PUBLIC-zone moves were), so the damage
+    // resolved to 0.
+    #[test]
+    fn volcanic_vision_deals_returned_cards_mana_value_after_return_to_hand() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        const ORACLE: &str = "Return target instant or sorcery card from your graveyard to your hand. \
+             Volcanic Vision deals damage equal to that card's mana value to each creature your opponents control. \
+             Exile Volcanic Vision.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            (0..8)
+                .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let volcanic = scenario
+            .add_spell_to_hand_from_oracle(P0, "Volcanic Vision", false, ORACLE)
+            .id();
+        // Return target: an instant in the caster's graveyard with mana value 3.
+        let bolt = scenario
+            .add_spell_to_graveyard(P0, "Fire Blast", true)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        let goblin = scenario.add_creature(P1, "Goblin", 2, 2).id();
+        let ogre = scenario.add_creature(P1, "Ogre", 3, 3).id();
+
+        let mut runner = scenario.build();
+        let outcome = runner.cast(volcanic).target_objects(&[bolt]).resolve();
+
+        outcome.assert_zone(&[bolt], Zone::Hand);
+        assert_eq!(
+            outcome.damage_marked(goblin),
+            3,
+            "each opponent creature must take the returned card's mana value (3)"
+        );
+        assert_eq!(outcome.damage_marked(ogre), 3);
+        outcome.assert_zone(&[volcanic], Zone::Exile);
+    }
 
     #[test]
     fn search_filter_dynamic_property_axes_consume_the_tracked_set() {
