@@ -37,14 +37,23 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
           const { getCurrentWindow } = await import("@tauri-apps/api/window");
           const appWindow = getCurrentWindow();
           const syncFullscreen = async () => {
-            const fullscreen = await appWindow.isFullscreen();
-            if (active) setIsFullscreen(fullscreen);
+            try {
+              const fullscreen = await appWindow.isFullscreen();
+              if (active) setIsFullscreen(fullscreen);
+            } catch (error) {
+              console.warn("[phase.rs] Could not synchronize Tauri fullscreen state.", error);
+            }
           };
 
           await syncFullscreen();
-          unlisten = await appWindow.onResized(() => {
+          const removeResizeListener = await appWindow.onResized(() => {
             void syncFullscreen();
           });
+          if (active) {
+            unlisten = removeResizeListener;
+          } else {
+            removeResizeListener();
+          }
         } catch (error) {
           console.warn("[phase.rs] Could not synchronize Tauri fullscreen state.", error);
         }

@@ -93,6 +93,10 @@ function resolveAiSeatBindings(
   }));
 }
 
+export function isDeckRejectedError(error: unknown): error is AdapterError {
+  return error instanceof AdapterError && error.code === AdapterErrorCode.DECK_REJECTED;
+}
+
 let avatarGeneration = 0;
 
 function setupRandomAvatars(playerCount: number, seed: string, preservePlayerNames = false) {
@@ -1222,10 +1226,9 @@ export function GameProvider({
             audioManager.setContext("battlefield");
           }).catch((err) => {
             if (cancelled) return;
-            const msg = err instanceof Error ? err.message : String(err);
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
-            if (msg.includes("Deck not legal")) {
-              onWsEventRef.current?.({ type: "deckRejected", reason: msg });
+            if (isDeckRejectedError(err)) {
+              onWsEventRef.current?.({ type: "deckRejected", reason: err.message });
             } else {
               useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
             }

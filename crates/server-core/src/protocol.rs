@@ -57,7 +57,7 @@ pub struct AiSeatRequest {
 // re-exported here so `ServerMessage::LobbyUpdate { games: Vec<LobbyGame> }`
 // and the broker reference the same struct. The serde shape is unchanged —
 // wire bytes are byte-identical (guarded by tests/lobby_wire_contract.rs).
-pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame};
+pub use lobby_broker::protocol::{DraftLobbyMetadata, LobbyGame, ServerErrorCode};
 
 pub use seat_reducer::types::{DeckChoice, SeatKind, SeatMutation, SeatTeamInfo, SeatView};
 
@@ -404,6 +404,8 @@ pub enum ServerMessage {
     },
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ServerErrorCode>,
     },
     LobbyUpdate {
         games: Vec<LobbyGame>,
@@ -530,6 +532,22 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_by: Option<PlayerId>,
     },
+}
+
+impl ServerMessage {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: None,
+        }
+    }
+
+    pub fn deck_rejected(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: Some(ServerErrorCode::DeckRejected),
+        }
+    }
 }
 
 #[cfg(test)]

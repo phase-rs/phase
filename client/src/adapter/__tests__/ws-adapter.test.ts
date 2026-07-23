@@ -390,7 +390,42 @@ describe("WebSocketAdapter", () => {
       } satisfies Partial<AdapterError>);
     });
 
-    it("preserves the non-recoverable deck rejection code", async () => {
+    it("preserves the typed non-recoverable deck rejection code", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "Error",
+          data: { message: "Deck not legal for this format", code: "deck_rejected" },
+        }),
+      );
+
+      await expect(attached).rejects.toMatchObject({
+        code: "DECK_REJECTED",
+        recoverable: false,
+      } satisfies Partial<AdapterError>);
+    });
+
+    it("does not infer deck rejection from matching error text without a code", async () => {
       const nativeAdapter = new WebSocketAdapter(
         "native-engine",
         "host",
@@ -417,8 +452,8 @@ describe("WebSocketAdapter", () => {
       );
 
       await expect(attached).rejects.toMatchObject({
-        code: "DECK_REJECTED",
-        recoverable: false,
+        code: "ACTION_REJECTED",
+        recoverable: true,
       } satisfies Partial<AdapterError>);
     });
   });

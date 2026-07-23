@@ -21,6 +21,13 @@ use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::match_config::MatchConfig;
 use serde::{Deserialize, Serialize};
 
+/// Machine-readable reasons for server error replies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerErrorCode {
+    DeckRejected,
+}
+
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
@@ -224,6 +231,8 @@ pub enum LobbyServerMessage {
     },
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ServerErrorCode>,
     },
     LobbyUpdate {
         games: Vec<LobbyGame>,
@@ -272,6 +281,15 @@ pub enum LobbyServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
     },
+}
+
+impl LobbyServerMessage {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: None,
+        }
+    }
 }
 
 /// Advertised role of the server. Mirrors `server_core::protocol::ServerMode`

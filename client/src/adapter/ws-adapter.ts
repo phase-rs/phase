@@ -1328,9 +1328,9 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "Error": {
-        const data = msg.data as { message: string };
-        const initializationError = data.message.includes("Deck not legal")
-          ? new AdapterError("DECK_REJECTED", data.message, false)
+        const data = msg.data as { message: string; code?: string };
+        const initializationError = data.code === "deck_rejected"
+          ? new AdapterError(AdapterErrorCode.DECK_REJECTED, data.message, false)
           : actionRejectionError(data.message);
         this.rejectInitialization(initializationError);
         this.rejectPregameMutation(actionRejectionError(data.message));

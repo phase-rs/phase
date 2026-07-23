@@ -16,6 +16,7 @@ const {
   nativeAdapterInitialize,
   nativeAdapters,
   multiplayerGetState,
+  multiplayerState,
   preferences,
   saveActiveGame,
   useGameStore,
@@ -106,7 +107,16 @@ const {
       subscribe: vi.fn(() => () => {}),
     },
   );
-  const multiplayerGetState = vi.fn();
+  const multiplayerState = {
+    displayName: "Player",
+    setActionPending: vi.fn(),
+    setConnectionStatus: vi.fn(),
+    setIsSpectator: vi.fn(),
+    setLatency: vi.fn(),
+    setSpectators: vi.fn(),
+    showToast: vi.fn(),
+  };
+  const multiplayerGetState = vi.fn(() => multiplayerState);
 
   return {
     NativeEngineVersionMismatchError,
@@ -119,6 +129,7 @@ const {
     nativeAdapterInitialize,
     nativeAdapters,
     multiplayerGetState,
+    multiplayerState,
     preferences,
     saveActiveGame: vi.fn(),
     useGameStore,
@@ -233,9 +244,12 @@ vi.mock("../../stores/multiplayerDraftStore", () => ({
 }));
 
 vi.mock("../../services/playerAvatars", () => ({
-  assignRandomAvatars: vi.fn(),
+  assignRandomAvatars: vi.fn(() => [
+    { name: "Jace", cardName: "Jace, the Mind Sculptor" },
+    { name: "Liliana", cardName: "Liliana of the Veil" },
+  ]),
   avatarCardNameForName: vi.fn(),
-  fetchAvatarArtUrl: vi.fn(),
+  fetchAvatarArtUrl: vi.fn(async () => null),
 }));
 
 vi.mock("../../services/multiplayerSession", () => ({
@@ -252,7 +266,12 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   loadDraftRun: vi.fn(),
 }));
 
+vi.mock("../../services/serverDetection", () => ({
+  detectServerUrl: vi.fn(async () => "ws://test-server"),
+}));
+
 import { GameProvider } from "../GameProvider";
+import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
@@ -264,6 +283,7 @@ describe("GameProvider native AI routing", () => {
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
     multiplayerGetState.mockReset();
+    multiplayerGetState.mockReturnValue(multiplayerState);
     preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
     preferences.cedhMode = false;
     gameStoreState.adapter = null;
@@ -383,5 +403,51 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+});
+
+describe("GameProvider online deck rejection", () => {
+  it("surfaces only typed deck rejections from online initialization", async () => {
+    const onWsEvent = vi.fn();
+    nativeAdapterInitialize.mockRejectedValue(
+      new AdapterError(AdapterErrorCode.DECK_REJECTED, "Invalid deck contents", false),
+    );
+
+    render(
+      <GameProvider gameId="online-deck-rejected" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith({
+        type: "deckRejected",
+        reason: "Invalid deck contents",
+      });
+    });
+
+    cleanup();
+    onWsEvent.mockClear();
+    const connectionStatusCallCount = multiplayerState.setConnectionStatus.mock.calls.length;
+    nativeAdapterInitialize.mockRejectedValue(
+      new AdapterError(
+        AdapterErrorCode.ACTION_REJECTED,
+        "Deck not legal for this format",
+        true,
+      ),
+    );
+
+    render(
+      <GameProvider gameId="online-action-rejected" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(
+        multiplayerState.setConnectionStatus.mock.calls.slice(connectionStatusCallCount),
+      ).toContainEqual(["disconnected"]);
+    });
+    expect(onWsEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "deckRejected" }));
   });
 });
