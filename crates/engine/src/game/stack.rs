@@ -1223,38 +1223,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             events,
                         );
                     }
-                    // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
-                    // Siege protector / Tribute opponent-choice prompt, or Metamorphic
-                    // Alteration's ChoosePermanent CopyTargetChoice) that were stashed
-                    // by `apply_single_replacement` while resolving this ZoneChange.
-                    // `CallerEpilogue` skipped the DeliveryTail drain above, so this
-                    // site owns the prompt.
-                    //
-                    // Honor the returned `WaitingFor` — discarding it silently drops
-                    // mid-entry choices (spell-path Metamorphic: Aura attached with
-                    // no copy). Continue the epilogue afterward so CR 608.3c Aura
-                    // attach / cast stamps still run; the answer path then finds the
-                    // host via `attached_to` (PersistChosenAttribute) the same way
-                    // the dig/delivery path does. Do NOT early-return + push
-                    // `PendingSpellResolution` here: that buries a Tribute/Siege
-                    // AbilityContinuation under SpellResolution (`active_*` is
-                    // top-only) and breaks TributeChoice / card-name resume.
-                    if state.has_post_replacement_drain() {
-                        state.clear_post_replacement_source();
-                        if let Some(wf) =
-                            super::engine_replacement::apply_pending_post_replacement_effect(
-                                state,
-                                Some(entry.id),
-                                None,
-                                Some(crate::types::replacements::ReplacementEvent::Moved),
-                                events,
-                            )
-                        {
-                            if !matches!(wf, WaitingFor::Priority { .. }) {
-                                state.waiting_for = wf;
-                            }
-                        }
-                    }
+                    // CR 614.12a post-replacement drain runs AFTER CR 608.3c Aura
+                    // attach below — PersistChosenAttribute needs `attached_to`
+                    // before the choice is answered (mirrors dig/CR 303.4f).
                 }
                 super::replacement::ReplacementResult::Prevented => {
                     // CR 608.3e: Permanent spell's ETB was fully prevented —
@@ -1534,6 +1505,30 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
+                    }
+                }
+            }
+
+            // CR 614.12a: Drain mandatory replacement post-effects (Siege /
+            // Tribute opponent-choice, Metamorphic ChoosePermanent
+            // CopyTargetChoice, …) stashed while resolving this permanent's
+            // ZoneChange. `CallerEpilogue` skipped the DeliveryTail drain, so
+            // this site owns the prompt — AFTER CR 608.3c Aura attach above so
+            // PersistChosenAttribute can read `attached_to` (dig/CR 303.4f
+            // order). Honor the returned WaitingFor; do not push
+            // PendingSpellResolution on top of an AbilityContinuation
+            // (Tribute/Siege resume is top-only).
+            if state.has_post_replacement_drain() {
+                state.clear_post_replacement_source();
+                if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
+                    state,
+                    Some(entry.id),
+                    None,
+                    Some(crate::types::replacements::ReplacementEvent::Moved),
+                    events,
+                ) {
+                    if !matches!(wf, WaitingFor::Priority { .. }) {
+                        state.waiting_for = wf;
                     }
                 }
             }
