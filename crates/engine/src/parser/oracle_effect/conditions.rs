@@ -3133,7 +3133,7 @@ pub(super) fn strip_suffix_conditional(
     // different anaphor source (event object vs. chosen target), not a duplicate
     // of the same concept. Mutable Pupa's "…if that creature has <keyword>" riders.
     //
-    // CR 115.1: gated on trigger context, mirroring `strip_counter_conditional`'s
+    // This is gated on trigger context, mirroring `strip_counter_conditional`'s
     // identical demonstrative-subject handling ("that creature has … counter" is
     // offered `if !in_trigger` there). `ZoneChangeObjectMatchesFilter` reads
     // `state.current_trigger_event`, which is only meaningful inside a trigger's

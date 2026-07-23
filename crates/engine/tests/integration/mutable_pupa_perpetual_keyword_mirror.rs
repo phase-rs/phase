@@ -5,7 +5,7 @@
 //! double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace,
 //! reach, trample, and vigilance."
 //!
-//! Digital-only Alchemy (no CR entry for "perpetually"); CR 608.2c governs the
+//! Digital-only Alchemy (no CR entry for "perpetually"); CR 702.1c + CR 608.2c govern the
 //! per-branch resolution order that the `SiblingCondition::ReplicatedOrBranch`
 //! marker restores. Each of the 12 keyword nodes is an INDEPENDENT OR-branch
 //! gated on the entering object having THAT keyword — so the grant list must not
@@ -206,9 +206,10 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
     let count = |ct: CounterType| kathril_obj.counters.get(&ct).copied().unwrap_or(0);
 
     // The trample gate is true → a trample counter is placed (chain reached it).
-    assert!(
-        count(CounterType::Keyword(Keyword::Trample.kind())) >= 1,
-        "trample is in the graveyard ⇒ a trample counter is placed (chain reached past false flying/first-strike/... gates)",
+    assert_eq!(
+        count(CounterType::Keyword(Keyword::Trample.kind())),
+        1,
+        "trample is in the graveyard ⇒ exactly one trample counter is placed",
     );
     // The flying gate is false → NO flying counter (per-item independence, not a
     // shared/collapsed gate).
@@ -219,8 +220,9 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
     );
     // The unconditional tail fires: a +1/+1 counter on Kathril (proves the chain
     // reached the end past vigilance's false gate).
-    assert!(
-        count(CounterType::Plus1Plus1) >= 1,
-        "the unconditional +1/+1 tail must land (chain reaches the end)",
+    assert_eq!(
+        count(CounterType::Plus1Plus1),
+        1,
+        "exactly one +1/+1 counter is placed for the one counter put on a creature this way",
     );
 }

@@ -696,12 +696,14 @@ pub(super) enum AntecedentRole {
     /// the sibling template a "Repeat this process for <keywords>" continuation
     /// clones (Kathril, Aspect Warper).
     KeywordCounterPlacement,
-    /// A perpetual keyword grant (`ApplyPerpetual { GrantKeywords }`) — the sibling
+    /// CR 702.1c + CR 608.2c: A perpetual keyword grant
+    /// (`ApplyPerpetual { GrantKeywords }`) — the sibling
     /// template a "The same is true for <keywords>" continuation clones when the
     /// antecedent is a PERPETUAL grant rather than Odric's static `GenericEffect`
     /// grant (Mutable Pupa). Membership is the EFFECT VARIANT ALONE, mirroring
     /// `def_is_perpetual_keyword_grant`; the gating condition is the mutator's
-    /// business, not the role's filter.
+    /// business, not the role's filter. "Perpetually" is a digital-only extension
+    /// outside the Comprehensive Rules.
     PerpetualKeywordGrantHead,
     /// A `DealDamage` — the antecedent an "excess damage" rider redirects from
     /// (CR 120.4a). The rider need not be adjacent to the damage clause, which is

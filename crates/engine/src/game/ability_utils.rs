@@ -157,8 +157,9 @@ pub fn build_resolved_from_def_with_targets(
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
-    // CR 608.2c: Carry the replication marker through so `resolve_chain_body`
-    // evaluates a `ReplicatedOrBranch` per-item OR-branch (Mutable Pupa, Kathril)
+    // CR 702.1c ("the same is true") + CR 608.2c (written order): Carry the
+    // replication marker through so `resolve_chain_body` evaluates a
+    // `ReplicatedOrBranch` per-item OR-branch (Mutable Pupa, Kathril)
     // independently of a preceding sibling's failed gate. Without this copy the
     // parser-stamped `SiblingCondition` never reaches the resolved sub and the
     // keyword list collapses after the first false gate.

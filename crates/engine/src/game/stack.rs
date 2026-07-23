@@ -2363,8 +2363,9 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
-        // CR 608.2c: a `ReplicatedOrBranch` per-item keyword-list sibling
-        // (Mutable Pupa, Kathril) is not the vanilla batchable shape this proof
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()
@@ -2546,8 +2547,9 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
-        // CR 608.2c: a `ReplicatedOrBranch` per-item keyword-list sibling
-        // (Mutable Pupa, Kathril) is not the vanilla batchable shape this proof
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()
@@ -2731,8 +2733,9 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
-        // CR 608.2c: a `ReplicatedOrBranch` per-item keyword-list sibling
-        // (Mutable Pupa, Kathril) is not the vanilla batchable shape this proof
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()

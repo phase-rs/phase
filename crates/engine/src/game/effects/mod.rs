@@ -8264,7 +8264,8 @@ fn resolve_chain_body(
                     sub.condition.as_ref(),
                     Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
                 );
-                // CR 608.2c: A sub produced by per-item keyword-list replication
+                // CR 702.1c ("the same is true") + CR 608.2c (written order): A
+                // sub produced by per-item keyword-list replication
                 // (`SiblingCondition::ReplicatedOrBranch`) is an INDEPENDENT
                 // OR-branch gated on its OWN keyword — Mutable Pupa's "perpetually
                 // gains <K_i> if that creature has <K_i>" and Kathril's "put a
@@ -8278,8 +8279,9 @@ fn resolve_chain_body(
                 // above, keyed on the replication marker rather than the condition
                 // variant (the gate here is a plain `ZoneChangeObjectMatchesFilter`
                 // / `QuantityCheck` that would otherwise look dependent).
-                let sub_is_replicated_or_branch =
-                    sub.sibling_condition == SiblingCondition::ReplicatedOrBranch;
+                let sub_is_replicated_or_branch = sub.sibling_condition
+                    == SiblingCondition::ReplicatedOrBranch
+                    && sub.sub_link == SubAbilityLink::SequentialSibling;
                 if sub
                     .condition
                     .as_ref()

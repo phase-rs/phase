@@ -25178,7 +25178,7 @@ fn parse_sigil_of_sleep_bounce_targets_triggering_player_controlled_creature() {
 
 // -----------------------------------------------------------------------
 // Mutable Pupa — perpetual keyword-mirror ETB trigger (issue #6321).
-// Digital-only Alchemy (no CR entry for "perpetually"); CR 608.2c governs the
+// Digital-only Alchemy (no CR entry for "perpetually"); CR 702.1c + CR 608.2c govern the
 // per-branch resolution order the `SiblingCondition::ReplicatedOrBranch` marker
 // restores. Oracle text verified verbatim against data/card-data.json.
 // -----------------------------------------------------------------------

@@ -16455,8 +16455,9 @@ pub struct AbilityDefinition {
     /// counter type must be rewritten to the current iteration's counter kind
     /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
     pub iteration_kind_binding: Option<IterationKindBinding>,
-    /// CR 608.2c: whether a `SequentialSibling` continuation with its OWN gating
-    /// condition must still be checked when a PRECEDING sibling's condition was
+    /// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
+    /// `SequentialSibling` continuation with its OWN gating condition must still be
+    /// checked when a PRECEDING sibling's condition was
     /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
     /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
     pub sibling_condition: SiblingCondition,
@@ -16815,15 +16816,16 @@ impl SubAbilityLink {
     }
 }
 
-/// CR 608.2c: whether a `SequentialSibling` continuation with its OWN gating
-/// condition must still be checked when a PRECEDING sibling's condition was
+/// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
+/// `SequentialSibling` continuation with its OWN gating condition must still be
+/// checked when a PRECEDING sibling's condition was
 /// false. `Dependent` (default) is today's behavior — the continuation's own
 /// condition/effect may presuppose the preceding sibling's effect actually ran
 /// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
 /// `GainControl` produced a target), so it is skipped alongside a failed
 /// predecessor. `ReplicatedOrBranch` marks a sibling produced by per-item
-/// keyword-list replication (CR 608.2c "The same is true for…" / "Repeat this
-/// process for…") — each item is an INDEPENDENT OR-branch checked on its own
+/// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
+/// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
 /// keyword, so it must be evaluated regardless of any other branch's outcome.
 /// Stamped ONLY by the `ReplicatePerKeyword` lowering helpers
 /// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) —
@@ -21510,8 +21512,9 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
-    /// CR 608.2c: Copied through from the originating `AbilityDefinition`. When
-    /// `ReplicatedOrBranch`, this `SequentialSibling` is an INDEPENDENT
+    /// CR 702.1c ("the same is true") + CR 608.2c (written order): Copied through
+    /// from the originating `AbilityDefinition`. When `ReplicatedOrBranch`, this
+    /// `SequentialSibling` is an INDEPENDENT
     /// per-item OR-branch produced by keyword-list replication (Mutable Pupa,
     /// Kathril) and must be evaluated by `resolve_chain_body` regardless of a
     /// preceding sibling's failed gate. `Dependent` (default) preserves the

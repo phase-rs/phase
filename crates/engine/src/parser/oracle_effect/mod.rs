@@ -22148,7 +22148,7 @@ pub(super) fn def_is_perpetual_keyword_grant(def: &AbilityDefinition) -> bool {
     )
 }
 
-/// CR 608.2c: Apply a "The same is true for <keyword list>" continuation whose
+/// CR 702.1c + CR 608.2c: Apply a "The same is true for <keyword list>" continuation whose
 /// antecedent is a PERPETUAL keyword grant (Mutable Pupa). The counters-class
 /// `attach_repeat_process_keywords` analogue: walk `defs` back to the most
 /// recent conditional perpetual keyword-grant (`ApplyPerpetual { GrantKeywords }`
@@ -22179,7 +22179,7 @@ fn attach_perpetual_keyword_grants(
         }
         // Each replicated perpetual grant is its own sequential instruction.
         new_def.sub_link = SubAbilityLink::SequentialSibling;
-        // CR 608.2c: independent OR-branch — resolves regardless of any other
+        // CR 702.1c + CR 608.2c: independent OR-branch — resolves regardless of any other
         // sibling's keyword gate (see `SiblingCondition::ReplicatedOrBranch`).
         new_def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
         new_def.sub_ability = None;
@@ -22208,7 +22208,7 @@ fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keywo
         | AbilityCondition::SourceLacksKeyword { keyword } => {
             *keyword = new_keyword.clone();
         }
-        // CR 608.2c: Mutable Pupa's per-keyword gate — "if that creature has
+        // CR 702.1c + CR 608.2c: Mutable Pupa's per-keyword gate — "if that creature has
         // <keyword>" — carries the keyword inside a `ZoneChangeObjectMatchesFilter`
         // typed filter (`FilterProp::WithKeyword`), swapped via the shared
         // `rewrite_filter_keyword` walker.
@@ -27452,22 +27452,30 @@ pub(crate) fn parse_effect_chain_ir(
         // keyword. Requires a prior clause to attach to.
         if !builder.is_empty() {
             if let Some(keywords) = try_parse_same_is_true_continuation(normalized_text) {
-                // CR 608.2c: select the replication template shape from the
-                // antecedent clause's parsed effect. A PERPETUAL keyword grant
+                // CR 702.1c ("the same is true") + CR 608.2c (written order):
+                // select the replication template shape from the antecedent clause's
+                // parsed effect. A PERPETUAL keyword grant
                 // (Mutable Pupa, `ApplyPerpetual { GrantKeywords }`) replicates via
                 // `attach_perpetual_keyword_grants`; every other "same is true for"
                 // antecedent (Odric's `GenericEffect` static grant) keeps the
                 // default `StaticGrant`. Mirrors `def_is_perpetual_keyword_grant`,
                 // applied to the clause's `.effect` (both expose `Effect`).
-                let kind = if builder.clauses().last().is_some_and(|c| {
-                    matches!(
-                        c.parsed.effect,
-                        Effect::ApplyPerpetual {
-                            modification: PerpetualModification::GrantKeywords { .. },
-                            ..
-                        }
-                    )
-                }) {
+                let kind = if builder
+                    .clauses()
+                    .iter()
+                    .rev()
+                    .find(|clause| {
+                        !matches!(clause.disposition, ClauseDisposition::Continue { .. })
+                    })
+                    .is_some_and(|clause| {
+                        matches!(
+                            &clause.parsed.effect,
+                            Effect::ApplyPerpetual {
+                                modification: PerpetualModification::GrantKeywords { .. },
+                                ..
+                            }
+                        )
+                    }) {
                     ReplicateKind::PerpetualKeywordGrant
                 } else {
                     ReplicateKind::StaticGrant
