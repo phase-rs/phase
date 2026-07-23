@@ -463,6 +463,10 @@ pub struct PolicyPenalties {
     /// scalar.)
     #[serde(default = "default_loop_shortcut_winning_declare_bonus")]
     pub loop_shortcut_winning_declare_bonus: f64,
+    /// CR 104.3d: card-equivalent weight for advancing the poison clock.
+    /// Critical band when the action reaches ten poison (a win), scaled by
+    /// clock progress below that.
+    pub poison_clock_pressure: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -527,6 +531,7 @@ impl Default for PolicyPenalties {
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
+            poison_clock_pressure: 6.0,
         }
     }
 }
@@ -724,6 +729,12 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "poison_clock_pressure",
+        "CR 104.3d win-detector weight — a critical-band term whose magnitude is \
+         load-bearing for correctness, not taste. Promote to ACTIVE only with a \
+         paired-seed ai-gate calibration.",
+    ),
     (
         "artifact_cost_payoff_bonus",
         "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
