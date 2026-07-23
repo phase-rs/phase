@@ -1509,6 +1509,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 .or_else(|| {
                                     state.objects.get(&entry.id).and_then(|o| o.cast_from_zone)
                                 });
+                            let cast_timing_permission = state
+                                .objects
+                                .get(&entry.id)
+                                .and_then(|o| o.cast_timing_permission.map(|(p, _)| p));
                             let kickers_paid = ability
                                 .as_ref()
                                 .map(|a| a.context.kickers_paid.clone())
@@ -1539,6 +1543,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                         .map(|o| o.additional_cost_payments.clone())
                                         .unwrap_or_default()
                                 });
+                            let convoked_creatures = state
+                                .objects
+                                .get(&entry.id)
+                                .map(|o| o.convoked_creatures.clone())
+                                .unwrap_or_default();
                             state.push_spell_resolution(
                                 crate::types::game_state::PendingSpellResolution {
                                     object_id: entry.id,
@@ -1552,7 +1561,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     kickers_paid,
                                     additional_cost_payment_count,
                                     additional_cost_payments,
-                                    convoked_creatures: convoked_creatures.clone(),
+                                    convoked_creatures,
                                 },
                             );
                             state.waiting_for = wf;
