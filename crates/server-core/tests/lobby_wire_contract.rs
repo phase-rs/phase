@@ -87,7 +87,7 @@ fn lobby_server_messages_byte_identical_to_canonical() {
     let sc_error = sc::ServerMessage::error("legacy error");
     assert_eq!(
         serde_json::to_string(&lb_error).unwrap(),
-        r#"{\"type\":\"Error\",\"data\":{\"message\":\"legacy error\"}}"#
+        r#"{"type":"Error","data":{"message":"legacy error"}}"#
     );
     assert_eq!(
         serde_json::to_string(&lb_error).unwrap(),
@@ -102,7 +102,7 @@ fn lobby_server_messages_byte_identical_to_canonical() {
     let sc_typed = sc::ServerMessage::deck_rejected("deck invalid");
     assert_eq!(
         serde_json::to_string(&lb_typed).unwrap(),
-        r#"{\"type\":\"Error\",\"data\":{\"message\":\"deck invalid\",\"code\":\"deck_rejected\"}}"#
+        r#"{"type":"Error","data":{"message":"deck invalid","code":"deck_rejected"}}"#
     );
     assert_eq!(
         serde_json::to_string(&lb_typed).unwrap(),
