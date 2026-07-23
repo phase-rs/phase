@@ -14,7 +14,7 @@
 //! and ends when the Aura leaves the battlefield (CR 400.7 / CR 611.2a).
 
 use engine::game::game_object::{AttachTarget, DisplaySource};
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     ChoosePermanentPersist, ChosenAttribute, ContinuousModification, Effect, FilterProp,
@@ -34,6 +34,10 @@ const METAMORPHIC_ALTERATION: &str = "Enchant creature\nAs this Aura enters, cho
 /// parsed as-enters choice + copy static. Identity (Enchantment / Aura /
 /// mana cost) is set BEFORE `from_oracle_text`, which preserves identity fields
 /// while installing the parsed abilities/keywords/replacements/statics.
+///
+/// Pass the MTGJSON-style `"enchant"` keyword hint so `"Enchant creature"` is
+/// extracted as `Keyword::Enchant` (scenario bare-FromStr inference cannot
+/// parse the space-form line into `Enchant:creature`).
 fn stage_metamorphic(scenario: &mut GameScenario) -> ObjectId {
     // CR 205.3h: Aura is an enchantment subtype. `as_enchantment` strips the
     // Instant/Sorcery seed from `add_spell_to_hand` so this is a clean
@@ -46,21 +50,8 @@ fn stage_metamorphic(scenario: &mut GameScenario) -> ObjectId {
             generic: 2,
             shards: vec![ManaCostShard::Blue],
         })
-        .from_oracle_text(METAMORPHIC_ALTERATION)
+        .from_oracle_text_with_keywords(&["enchant"], METAMORPHIC_ALTERATION)
         .id()
-}
-
-/// CR 608.3c: pin Enchant to a single host so spell-path attach cannot become
-/// an ambiguous multi-host consult when stack enchant targets are absent.
-/// Opponent donors remain legal *copy* choices (ChoosePermanent pool ≠ Enchant).
-fn pin_enchant_host(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
-    let obj = runner.state_mut().objects.get_mut(&aura).unwrap();
-    obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
-    obj.base_keywords
-        .retain(|k| !matches!(k, Keyword::Enchant(_)));
-    let pinned = Keyword::Enchant(TargetFilter::SpecificObject { id: host });
-    obj.keywords.push(pinned.clone());
-    obj.base_keywords.push(pinned);
 }
 
 fn blue_pool(scenario: &mut GameScenario) {
@@ -93,8 +84,6 @@ fn enchanted_creature_becomes_copy_of_chosen_and_aura_is_unchanged() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura, host);
-
     runner
         .cast(aura)
         .target_object(host)
@@ -138,6 +127,74 @@ fn enchanted_creature_becomes_copy_of_chosen_and_aura_is_unchanged() {
     );
 }
 
+/// CR 608.3c / CR 303.4a: with the normal `"Enchant creature"` filter and at
+/// least two legal hosts, a resolving Aura spell must attach to the creature
+/// it targeted at cast — never re-consult the Enchant filter (CR 303.4f) for an
+/// ambiguous host. The copy donor is a third creature so attach-host ≠
+/// copy-source cannot be confused.
+#[test]
+fn spell_path_retains_chosen_enchant_target_among_multiple_legal_hosts() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let donor = scenario
+        .add_creature_from_oracle(P0, "Serra Angel", 4, 4, "Flying")
+        .id();
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let other_legal = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let aura = stage_metamorphic(&mut scenario);
+    blue_pool(&mut scenario);
+
+    let mut runner = scenario.build();
+    // Sanity: fixture must carry the real Enchant creature filter (not a
+    // SpecificObject pin that would collapse the multi-host consult).
+    assert!(
+        runner.state().objects[&aura].keywords.iter().any(|k| {
+            matches!(
+                k,
+                Keyword::Enchant(TargetFilter::Typed(tf))
+                    if tf.type_filters.contains(&engine::types::ability::TypeFilter::Creature)
+            )
+        }),
+        "fixture must use normal Enchant creature, not a pinned SpecificObject host"
+    );
+
+    runner
+        .cast(aura)
+        .target_object(host)
+        .copy_target(donor)
+        .resolve();
+
+    let aura_obj = &runner.state().objects[&aura];
+    assert_eq!(
+        aura_obj.attached_to,
+        Some(AttachTarget::Object(host)),
+        "CR 608.3c: Aura must remain attached to the cast target, not the other \
+         legal Enchant creature ({other_legal:?})"
+    );
+    assert_ne!(
+        aura_obj.attached_to,
+        Some(AttachTarget::Object(other_legal)),
+        "must not attach to the non-targeted legal creature via Enchant-filter consult"
+    );
+    assert_ne!(
+        aura_obj.attached_to,
+        Some(AttachTarget::Object(donor)),
+        "must not attach to the copy donor"
+    );
+
+    let host_obj = &runner.state().objects[&host];
+    assert_eq!(
+        host_obj.name, "Serra Angel",
+        "targeted host still receives the chosen creature's copy"
+    );
+    assert_eq!(
+        runner.state().objects[&other_legal].name,
+        "Runeclaw Bear",
+        "non-targeted creature must not receive the host copy"
+    );
+}
+
 /// CR 707.2b: the copy is a FROZEN snapshot taken when the effect first started
 /// to apply — later changes to the chosen creature never propagate to the host.
 /// Mutating the donor's base P/T and re-running the layer engine must leave the
@@ -156,7 +213,6 @@ fn copied_values_are_a_frozen_snapshot_of_the_chosen_creature() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -200,7 +256,6 @@ fn host_reverts_when_the_aura_leaves_play() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -251,7 +306,6 @@ fn hexproof_opponent_creature_is_a_legal_copy_donor() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -303,7 +357,6 @@ fn host_is_the_only_creature_and_remains_a_legal_copy_choice() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -393,8 +446,6 @@ fn two_auras_install_independent_copies_on_their_own_hosts() {
     );
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura_a, host_a);
-    pin_enchant_host(&mut runner, aura_b, host_b);
     runner
         .cast(aura_a)
         .target_object(host_a)
@@ -443,7 +494,6 @@ fn host_copying_a_token_donor_routes_token_display() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
-    pin_enchant_host(&mut runner, aura, host);
     // Make the donor a TRUE token so its display routes to the token art db
     // (CR 111.1): `is_token` with no `base_printed_ref` derives
     // `DisplaySource::Token` in the layer engine; its `token_image_ref` is its
@@ -512,7 +562,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
         .id();
     let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     // Library dig → battlefield is a non-spell Aura entry (CR 303.4f). Stage
-    // through the same `from_oracle_text` path as the spell fixture so live +
+    // through the same oracle+enchant-hint path as the spell fixture so live +
     // base replacement/static definitions are both populated.
     let aura = scenario
         .add_spell_to_library_top(P0, "Metamorphic Alteration", false)
@@ -522,7 +572,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
             generic: 2,
             shards: vec![ManaCostShard::Blue],
         })
-        .from_oracle_text(METAMORPHIC_ALTERATION)
+        .from_oracle_text_with_keywords(&["enchant"], METAMORPHIC_ALTERATION)
         .id();
 
     let mut runner = scenario.build();

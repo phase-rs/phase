@@ -1377,8 +1377,8 @@ fn handle_persist_chosen_attribute_choice(
     }
 
     // CR 608.3c + CR 614.12a: Mid-entry `CopyTargetChoice` is raised from the
-    // zone-delivery post-replacement drain, which pauses BEFORE the spell-
-    // resolution epilogue (Aura attach, cast-link stamps) in `stack.rs`. The
+    // zone-delivery / CallerEpilogue post-replacement drain, which pauses
+    // BEFORE the spell-resolution Aura-attach epilogue in `stack.rs`. The
     // stash pushed there (`PendingSpellResolution`) carries the Aura spell's
     // enchant target — establish the host from those spell targets AND apply
     // the attach now so `attached_to` is consistent before the copy installs.
@@ -1387,6 +1387,7 @@ fn handle_persist_chosen_attribute_choice(
     // choice), so `attached_to` is already set and there is no spell-resolution
     // frame — fall through to the attached host / enter-time attach consult.
     let mut host_from_spell: Option<ObjectId> = None;
+    let mut took_spell_resolution = false;
     if state
         .active_spell_resolution()
         .is_some_and(|ctx| ctx.object_id == source_id)
@@ -1394,6 +1395,7 @@ fn handle_persist_chosen_attribute_choice(
         let ctx = state
             .take_active_spell_resolution()
             .expect("active spell-resolution frame checked above");
+        took_spell_resolution = true;
         host_from_spell = ctx.spell_targets.first().and_then(|t| match t {
             crate::types::ability::TargetRef::Object(id) => Some(*id),
             _ => None,
@@ -1403,12 +1405,14 @@ fn handle_persist_chosen_attribute_choice(
 
     // CR 303.4f: Non-spell path may still be unattached if entry skipped the
     // auto-attach consult (e.g. liminal copy → Aura). Resolve it now.
-    // CR 608.3c recovery: the same consult covers spell-path Auras whose stack
-    // ability lost enchant targets before the CallerEpilogue attach site ran.
-    if state
-        .objects
-        .get(&source_id)
-        .is_some_and(|aura| aura.attached_to.is_none())
+    // Never use this Enchant-filter consult as a CR 608.3c spell-path fallback
+    // — a resolving Aura spell's host is the target chosen at cast (CR 303.4a),
+    // carried on `PendingSpellResolution.spell_targets`.
+    if !took_spell_resolution
+        && state
+            .objects
+            .get(&source_id)
+            .is_some_and(|aura| aura.attached_to.is_none())
     {
         match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable

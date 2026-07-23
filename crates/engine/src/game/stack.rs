@@ -1476,13 +1476,113 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // (NOT CR 303.4f, which explicitly governs Auras entering "by any means
         // other than by resolving as an Aura spell.")
         if spell_in_zone(state, entry.id, Zone::Battlefield) {
+            // CR 614.12a: Drain mandatory replacement post-effects (Siege /
+            // Tribute opponent-choice, Metamorphic ChoosePermanent
+            // CopyTargetChoice, …) stashed while resolving this permanent's
+            // ZoneChange. `CallerEpilogue` skipped the DeliveryTail drain, so
+            // this site owns the prompt — BEFORE CR 608.3c Aura attach so a
+            // mid-entry `CopyTargetChoice` can pause with the cast target
+            // carried on `PendingSpellResolution` (CR 608.3c / CR 303.4a),
+            // matching the DeliveryTail `NeedsChoice` arm above. Do not push
+            // `PendingSpellResolution` on top of an AbilityContinuation
+            // (Tribute/Siege resume is top-only).
+            if state.has_post_replacement_drain() {
+                state.clear_post_replacement_source();
+                if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
+                    state,
+                    Some(entry.id),
+                    None,
+                    Some(crate::types::replacements::ReplacementEvent::Moved),
+                    events,
+                ) {
+                    match wf {
+                        // CR 608.3c + CR 614.12a: Metamorphic-class mid-entry
+                        // copy choice — stash the Aura spell's chosen host and
+                        // pause before attach / cast-link stamps. The answer
+                        // path (`handle_persist_chosen_attribute_choice`)
+                        // applies `PendingSpellResolution` then installs the
+                        // host copy.
+                        WaitingFor::CopyTargetChoice { .. } => {
+                            let cast_from_zone = ability
+                                .as_ref()
+                                .and_then(|a| a.context.cast_from_zone)
+                                .or_else(|| {
+                                    state.objects.get(&entry.id).and_then(|o| o.cast_from_zone)
+                                });
+                            let kickers_paid = ability
+                                .as_ref()
+                                .map(|a| a.context.kickers_paid.clone())
+                                .unwrap_or_else(|| {
+                                    state
+                                        .objects
+                                        .get(&entry.id)
+                                        .map(|o| o.kickers_paid.clone())
+                                        .unwrap_or_default()
+                                });
+                            let additional_cost_payment_count = ability
+                                .as_ref()
+                                .map(|a| a.context.additional_cost_payment_count)
+                                .unwrap_or_else(|| {
+                                    state
+                                        .objects
+                                        .get(&entry.id)
+                                        .map(|o| o.additional_cost_payment_count)
+                                        .unwrap_or_default()
+                                });
+                            let additional_cost_payments = ability
+                                .as_ref()
+                                .map(|a| a.context.additional_cost_payments.clone())
+                                .unwrap_or_else(|| {
+                                    state
+                                        .objects
+                                        .get(&entry.id)
+                                        .map(|o| o.additional_cost_payments.clone())
+                                        .unwrap_or_default()
+                                });
+                            state.push_spell_resolution(
+                                crate::types::game_state::PendingSpellResolution {
+                                    object_id: entry.id,
+                                    controller: entry.controller,
+                                    casting_variant,
+                                    cast_from_zone,
+                                    cast_controller: Some(entry.controller),
+                                    cast_timing_permission,
+                                    spell_targets: spell_targets.clone(),
+                                    actual_mana_spent,
+                                    kickers_paid,
+                                    additional_cost_payment_count,
+                                    additional_cost_payments,
+                                    convoked_creatures: convoked_creatures.clone(),
+                                },
+                            );
+                            state.waiting_for = wf;
+                            events.push(GameEvent::StackResolved {
+                                object_id: entry.id,
+                            });
+                            state.current_trigger_event = None;
+                            state.current_trigger_events.clear();
+                            state.current_trigger_match_count = None;
+                            state.die_result_this_resolution = None;
+                            return;
+                        }
+                        WaitingFor::Priority { .. } => {}
+                        other => {
+                            // Tribute / Siege NamedChoice — surface the prompt
+                            // and continue the caller epilogue (Aura attach +
+                            // cast-variant stamps). Do not push SpellResolution
+                            // on top of an AbilityContinuation.
+                            state.waiting_for = other;
+                        }
+                    }
+                }
+            }
+
             let is_aura = state
                 .objects
                 .get(&entry.id)
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
-                let mut attached = false;
                 match spell_targets.first() {
                     // CR 608.3c + CR 608.2b: Object Aura — verify the target is
                     // still a legal host per the Aura's own zone-scoped enchant
@@ -1493,13 +1593,16 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Dead) legally accepts a graveyard host. A now-illegal target
                     // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
                     // at the next checkpoint.
+                    //
+                    // CR 608.3c / CR 303.4a: the host is the spell's chosen
+                    // target — never re-consult the Enchant filter (CR 303.4f
+                    // non-spell entry) when that target is missing.
                     Some(crate::types::ability::TargetRef::Object(target_id))
                         if crate::game::sba::is_valid_attachment_target(
                             state, entry.id, *target_id,
                         ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
-                        attached = true;
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
@@ -1511,45 +1614,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
                         effects::attach::attach_to_player(state, entry.id, *player_id);
-                        attached = true;
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
-                    }
-                }
-                // CR 608.3c recovery: when the stack ability lost its enchant
-                // targets (placeholder Unimplemented stripped with empty
-                // targets), fall back to the Enchant-filter attach authority
-                // used for non-spell Aura entry (CR 303.4f). A unique legal
-                // host auto-attaches; multiple hosts raise NeedsChoice (rare
-                // for a correctly targeted Aura spell).
-                if !attached {
-                    let _ = zone_pipeline::resolve_entering_aura_attachment(state, entry.id);
-                }
-            }
-
-            // CR 614.12a: Drain mandatory replacement post-effects (Siege /
-            // Tribute opponent-choice, Metamorphic ChoosePermanent
-            // CopyTargetChoice, …) stashed while resolving this permanent's
-            // ZoneChange. `CallerEpilogue` skipped the DeliveryTail drain, so
-            // this site owns the prompt — AFTER CR 608.3c Aura attach above so
-            // PersistChosenAttribute can read `attached_to` (dig/CR 303.4f
-            // order). Honor the returned WaitingFor; do not push
-            // PendingSpellResolution on top of an AbilityContinuation
-            // (Tribute/Siege resume is top-only).
-            if state.has_post_replacement_drain() {
-                state.clear_post_replacement_source();
-                if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
-                    state,
-                    Some(entry.id),
-                    None,
-                    Some(crate::types::replacements::ReplacementEvent::Moved),
-                    events,
-                ) {
-                    if !matches!(wf, WaitingFor::Priority { .. }) {
-                        state.waiting_for = wf;
                     }
                 }
             }
