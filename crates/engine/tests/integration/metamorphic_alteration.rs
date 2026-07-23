@@ -521,7 +521,7 @@ fn non_spell_aura_entry_copies_chosen_creature() {
     assert!(
         runner.state().objects[&aura]
             .replacement_definitions
-            .iter()
+            .iter_all()
             .any(|r| matches!(
                 r.execute.as_ref().map(|e| e.effect.as_ref()),
                 Some(Effect::ChoosePermanent { .. })
