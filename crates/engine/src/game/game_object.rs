@@ -1839,6 +1839,12 @@ impl GameObject {
                 mana_spent_to_cast: self.mana_spent_to_cast,
                 colors_spent_to_cast: self.colors_spent_to_cast.clone(),
                 mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
+                // CR 400.7d + CR 603.4: latched WITH the bool/color/amount
+                // stamps above — a source-qualified rider ("mana from a
+                // Treasure spent to cast it") reads this vector at its
+                // resolution re-check after the source has left and the live
+                // vector was cleared at the exit boundary (CR 400.7).
+                mana_spent_source_snapshots: self.mana_spent_source_snapshots.clone(),
                 kickers_paid: self.kickers_paid.clone(),
                 additional_cost_payment_count: self.additional_cost_payment_count,
                 additional_cost_payments: self.additional_cost_payments.clone(),
@@ -2753,6 +2759,42 @@ mod tests {
         assert!(
             obj.cast_from_zone.is_none(),
             "cast_from_zone exit-clear pin (CR 400.7 + CR 603.4)"
+        );
+    }
+
+    /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change
+    /// snapshot latches ALL FOUR cast-payment stamps — including the
+    /// per-mana-unit source-snapshot vector — into the owned trigger source
+    /// context, so a source-qualified rider ("mana from a Treasure spent to
+    /// cast it") can still resolve after the exit-boundary clear wipes the
+    /// live object.
+    #[test]
+    fn snapshot_for_zone_change_latches_cast_payment_stamps() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Marut".to_string(),
+            Zone::Battlefield,
+        );
+        stamp_cast_payment(&mut obj);
+
+        let record = obj.snapshot_for_zone_change(obj.id, Some(Zone::Battlefield), Zone::Graveyard);
+        let context = record
+            .trigger_source_context()
+            .expect("zone-change snapshot always owns a trigger source context");
+
+        assert!(context.mana_spent_to_cast, "latched bool");
+        assert_eq!(context.mana_spent_to_cast_amount, 2, "latched amount");
+        assert!(!context.colors_spent_to_cast.is_empty(), "latched colors");
+        assert_eq!(
+            context.mana_spent_source_snapshots.len(),
+            1,
+            "latched payment-source snapshot vector"
+        );
+        assert_eq!(
+            context.mana_spent_source_snapshots[0].source_id, obj.id,
+            "latched snapshot must keep its payment-time source identity"
         );
     }
 

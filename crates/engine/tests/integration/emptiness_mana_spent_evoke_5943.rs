@@ -22,11 +22,13 @@
 //! https://github.com/phase-rs/phase/issues/5943
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::zones::create_object;
 use engine::types::ability::{TargetRef, TriggerCondition};
 use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -856,4 +858,238 @@ fn dawnglow_spend_color_condition_reads_stack_tally() {
     // CR 601.2h + CR 608.2c: the {W} spend-color branch reads the Stack
     // object's surviving tally at resolution and pays out X (=2) life.
     outcome.assert_life_delta(P0, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Review-round fixtures: source-qualified payment provenance must survive a
+// battlefield exit between trigger collection and resolution (CR 603.4 +
+// CR 400.7d), via the latched TriggerSourceContext — while the re-entered
+// incarnation keeps reading empty/0 (the CR 400.7 clearing that stays).
+// ---------------------------------------------------------------------------
+
+/// Marut — verbatim Oracle text (data/card-data.json, byte-identical).
+/// {8} Artifact Creature — Construct 7/7.
+const MARUT_ORACLE: &str = "Trample\nWhen this creature enters, if mana from a Treasure was spent to cast it, create a Treasure token for each mana from a Treasure spent to cast it. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// Cloudshift — verbatim Oracle text (data/card-data.json, byte-identical).
+const CLOUDSHIFT_ORACLE: &str =
+    "Exile target creature you control, then return that card to the battlefield under your control.";
+
+/// A real battlefield Treasure (artifact, subtype Treasure) to serve as the
+/// PRODUCING source of tagged pool mana — the `FromSource { Subtype Treasure }`
+/// filter matches the payment-time snapshot of this object (precedent:
+/// `issue_1156_coin_of_mastery.rs::make_treasure`).
+fn make_treasure_source(runner: &mut GameRunner, card_id: u64) -> ObjectId {
+    let state = runner.state_mut();
+    let id = create_object(
+        state,
+        CardId(card_id),
+        P0,
+        "Treasure".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.subtypes.push("Treasure".to_string());
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
+/// Pool mana whose `ManaUnit::source` points at a REAL object, so the payment
+/// block stamps a `ManaSpentSourceSnapshot` for each unit (CR 601.2h).
+fn add_mana_from_source(
+    runner: &mut GameRunner,
+    player: PlayerId,
+    mana_type: ManaType,
+    amount: u32,
+    source: ObjectId,
+) {
+    let pool = &mut runner
+        .state_mut()
+        .players
+        .iter_mut()
+        .find(|p| p.id == player)
+        .unwrap()
+        .mana_pool;
+    for _ in 0..amount {
+        pool.add(ManaUnit::new(mana_type, source, false, vec![]));
+    }
+}
+
+/// Battlefield Treasure TOKENS only — Marut's rider output, disjoint from the
+/// non-token Treasure the fixture uses as a mana source.
+fn treasure_token_count(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|o| {
+            o.zone == Zone::Battlefield
+                && o.is_token
+                && o.card_types.subtypes.iter().any(|s| s == "Treasure")
+        })
+        .count()
+}
+
+/// Pass priority (draining any single-slot OrderTriggers prompt with identity)
+/// until `done` holds, panicking on any other waiting state.
+fn pass_until(runner: &mut GameRunner, mut done: impl FnMut(&GameRunner) -> bool, what: &str) {
+    for _ in 0..20 {
+        if done(runner) {
+            return;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority must be accepted");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("identity OrderTriggers must succeed");
+            }
+            other => panic!("unhandled waiting state while {what}: {other:?}"),
+        }
+    }
+    panic!("drive loop exhausted while {what}");
+}
+
+/// R11 — the review-round fixture: Marut's source-qualified ETB rider ("create
+/// a Treasure token for each mana from a Treasure spent to cast it") is
+/// collected, then Marut is BLINKED (Cloudshift) before the rider resolves.
+///
+/// CR 603.4 + CR 400.7d: both the intervening-if re-check and the effect
+/// quantity must read the payment provenance through the LATCHED trigger
+/// source context — the re-entered incarnation is a new object whose stamps
+/// were cleared at the battlefield exit (CR 400.7) and can only answer 0.
+/// The rider must still create exactly TWO Treasures (two Treasure-tagged
+/// mana units paid), and the re-entered Marut must read empty/0.
+#[test]
+fn marut_treasure_rider_survives_blink_via_latched_snapshots() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marut = {
+        let mut b = scenario.add_creature_to_hand(P0, "Marut", 7, 7);
+        b.from_oracle_text(MARUT_ORACLE);
+        b.with_mana_cost(ManaCost::generic(8));
+        b.id()
+    };
+    let cloudshift = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        b.id()
+    };
+    let mut runner = scenario.build();
+
+    // Two Treasure-tagged units + six untagged units pay Marut's {8}.
+    let treasure = make_treasure_source(&mut runner, 9001);
+    add_mana_from_source(&mut runner, P0, ManaType::Colorless, 2, treasure);
+    add_mana(&mut runner, P0, ManaType::Colorless, 6);
+
+    {
+        let commit = runner.cast(marut).commit();
+        // Reach-guard (non-degenerate fixture): the payment stamped exactly two
+        // Treasure-source snapshots on the spell (CR 601.2h).
+        assert_eq!(
+            commit.state().objects[&marut]
+                .mana_spent_source_snapshots
+                .len(),
+            2,
+            "both Treasure-tagged mana units must snapshot their source at payment"
+        );
+    }
+
+    // Resolve the SPELL only: Marut enters, its conditional ETB is collected
+    // (intervening-if true at collection: 2 > 0) and sits on the stack.
+    pass_until(
+        &mut runner,
+        |r| {
+            matches!(
+                r.state().stack.back().map(|e| &e.kind),
+                Some(StackEntryKind::TriggeredAbility { .. })
+            )
+        },
+        "resolving the Marut spell",
+    );
+    assert_eq!(
+        runner.state().objects[&marut].zone,
+        Zone::Battlefield,
+        "Marut must be on the battlefield with its ETB rider pending"
+    );
+
+    // Blink Marut IN RESPONSE to its own pending rider (CR 405.5: the trigger
+    // stays on the stack; Cloudshift, added later, is on top and resolves
+    // first — CR 400.7 makes the returned Marut a new incarnation).
+    add_mana(&mut runner, P0, ManaType::White, 1);
+    {
+        let _commit = runner.cast(cloudshift).target_object(marut).commit();
+    }
+    pass_until(
+        &mut runner,
+        |r| r.state().objects[&cloudshift].zone == Zone::Graveyard,
+        "resolving Cloudshift",
+    );
+
+    // Hostile mid-state (the seam the review flagged): the rider is still
+    // pending, and the ONLY surviving payment provenance is the latched
+    // trigger-source snapshot — the re-entered Marut was cleared at the
+    // battlefield exit (CR 400.7) and no Treasure token exists yet.
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the ETB rider must still be pending after the blink"
+    );
+    let marut_reentered = runner
+        .state()
+        .objects
+        .values()
+        .find(|o| o.zone == Zone::Battlefield && o.name == "Marut")
+        .expect("blinked Marut must have returned to the battlefield")
+        .id;
+    assert!(
+        runner.state().objects[&marut_reentered]
+            .mana_spent_source_snapshots
+            .is_empty(),
+        "the re-entered incarnation must carry no payment-source snapshots (CR 400.7)"
+    );
+    assert_eq!(
+        treasure_token_count(&runner),
+        0,
+        "no Treasure token may exist before the rider resolves"
+    );
+
+    // Resolve the pending rider.
+    pass_until(
+        &mut runner,
+        |r| r.state().stack.is_empty(),
+        "resolving the pending Marut rider",
+    );
+
+    // CR 603.4 + CR 400.7d: the rider read the LATCHED source-payment vector —
+    // exactly two Treasures. (Exactly two also proves the re-entry produced no
+    // second rider: its collection-time intervening-if read the cleared new
+    // object as 0.)
+    assert_eq!(
+        treasure_token_count(&runner),
+        2,
+        "the rider must create one Treasure per Treasure-tagged mana unit via the latch"
+    );
+    // Mirror guard: the CR 400.7 clearing STAYS — the new incarnation still
+    // reads empty/0 after the rider resolved from the latch.
+    let reentered = &runner.state().objects[&marut_reentered];
+    assert!(
+        reentered.mana_spent_source_snapshots.is_empty(),
+        "the re-entered incarnation must still read no payment-source snapshots"
+    );
+    assert_eq!(
+        reentered.mana_spent_to_cast_amount, 0,
+        "the re-entered incarnation must still read 0 mana spent"
+    );
 }

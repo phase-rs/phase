@@ -454,6 +454,14 @@ pub struct TriggerSourceContext {
     pub colors_spent_to_cast: ColoredManaCount,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub mana_spent_to_cast_amount: u32,
+    /// CR 400.7d + CR 601.2h: per-mana-unit payment source snapshots, latched
+    /// with the other cast-payment stamps so a source-qualified rider ("mana
+    /// from a Treasure spent to cast it") still resolves after the source
+    /// leaves before its trigger does (CR 603.4). The live vector is cleared at
+    /// the battlefield-exit boundary (CR 400.7); this latch is the departing
+    /// incarnation's only surviving source-payment provenance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_source_snapshots: Vec<ManaSpentSourceSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<KickerVariant>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -524,7 +532,14 @@ impl std::fmt::Debug for TriggerSourceContext {
             .field("cast_spell_keywords", &self.cast_spell_keywords)
             .field("mana_spent_to_cast", &self.mana_spent_to_cast)
             .field("colors_spent_to_cast", &self.colors_spent_to_cast)
-            .field("mana_spent_to_cast_amount", &self.mana_spent_to_cast_amount)
+            .field("mana_spent_to_cast_amount", &self.mana_spent_to_cast_amount);
+        if !self.mana_spent_source_snapshots.is_empty() {
+            debug.field(
+                "mana_spent_source_snapshots",
+                &self.mana_spent_source_snapshots,
+            );
+        }
+        debug
             .field("kickers_paid", &self.kickers_paid)
             .field(
                 "additional_cost_payment_count",

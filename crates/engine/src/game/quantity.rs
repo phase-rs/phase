@@ -1528,11 +1528,14 @@ fn resolve_event_scoped_ref(
                 },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
+            // No latch routing: the read subject is the triggering SPELL from
+            // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
                 metric,
                 &FilterContext::from_source(state, id),
+                None,
             )
         }
         QuantityExpr::Ref {
@@ -1551,15 +1554,44 @@ pub(crate) fn resolve_mana_spent_to_cast_metric(
     cast_object: ObjectId,
     metric: &CastManaSpentMetric,
     filter_ctx: &FilterContext<'_>,
+    trigger_source: Option<&TriggerSourceContext>,
 ) -> Option<i32> {
-    let obj = state.objects.get(&cast_object)?;
+    // CR 603.4 + CR 400.7d + CR 608.2h: when the cast object IS the latched
+    // trigger source, read all three cast-payment stamps through the exact
+    // event-time authority (`source_read`) — a source that left its observed
+    // zone (or re-entered as a new incarnation, CR 400.7) answers from the
+    // latch; a later same-id object never answers for it. Mirrors how
+    // `check_trigger_condition`'s spend-color arms read the per-color tally.
+    let source_read = trigger_source
+        .filter(|source| source.identity.reference.object_id == cast_object)
+        .map(|source| source.source_read(state));
+    let (spent_amount, spent_colors, source_snapshots) = match source_read {
+        Some(crate::types::game_state::TriggerSourceRead::ExactLive(object)) => (
+            object.mana_spent_to_cast_amount,
+            &object.colors_spent_to_cast,
+            &object.mana_spent_source_snapshots,
+        ),
+        Some(crate::types::game_state::TriggerSourceRead::Latched(context)) => (
+            context.mana_spent_to_cast_amount,
+            &context.colors_spent_to_cast,
+            &context.mana_spent_source_snapshots,
+        ),
+        None => {
+            let object = state.objects.get(&cast_object)?;
+            (
+                object.mana_spent_to_cast_amount,
+                &object.colors_spent_to_cast,
+                &object.mana_spent_source_snapshots,
+            )
+        }
+    };
     Some(match metric {
-        CastManaSpentMetric::Total => u32_to_i32_saturating(obj.mana_spent_to_cast_amount),
+        CastManaSpentMetric::Total => u32_to_i32_saturating(spent_amount),
         CastManaSpentMetric::DistinctColors => {
-            usize_to_i32_saturating(obj.colors_spent_to_cast.distinct_colors())
+            usize_to_i32_saturating(spent_colors.distinct_colors())
         }
         CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
-            obj.mana_spent_source_snapshots
+            source_snapshots
                 .iter()
                 .filter(|snapshot| {
                     crate::game::filter::matches_target_filter_on_lki_snapshot(
@@ -3014,7 +3046,18 @@ fn resolve_ref(
                 }),
             };
             cast_object
-                .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
+                .and_then(|id| {
+                    // CR 603.4 + CR 400.7d: the resolver reads through the
+                    // latched trigger source when (and only when) it is the
+                    // cast object being asked about.
+                    resolve_mana_spent_to_cast_metric(
+                        state,
+                        id,
+                        metric,
+                        &filter_ctx,
+                        ctx.trigger_source.as_ref(),
+                    )
+                })
                 .unwrap_or(0)
         }
         // CR 903.4 + CR 903.4f: Number of distinct colors in the controller's
