@@ -9784,23 +9784,59 @@ fn parse_damage_prevention_replacement(
     // the amount. The bare "all" arm below must stay ordered after this one
     // because it shares the "all" prefix.
     let after_prevent = strip_after(working_lower, "prevent ");
-    let amount = if let Some((after_all_but, _)) =
+    // CR 615.1a: A prevention clause resolves to one of two representations on the
+    // resulting `DamageDone` replacement:
+    //   * a `ShieldKind::Prevention` shield — "prevent all", "prevent all but N",
+    //     the depleting "prevent the next N", or the redirection-context
+    //     "prevent that damage"; or
+    //   * for the continuous, non-depleting bare "prevent N of that damage" class
+    //     (Heart-Shaped Herb — issue #5902, Sphere of Purity, Orbs of Warding,
+    //     Urza's Armor, Guardian Seraph, Daunting Defender, ...), a
+    //     `DamageModification::Minus { value: N }` that saturating-subtracts N
+    //     from every qualifying damage event.
+    //
+    // CR 702.64: the `Minus` representation deliberately reuses the same shared
+    // per-event damage-subtraction authority that Absorb already synthesizes
+    // (`database::synthesis::build_absorb_replacement`) rather than a new
+    // prevention-amount variant, so parser and resolver keep a single semantic
+    // representation for continuous per-event prevention (it is non-consumed and
+    // re-fires for every event — exactly Absorb's CR 702.64b semantics).
+    enum PreventionRepr {
+        Shield(PreventionAmount),
+        Reduce(u32),
+    }
+    let repr = if let Some((after_all_but, _)) =
         after_prevent.and_then(|s| tag::<_, _, OracleError<'_>>("all but ").parse(s).ok())
     {
         let (n, _) = parse_number(after_all_but)?;
-        PreventionAmount::AllBut(n)
+        PreventionRepr::Shield(PreventionAmount::AllBut(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent all") {
-        PreventionAmount::All
+        PreventionRepr::Shield(PreventionAmount::All)
     } else if let Some(rest) = strip_after(working_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
         let (n, _) = parse_number(rest)?;
-        PreventionAmount::Next(n)
+        PreventionRepr::Shield(PreventionAmount::Next(n))
     } else if nom_primitives::scan_contains(working_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
-        PreventionAmount::All
+        PreventionRepr::Shield(PreventionAmount::All)
     } else {
-        return None;
+        // CR 615.1a: bare "prevent N of that damage" — a literal numeric amount
+        // immediately following the "prevent " verb. Only a leading ASCII digit
+        // qualifies: `parse_number` also maps the bare pronoun "X" → 0 for the
+        // dynamic "prevent the next X" idiom, and matching that here would
+        // silently swallow the dynamic case into a static `Minus { value: 0 }`
+        // no-op instead of letting the chunk-level where-X machinery bind it.
+        // Anchored on the literal "of that damage" suffix trailing the number so
+        // an unrelated numeric phrase elsewhere in the clause cannot be misbound.
+        // Any miss (no leading digit, or no "of that damage" anchor) means this
+        // is not a recognized prevention pattern, so `?` bails the whole parse.
+        let n = after_prevent
+            .filter(|s| s.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+            .and_then(parse_number)
+            .filter(|(_, rest)| nom_primitives::scan_contains(rest.trim_start(), "of that damage"))
+            .map(|(n, _)| n)?;
+        PreventionRepr::Reduce(n)
     };
 
     // --- 2. Extract combat scope ---
@@ -9916,8 +9952,19 @@ fn parse_damage_prevention_replacement(
 
     // --- 5. Build the replacement definition ---
     let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
-        .prevention_shield(amount)
         .description(original_text.to_string());
+    def = match repr {
+        // CR 615.1a: shield-style prevention (all / all-but / depleting next /
+        // redirection-context "prevent that damage").
+        PreventionRepr::Shield(amount) => def.prevention_shield(amount),
+        // CR 615.1a + CR 702.64: continuous "prevent N of that damage" reuses the
+        // shared `DamageModification::Minus` per-event subtraction authority
+        // (Branch 1 of `damage_done_applier`), never consumed, re-firing for
+        // every qualifying event — no separate prevention-amount variant.
+        PreventionRepr::Reduce(n) => {
+            def.damage_modification(DamageModification::Minus { value: n })
+        }
+    };
 
     if let Some(cs) = combat_scope {
         def = def.combat_scope(cs);
@@ -12872,6 +12919,83 @@ mod tests {
             }
             other => panic!("expected Typed recipient filter, got {other:?}"),
         }
+    }
+
+    /// CR 615.1a + CR 702.64: Heart-Shaped Herb (issue #5902) — "If a source an
+    /// opponent controls would deal damage to you, prevent 1 of that damage."
+    /// Before this fix the bare "prevent N of that damage" amount phrasing (no
+    /// "all" / "all but" / "the next") matched none of the amount branches, so
+    /// `parse_damage_prevention_replacement` returned `None` and the whole
+    /// static ability silently failed to install — matching the reported symptom
+    /// ("isn't affecting it at all"). Per the maintainer's CR review the class is
+    /// re-emitted onto the shared `DamageModification::Minus` per-event
+    /// subtraction authority (the CR 702.64 Absorb representation), NOT a new
+    /// prevention-amount variant. This idiom is shared by many real cards
+    /// (Sphere of Purity, Orbs of Warding, Urza's Armor, Guardian Seraph,
+    /// Daunting Defender, ...), so the fix is generic.
+    #[test]
+    fn heart_shaped_herb_prevent_n_of_that_damage_is_minus_modification() {
+        let def = parse_replacement_line(
+            "If a source an opponent controls would deal damage to you, prevent 1 of that damage.",
+            "Heart-Shaped Herb",
+        )
+        .expect("Heart-Shaped Herb should parse as damage prevention");
+
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Minus { value: 1 }),
+            "bare 'prevent 1 of that damage' must install a continuous Minus(1) \
+             modification, not fall through unparsed"
+        );
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::None,
+            "the Minus representation must not also carry a prevention shield_kind"
+        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.damage_target_filter,
+            Some(damage_target_controller()),
+            "recipient must be the shield controller ('deal damage to you')"
+        );
+
+        let source_filter = def
+            .damage_source_filter
+            .as_ref()
+            .expect("'a source an opponent controls' must produce a source filter");
+        match source_filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::Opponent),
+                    "source must be scoped to opponent-controlled, not any source"
+                );
+            }
+            other => panic!("expected Typed opponent-controlled source filter, got {other:?}"),
+        }
+    }
+
+    /// Sibling coverage for the same bare "prevent N of that damage" idiom with
+    /// N > 1 and no source-controller qualifier (Sphere of Purity-style). Pins
+    /// that the fix generalizes to other N and doesn't require an "an opponent
+    /// controls" clause to be present.
+    #[test]
+    fn bare_prevent_n_of_that_damage_generalizes_without_source_controller_clause() {
+        let def = parse_replacement_line(
+            "If a source would deal damage to equipped creature, prevent 2 of that damage.",
+            "Shield of the Realm",
+        )
+        .expect("bare 'prevent N of that damage' with no controller qualifier should parse");
+
+        assert_eq!(
+            def.damage_modification,
+            Some(DamageModification::Minus { value: 2 })
+        );
+        assert_eq!(def.shield_kind, ShieldKind::None);
+        assert!(
+            def.damage_source_filter.is_none(),
+            "unqualified 'a source' must not synthesize a source filter"
+        );
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to

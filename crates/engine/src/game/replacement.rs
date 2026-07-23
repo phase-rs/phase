@@ -1548,6 +1548,9 @@ fn damage_done_applier(
 ) -> ApplyResult {
     // Branch 1: Damage modification (Double, Triple, Plus, Minus)
     if let Some(modification) = damage_modification_for_rid(state, rid) {
+        // CR 510.2: identity for the combat-damage-batch prevention tally, taken
+        // before the event is destructured (mirrors the Branch 2 shield path).
+        let applied_key = AppliedReplacementKey::for_event(&event, rid);
         if let ProposedEvent::Damage {
             source_id,
             target,
@@ -1556,6 +1559,9 @@ fn damage_done_applier(
             applied,
         } = event
         {
+            // CR 615.1a: captured before the match consumes `modification` (the
+            // `Plus`/`SetTo` arms move their non-`Copy` payload out).
+            let is_minus_prevention = matches!(modification, DamageModification::Minus { .. });
             let new_amount = match modification {
                 DamageModification::Double => amount.saturating_mul(2),
                 DamageModification::Triple => amount.saturating_mul(3),
@@ -1643,6 +1649,33 @@ fn damage_done_applier(
             // consumed here — they re-apply to every damage event.
             if let Some(ShieldKind::DamageReplacementOneShot) = shield_kind_for_rid(state, rid) {
                 consume_prevention_shield(state, rid, None);
+            }
+            // CR 615.1a + CR 702.64b + CR 510.2: `DamageModification::Minus` is the
+            // shared continuous-prevention authority — CR 702.64 Absorb, the bare
+            // "prevent N of that damage" static shields (Heart-Shaped Herb #5902,
+            // Sphere of Purity, Orbs of Warding, ...), and the
+            // `Minus { value: u32::MAX }` prevent-all sentinel. When it actually
+            // reduces the event it prevents damage, so emit the same
+            // `DamagePrevented` bookkeeping the `ShieldKind::Prevention` shields do
+            // (Branch 2) rather than a parallel representation: in a combat-damage
+            // batch the prevented amount aggregates into the per-shield tally (one
+            // post-batch `DamagePrevented` via `fire_combat_prevention_riders`),
+            // and outside a batch it is emitted per event here. Increase/no-op
+            // modifications (Double, Triple, Plus, SetTo*, LifeFloor) are not
+            // prevention and record nothing.
+            if is_minus_prevention {
+                let prevented = amount.saturating_sub(new_amount);
+                if prevented > 0 {
+                    if let Some(tally) = state.combat_prevention_tally.as_mut() {
+                        *tally.entry(applied_key).or_insert(0) += prevented as i32;
+                    } else {
+                        events.push(GameEvent::DamagePrevented {
+                            source_id,
+                            target: target.clone(),
+                            amount: prevented,
+                        });
+                    }
+                }
             }
             return ApplyResult::Modified(ProposedEvent::Damage {
                 source_id,
