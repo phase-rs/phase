@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
-    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ChoosePermanentPersist, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    CostReduction, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -1192,6 +1192,7 @@ fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<Do
     detect_linked_choice_etb_counter(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
     detect_linked_choice_persisted_player(items, &mut relations);
+    detect_linked_choice_copy_chosen_host(items, &mut relations);
     detect_etb_exile_ltb_return(items, &mut relations);
     detect_active_player_punisher(items, &mut relations);
     relations
@@ -1673,6 +1674,91 @@ fn apply_linked_choice_persisted_player(
             }
         }
     }
+}
+
+// --- CR 607.2d + CR 707.2c: as-enters permanent choice → CopyChosen host copy --
+
+/// Pair an as-enters permanent-object choice (loud-unsupported until proven)
+/// with a `ContinuousModification::CopyChosen` consumer. First-match of each
+/// mirrors the other linked-choice detectors.
+fn detect_linked_choice_copy_chosen_host(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let chooser = items.iter().find(|item| {
+        item_replacement(item)
+            .and_then(|replacement| replacement.execute.as_ref())
+            .is_some_and(is_as_enters_choose_permanent_unsupported)
+    });
+    let copy_static = items.iter().find(|item| {
+        item_static(item).is_some_and(|s| {
+            s.modifications
+                .contains(&ContinuousModification::CopyChosen)
+        })
+    });
+    if let (Some(chooser), Some(copy_static)) = (chooser, copy_static) {
+        if chooser.id != copy_static.id {
+            relations.push(DocumentRelationIr::LinkedChoice(
+                LinkedChoiceKind::CopyChosenHost {
+                    chooser: chooser.id,
+                    copy_static: copy_static.id,
+                },
+            ));
+        }
+    }
+}
+
+/// CR 607.2d + CR 707.2c + CR 614.12a: Upgrade a proven chooser from the
+/// unsupported marker to `Effect::ChoosePermanent { CopiableSnapshot }`. The
+/// filter is re-derived from the marker's Oracle description so line-local
+/// lowering never assigns copy-host semantics without this relation.
+fn apply_linked_choice_copy_chosen_host(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    replacement_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost { chooser, .. }) =
+            relation
+        else {
+            continue;
+        };
+        let Some(pos) = position_of(replacement_ids, *chooser) else {
+            continue;
+        };
+        let Some(execute) = result.replacements[pos].execute.as_mut() else {
+            continue;
+        };
+        let description = match execute.effect.as_ref() {
+            Effect::Unimplemented { description, .. } => description.clone(),
+            _ => continue,
+        };
+        let lower = description.to_lowercase();
+        let Some((_, _, choose_suffix)) =
+            scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("choose ").parse(i))
+        else {
+            continue;
+        };
+        let Some(filter) =
+            super::oracle_replacement::as_enters_choose_permanent_filter(choose_suffix)
+        else {
+            continue;
+        };
+        *execute = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChoosePermanent {
+                filter,
+                persist: ChoosePermanentPersist::CopiableSnapshot,
+            },
+        );
+    }
+}
+
+fn is_as_enters_choose_permanent_unsupported(def: &AbilityDefinition) -> bool {
+    matches!(
+        def.effect.as_ref(),
+        Effect::Unimplemented { name, .. } if name == "as-enters-choose-permanent"
+    )
 }
 
 /// Whether an ability's effect chain (recursing sub-abilities) makes a
@@ -2848,6 +2934,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     );
     reconcile_host_bound_phase_outs(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
+    apply_linked_choice_copy_chosen_host(&mut result, &ir.relations, &replacement_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause

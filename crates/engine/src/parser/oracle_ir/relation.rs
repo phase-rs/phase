@@ -130,4 +130,15 @@ pub(crate) enum LinkedChoiceKind {
     /// exists, so a resolution-scoped choice with no durable reader stays
     /// non-persisted.
     PersistedPlayer { choosers: Vec<OracleItemId> },
+    /// CR 607.2d + CR 707.2c + CR 614.12a: An as-enters permanent-object choice
+    /// (`chooser`) linked to a `ContinuousModification::CopyChosen` static
+    /// (`copy_static`). Applying rewrites the chooser's unsupported marker into
+    /// `Effect::ChoosePermanent { persist: CopiableSnapshot }` — Metamorphic
+    /// Alteration's Aura-host copy. Without this consumer relation the choose
+    /// line stays loud-unsupported rather than silently gaining copy-host
+    /// semantics.
+    CopyChosenHost {
+        chooser: OracleItemId,
+        copy_static: OracleItemId,
+    },
 }

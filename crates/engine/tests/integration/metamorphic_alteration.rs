@@ -490,37 +490,37 @@ fn non_spell_aura_entry_copies_chosen_creature() {
         .add_creature_from_oracle(P1, "Serra Angel", 4, 4, "Flying")
         .id();
     let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    // Library dig → battlefield is a non-spell Aura entry (CR 303.4f).
-    let aura = scenario.add_card_to_library_top(P0, "Metamorphic Alteration");
+    // Library dig → battlefield is a non-spell Aura entry (CR 303.4f). Stage
+    // through the same `from_oracle_text` path as the spell fixture so live +
+    // base replacement/static definitions are both populated.
+    let aura = scenario
+        .add_spell_to_library_top(P0, "Metamorphic Alteration", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Blue],
+        })
+        .from_oracle_text(METAMORPHIC_ALTERATION)
+        .id();
 
     let mut runner = scenario.build();
 
-    // Install Aura identity + parsed Metamorphic replacements/statics/keywords.
-    let parsed = parse_oracle_text(
-        METAMORPHIC_ALTERATION,
-        "Metamorphic Alteration",
-        &[],
-        &["Enchantment".to_string()],
-        &["Aura".to_string()],
-    );
+    // Narrow Enchant so only `host` is a legal attach target (auto-attach).
     {
         let obj = runner.state_mut().objects.get_mut(&aura).unwrap();
-        obj.card_types.core_types = vec![CoreType::Enchantment];
-        obj.card_types.subtypes = vec!["Aura".to_string()];
-        obj.base_card_types = obj.card_types.clone();
-        obj.keywords = parsed.extracted_keywords;
-        obj.replacements = parsed.replacements;
-        obj.statics = parsed.statics;
-        // Narrow Enchant so only `host` is a legal attach target (auto-attach).
         obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
+        obj.base_keywords
+            .retain(|k| !matches!(k, Keyword::Enchant(_)));
         let mut you_control_creature = TypedFilter::creature();
         you_control_creature.controller = Some(ControllerRef::You);
-        obj.keywords
-            .push(Keyword::Enchant(TargetFilter::Typed(you_control_creature)));
+        let narrowed = Keyword::Enchant(TargetFilter::Typed(you_control_creature));
+        obj.keywords.push(narrowed.clone());
+        obj.base_keywords.push(narrowed);
     }
     assert!(
         runner.state().objects[&aura]
-            .replacements
+            .replacement_definitions
             .iter()
             .any(|r| matches!(
                 r.execute.as_ref().map(|e| e.effect.as_ref()),
@@ -585,9 +585,11 @@ fn non_spell_aura_entry_copies_chosen_creature() {
     );
 }
 
-/// SHAPE: the "As this Aura enters, choose a creature." line parses to an
-/// as-enters `Effect::ChoosePermanent { persist: CopiableSnapshot }` over a
-/// creature copy-source pool — never a `BecomeCopy` on the entering Aura.
+/// SHAPE: the "As this Aura enters, choose a creature." line, paired with the
+/// companion CopyChosen static on the same card, lowers to an as-enters
+/// `Effect::ChoosePermanent { persist: CopiableSnapshot }` over a creature
+/// copy-source pool — never a `BecomeCopy` on the entering Aura. A bare choose
+/// line without CopyChosen stays unsupported (see unit test).
 #[test]
 fn as_enters_choose_a_creature_parses_to_choose_permanent() {
     let parsed = parse_oracle_text(

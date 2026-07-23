@@ -33,15 +33,15 @@ use super::oracle_util::{
 };
 use crate::types::ability::CastingPermission;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType,
-    ChoosePermanentPersist, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
-    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
-    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
-    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
-    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
-    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
+    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
+    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
+    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
+    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
+    PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
+    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2133,8 +2133,9 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     // CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." is an
     // as-enters OBJECT choice, not a named-attribute choice, so
     // `parse_named_choice_object` (color/type/name/etc.) fails. Fall back to
-    // the object-choice combinator that lowers to `Effect::ChoosePermanent`
-    // (Metamorphic Alteration) before giving up.
+    // the object-choice combinator, which claims the line as a Moved replacement
+    // with a loud unsupported marker until `CopyChosenHost` proves the
+    // companion CopyChosen static (Metamorphic Alteration).
     let Some(choice_type) = parse_named_choice_object(choose_object) else {
         return parse_as_enters_choose_permanent(choose_suffix, original_text);
     };
@@ -2298,7 +2299,11 @@ pub(crate) fn is_as_enters_choose_permanent_phrase(choose_text: &str) -> bool {
 /// Parse the object-filter of an as-enters permanent choice. Accepts either the
 /// suffix after `choose ` (`"a creature."`) or a full `"choose a creature."`
 /// clause. Requires full consumption and a concrete `Typed` filter.
-fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
+///
+/// `pub(crate)` so the `CopyChosenHost` document-relation apply step can
+/// re-derive the filter from an unsupported chooser's description when upgrading
+/// to `ChoosePermanent { CopiableSnapshot }`.
+pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
     // Structural optional-prefix + trailing-period cleanup (not dispatch):
     // callers may pass the match-at-start slice or the post-`choose ` suffix.
     let object_phrase = choose_text.trim_start();
@@ -2325,26 +2330,29 @@ fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> 
 /// CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." — the
 /// as-enters OBJECT-choice analogue of `parse_as_enters_choose` (which only
 /// handles named-attribute choices: color, creature type, card name, etc.).
-/// The chosen permanent's copiable values are latched at the choice answer and
-/// installed as a Layer-1 copy on the Aura's enchanted host
-/// (`ChoosePermanentPersist::CopiableSnapshot`) — the entering Aura itself is
-/// never turned into a copy. Metamorphic Alteration.
+///
+/// Line-local lowering does **not** emit `ChoosePermanentPersist::CopiableSnapshot`:
+/// that persist purpose installs a Layer-1 copy on an Aura's enchanted host and
+/// is only rules-correct when a companion `ContinuousModification::CopyChosen`
+/// consumer is also present (Metamorphic Alteration). Emit a loud unsupported
+/// marker instead; `LinkedChoiceKind::CopyChosenHost` upgrades it at the
+/// document-relation seam when the consumer is proven.
 ///
 /// `choose_text` is the object phrase (optionally still carrying a leading
 /// `"choose "`). Parsed with the shared `parse_target` descriptor grammar; the
-/// remainder must be empty and the filter must be `Typed`.
+/// remainder must be empty and the filter must be `Typed` (proves the phrase is
+/// an object choice before we claim the line).
 fn parse_as_enters_choose_permanent(
     choose_text: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let filter = as_enters_choose_permanent_filter(choose_text)?;
+    // Validate the object phrase is a concrete Typed filter — then leave the
+    // CopiableSnapshot lowering to the CopyChosenHost document relation.
+    let _filter = as_enters_choose_permanent_filter(choose_text)?;
 
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::ChoosePermanent {
-            filter,
-            persist: ChoosePermanentPersist::CopiableSnapshot,
-        },
+        Effect::unimplemented("as-enters-choose-permanent", original_text),
     );
 
     Some(
@@ -14715,25 +14723,27 @@ mod tests {
         ));
     }
 
-    /// CR 614.12a + CR 707.2c: object as-enters choice (Metamorphic Alteration)
-    /// must lower to `Effect::ChoosePermanent`, not a named `ChoiceType`.
+    /// CR 614.12a + CR 707.2c: object as-enters choice alone is loud-unsupported
+    /// until a companion `CopyChosen` static proves the host-copy relation
+    /// (`LinkedChoiceKind::CopyChosenHost`). Line-local parse must not emit
+    /// `ChoosePermanent { CopiableSnapshot }`.
     #[test]
-    fn as_enters_choose_a_creature_is_choose_permanent() {
+    fn as_enters_choose_a_creature_is_unsupported_without_copy_chosen() {
         let def = parse_replacement_line(
             "As this Aura enters, choose a creature.",
             "Metamorphic Alteration",
         )
-        .expect("as-enters choose-a-creature must parse as a Moved replacement");
+        .expect("as-enters choose-a-creature must claim a Moved replacement");
         let execute = def.execute.as_ref().unwrap();
         assert!(
             matches!(
                 *execute.effect,
-                Effect::ChoosePermanent {
-                    persist: ChoosePermanentPersist::CopiableSnapshot,
+                Effect::Unimplemented {
+                    name: ref n,
                     ..
-                }
+                } if n == "as-enters-choose-permanent"
             ),
-            "expected ChoosePermanent {{ CopiableSnapshot }}, got {:?}",
+            "expected unsupported as-enters-choose-permanent marker, got {:?}",
             execute.effect
         );
     }
