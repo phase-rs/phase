@@ -40,7 +40,7 @@ use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerCounterKind;
 
-use crate::ability_chain::collect_chain_effects;
+use crate::ability_chain::{collect_scoped_effects, AbilityScope};
 use crate::features::commitment;
 
 /// Commitment at or above which the poison clock is a real plan for this deck
@@ -92,8 +92,12 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
             total_nonland = total_nonland.saturating_add(entry.count);
         }
 
+        // Deck time asks "can this card ever advance the clock", so a poison
+        // mode of a modal card counts here even though the mode has not been
+        // chosen. The live policy asks the narrower question at the seam where
+        // the mode IS chosen — see `AbilityScope`.
         let is_source = is_poison_source_parts(&face.card_type.core_types, &face.keywords);
-        let is_direct = gives_opponents_poison_parts(&face.abilities);
+        let is_direct = gives_opponents_poison_parts(&face.abilities, AbilityScope::Potential);
 
         if is_source {
             source_count = source_count.saturating_add(entry.count);
@@ -106,7 +110,7 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
         if is_source || is_direct {
             source_names.push(face.name.clone());
         }
-        if proliferates_parts(&face.abilities) {
+        if proliferates_parts(&face.abilities, AbilityScope::Potential) {
             proliferate_count = proliferate_count.saturating_add(entry.count);
         }
     }
@@ -171,15 +175,52 @@ pub(crate) fn is_poison_source_parts(core_types: &[CoreType], keywords: &[Keywor
     })
 }
 
-/// CR 122.1f: an ability chain that gives poison counters to a player who can
-/// be an opponent.
+/// CR 702.90b / CR 702.164c / CR 702.70a: how many poison counters this
+/// creature's combat damage to a PLAYER would produce.
+///
+/// * Infect (CR 702.90b) converts the damage itself, so it yields `power`;
+///   CR 702.90f makes multiple instances redundant.
+/// * Toxic (CR 702.164c) adds the creature's total toxic value, which
+///   CR 702.164b defines as the SUM of every toxic ability's N.
+/// * Poisonous N (CR 702.70a) is a separate triggered ability per instance.
+///
+/// Parts-based so the arithmetic is testable without a `GameObject`; the live
+/// caller passes `obj.card_types.core_types`, `obj.keywords`, and `obj.power`.
+pub(crate) fn poison_yield_parts(core_types: &[CoreType], keywords: &[Keyword], power: i32) -> u32 {
+    if !is_poison_source_parts(core_types, keywords) {
+        return 0;
+    }
+    let mut has_infect = false;
+    let mut flat = 0u32;
+    for keyword in keywords {
+        match keyword {
+            Keyword::Infect => has_infect = true,
+            Keyword::Toxic(n) | Keyword::Poisonous(n) => flat = flat.saturating_add(*n),
+            _ => {}
+        }
+    }
+    // CR 702.90b: damage dealt to a player by an infect source becomes that
+    // many poison counters. Negative or absent power deals no damage.
+    let from_infect = if has_infect {
+        u32::try_from(power).unwrap_or(0)
+    } else {
+        0
+    };
+    from_infect.saturating_add(flat)
+}
+
+/// CR 122.1f: an ability tree that gives poison counters to a player who can
+/// be an opponent, walked at `scope`.
 ///
 /// A `TargetFilter::Controller` / `SelfRef` scope is rejected — a card that
 /// poisons ITS OWN controller (a drawback clause, e.g. Phyrexian Vatmother) is
 /// not a poison payoff.
-pub(crate) fn gives_opponents_poison_parts(abilities: &[AbilityDefinition]) -> bool {
-    abilities.iter().any(|ability| {
-        collect_chain_effects(ability).iter().any(|effect| {
+pub(crate) fn gives_opponents_poison_parts<'a>(
+    abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
+    scope: AbilityScope,
+) -> bool {
+    abilities.into_iter().any(|ability| {
+        collect_scoped_effects(ability, scope).iter().any(|effect| {
             matches!(
                 effect,
                 Effect::GivePlayerCounter {
@@ -195,6 +236,9 @@ pub(crate) fn gives_opponents_poison_parts(abilities: &[AbilityDefinition]) -> b
 /// True when a `TargetFilter` can resolve to a player other than the ability's
 /// controller. Mirrors `landfall::filter_matches_land_you_control`'s recursion,
 /// including the CR 109.3 conjunction rule for `And`.
+///
+/// Player-scope arms follow `game::filter::player_matches_target_filter_with`,
+/// the engine's authority for matching a player against a `TargetFilter`.
 fn filter_can_hit_opponent(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Opponent | TargetFilter::Player | TargetFilter::Any => true,
@@ -202,14 +246,47 @@ fn filter_can_hit_opponent(filter: &TargetFilter) -> bool {
         TargetFilter::Or { filters } => filters.iter().any(filter_can_hit_opponent),
         // CR 109.3: every constraint of an `And` must hold for the match.
         TargetFilter::And { filters } => filters.iter().all(filter_can_hit_opponent),
+        // A negated scope hits an opponent exactly when some opponent is NOT
+        // matched by the inner filter — so `Not { SelfRef }` and
+        // `Not { Typed(controller: You) }` ("each other player") are poison
+        // payoffs, while `Not { Opponent }` resolves to you alone and is not.
+        TargetFilter::Not { filter } => !filter_matches_every_opponent(filter),
         _ => false,
     }
 }
 
-/// CR 701.34a: an ability chain containing either proliferate form.
-pub(crate) fn proliferates_parts(abilities: &[AbilityDefinition]) -> bool {
-    abilities.iter().any(|ability| {
-        collect_chain_effects(ability).iter().any(|effect| {
+/// True when EVERY opponent matches `filter`, the complement
+/// `filter_can_hit_opponent` needs to decide a negated scope. Anything this
+/// function cannot prove universal answers `false`, which makes the negation
+/// fail open toward "can hit an opponent" only for scopes that genuinely leave
+/// an opponent unmatched.
+fn filter_matches_every_opponent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Opponent | TargetFilter::Player | TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => {
+            typed.type_filters.is_empty()
+                && matches!(typed.controller, Some(ControllerRef::Opponent))
+        }
+        // Universality distributes the opposite way from `filter_can_hit_opponent`:
+        // an `Or` covers every opponent as soon as one branch does, an `And`
+        // only when all of them do (CR 109.3).
+        TargetFilter::Or { filters } => filters.iter().any(filter_matches_every_opponent),
+        TargetFilter::And { filters } => filters.iter().all(filter_matches_every_opponent),
+        // Double negation: `Not { X }` covers every opponent exactly when `X`
+        // covers none.
+        TargetFilter::Not { filter } => !filter_can_hit_opponent(filter),
+        _ => false,
+    }
+}
+
+/// CR 701.34a: an ability tree containing either proliferate form, walked at
+/// `scope`.
+pub(crate) fn proliferates_parts<'a>(
+    abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
+    scope: AbilityScope,
+) -> bool {
+    abilities.into_iter().any(|ability| {
+        collect_scoped_effects(ability, scope).iter().any(|effect| {
             matches!(
                 effect,
                 Effect::Proliferate | Effect::ProliferateTarget { .. }
