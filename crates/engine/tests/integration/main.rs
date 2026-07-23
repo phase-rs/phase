@@ -579,6 +579,7 @@ mod issue_6092_ability_block_reason;
 mod issue_6102_ragavan_exile_cast;
 mod issue_6157_gold_token_auto_mana_payment;
 mod issue_629_fractured_sanity_cycling;
+mod issue_6459_scheming_symmetry;
 mod issue_6500_loreseekers_stone_hand_cost;
 mod issue_654_stridehangar_automaton;
 mod issue_680_shalai_and_hallar_forgotten_ancient;

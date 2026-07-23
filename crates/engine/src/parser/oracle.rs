@@ -18,6 +18,7 @@ use crate::types::ability::{
     TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
+use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -2739,6 +2740,56 @@ fn parse_flash_cleanup_sacrifice_casting_option(
 /// `OracleDocIr.diagnostics`. That keeps the doc IR the single warning channel
 /// (`OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`) rather than
 /// letting the audit direct-append to `parse_warnings` behind the doc's back.
+/// CR 115.1b + CR 601.2c: a single instruction that chooses two or more target
+/// PLAYERS requires them to be different — the same player can't be chosen for
+/// more than one of that instruction's target slots (Scheming Symmetry, issue
+/// #6459: "Choose two target players." allowed picking the same player twice).
+///
+/// Modal cards express this via `ModalSelectionConstraint::DifferentTargetPlayers`
+/// (parsed from "each mode must target a different player"), but a plain
+/// multi-target player requirement had no equivalent, so the runtime
+/// distinctness authority (`validate_target_constraints`) never saw a constraint
+/// to enforce. Attach `TargetSelectionConstraint::DifferentTargetPlayers` here
+/// for every non-modal multi-target player requirement — the shared enforcement
+/// then rejects a duplicate player selection uniformly (Scheming Symmetry, and
+/// the "any number of target players" class). The constraint is a no-op for a
+/// selection of fewer than two players, so attaching it whenever the requirement
+/// CAN select multiple players is always safe.
+fn ensure_distinct_player_multi_targets(result: &mut ParsedAbilities) {
+    for ability in &mut result.abilities {
+        ensure_distinct_player_multi_target(ability);
+    }
+    for trigger in &mut result.triggers {
+        if let Some(execute) = trigger.execute.as_mut() {
+            ensure_distinct_player_multi_target(execute);
+        }
+    }
+}
+
+fn ensure_distinct_player_multi_target(def: &mut AbilityDefinition) {
+    if def.multi_target.is_none() {
+        return;
+    }
+    // Only player-target requirements are governed by this constraint; an
+    // object multi-target ("two target creatures") is kept distinct by the
+    // per-slot legal-set exclusion instead.
+    if !matches!(
+        def.effect.target_filter(),
+        Some(TargetFilter::Player | TargetFilter::Opponent)
+    ) {
+        return;
+    }
+    if def
+        .target_constraints
+        .iter()
+        .any(|c| matches!(c, TargetSelectionConstraint::DifferentTargetPlayers))
+    {
+        return;
+    }
+    def.target_constraints
+        .push(TargetSelectionConstraint::DifferentTargetPlayers);
+}
+
 pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     let mut result = ParsedAbilities {
         abilities: Vec::new(),
@@ -2847,6 +2898,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
         &static_ids,
     );
     reconcile_host_bound_phase_outs(&mut result);
+    ensure_distinct_player_multi_targets(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
