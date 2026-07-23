@@ -254,12 +254,13 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::unimplemented("paradigm test spell", "paradigm test spell body"),
             )]);
-            // Stamp all four cast-payment fields non-default, as
-            // `finalize_cast` would after a real {W}{W} payment (CR 601.2h).
+            // Stamp all five cast-payment fields non-default, including a
+            // synthetic Phyrexian life payment, to verify the copy reset.
             obj.mana_spent_to_cast = true;
             obj.colors_spent_to_cast
                 .add(crate::types::mana::ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
             obj.mana_spent_source_snapshots
                 .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
         }
@@ -287,6 +288,10 @@ mod tests {
             copy.mana_spent_to_cast_amount, 0,
             "copy: amount must be default"
         );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
         assert!(
             copy.mana_spent_source_snapshots.is_empty(),
             "copy: payment-source snapshots must be default"
@@ -295,6 +300,10 @@ mod tests {
         assert_eq!(
             state.objects[&source_id].mana_spent_to_cast_amount, 2,
             "exiled source keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&source_id].phyrexian_life_paid, 1,
+            "exiled source keeps its own Phyrexian life-payment record"
         );
     }
 

@@ -348,8 +348,8 @@ mod tests {
     fn cast_copy_resets_cast_payment_stamps() {
         let mut state = GameState::new_two_player(7);
         let source_id = add_exiled_spell_card(&mut state, "Lightning Bolt");
-        // Stamp all four cast-payment fields non-default, as `finalize_cast`
-        // would after a real {W}{W} payment (CR 601.2h).
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
         {
             let lki = state.objects[&source_id].snapshot_for_mana_spent();
             let obj = state.objects.get_mut(&source_id).unwrap();
@@ -357,6 +357,7 @@ mod tests {
             obj.colors_spent_to_cast
                 .add(crate::types::mana::ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
             obj.mana_spent_source_snapshots
                 .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id, lki });
         }
@@ -386,6 +387,10 @@ mod tests {
             copy.mana_spent_to_cast_amount, 0,
             "copy: amount must be default"
         );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
         assert!(
             copy.mana_spent_source_snapshots.is_empty(),
             "copy: payment-source snapshots must be default"
@@ -394,6 +399,10 @@ mod tests {
         assert_eq!(
             state.objects[&source_id].mana_spent_to_cast_amount, 2,
             "source keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&source_id].phyrexian_life_paid, 1,
+            "source keeps its own Phyrexian life-payment record"
         );
     }
 

@@ -7,7 +7,7 @@
 //! so by the time the conditional ETB trigger resolved (or was even collected,
 //! after the cast-event collection pass), the per-color tally was gone and the
 //! rider silently did nothing. The fix preserves the tally for objects on the
-//! Battlefield or Stack (mirroring `cast_from_zone`), clears ALL FOUR
+//! Battlefield or Stack (mirroring `cast_from_zone`), clears all five
 //! cast-payment stamps for objects in every other zone (a countered/fizzled
 //! spell loses its payment record at the next collection pass) and at
 //! battlefield exit via `GameObject::clear_cast_payment_stamps` (CR 400.7),
@@ -648,7 +648,7 @@ fn blink_reanimate_clears_cast_payment_stamps() {
 /// R10-counter — the countered-spell path: a spell that is COUNTERED goes
 /// Stack → Graveyard, so `reset_for_battlefield_exit` (the CR 400.7
 /// battlefield-exit clear) never runs on it. The post-collection transient
-/// clear must wipe ALL FOUR cast-payment stamps on the graveyard object at
+/// clear must wipe all five cast-payment stamps on the graveyard object at
 /// the next trigger-collection pass — otherwise reanimating it produces a
 /// battlefield permanent with a phantom payment record (the Satoru-class
 /// "no mana was spent to cast it" condition would wrongly read false, and
@@ -733,7 +733,7 @@ fn countered_spell_clears_cast_payment_stamps_before_reanimation() {
     }
 
     // CR 400.7 family: the reanimated permanent is a new object identity with
-    // NO memory of the countered cast's payment — all four stamps default.
+    // NO memory of the countered cast's payment — all five stamps default.
     let reanimated = &runner.state().objects[&ogre];
     assert_eq!(
         reanimated.mana_spent_to_cast_amount, 0,

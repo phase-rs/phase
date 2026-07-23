@@ -2318,10 +2318,6 @@ impl GameObject {
         // CR 701.60a / CR 702.112b: Suspect and renowned are battlefield designations.
         self.is_suspected = false;
         self.is_renowned = false;
-        // CR 400.7 + CR 702.150a: Compleated's life-payment count belongs to
-        // the cast that created this permanent. Once it leaves the battlefield,
-        // a later entry has no memory of that payment.
-        self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
         self.saddled_by.clear();
@@ -2340,10 +2336,11 @@ impl GameObject {
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
         self.cast_controller = None;
-        // CR 400.7: a re-entering permanent is a new object with no memory of
-        // the cast that paid for its previous existence — clear all four
-        // cast-payment stamps (fixes the Satoru-class blink leak: a reanimated
-        // or blinked permanent must not read a stale "mana was spent" record).
+        // CR 400.7 + CR 702.150a: a re-entering permanent is a new object with
+        // no memory of the cast that paid for its previous existence — clear all
+        // five cast-payment stamps, including Compleated's Phyrexian life-payment
+        // count (fixes the Satoru-class blink leak: a reanimated or blinked
+        // permanent must not read a stale "mana was spent" record).
         // Exit-time LKI / zone-change snapshots are captured before this reset
         // runs (zones.rs: exit seam → snapshot → reset), so latched trigger
         // contexts keep the payment record of the departing incarnation.
@@ -2391,7 +2388,7 @@ impl GameObject {
     }
 
     /// CR 707.10 + CR 707.12: a spell copy is not cast (and a cast copy pays
-    /// its own costs), so no payment record carries over — reset all four
+    /// its own costs), so no payment record carries over — reset all five
     /// cast-payment stamps to their no-payment defaults. Also the CR 400.7
     /// battlefield-exit authority via [`Self::reset_for_battlefield_exit`],
     /// and the post-collection clear for objects outside the Battlefield/
@@ -2408,6 +2405,7 @@ impl GameObject {
         self.mana_spent_to_cast = false;
         self.colors_spent_to_cast = ColoredManaCount::default();
         self.mana_spent_to_cast_amount = 0;
+        self.phyrexian_life_paid = 0;
         self.mana_spent_source_snapshots.clear();
     }
 
@@ -2689,13 +2687,14 @@ mod tests {
     use crate::types::counter::parse_counter_type;
     use crate::types::triggers::TriggerMode;
 
-    /// Stamp all four cast-payment fields non-default, as `finalize_cast`
-    /// would after a real mana payment.
+    /// Stamp all five cast-payment fields non-default, including a synthetic
+    /// Phyrexian life payment, to verify the shared reset authority.
     fn stamp_cast_payment(obj: &mut GameObject) {
         obj.mana_spent_to_cast = true;
         obj.colors_spent_to_cast
             .add(crate::types::mana::ManaColor::White, 2);
         obj.mana_spent_to_cast_amount = 2;
+        obj.phyrexian_life_paid = 1;
         let lki = obj.snapshot_for_mana_spent();
         obj.mana_spent_source_snapshots
             .push(crate::types::game_state::ManaSpentSourceSnapshot {
@@ -2714,15 +2713,19 @@ mod tests {
             obj.mana_spent_to_cast_amount, 0,
             "{context}: amount must be default"
         );
+        assert_eq!(
+            obj.phyrexian_life_paid, 0,
+            "{context}: Phyrexian life-payment count must be default"
+        );
         assert!(
             obj.mana_spent_source_snapshots.is_empty(),
             "{context}: payment-source snapshots must be default"
         );
     }
 
-    /// R-helper pin: `clear_cast_payment_stamps` resets all four fields.
+    /// R-helper pin: `clear_cast_payment_stamps` resets all five fields.
     #[test]
-    fn clear_cast_payment_stamps_resets_all_four_fields() {
+    fn clear_cast_payment_stamps_resets_all_five_fields() {
         let mut obj = GameObject::new(
             ObjectId(1),
             CardId(1),
@@ -2735,7 +2738,7 @@ mod tests {
         assert_cast_payment_stamps_default(&obj, "after clear_cast_payment_stamps");
     }
 
-    /// CR 400.7 (issue #5943): `reset_for_battlefield_exit` clears the four
+    /// CR 400.7 (issue #5943): `reset_for_battlefield_exit` clears the five
     /// cast-payment stamps alongside `cast_from_zone` — a re-entering
     /// permanent has no memory of the cast that paid for its previous
     /// existence (Satoru-class blink leak).
@@ -2763,7 +2766,7 @@ mod tests {
     }
 
     /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change
-    /// snapshot latches ALL FOUR cast-payment stamps — including the
+    /// snapshot latches all four trigger-relevant mana-payment stamps — including the
     /// per-mana-unit source-snapshot vector — into the owned trigger source
     /// context, so a source-qualified rider ("mana from a Treasure spent to
     /// cast it") can still resolve after the exit-boundary clear wipes the

@@ -891,8 +891,11 @@ mod tests {
         ControllerRef, CopyRetargetPermission, Effect, EffectScope, QuantityExpr, QuantityRef,
         TapStateChange, TargetFilter, TargetRef,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
 
     /// Helper: push a spell onto the stack with a matching GameObject.
@@ -999,7 +1002,7 @@ mod tests {
 
     /// CR 707.10 (issue #5943): a spell copy is not cast — the copy born by
     /// `resolve(Effect::CopySpell)` must carry NO cast-payment record even
-    /// though it clones the original object. All four stamps reset to their
+    /// though it clones the original object. All five stamps reset to their
     /// no-payment defaults; the original keeps its own record (reach-guard).
     #[test]
     fn spell_copy_resets_cast_payment_stamps() {
@@ -1021,12 +1024,12 @@ mod tests {
             ObjectId(10),
             CardId(1),
             PlayerId(0),
-            "Lightning Bolt",
+            "Compleated Test Walker",
             original_ability,
             CastingVariant::Normal,
         );
-        // Stamp all four cast-payment fields non-default, as `finalize_cast`
-        // would after a real {W}{W} payment (CR 601.2h).
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
         {
             let lki = state.objects[&ObjectId(10)].snapshot_for_mana_spent();
             let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
@@ -1034,12 +1037,19 @@ mod tests {
             obj.colors_spent_to_cast
                 .add(crate::types::mana::ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
             obj.mana_spent_source_snapshots.push(
                 crate::types::game_state::ManaSpentSourceSnapshot {
                     source_id: ObjectId(10),
                     lki,
                 },
             );
+            obj.card_types.core_types = vec![CoreType::Planeswalker];
+            obj.base_card_types = obj.card_types.clone();
+            obj.loyalty = Some(5);
+            obj.base_loyalty = Some(5);
+            obj.keywords.push(Keyword::Compleated);
+            obj.base_keywords.push(Keyword::Compleated);
         }
 
         let copy_ability = ResolvedAbility::new(
@@ -1069,6 +1079,10 @@ mod tests {
             copy.mana_spent_to_cast_amount, 0,
             "copy: amount must be default"
         );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
         assert!(
             copy.mana_spent_source_snapshots.is_empty(),
             "copy: payment-source snapshots must be default"
@@ -1079,6 +1093,30 @@ mod tests {
             state.objects[&ObjectId(10)].mana_spent_to_cast_amount,
             2,
             "original keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&ObjectId(10)].phyrexian_life_paid,
+            1,
+            "original keeps its own Phyrexian life-payment record"
+        );
+
+        // Runtime regression: resolve the copied permanent spell through the
+        // production stack/entry-replacement pipeline. If the copy inherited
+        // the source's life payment, Compleated would reduce its 5 loyalty to 3.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        let copy = state
+            .objects
+            .get(&copy_id)
+            .expect("copy persists after resolution");
+        assert_eq!(
+            copy.zone,
+            Zone::Battlefield,
+            "copy must resolve as a permanent"
+        );
+        assert_eq!(
+            copy.counters.get(&CounterType::Loyalty),
+            Some(&5),
+            "CR 702.150a: a spell copy has no source Phyrexian life payment to reduce loyalty"
         );
     }
 

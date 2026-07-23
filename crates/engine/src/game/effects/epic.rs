@@ -217,8 +217,8 @@ mod tests {
             "Epic Prototype".to_string(),
             Zone::Graveyard,
         );
-        // Stamp all four cast-payment fields non-default, as `finalize_cast`
-        // would after a real {W}{W} payment (CR 601.2h).
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
         {
             let lki = state.objects[&prototype].snapshot_for_mana_spent();
             let obj = state.objects.get_mut(&prototype).unwrap();
@@ -226,6 +226,7 @@ mod tests {
             obj.colors_spent_to_cast
                 .add(crate::types::mana::ManaColor::White, 2);
             obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
             obj.mana_spent_source_snapshots.push(
                 crate::types::game_state::ManaSpentSourceSnapshot {
                     source_id: prototype,
@@ -263,6 +264,10 @@ mod tests {
             copy.mana_spent_to_cast_amount, 0,
             "copy: amount must be default"
         );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
         assert!(
             copy.mana_spent_source_snapshots.is_empty(),
             "copy: payment-source snapshots must be default"
@@ -271,6 +276,10 @@ mod tests {
         assert_eq!(
             state.objects[&prototype].mana_spent_to_cast_amount, 2,
             "prototype keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&prototype].phyrexian_life_paid, 1,
+            "prototype keeps its own Phyrexian life-payment record"
         );
     }
 }

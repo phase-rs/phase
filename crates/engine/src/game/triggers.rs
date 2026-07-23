@@ -4601,8 +4601,8 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
 }
 
 /// Clear the transient `mana_spent_to_cast` boolean on all objects after
-/// trigger collection, and clear ALL FOUR cast-payment stamps (the bool,
-/// `colors_spent_to_cast`, `mana_spent_to_cast_amount`,
+/// trigger collection, and clear all five cast-payment stamps (the bool,
+/// `colors_spent_to_cast`, `mana_spent_to_cast_amount`, `phyrexian_life_paid`,
 /// `mana_spent_source_snapshots`) on objects outside the Battlefield/Stack
 /// provenance zones, via the single authority
 /// `GameObject::clear_cast_payment_stamps`.
@@ -4620,7 +4620,7 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
 /// its own resolution. Clearing them here for those zones made every such
 /// rider silently do nothing at the re-check.
 ///
-/// Like `cast_from_zone`, all four payment stamps are cleared once the
+/// Like `cast_from_zone`, all five payment stamps are cleared once the
 /// object leaves the Battlefield|Stack provenance zones (CR 400.7 family):
 /// a spell that was COUNTERED or fizzled goes Stack → Graveyard, so
 /// `reset_for_battlefield_exit` never runs on it — it loses its payment
@@ -4657,7 +4657,7 @@ fn clear_post_collection_transients(state: &mut GameState) {
             // cast it"). Everywhere else the cast provenance is no longer
             // meaningful — a countered/fizzled spell went Stack → Graveyard,
             // so `reset_for_battlefield_exit` (the exit-clear authority for
-            // battlefield objects, CR 400.7) never ran on it. Clear all four
+            // battlefield objects, CR 400.7) never ran on it. Clear all five
             // payment stamps through the single authority, mirroring
             // `cast_from_zone`, so none of them leak onto a later object
             // identity via reanimation.
