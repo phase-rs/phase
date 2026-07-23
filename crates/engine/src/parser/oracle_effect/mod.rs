@@ -297,28 +297,42 @@ fn if_you_do_object_anchor(
         })
 }
 
-/// CR 608.2c + CR 708.7: Reinterpret a generic "if you can't" rider for a
-/// preceding effect that performs no zone change.
+/// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
+/// for a preceding effect that performs no zone change.
 ///
 /// `try_nom_condition_as_ability_condition` lowers "if you can't" to
 /// `Not { ZoneChangedThisWay { Any } }` — the right proxy for the common
 /// zone-changing parent ("search …. If you can't, draw"), where an absence of
 /// `last_zone_changed_ids` means the instruction did nothing. But that proxy is
-/// WRONG for an effect whose success produces no `ZoneChanged` event: a
-/// successful `Effect::TurnFaceUp` (Etrata, Deadly Fugitive's granted
-/// "{2}{U}{B}: Turn this creature face up. If you can't, exile it …") only
-/// clears `face_down`/restores `back_face` and emits `TurnedFaceUp`, so the
-/// zone-change ledger stays empty and `Not { ZoneChangedThisWay }` would be
-/// true even after the turn-up SUCCEEDED — firing the exile rider every time.
+/// WRONG for an effect whose success produces no `ZoneChanged` event:
+///
+///   - a successful `Effect::TurnFaceUp` (Etrata, Deadly Fugitive's granted
+///     "{2}{U}{B}: Turn this creature face up. If you can't, exile it …")
+///     only clears `face_down`/restores `back_face` and emits `TurnedFaceUp`.
+///   - a successful `Effect::PayCost` (Greenbelt Rampager's "When this
+///     creature enters, pay {E}{E}. If you can't, return this creature to its
+///     owner's hand and you get {E}." — issue #4955, and every other
+///     mandatory-cost-then-"if you can't" card: mana, life, energy, loyalty,
+///     speed) only deducts the paid resource and emits e.g.
+///     `EnergyChanged`/`LifeChanged`/`ManaSpent`, never `ZoneChanged`.
+///
+/// For both, the zone-change ledger stays empty and `Not { ZoneChangedThisWay }`
+/// would be true even after the instruction SUCCEEDED — firing the rider every
+/// time regardless of affordability.
 ///
 /// The correct general signal for "the preceding instruction couldn't be
 /// performed" is `Not { OptionalEffectPerformed }`: a mandatory parent whose
 /// action occurred seeds `optional_effect_performed` via
-/// `effects::mod::mandatory_parent_effect_performed`, which has a `TurnFaceUp`
-/// arm keyed on `GameEvent::TurnedFaceUp`. Rewrite the condition to that signal
-/// only when the immediately-preceding clause is exactly a `TurnFaceUp` — the
-/// one effect class in this position whose success is invisible to the
-/// zone-change ledger. Other effects keep the zone-change proxy unchanged.
+/// `effects::mod::mandatory_parent_effect_performed`. That function has no
+/// explicit `PayCost` arm, so it falls to its `_ => true` default — meaning
+/// the seed's own `!state.cost_payment_failed_flag` guard (set by
+/// `pay::resolve`/`resolve_ability_cost_payment` on an unpayable cost) is the
+/// sole gate for a `PayCost` parent, which is exactly CR 118.3's "can't pay
+/// without the resources" signal. Rewrite the condition to
+/// `Not { OptionalEffectPerformed }` when the immediately-preceding clause is
+/// one of these zone-change-ledger-invisible effect classes; other effects
+/// (Sacrifice, Exile, Discard, Mill, …) keep the zone-change proxy unchanged,
+/// since their success IS a `ZoneChanged`/`PermanentSacrificed` event.
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
@@ -336,14 +350,68 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
     if !is_generic_cant {
         return condition;
     }
-    let prev_is_turn_face_up = clauses
+    let prev_is_ledger_invisible = clauses
         .iter()
         .rev()
         .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
-        .is_some_and(|clause| matches!(clause.parsed.effect, Effect::TurnFaceUp { .. }));
-    if prev_is_turn_face_up {
+        .is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::TurnFaceUp { .. } | Effect::PayCost { .. }
+            )
+        });
+    if prev_is_ledger_invisible {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
+        });
+    }
+    condition
+}
+
+/// CR 603.12 + CR 701.16a + CR 608.2c: rebind an active-past "you exiled …
+/// this way" reflexive gate to the zone-change ledger when its antecedent is
+/// an EXILE EFFECT in the same chain (Ardyn, the Usurper: "exile up to one
+/// target creature card from a graveyard. If you exiled a card this way,
+/// create a token that's a copy of that card…", issue #5989).
+///
+/// The context-free condition grammar reads "you exiled a[n] X this way" as
+/// `CostPaidObjectMatchesFilter` — correct for its original cost-paid class
+/// (the Shilgengar shape, where the exile happened as a COST and the
+/// `cost_paid_object` snapshot answers the check), but wrong when the exile
+/// is the immediately-preceding EFFECT instruction: no cost snapshot exists,
+/// and the runtime fallback constrains the moved object's controller to the
+/// ability controller — a card exiled from an OPPONENT's graveyard fails that
+/// check, which is exactly the reported "only works on my own graveyard"
+/// symptom. Only the clause context can disambiguate the two classes, so this
+/// rewrite (mirroring `rewrite_cant_rider_for_non_zone_change_parent` above)
+/// fires ONLY when the previous non-continuation clause is a
+/// `ChangeZone { destination: Exile }` effect; the cost-paid class (no such
+/// preceding clause) and the subject-scoped sacrifice class (Deadly Brew's
+/// "If you sacrificed a permanent this way" after a per-player sacrifice,
+/// whose `Sacrifice` parent is not a `ChangeZone`) are untouched.
+fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
+    condition: Option<AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> Option<AbilityCondition> {
+    let Some(AbilityCondition::CostPaidObjectMatchesFilter { filter }) = &condition else {
+        return condition;
+    };
+    let prev_is_effect_exile = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        });
+    if prev_is_effect_exile {
+        return Some(AbilityCondition::ZoneChangedThisWay {
+            filter: filter.clone(),
         });
     }
     condition
@@ -15169,8 +15237,12 @@ fn try_parse_verb_and_target<'a>(
             // UTF-8 char boundary and `text[..text.len() - rem.len()]` is sound.
             let primary_clause = &text[..text.len() - rem.len()];
             let primary_clause_lower = primary_clause.to_ascii_lowercase();
+            // CR 608.2c: A `ParentTarget` placement subject ("each of them") is
+            // an anaphor to a bounded set of chosen objects, not a battlefield-
+            // wide type scan — mirror imperative.rs mass-classification authority.
             let ast = if imperative::counter_placement_is_mass(&primary_clause_lower)
                 && multi_target.is_none()
+                && !matches!(target, TargetFilter::ParentTarget)
             {
                 ZoneCounterImperativeAst::PutCounterAll {
                     counter_type,
@@ -18670,6 +18742,44 @@ fn lower_subject_predicate_ast(
                 }
                 return clause;
             }
+            // CR 608.2d: "An opponent chooses a nonland card exiled this way"
+            // (Plargg and Nassari) — `strip_subject_clause` peeled the
+            // "an opponent" subject and deconjugated the predicate to "choose
+            // a nonland card exiled this way", which the imperative layer
+            // lowered to `ChooseFromZone` with the default `Chooser::Controller`.
+            // The subject names the selecting player, not an affected object,
+            // so rebind the chooser to `Chooser::Opponent` (the same delegation
+            // `try_parse_return_opponent_choice_from_graveyard` encodes for
+            // "of an opponent's choice"). Matched narrowly on the bare
+            // single-opponent player filter the "an opponent" / "your opponent"
+            // subject arms produce (subject.rs `parse_subject_application`) —
+            // typed or property-carrying subjects fall through to the honesty
+            // gate below.
+            //
+            // The targeted form ("target opponent chooses …" — Forgotten Lore,
+            // Shrouded Lore) is deliberately NOT rebound: `parse_target` lowers
+            // "target opponent" to the same bare opponent filter, but the
+            // subject then carries `target: Some(_)` — the chooser is bound to
+            // a chosen target slot, not "an opponent of the controller's
+            // choice", and `Chooser::Opponent` cannot represent that binding.
+            // Gating on `subject.target.is_none()` keeps those cards on the
+            // honesty gate below — the same fall-through the exiled-this-way
+            // anaphor keeps for its targeted form (imperative.rs
+            // `try_parse_choose_exiled_anaphor`).
+            if let Effect::ChooseFromZone { chooser, .. } = &mut clause.effect {
+                if subject.target.is_none()
+                    && matches!(
+                        &subject.affected,
+                        TargetFilter::Typed(tf)
+                            if tf.controller == Some(ControllerRef::Opponent)
+                                && tf.type_filters.is_empty()
+                                && tf.properties.is_empty()
+                    )
+                {
+                    *chooser = crate::types::ability::Chooser::Opponent;
+                    return clause;
+                }
+            }
             if matches!(
                 &clause.effect,
                 Effect::ChooseFromZone {
@@ -20361,6 +20471,53 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     })
 }
 
+/// CR 608.2g + CR 601.2 + CR 118.9: Parse the counted free-cast-window form
+/// `"up to N spell(s) from among (the|those) [other] [typed] cards exiled this
+/// way"` (the `"cast "` prefix and the `"without paying their mana cost(s)"`
+/// requirement are handled by the caller) and lower it to
+/// `Effect::FreeCastFromZones` with `zones = [Exile]`.
+///
+/// The filter is the `parse_from_among_exiled_this_way` anchor's output
+/// (`ExiledBySource` AND any typed leg), with one rewrite: when the typed leg
+/// carries `FilterProp::Another` ("the OTHER cards exiled this way"), the
+/// "other"-ness is relative to the card a PRIOR choose in the same chain
+/// selected (Plargg and Nassari: "An opponent chooses a nonland card exiled
+/// this way. You may cast up to two spells from among the other cards exiled
+/// this way") — not relative to the ability source. Rewrite `Another` →
+/// `Not(InTrackedSet(0))` (the sentinel the choose's resolution publishes its
+/// picks under), mirroring `rewrite_filter_prop_another_to_tracked_set` for
+/// the Day-of-the-Doctor "all other X" class.
+fn try_parse_counted_free_cast_from_exiled_this_way(rest: &str) -> Option<Effect> {
+    type E<'a> = OracleError<'a>;
+    // CR 601.2: "up to N" — the counted bound. A fixed number only; variable
+    // counts ("up to X") have no concrete cap at parse time and fall through
+    // to the existing permission-based arms.
+    let (after_count, _) = tag::<_, _, E>("up to ").parse(rest).ok()?;
+    let (after_count, count) = nom_primitives::parse_number.parse(after_count).ok()?;
+    if count == 0 || count > u8::MAX as u32 {
+        return None;
+    }
+    // CR 601.2a: the "spells" noun — this window casts spells (a land card can
+    // never be cast, CR 305.1), so require the spell noun rather than "cards".
+    let (after_noun, _) = alt((tag::<_, _, E>(" spells "), tag(" spell ")))
+        .parse(after_count)
+        .ok()?;
+
+    let mut filter = parse_from_among_exiled_this_way(after_noun)?;
+    // CR 608.2c: "the OTHER cards exiled this way" — rewrite the
+    // source-relative `Another` into the tracked-set complement of the prior
+    // choose's picks (see doc comment).
+    rewrite_target_filter_another_to_tracked_set(&mut filter);
+
+    Some(Effect::FreeCastFromZones {
+        count: count as u8,
+        max_total_mv: None,
+        filter,
+        zones: vec![Zone::Exile],
+        exile_instead_of_graveyard: false,
+    })
+}
+
 /// CR 406.6 + CR 603.10a: Detect the `"from among cards exiled with [self-ref]"`
 /// anchor — the persistent per-source exile-link anaphor used by cards that
 /// reference their own tracked exile set from a later, independent ability
@@ -20923,6 +21080,30 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
             driver: crate::types::ability::CastFromZoneDriver::LingeringPermission,
             mana_spend_permission: None,
         });
+    }
+    // CR 608.2g + CR 601.2 + CR 118.9: "cast up to N spells from among the
+    // [other] cards exiled this way without paying their mana costs" — a
+    // COUNTED free-cast window over the resolution's exile set (Plargg and
+    // Nassari; ruling 2021-04-16: "All the spells you cast due to the
+    // triggered ability are cast during the resolution of that ability. You
+    // can cast them in any order."). The counted "up to N" bound is a hard
+    // cast cap, so this must NOT lower to `CastFromZone` (a per-object
+    // permission grant with no shared budget): route it to
+    // `Effect::FreeCastFromZones`, whose interactive window already owns the
+    // "up to `count`" stop-early loop (Invoke Calamity machinery). Placed
+    // before the uncounted `parse_from_among_exiled_this_way` arm below so the
+    // counted form wins; uncounted forms (Etali Primal Conqueror's "cast any
+    // number") keep their existing lowering.
+    //
+    // CR 601.2 (strict-lowering rule): `Effect::FreeCastFromZones` carries no
+    // cast-constraint channel, so a parsed `constraint` (e.g. a timing rider)
+    // MUST NOT be silently dropped into an unconstrained window — gate this
+    // arm on `constraint.is_none()` and let constrained forms fall through to
+    // the arms that carry (or strictly reject) the constraint.
+    if mode == CardPlayMode::Cast && without_paying && constraint.is_none() {
+        if let Some(effect) = try_parse_counted_free_cast_from_exiled_this_way(rest) {
+            return Some(effect);
+        }
     }
     // CR 610.3 + CR 118.9 + CR 608.2c + CR 701.13a: "Cast [quantifier] [filter]
     // from among [the|those] [typed] cards exiled this way" — the article-`the`
@@ -25890,6 +26071,10 @@ fn parse_exile_pile_shuffle_cloak_ir(
                 target: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
                 object_source: Some(tracked_sentinel),
+                // CR 110.2a: "you exile ... then cloak them" — the cloaker
+                // controls the returned face-down permanents even for pile
+                // members they don't own.
+                enters_under: Some(ControllerRef::You),
             }),
             None,
             ClauseDisposition::Emit {
@@ -27735,6 +27920,13 @@ pub(crate) fn parse_effect_chain_ir(
         // zone-change ledger (a successful turn-up changes no zone). See the
         // helper for the full rationale (Etrata, Deadly Fugitive).
         let condition = rewrite_cant_rider_for_non_zone_change_parent(condition, builder.clauses());
+        // CR 603.12 + CR 701.16a: "If you exiled … this way" after an exile
+        // EFFECT is the reflexive zone-change gate, not the cost-paid class —
+        // see the helper for the full disambiguation rationale (issue #5989).
+        let condition = rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
+            condition,
+            builder.clauses(),
+        );
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude

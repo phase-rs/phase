@@ -22,6 +22,7 @@
     "updatePending": "Aktualisierung nach dem Spiel ausstehend",
     "cards": "Karten {{age}} ({{commit}})",
     "cardDataTitle": "Kartendaten erzeugt am {{date}} aus {{commit}}",
+    "desktopAppVersion": "Desktop-App v{{version}}",
     "checkForUpdates": "Nach Updates suchen",
     "updaterDebugInfo": "Updater-Debug-Informationen",
     "updaterIssue": "Updater-Problem: {{error}}",

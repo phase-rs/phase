@@ -442,9 +442,20 @@ pub fn place_attacking_alongside(
     attack_target: AttackTarget,
     _events: &mut Vec<GameEvent>,
 ) {
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.tapped = true;
-        obj.entered_battlefield_turn = Some(state.turn_number);
+    if state.objects.contains_key(&object_id) {
+        let turn_number = state.turn_number;
+        crate::game::object_state::resolve_and_apply_object_edit(
+            state,
+            object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            true,
+        )
+        .expect("an existing attacker must satisfy the resolved tap precondition");
+        let obj = state
+            .objects
+            .get_mut(&object_id)
+            .expect("the resolved attacker must remain present");
+        obj.entered_battlefield_turn = Some(turn_number);
         // CR 302.6: Ninjutsu/Sneak places a new permanent already attacking.
         // The attack declaration itself bypasses the normal summoning-
         // sickness check for attacking, but the flag remains true so {T}

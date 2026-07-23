@@ -12,6 +12,7 @@ describe("clearPromptOverlayState", () => {
       pendingAbilityChoice: null,
       enchantmentsDialogPlayer: null,
       manualManaOverride: false,
+      mobileHandGesture: null,
     });
   });
 
@@ -69,5 +70,30 @@ describe("clearPromptOverlayState", () => {
     clearPromptOverlayState();
 
     expect(useUiStore.getState().handFilter).toBe("none");
+  });
+
+  it("clears an in-flight mobile hand gesture at a game boundary", () => {
+    useUiStore.setState({
+      mobileHandGesture: {
+        objectId: 1,
+        phase: "drag",
+        sourceOrigin: {
+          bottom: 180,
+          centerX: 50,
+          height: 140,
+          rotation: 0,
+          top: 40,
+          width: 100,
+        },
+        offsetX: 12,
+        offsetY: -80,
+        playable: true,
+        castReady: true,
+      },
+    });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().mobileHandGesture).toBeNull();
   });
 });

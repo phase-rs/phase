@@ -922,6 +922,24 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 text[offset..].to_string(),
             );
         }
+        // CR 603.12 + CR 701.16a: active-voice "you exile[d] a[n] X this way,
+        // [body]" — the reflexive gate created by a preceding "exile [target]
+        // X" instruction. Runs under BOTH prefixes because the printed idiom
+        // appears in both tenses: past "If you exiled a card this way, …"
+        // (Ardyn, the Usurper's actual Oracle text, issue #5989) and present
+        // "When you exile a card this way, …". The exile's move into the
+        // (public, CR 400.2) exile zone publishes the card into
+        // `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
+        if let Ok((after_clause, (filter, _negated))) =
+            nom_cond::parse_you_exile_this_way_clause(rest)
+        {
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                text[offset..].to_string(),
+            );
+        }
         if let Ok((after_clause, (filter, _negated))) =
             nom_cond::parse_zone_changed_this_way_clause(rest)
         {
@@ -4139,7 +4157,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     }
 
     let body_rest_lower = body_rest.to_lowercase();
-    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest)?;
+    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest, ctx)?;
     let ContinuationAst::DigFromAmong {
         quantity: alt_quantity,
         filter: alt_filter,

@@ -1,6 +1,23 @@
 #![allow(unused_imports)]
 use super::*;
 
+fn tap_land_action(runner: &GameRunner, object_id: ObjectId) -> GameAction {
+    engine::game::mana_sources::activatable_mana_actions_for_player(
+        runner.state(),
+        runner
+            .state()
+            .waiting_for
+            .acting_player()
+            .expect("acting player"),
+    )
+    .into_iter()
+    .find(|action| {
+        matches!(action, GameAction::TapLandForMana { selection }
+            if selection.source.object_id == object_id)
+    })
+    .expect("land must expose semantic mana action")
+}
+
 /// CR 510.1: Unblocked attacker deals combat damage to defending player
 #[test]
 fn unblocked_attacker_deals_damage_to_player() {
@@ -771,9 +788,8 @@ fn ghostly_prison_accept_pays_tax_and_attacks_proceed() {
         .copied()
         .collect();
     for land in plains {
-        runner
-            .act(GameAction::TapLandForMana { object_id: land })
-            .ok();
+        let action = tap_land_action(&runner, land);
+        runner.act(action).ok();
     }
 
     // Accept the tax.
@@ -1045,9 +1061,8 @@ fn norns_annex_accept_pays_phyrexian_with_mana() {
         .copied()
         .collect();
     for land in plains {
-        runner
-            .act(GameAction::TapLandForMana { object_id: land })
-            .ok();
+        let action = tap_land_action(&runner, land);
+        runner.act(action).ok();
     }
 
     runner
@@ -1518,9 +1533,8 @@ fn tap_all_p0_lands(runner: &mut GameRunner) {
         .copied()
         .collect();
     for land in lands {
-        runner
-            .act(GameAction::TapLandForMana { object_id: land })
-            .ok();
+        let action = tap_land_action(runner, land);
+        runner.act(action).ok();
     }
 }
 

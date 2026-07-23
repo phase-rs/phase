@@ -12,9 +12,12 @@
     "test": "tsx --test test/*.test.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250101.0",
+    "@cloudflare/workers-types": "^5.20260721.1",
     "tsx": "^4.19.4",
     "typescript": "^5.6.0",
-    "wrangler": "^4.102.0"
+    "wrangler": "^4.113.0"
+  },
+  "overrides": {
+    "sharp": "0.35.3"
   }
 }

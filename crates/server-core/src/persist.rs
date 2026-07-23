@@ -18,6 +18,8 @@ use crate::protocol::DraftLobbyMetadata;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSession {
     pub game_code: String,
+    #[serde(default)]
+    pub state_revision: u64,
     pub state: PersistedGameState,
     pub player_tokens: Vec<String>,
     pub display_names: Vec<String>,

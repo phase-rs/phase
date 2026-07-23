@@ -1399,6 +1399,9 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
             slot: slot.clone(),
             kind: DecisionPointKind::Targets {
                 legal_targets: vec![TargetRef::Player(P1)],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
             },
         }],
         convoke_tappable_count: 0,
@@ -3824,6 +3827,9 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
                     TargetRef::Player(P1),
                     TargetRef::Object(battlefield),
                 ],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
             },
         }],
         convoke_tappable_count: 0,
@@ -3845,7 +3851,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         let WaitingFor::LoopShortcut { schema, .. } = wf else {
             panic!("expected LoopShortcut, got {wf:?}");
         };
-        let DecisionPointKind::Targets { legal_targets } = &schema.points[0].kind else {
+        let DecisionPointKind::Targets { legal_targets, .. } = &schema.points[0].kind else {
             panic!("expected a Targets point, got {:?}", schema.points[0].kind);
         };
         legal_targets.clone()

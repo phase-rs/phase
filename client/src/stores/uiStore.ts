@@ -42,6 +42,26 @@ export type DiceRollPayload =
       context: "startingPlayer" | "ability";
     };
 
+/** Direct-manipulation state for the mobile hand's held-card preview. The
+ * engine-authored action set determines `playable` / whether `castReady` may
+ * ever become true; offsets and the release threshold are presentation only. */
+export interface MobileHandGesture {
+  objectId: ObjectId;
+  phase: "preview" | "drag";
+  sourceOrigin: {
+    bottom: number;
+    centerX: number;
+    height: number;
+    rotation: number;
+    top: number;
+    width: number;
+  };
+  offsetX: number;
+  offsetY: number;
+  playable: boolean;
+  castReady: boolean;
+}
+
 // Guard against spurious mouseleave events caused by Framer Motion layout
 // recalculations or pointer-events-auto overlays stealing focus from the card.
 // Clears are deferred — if the cursor is still over a card/preview element
@@ -170,6 +190,7 @@ interface UiStoreState {
    *  use the modal AttachmentsDialog). Cleared by `clearPromptOverlayState`. */
   attachmentFanHostId: ObjectId | null;
   mobileHandOpen: boolean;
+  mobileHandGesture: MobileHandGesture | null;
   /** Ephemeral hide-filter for the player's own hand (display-only). Lives here
    *  rather than in `preferencesStore` so it resets each game (cleared by
    *  `clearPromptOverlayState`) — a per-game focus aid, not a durable
@@ -258,6 +279,7 @@ interface UiStoreActions {
   setEnchantmentsDialogPlayer: (id: number | null) => void;
   setAttachmentFanHost: (id: ObjectId | null) => void;
   setMobileHandOpen: (open: boolean) => void;
+  setMobileHandGesture: (gesture: MobileHandGesture | null) => void;
   setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
@@ -314,6 +336,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   enchantmentsDialogPlayer: null,
   attachmentFanHostId: null,
   mobileHandOpen: false,
+  mobileHandGesture: null,
   handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
@@ -419,7 +442,13 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       pendingClearTimer = null;
     }
     cancelPendingShow();
-    set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
+    set({
+      inspectedObjectId: null,
+      inspectedFaceIndex: 0,
+      previewSticky: false,
+      altHeld: false,
+      mobileHandGesture: null,
+    });
   },
 
   addSelectedCard: (cardId) =>
@@ -579,6 +608,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
   setAttachmentFanHost: (id) => set({ attachmentFanHostId: id }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
+  setMobileHandGesture: (gesture) => set({ mobileHandGesture: gesture }),
   setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),

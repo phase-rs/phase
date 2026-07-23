@@ -3,7 +3,7 @@
     "identifier": "default",
     "description": "Local permissions for the bundled bootstrap page",
     "windows": ["main"],
-    "permissions": ["core:default", "allow-stash-legacy-storage"]
+    "permissions": ["core:default", "core:window:allow-set-fullscreen", "allow-stash-legacy-storage"]
   },
   {
     "identifier": "remote-shell",
@@ -19,6 +19,7 @@
     },
     "permissions": [
       "core:default",
+      "core:window:allow-set-fullscreen",
       "shell:allow-open",
       "process:allow-exit",
       "process:allow-restart",

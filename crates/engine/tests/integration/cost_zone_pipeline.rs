@@ -9705,6 +9705,7 @@ fn effect_zone_put_at_library_position_mixed_sources_preserves_legacy_library_or
             library_position: Some(position),
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         let completed = runner
@@ -9776,6 +9777,9 @@ fn cloak_tracked_exile_redirect_pauses_before_manifest_tail() {
             target: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 0 },
             object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+            // CR 110.2a: P0-owned/P0-controlled pile — pins the None-snapshot
+            // park/re-park path (owner default, behavior-identical).
+            enters_under: None,
         },
         vec![],
         source,
@@ -9872,6 +9876,9 @@ fn cloak_tracked_exile_delivery_stays_synchronous_and_cloaks_every_member() {
             target: TargetFilter::Controller,
             count: QuantityExpr::Fixed { value: 0 },
             object_source: Some(TargetFilter::TrackedSet { id: tracked_set }),
+            // CR 110.2a: P0-owned/P0-controlled pile — pins the None-snapshot
+            // synchronous path (owner default, behavior-identical).
+            enters_under: None,
         },
         vec![],
         source,

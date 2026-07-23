@@ -6,6 +6,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 pub fn add_player_counter_with_replacement(
     state: &mut GameState,
@@ -67,8 +68,15 @@ pub fn apply_player_counter_addition(
     if amount == 0 {
         return;
     }
-    let player = &mut state.players[player_id.0 as usize];
-    player.add_player_counters(&counter_kind, amount);
+    state
+        .resolve_and_apply_player_edit(
+            player_id,
+            ResolvedPlayerEdit::Counter {
+                kind: counter_kind,
+                delta: amount as i32,
+            },
+        )
+        .expect("post-replacement player counter gain must target a live player");
 
     // CR 122.1: Emit event for counter change.
     events.push(GameEvent::PlayerCounterChanged {
@@ -241,11 +249,23 @@ fn clear_all_player_counters(
     player_id: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    let player = &mut state.players[player_id.0 as usize];
-
-    if player.poison_counters > 0 {
-        let delta = -(player.poison_counters as i32);
-        player.poison_counters = 0;
+    let poison = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .expect("counter target must be a live player")
+        .poison_counters;
+    if poison > 0 {
+        let delta = -(poison as i32);
+        state
+            .resolve_and_apply_player_edit(
+                player_id,
+                ResolvedPlayerEdit::Counter {
+                    kind: PlayerCounterKind::Poison,
+                    delta,
+                },
+            )
+            .expect("live player counter removal must apply");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind: PlayerCounterKind::Poison,
@@ -255,12 +275,26 @@ fn clear_all_player_counters(
 
     // Drain the generic map — collect kinds first to release the borrow before
     // mutating/emitting events.
-    let drained: Vec<(PlayerCounterKind, u32)> = player
+    let drained: Vec<(PlayerCounterKind, u32)> = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .expect("counter target must be a live player")
         .player_counters
-        .drain()
+        .iter()
+        .map(|(kind, count)| (*kind, *count))
         .filter(|(_, count)| *count > 0)
         .collect();
     for (counter_kind, count) in drained {
+        state
+            .resolve_and_apply_player_edit(
+                player_id,
+                ResolvedPlayerEdit::Counter {
+                    kind: counter_kind,
+                    delta: -(count as i32),
+                },
+            )
+            .expect("live player counter removal must apply");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind,

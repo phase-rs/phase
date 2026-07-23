@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const EXPECTED_PROTOCOL_VERSION = 20;
+const EXPECTED_PROTOCOL_VERSION = 21;
 
 function extractVersion(source, pattern, label) {
   const match = source.match(pattern);

@@ -1,5 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import {
+  AnimatePresence,
+  motion,
+  useAnimationControls,
+  useReducedMotion,
+} from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import type { AbilityBlockKind, ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
@@ -13,7 +18,7 @@ import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
+import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -65,6 +70,10 @@ export interface CardHoverInfo {
 
 interface CardPreviewProps {
   cardName: string | null;
+  /** In-game object whose details and art metadata belong to this preview.
+   *  Explicitly carrying the identity keeps an exiting animation pinned to its
+   *  original object while a rapid hover/scrub starts the next preview. */
+  objectId?: number | null;
   backFaceName?: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
@@ -102,6 +111,7 @@ interface HandPreviewOrigin {
 
 export function CardPreview({
   cardName,
+  objectId,
   backFaceName,
   faceIndex,
   position,
@@ -112,6 +122,17 @@ export function CardPreview({
   mobileLayout = "modal",
   handSourceObjectId,
 }: CardPreviewProps) {
+  const mobileHandGesture = useUiStore((s) => s.mobileHandGesture);
+  const shouldReduceMotion = useReducedMotion();
+  const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
+  const isHeldCardDrag =
+    mobileHandGesture?.phase === "drag"
+    && mobileHandGesture.objectId === handSourceObjectId;
+  const [dragHandoffComplete, setDragHandoffComplete] = useState(false);
+  const heldSourceOrigin =
+    mobileHandGesture != null && mobileHandGesture.objectId === handSourceObjectId
+      ? mobileHandGesture.sourceOrigin
+      : null;
   const [measuredHandOrigin, setMeasuredHandOrigin] = useState<{
     objectId: number;
     origin: HandPreviewOrigin | null;
@@ -123,14 +144,28 @@ export function CardPreview({
       return;
     }
 
+    // The source card leaves the fan as soon as the hold becomes active. Keep
+    // using the geometry captured immediately before that collapse so the
+    // preview still grows from the card the player's finger actually lifted.
+    if (heldSourceOrigin) {
+      setMeasuredHandOrigin({
+        objectId: handSourceObjectId,
+        origin: { objectId: handSourceObjectId, ...heldSourceOrigin },
+      });
+      return;
+    }
+
     const source = document.querySelector<HTMLElement>(
       `[data-hand-card][data-object-id="${handSourceObjectId}"]`,
     );
     // The same hand object can also render inside an overlay (most notably the
     // mulligan screen) while the board's resting PlayerHand remains mounted
-    // underneath. Require the resting source to be hovered so overlays retain
-    // their normal preview instead of inheriting the hand-origin animation.
-    if (!source || !source.matches(":hover")) {
+    // underneath. Require either desktop hover or the explicit mobile scrub
+    // marker so overlays retain their normal preview instead of inheriting the
+    // hand-origin animation.
+    const isActiveHandSource =
+      source?.matches(":hover") || source?.dataset.handTouchActive === "true";
+    if (!source || !isActiveHandSource) {
       setMeasuredHandOrigin({ objectId: handSourceObjectId, origin: null });
       return;
     }
@@ -147,7 +182,34 @@ export function CardPreview({
         width: source.offsetWidth || rect.width,
       },
     });
-  }, [cardName, handSourceObjectId]);
+  }, [cardName, handSourceObjectId, heldSourceOrigin]);
+
+  useEffect(() => {
+    if (!isHeldCardDrag) {
+      setDragHandoffComplete(false);
+      return undefined;
+    }
+
+    if (animationSpeedMultiplier <= 0) {
+      setDragHandoffComplete(true);
+      return undefined;
+    }
+
+    const durationMs = (shouldReduceMotion ? 60 : 120) * animationSpeedMultiplier;
+    const timeoutId = window.setTimeout(() => {
+      setDragHandoffComplete(true);
+    }, durationMs);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [animationSpeedMultiplier, isHeldCardDrag, shouldReduceMotion]);
+
+  // Keep the large inspection card alive just long enough to crossfade into
+  // the lifted card. The hand-sized drag visual already tracks the live finger
+  // position, so translating this second copy during the handoff would make
+  // the same card appear in two moving places at once.
+  if (isHeldCardDrag && (dragHandoffComplete || animationSpeedMultiplier <= 0)) {
+    return null;
+  }
 
   const handMeasurementReady =
     handSourceObjectId == null || measuredHandOrigin?.objectId === handSourceObjectId;
@@ -155,13 +217,21 @@ export function CardPreview({
     measuredHandOrigin && measuredHandOrigin.objectId === handSourceObjectId
       ? measuredHandOrigin.origin
       : null;
+  // A hand browse is one continuous preview session. Keeping this key stable
+  // across adjacent cards prevents AnimatePresence from leaving a trail of
+  // full-size previews that shrink onto previously scrubbed hand slots. The
+  // initial appearance and final dismissal still mount/unmount normally.
+  const previewKey = handSourceObjectId != null
+    ? "hand-preview"
+    : `${objectId ?? cardName}:${faceIndex ?? 0}:${scryfallId ?? ""}`;
 
   return (
     <AnimatePresence>
       {cardName && handMeasurementReady ? (
         <CardPreviewInner
-          key={`${cardName}:${faceIndex ?? 0}:${scryfallId ?? ""}`}
+          key={previewKey}
           cardName={cardName}
+          objectId={objectId}
           backFaceName={backFaceName ?? null}
           faceIndex={faceIndex}
           position={position}
@@ -171,6 +241,7 @@ export function CardPreview({
           onDismiss={onDismiss}
           mobileLayout={mobileLayout}
           handOrigin={handOrigin}
+          mobileHandGesture={mobileHandGesture}
         />
       ) : null}
     </AnimatePresence>
@@ -179,6 +250,7 @@ export function CardPreview({
 
 function CardPreviewInner({
   cardName,
+  objectId,
   backFaceName: backFaceNameProp,
   faceIndex,
   position,
@@ -188,8 +260,10 @@ function CardPreviewInner({
   onDismiss,
   mobileLayout,
   handOrigin,
+  mobileHandGesture,
 }: {
   cardName: string;
+  objectId?: number | null;
   backFaceName: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
@@ -199,13 +273,15 @@ function CardPreviewInner({
   onDismiss?: () => void;
   mobileLayout?: "modal" | "compact";
   handOrigin: HandPreviewOrigin | null;
+  mobileHandGesture: MobileHandGesture | null;
 }) {
   const { t } = useTranslation("game");
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const previewObjectId = objectId === undefined ? inspectedObjectId : objectId;
   const dismissPreview = useUiStore((s) => s.dismissPreview);
   const showDebugId = useUiStore((s) => s.debugPanelOpen || s.debugInteractionMode);
   const obj = useGameStore((s) =>
-    inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
+    previewObjectId != null ? s.gameState?.objects[previewObjectId] ?? null : null,
   );
   // `card_report` context needs a live, participating game: `obj == null` (deck
   // builder) has no zone and a possibly-stale `gameMode`, `gameId == null` means
@@ -453,21 +529,6 @@ function CardPreviewInner({
         }
       : undefined;
 
-  if (isMobile) {
-    return (
-      <MobilePreviewOverlay
-        cardName={cardName}
-        backFaceName={backFaceName}
-        faceIndex={defaultFaceIndex}
-        obj={obj}
-        onDismiss={onDismiss ?? dismissPreview}
-        sourcePrinting={sourcePrinting}
-        layout={mobileLayout ?? "modal"}
-        report={reportContext}
-      />
-    );
-  }
-
   const handPreviewLeft = handPreview
     ? Math.min(
         Math.max(margin, handOrigin.centerX - previewWidth / 2),
@@ -512,11 +573,126 @@ function CardPreviewInner({
 
   const animatePreview = animationSpeedMultiplier > 0;
   const movePreview = animatePreview && !shouldReduceMotion;
+  const previewControls = useAnimationControls();
+  const previousHandSourceRef = useRef<number | null>(null);
   const transformOrigin = handPreview
     ? "50% 100%"
     : position && position.x <= viewportWidth / 2
       ? "0% 50%"
       : "100% 50%";
+  const activeMobileHandGesture =
+    handPreview
+      && mobileHandGesture?.phase === "preview"
+      && mobileHandGesture.objectId === previewObjectId
+      ? mobileHandGesture
+      : null;
+  const activeMobileHandDrag =
+    handPreview
+      && mobileHandGesture?.phase === "drag"
+      && mobileHandGesture.objectId === previewObjectId
+      ? mobileHandGesture
+      : null;
+  const activeMobileHandDragObjectId = activeMobileHandDrag?.objectId ?? null;
+  const mobileHandPreviewState = activeMobileHandGesture?.castReady
+    ? "cast-ready"
+    : activeMobileHandGesture?.playable
+      ? "playable"
+      : undefined;
+  const mobileHandHighlightClass = activeMobileHandGesture?.castReady
+    ? "ring-2 ring-amber-300 shadow-[0_0_22px_6px_rgba(251,191,36,0.72)]"
+    : activeMobileHandGesture?.playable
+      ? "ring-2 ring-cyan-400 shadow-[0_0_16px_4px_rgba(34,211,238,0.6)]"
+      : "";
+  const wobbleHeldPreview =
+    activeMobileHandGesture != null
+    && animatePreview
+    && !shouldReduceMotion;
+
+  useLayoutEffect(() => {
+    if (activeMobileHandDragObjectId != null) {
+      const duration = (
+        shouldReduceMotion ? 0.06 : 0.12
+      ) * animationSpeedMultiplier;
+      void previewControls.start({
+        opacity: 0,
+        rotate: 0,
+        scale: 1,
+        x: 0,
+        y: 0,
+        transition: {
+          duration,
+          ease: "easeOut",
+        },
+      });
+      return;
+    }
+
+    const duration = (
+      shouldReduceMotion ? 0.12 : handPreview ? 0.24 : 0.2
+    ) * animationSpeedMultiplier;
+    const handSourceChanged =
+      handPreview
+      && handOrigin.objectId !== previousHandSourceRef.current;
+
+    if (handSourceChanged && previousHandSourceRef.current != null && movePreview) {
+      // A scrubbed card becomes the preview itself: reset the one persistent
+      // layer to the new source card's exact fan geometry, then grow it into
+      // the bottom-pinned inspection size. Starting another scrub cancels this
+      // motion and restarts from the next source, so no exit clones accumulate.
+      previewControls.set({
+        left: handPreviewLeft,
+        opacity: 1,
+        rotate: handOrigin.rotation,
+        scale: handPreviewScale,
+        x: handPreviewX,
+        y: handPreviewY,
+      });
+    }
+
+    previousHandSourceRef.current = handPreview ? handOrigin.objectId : null;
+    void previewControls.start({
+      left: handPreview ? handPreviewLeft : undefined,
+      opacity: 1,
+      rotate: 0,
+      scale: 1,
+      x: 0,
+      y: 0,
+      transition: {
+        duration,
+        ease: [0.22, 1, 0.36, 1],
+      },
+    });
+  }, [
+    activeMobileHandDragObjectId,
+    animationSpeedMultiplier,
+    handOrigin,
+    handPreview,
+    handPreviewLeft,
+    handPreviewScale,
+    handPreviewX,
+    handPreviewY,
+    movePreview,
+    previewControls,
+    shouldReduceMotion,
+  ]);
+
+  // Generic mobile inspections use the blocking modal. A held hand card is the
+  // exception: it uses the same bottom-anchored Arena animation as desktop so
+  // the player can keep their finger down and scrub the stable fan beneath it.
+  if (isMobile && !handPreview) {
+    return (
+      <MobilePreviewOverlay
+        cardName={cardName}
+        backFaceName={backFaceName}
+        faceIndex={defaultFaceIndex}
+        obj={obj}
+        onDismiss={onDismiss ?? dismissPreview}
+        sourcePrinting={sourcePrinting}
+        layout={mobileLayout ?? "modal"}
+        report={reportContext}
+      />
+    );
+  }
 
   return (
     <motion.div
@@ -536,19 +712,7 @@ function CardPreviewInner({
             : { opacity: 0, scale: movePreview ? 0.975 : 1, y: movePreview ? 6 : 0 }
           : false
       }
-      animate={{
-        opacity: 1,
-        rotate: 0,
-        scale: 1,
-        x: 0,
-        y: 0,
-        transition: {
-          duration: (
-            shouldReduceMotion ? 0.12 : handPreview ? 0.24 : 0.2
-          ) * animationSpeedMultiplier,
-          ease: [0.22, 1, 0.36, 1],
-        },
-      }}
+      animate={previewControls}
       exit={{
         opacity: animatePreview && (!handPreview || !movePreview) ? 0 : 1,
         rotate: handPreview && movePreview ? handOrigin.rotation : 0,
@@ -568,39 +732,56 @@ function CardPreviewInner({
       }}
       data-card-preview
     >
-      {altHeld && (frontParseDetails || engineFrontFace) ? (
-        <ParsedAbilitiesPanel
-          name={showOtherFace ? (engineBackFace?.name ?? backFaceName ?? "") : (obj?.name ?? engineFrontFace?.name ?? frontFaceName)}
-          cardTypes={showOtherFace ? engineBackFace?.card_type : (obj?.card_types ?? engineFrontFace?.card_type)}
-          keywords={showOtherFace ? undefined : obj?.keywords}
-          localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
-          parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
-          maxHeight={viewportHeight - margin * 2}
-          report={reportContext}
-        />
-      ) : (
-        <CardImagePreview
-          cardName={displayName}
-          classLevel={classLevel}
-          showInfoPanel={showInfoPanel}
-          showFooter={showCardPreviewFooter}
-          compactDesktop={handPreview}
-          obj={obj}
-          showOtherFace={showOtherFace}
-          otherFaceCost={obj?.back_face?.mana_cost ?? null}
-          isLoading={activeLoading}
-          src={activeSrc}
-          isRotated={activeRotated}
-          flip180={flip180}
-          backFaceHint={isFlip
-            ? (flip180 ? null : t("preview.holdCtrlFlip"))
-            : backFaceName != null && !showOtherFace
-              ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
-              : null}
-          altAvailable={Boolean(frontParseDetails || engineFrontFace)}
-          debugObjectId={showDebugId && inspectedObjectId != null ? inspectedObjectId : null}
-        />
-      )}
+      <motion.div
+        className={`rounded-[4%] transition-[box-shadow] motion-safe:duration-100 ${mobileHandHighlightClass}`}
+        style={{ transformOrigin: "50% 85%" }}
+        animate={wobbleHeldPreview ? { rotate: [0, -0.55, 0.55, 0] } : { rotate: 0 }}
+        transition={
+          wobbleHeldPreview
+            ? {
+                duration: 1.2 * animationSpeedMultiplier,
+                ease: "easeInOut",
+                repeat: Infinity,
+              }
+            : { duration: 0.08 * animationSpeedMultiplier }
+        }
+        data-mobile-hand-preview-state={mobileHandPreviewState}
+        data-mobile-hand-preview-wobble={wobbleHeldPreview || undefined}
+      >
+        {altHeld && (frontParseDetails || engineFrontFace) ? (
+          <ParsedAbilitiesPanel
+            name={showOtherFace ? (engineBackFace?.name ?? backFaceName ?? "") : (obj?.name ?? engineFrontFace?.name ?? frontFaceName)}
+            cardTypes={showOtherFace ? engineBackFace?.card_type : (obj?.card_types ?? engineFrontFace?.card_type)}
+            keywords={showOtherFace ? undefined : obj?.keywords}
+            localizedTypeLine={showOtherFace ? engineBackFace?.localized_type_line : engineFrontFace?.localized_type_line}
+            parseDetails={showOtherFace && backParseDetails ? backParseDetails : frontParseDetails}
+            maxHeight={viewportHeight - margin * 2}
+            report={reportContext}
+          />
+        ) : (
+          <CardImagePreview
+            cardName={displayName}
+            classLevel={classLevel}
+            showInfoPanel={showInfoPanel}
+            showFooter={showCardPreviewFooter}
+            compactDesktop={handPreview}
+            obj={obj}
+            showOtherFace={showOtherFace}
+            otherFaceCost={obj?.back_face?.mana_cost ?? null}
+            isLoading={activeLoading}
+            src={activeSrc}
+            isRotated={activeRotated}
+            flip180={flip180}
+            backFaceHint={isFlip
+              ? (flip180 ? null : t("preview.holdCtrlFlip"))
+              : backFaceName != null && !showOtherFace
+                ? (isTransformed ? t("preview.holdCtrlFront") : t("preview.holdCtrlBack"))
+                : null}
+            altAvailable={Boolean(frontParseDetails || engineFrontFace)}
+            debugObjectId={showDebugId && previewObjectId != null ? previewObjectId : null}
+          />
+        )}
+      </motion.div>
     </motion.div>
   );
 }
@@ -921,7 +1102,12 @@ function CardImagePreview({
           />
         )}
         {displayCost && (
-          <ManaCostPips cost={displayCost} isReduced={displayCostReduced} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
+          <ManaCostPips
+            cost={displayCost}
+            isReduced={displayCostReduced}
+            size="lg"
+            className="absolute right-[7.00%] top-[5.25%] z-10"
+          />
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">

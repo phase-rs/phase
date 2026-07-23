@@ -22,6 +22,7 @@
     "updatePending": "actualización pendiente tras la partida",
     "cards": "cartas {{age}} ({{commit}})",
     "cardDataTitle": "Datos de cartas generados el {{date}} desde {{commit}}",
+    "desktopAppVersion": "Aplicación de escritorio v{{version}}",
     "checkForUpdates": "Buscar actualizaciones",
     "updaterDebugInfo": "Información de depuración del actualizador",
     "updaterIssue": "Problema del actualizador: {{error}}",
