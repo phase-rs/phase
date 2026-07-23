@@ -32120,9 +32120,9 @@ fn effect_for_each_opponent_put_at_library_position_keeps_repeat_for_and_target_
                 .any(|filter| matches!(filter, TypeFilter::Permanent)));
             assert_eq!(*n, 3);
         }
-        other => panic!(
-            "expected PutAtLibraryPosition TargetPlayer nonland permanent, got {other:?}"
-        ),
+        other => {
+            panic!("expected PutAtLibraryPosition TargetPlayer nonland permanent, got {other:?}")
+        }
     }
 }
 

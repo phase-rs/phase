@@ -28975,7 +28975,10 @@ pub(crate) fn parse_effect_chain_ir(
             })
         );
         let prior_relative_player_scope = is_for_each_opponent_repeat
-            .then(|| ctx.relative_player_scope.replace(ControllerRef::TargetPlayer))
+            .then(|| {
+                ctx.relative_player_scope
+                    .replace(ControllerRef::TargetPlayer)
+            })
             .flatten();
         let (clause, repeat_for) = if let Some(draw) = difference_draw {
             (draw, repeat_for)
