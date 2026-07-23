@@ -467,6 +467,124 @@ fn host_copying_a_token_donor_routes_token_display() {
     );
 }
 
+/// CR 303.4f + CR 614.12a + CR 707.2c: Non-spell Aura entry (dig → battlefield)
+/// attaches via the enter-time host consult, then raises the as-enters copy
+/// choice. Discriminates from the spell-cast path (CR 608.3c /
+/// `PendingSpellResolution`): no spell-resolution frame is involved.
+///
+/// Enchant is narrowed to "creature you control" so the opponent's donor is NOT
+/// a legal attach host (single legal host → auto-attach, CR 303.4f) while still
+/// remaining a legal copy CHOICE ("choose a creature", CR 115.10a).
+#[test]
+fn non_spell_aura_entry_copies_chosen_creature() {
+    use engine::types::ability::{ControllerRef, CopyTargetPurpose, TargetRef};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Opponent-controlled donor: legal copy choice, illegal attach host under
+    // the narrowed Enchant(you-control) keyword installed below.
+    let donor = scenario
+        .add_creature_from_oracle(P1, "Serra Angel", 4, 4, "Flying")
+        .id();
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    // Library dig → battlefield is a non-spell Aura entry (CR 303.4f).
+    let aura = scenario.add_card_to_library_top(P0, "Metamorphic Alteration");
+
+    let mut runner = scenario.build();
+
+    // Install Aura identity + parsed Metamorphic replacements/statics/keywords.
+    let parsed = parse_oracle_text(
+        METAMORPHIC_ALTERATION,
+        "Metamorphic Alteration",
+        &[],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&aura).unwrap();
+        obj.card_types.core_types = vec![CoreType::Enchantment];
+        obj.card_types.subtypes = vec!["Aura".to_string()];
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords = parsed.extracted_keywords;
+        obj.replacements = parsed.replacements;
+        obj.statics = parsed.statics;
+        // Narrow Enchant so only `host` is a legal attach target (auto-attach).
+        obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
+        let mut you_control_creature = TypedFilter::creature();
+        you_control_creature.controller = Some(ControllerRef::You);
+        obj.keywords
+            .push(Keyword::Enchant(TargetFilter::Typed(you_control_creature)));
+    }
+    assert!(
+        runner.state().objects[&aura]
+            .replacements
+            .iter()
+            .any(|r| matches!(
+                r.execute.as_ref().map(|e| e.effect.as_ref()),
+                Some(Effect::ChoosePermanent { .. })
+            )),
+        "non-spell fixture must carry the ChoosePermanent as-enters replacement"
+    );
+
+    runner.state_mut().waiting_for = WaitingFor::DigChoice {
+        player: P0,
+        library_owner: P0,
+        cards: vec![aura],
+        keep_count: 1,
+        up_to: false,
+        selectable_cards: vec![aura],
+        kept_destination: Some(Zone::Battlefield),
+        rest_destination: Some(Zone::Graveyard),
+        source_id: None,
+        enter_tapped: false,
+    };
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![aura] })
+        .expect("dig keep must put the Aura onto the battlefield");
+
+    // Single legal host → auto-attach (no ReturnAsAuraTarget); copy choice next.
+    match &runner.state().waiting_for {
+        WaitingFor::CopyTargetChoice { purpose, .. } => {
+            assert!(
+                matches!(purpose, CopyTargetPurpose::PersistChosenAttribute),
+                "non-spell path must raise PersistChosenAttribute, got {purpose:?}"
+            );
+        }
+        other => panic!("expected CopyTargetChoice after non-spell Aura entry, got {other:?}"),
+    }
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(AttachTarget::Object(host)),
+        "CR 303.4f: non-spell Aura auto-attaches to the sole legal host before the copy choice"
+    );
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(donor)),
+        })
+        .expect("answer the copy-source choice");
+
+    let host_obj = &runner.state().objects[&host];
+    assert_eq!(
+        host_obj.name, "Serra Angel",
+        "CR 707.2c: non-spell Aura entry still installs the host copy"
+    );
+    assert_eq!(host_obj.power, Some(4));
+    assert!(host_obj.keywords.contains(&Keyword::Flying));
+
+    let aura_obj = &runner.state().objects[&aura];
+    assert_eq!(aura_obj.name, "Metamorphic Alteration");
+    assert_eq!(
+        aura_obj.attached_to,
+        Some(AttachTarget::Object(host)),
+        "CR 303.4f: Aura remains attached to the chosen host"
+    );
+}
+
 /// SHAPE: the "As this Aura enters, choose a creature." line parses to an
 /// as-enters `Effect::ChoosePermanent { persist: CopiableSnapshot }` over a
 /// creature copy-source pool — never a `BecomeCopy` on the entering Aura.

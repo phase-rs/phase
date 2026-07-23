@@ -1380,9 +1380,13 @@ fn handle_persist_chosen_attribute_choice(
     // zone-delivery post-replacement drain, which pauses BEFORE the spell-
     // resolution epilogue (Aura attach, cast-link stamps) in `stack.rs`. The
     // stash pushed there (`PendingSpellResolution`) carries the Aura spell's
-    // enchant target — apply it now so `attached_to` is set before the host
-    // copy installs. Not CR 303.4f (non-spell Aura entry). `attach_to` is
-    // idempotent if attachment already ran.
+    // enchant target — establish the host from those spell targets AND apply
+    // the attach now so `attached_to` is consistent before the copy installs.
+    //
+    // CR 303.4f: Non-spell Aura entry attaches during delivery (before this
+    // choice), so `attached_to` is already set and there is no spell-resolution
+    // frame — fall through to the attached host / enter-time attach consult.
+    let mut host_from_spell: Option<ObjectId> = None;
     if state
         .active_spell_resolution()
         .is_some_and(|ctx| ctx.object_id == source_id)
@@ -1390,48 +1394,71 @@ fn handle_persist_chosen_attribute_choice(
         let ctx = state
             .take_active_spell_resolution()
             .expect("active spell-resolution frame checked above");
+        host_from_spell = ctx.spell_targets.first().and_then(|t| match t {
+            crate::types::ability::TargetRef::Object(id) => Some(*id),
+            _ => None,
+        });
         apply_pending_spell_resolution(state, &ctx, events);
     }
 
-    // CR 303.4 + CR 702.5: the Aura enchants a creature — its host is the
-    // recipient of the copy effect.
-    let host = state
+    // CR 303.4f: Non-spell path may still be unattached if entry skipped the
+    // auto-attach consult (e.g. liminal copy → Aura). Resolve it now.
+    if state
         .objects
         .get(&source_id)
-        .and_then(|aura| aura.attached_to.as_ref())
-        .and_then(|attach| attach.as_object());
-
-    if let Some(host_id) = host {
-        // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
-        // continuous effect sourced from the Aura, applied to the host, ending
-        // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
-        // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
-        // host for any recipient-relative duration reads (harmless here).
-        let copy = super::effects::become_copy::PrecomputedCopyValues {
-            source_id,
-            controller,
-            duration_subject_id: host_id,
-            duration: crate::types::ability::Duration::UntilHostLeavesPlay,
-            values,
-            display_source,
-            printed_ref,
-            token_image_ref,
-            additional_modifications: Vec::new(),
-            effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
-        };
-        super::effects::become_copy::apply_precomputed_copy_values(state, host_id, copy, events)
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-    } else {
-        // CR 608.2b: an Aura spell whose enchant target is illegal at resolution
-        // is countered and never enters — so this choose-a-creature replacement
-        // should not fire hostless on the spell-cast path. If reached anyway,
-        // skip the copy; SBA CR 704.5m cleans up the unattached Aura.
-        debug_assert!(
-            false,
-            "Metamorphic Alteration's Aura must be attached (CR 608.3c via \
-             PendingSpellResolution) when the copy choice is answered"
-        );
+        .is_some_and(|aura| aura.attached_to.is_none())
+    {
+        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+            crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+            | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+            crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice { .. } => {
+                return Err(EngineError::InvalidAction(
+                    "PersistChosenAttribute requires a resolved Aura host before the copy installs"
+                        .to_string(),
+                ));
+            }
+        }
     }
+
+    // CR 303.4 + CR 702.5: the Aura enchants a creature — its host is the
+    // recipient of the copy effect. Prefer the spell-target host established
+    // above (spell-cast path), then the live attachment (non-spell / after
+    // attach). Never silently no-op if the host is missing.
+    let host_id = host_from_spell
+        .or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|aura| aura.attached_to.as_ref())
+                .and_then(|attach| attach.as_object())
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Metamorphic Alteration copy choice answered without a resolved Aura host \
+                 (CR 608.3c spell target / CR 303.4f attach)"
+                    .to_string(),
+            )
+        })?;
+
+    // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
+    // continuous effect sourced from the Aura, applied to the host, ending
+    // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
+    // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
+    // host for any recipient-relative duration reads (harmless here).
+    let copy = super::effects::become_copy::PrecomputedCopyValues {
+        source_id,
+        controller,
+        duration_subject_id: host_id,
+        duration: crate::types::ability::Duration::UntilHostLeavesPlay,
+        values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+        additional_modifications: Vec::new(),
+        effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
+    };
+    super::effects::become_copy::apply_precomputed_copy_values(state, host_id, copy, events)
+        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
 
     // CR 707.4: installing the host copy must not disturb the Aura's attachment.
     debug_assert!(

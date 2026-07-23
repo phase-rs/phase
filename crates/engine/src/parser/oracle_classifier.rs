@@ -977,9 +977,15 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("enters").parse(i)
     })
     .is_some();
+    // CR 614.12a + CR 707.2c: named-attribute choices ("choose a creature type")
+    // AND object choices ("choose a creature" — Metamorphic Alteration) both
+    // route through `parse_as_enters_choose`. Gating only on
+    // `try_parse_named_choice` dropped the object-choice class before Priority-8
+    // replacement dispatch, so the permanent combinator never ran.
     let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
         verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
             try_parse_named_choice(i).is_some()
+                || super::oracle_replacement::is_as_enters_choose_permanent_phrase(i)
         })
         .parse(i)
     })

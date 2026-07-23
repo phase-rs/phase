@@ -12,7 +12,7 @@ use nom::Parser;
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
     parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
-    try_parse_named_choice, try_parse_named_choice_conjunction,
+    parse_named_choice_object, try_parse_named_choice, try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
@@ -2120,17 +2120,23 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         return None;
     }
 
-    // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
-    let (prefix_lower, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+    // Extract the "choose a ..." clause — `scan_preceded` yields the suffix
+    // AFTER `choose ` so the object-choice path parses the descriptor directly
+    // (no second leading-`choose ` re-parse).
+    let (prefix_lower, _, choose_suffix) = nom_primitives::scan_preceded(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
+    // Structural trailing-period cleanup before the named-choice object table
+    // (not parsing dispatch). `parse_named_choice_object` expects the phrase
+    // with "choose " already stripped.
+    let choose_object = choose_suffix.trim_end().trim_end_matches('.').trim();
     // CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." is an
     // as-enters OBJECT choice, not a named-attribute choice, so
-    // `try_parse_named_choice` (which only recognizes color/type/name/etc.)
-    // fails. Fall back to the object-choice combinator that lowers to
-    // `Effect::ChoosePermanent` (Metamorphic Alteration) before giving up.
-    let Some(choice_type) = try_parse_named_choice(choose_text) else {
-        return parse_as_enters_choose_permanent(choose_text, original_text);
+    // `parse_named_choice_object` (color/type/name/etc.) fails. Fall back to
+    // the object-choice combinator that lowers to `Effect::ChoosePermanent`
+    // (Metamorphic Alteration) before giving up.
+    let Some(choice_type) = parse_named_choice_object(choose_object) else {
+        return parse_as_enters_choose_permanent(choose_suffix, original_text);
     };
 
     let choose = AbilityDefinition::new(
@@ -2280,6 +2286,42 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     )
 }
 
+/// CR 614.12a + CR 707.2c: Recognizer for an as-enters OBJECT choice phrase —
+/// the suffix after (or including) `choose `, e.g. `"a creature."` or
+/// `"choose a creature."`. Shared by the Priority-8 classifier
+/// (`is_as_enters_choose_pattern`) and `parse_as_enters_choose_permanent` so
+/// routing and lowering agree on the same descriptor grammar.
+pub(crate) fn is_as_enters_choose_permanent_phrase(choose_text: &str) -> bool {
+    as_enters_choose_permanent_filter(choose_text).is_some()
+}
+
+/// Parse the object-filter of an as-enters permanent choice. Accepts either the
+/// suffix after `choose ` (`"a creature."`) or a full `"choose a creature."`
+/// clause. Requires full consumption and a concrete `Typed` filter.
+fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
+    // Structural optional-prefix + trailing-period cleanup (not dispatch):
+    // callers may pass the match-at-start slice or the post-`choose ` suffix.
+    let object_phrase = choose_text.trim_start();
+    let object_phrase = object_phrase
+        .strip_prefix("choose ") // allow-noncombinator: optional prefix tolerance
+        .unwrap_or(object_phrase);
+    let trimmed_end = object_phrase.trim_end();
+    let object_phrase = trimmed_end
+        .strip_suffix('.') // allow-noncombinator: structural trailing-period cleanup
+        .unwrap_or(trimmed_end)
+        .trim();
+    if object_phrase.is_empty() {
+        return None;
+    }
+    let (filter, remainder) = parse_target(object_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    // CR 707.2c: the copy source is a permanent — only a concrete object filter
+    // (never a player/zone/`Any` descriptor) is a valid copy-source pool.
+    matches!(filter, TargetFilter::Typed(_)).then_some(filter)
+}
+
 /// CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." — the
 /// as-enters OBJECT-choice analogue of `parse_as_enters_choose` (which only
 /// handles named-attribute choices: color, creature type, card name, etc.).
@@ -2288,35 +2330,14 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
 /// (`ChoosePermanentPersist::CopiableSnapshot`) — the entering Aura itself is
 /// never turned into a copy. Metamorphic Alteration.
 ///
-/// `choose_text` still carries its leading "choose " (as returned by
-/// `scan_split_at_phrase`). The object phrase is parsed with the shared
-/// `parse_target` descriptor grammar; the remainder must be empty (only the
-/// choice, no trailing effect) and the filter must be a concrete object
-/// (`Typed`) filter, so this never hijacks a compound as-enters instruction or
-/// a player/zone choice.
+/// `choose_text` is the object phrase (optionally still carrying a leading
+/// `"choose "`). Parsed with the shared `parse_target` descriptor grammar; the
+/// remainder must be empty and the filter must be `Typed`.
 fn parse_as_enters_choose_permanent(
     choose_text: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let (object_phrase, _) = tag::<_, _, OracleError<'_>>("choose ")
-        .parse(choose_text)
-        .ok()?;
-    // Structural trailing-period/whitespace cleanup on the extracted object
-    // phrase (not parsing dispatch) before the descriptor grammar runs.
-    let object_phrase = object_phrase
-        .trim_end()
-        .strip_suffix('.') // allow-noncombinator: structural trailing-period cleanup, not dispatch
-        .unwrap_or(object_phrase)
-        .trim();
-    let (filter, remainder) = parse_target(object_phrase);
-    if !remainder.trim().is_empty() {
-        return None;
-    }
-    // CR 707.2c: the copy source is a permanent — only a concrete object filter
-    // (never a player/zone/`Any` descriptor) is a valid copy-source pool.
-    if !matches!(filter, TargetFilter::Typed(_)) {
-        return None;
-    }
+    let filter = as_enters_choose_permanent_filter(choose_text)?;
 
     let execute = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -14692,6 +14713,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 614.12a + CR 707.2c: object as-enters choice (Metamorphic Alteration)
+    /// must lower to `Effect::ChoosePermanent`, not a named `ChoiceType`.
+    #[test]
+    fn as_enters_choose_a_creature_is_choose_permanent() {
+        let def = parse_replacement_line(
+            "As this Aura enters, choose a creature.",
+            "Metamorphic Alteration",
+        )
+        .expect("as-enters choose-a-creature must parse as a Moved replacement");
+        let execute = def.execute.as_ref().unwrap();
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::ChoosePermanent {
+                    persist: ChoosePermanentPersist::CopiableSnapshot,
+                    ..
+                }
+            ),
+            "expected ChoosePermanent {{ CopiableSnapshot }}, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
