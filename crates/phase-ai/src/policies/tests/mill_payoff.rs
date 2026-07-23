@@ -73,10 +73,7 @@ fn cast_candidate(object_id: ObjectId) -> CandidateAction {
             targets: Vec::new(),
             payment_mode: CastPaymentMode::default(),
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Spell,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
     }
 }
 
@@ -88,10 +85,7 @@ fn land_candidate(object_id: ObjectId) -> CandidateAction {
             object_id,
             card_id: CardId(object_id.0),
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Land,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Land),
     }
 }
 

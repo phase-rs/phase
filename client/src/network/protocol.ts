@@ -23,6 +23,7 @@ import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 export interface LegalActionsWire {
   legalActions: GameAction[];
   autoPassRecommended?: boolean;
+  manaPaymentShortcutActions?: GameAction[];
   legalActionsByObject?: Record<string, GameAction[]>;
   spellCosts?: Record<string, ManaCost>;
 }
@@ -32,6 +33,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
   };
@@ -42,6 +44,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
   return {
     actions: wire.legalActions,
     autoPassRecommended: wire.autoPassRecommended ?? false,
+    manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
   };
@@ -73,7 +76,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 13 as const;
+export const WIRE_PROTOCOL_VERSION = 14 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

@@ -11,6 +11,10 @@ forge = []
 proptest = ["dep:proptest"]
 # Exposes raw zone placement for test crates; never enabled by production consumers.
 test-support = []
+# Generates only the self-contained interaction DTO contract. Production
+# consumers do not enable this feature and continue to use the existing action
+# transport until the explicit adapter cutover.
+interaction-bindings = ["dep:ts-rs"]
 # Compiles the shared combo corpus (`analysis::corpus`) into the lib + the
 # `combo-verify` tool bin, including the scenario harness it drives. Excluded
 # from the default lib / WASM surface.
@@ -35,6 +39,7 @@ web-time = "1"
 im = { version = "15", features = ["serde"] }
 rustc-hash = "2"
 smallvec = { version = "1", features = ["serde", "union"] }
+ts-rs = { version = "=12.0.1", optional = true, features = ["serde-compat"] }
 
 [[bin]]
 name = "coverage-report"
@@ -70,6 +75,12 @@ test = false
 [[bin]]
 name = "card-data-validate"
 path = "src/bin/card_data_validate.rs"
+test = false
+
+[[bin]]
+name = "interaction-bindings"
+path = "src/bin/interaction_bindings.rs"
+required-features = ["interaction-bindings"]
 test = false
 
 [[bin]]

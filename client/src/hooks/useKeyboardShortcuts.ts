@@ -71,8 +71,15 @@ export function useKeyboardShortcuts(): void {
         return;
       }
 
-      const { gameState, waitingFor, dispatch, undo, stateHistory, gameMode } =
-        useGameStore.getState();
+      const {
+        gameState,
+        waitingFor,
+        dispatch,
+        undo,
+        stateHistory,
+        gameMode,
+        manaPaymentShortcutActions,
+      } = useGameStore.getState();
       const uiState = useUiStore.getState();
 
       // Flex Layout edit mode owns Escape while active so it can't fall through
@@ -146,18 +153,11 @@ export function useKeyboardShortcuts(): void {
         case "T":
           if (waitingFor?.type === "ManaPayment") {
             e.preventDefault();
-            // Tap all untapped lands controlled by the player
-            const gs = useGameStore.getState().gameState;
-            const mp = waitingFor.data.player;
-            if (gs) {
-              for (const id of gs.battlefield) {
-                const o = gs.objects[id];
-                if (o && !o.tapped && o.controller === mp
-                    && o.card_types.core_types.includes("Land")) {
-                  dispatch({ type: "TapLandForMana", data: { object_id: id } });
-                }
+            void (async () => {
+              for (const action of manaPaymentShortcutActions) {
+                await dispatch(action);
               }
-            }
+            })();
           }
           break;
 

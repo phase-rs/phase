@@ -183,6 +183,37 @@ body {
   overscroll-behavior: none;
 }
 
+/* Game route only: pin the document itself so iOS cannot rubber-band the PWA
+   around the battlefield. Nested overflow containers remain scrollable. */
+html.game-viewport-lock,
+body.game-viewport-lock {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body.game-viewport-lock {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100dvh;
+}
+
+html.game-viewport-lock #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* The locked game document cannot act as a fallback scroll container. Keep the
+   in-game menu within the visible viewport and let it own vertical touch scroll. */
+.game-menu-scroll {
+  max-height: calc(
+    100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) -
+      var(--game-top-overlay-offset, 0px) - 3.75rem
+  );
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Game-only: prevent selection, callout, and tap-highlight during matches */
 .game-no-select {
   -webkit-user-select: none;
@@ -574,6 +605,16 @@ select.select-dark option {
   [data-mobile-action-left],
   [data-mobile-action-right] {
     width: min(calc((100vw - 3rem) / 2), 9.5rem);
+  }
+}
+
+/* iOS reserves the landscape bottom edge for the Home/App Switcher gesture.
+   A website or installed PWA cannot suppress that system gesture, so keep the
+   fanned hand's touch surface above its safe-area inset. The 1.25rem floor also
+   protects browser-mode layouts where WebKit reports a transient zero inset. */
+@media (width < 64rem) and (orientation: landscape) {
+  [data-flex-zone="playerHandRow"] {
+    transform: translateY(calc(-1 * max(env(safe-area-inset-bottom), 1.25rem)));
   }
 }
 

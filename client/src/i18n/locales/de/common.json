@@ -15,6 +15,16 @@
     "enter": "Vollbild starten",
     "exit": "Vollbild beenden"
   },
+  "nativeEngineProgress": {
+    "title": "Nativer Engine wird aktualisiert",
+    "resolving": "Passender lokaler Server wird gesucht…",
+    "downloadingBinary": "Aktualisierter Server wird heruntergeladen…",
+    "verifying": "Server wird überprüft…",
+    "downloadingData": "Spieldaten werden heruntergeladen…",
+    "spawning": "Lokaler Server wird gestartet…",
+    "ready": "Native Engine bereit",
+    "failed": "Native Engine konnte nicht vorbereitet werden"
+  },
   "buildBadge": {
     "downloading": "wird heruntergeladen… {{progress}}%",
     "checking": "wird geprüft…",
@@ -22,6 +32,7 @@
     "updatePending": "Aktualisierung nach dem Spiel ausstehend",
     "cards": "Karten {{age}} ({{commit}})",
     "cardDataTitle": "Kartendaten erzeugt am {{date}} aus {{commit}}",
+    "desktopAppVersion": "Desktop-App v{{version}}",
     "checkForUpdates": "Nach Updates suchen",
     "updaterDebugInfo": "Updater-Debug-Informationen",
     "updaterIssue": "Updater-Problem: {{error}}",
@@ -246,7 +257,13 @@
     "youPlayFirst": "Du beginnst",
     "playerPlaysFirst": "{{name}} beginnt",
     "heads": "Kopf",
-    "tails": "Zahl"
+    "tails": "Zahl",
+    "coinFlip": "Münzwurf",
+    "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
+    "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
+    "turnOrder": "Zugreihenfolge",
+    "turnOrderItem": "Zug {{turn}}: {{name}}",
+    "youTakeTurn": "Du bist in Zug {{turn}} dran"
   },
   "chrome": {
     "back": "Zurück",

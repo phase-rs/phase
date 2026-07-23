@@ -296,6 +296,14 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
                 ..
+            }
+            // CR 122.1 + CR 613.4c: "…for each [kind] counter on it/them" in a
+            // per-recipient continuous static counts the counters on the
+            // affected object, so the magnitude varies per recipient (Toxrill,
+            // Clamavus, Thelon of Havenwood, Luxior, Spark Rupture).
+            | QuantityRef::CountersOn {
+                scope: ObjectScope::Recipient,
+                ..
             } => true,
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -851,10 +859,15 @@ pub(crate) fn static_condition_uses_unspent_mana(condition: &StaticCondition) ->
 
 /// CR 611.3a + CR 613.7d: Leaf classification for `quantity_expr_uses_object_count`.
 /// EXHAUSTIVE and wildcard-free — adding a `QuantityRef` variant forces a
-/// decision here. `true` for any reference that reads battlefield object
-/// population; `false` for single-object, player-level, history-record, and
-/// payment/choice references whose value is unaffected by another object
-/// entering or leaving the battlefield.
+/// decision here. `true` for any reference whose value another object's
+/// battlefield entry or departure can change; `false` for single-object,
+/// player-level, payment/choice, and history-record references whose value is
+/// unaffected by another object entering or leaving the battlefield.
+///
+/// "Population" here means the counted set, not necessarily a LIVE board census:
+/// a per-turn journal that every battlefield entry appends to (CR 608.2i
+/// look-back tallies) is population-sensitive in the sense this classifier means,
+/// even though it is a history record rather than a board scan.
 fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
     match qty {
         // Read battlefield object population directly.
@@ -870,6 +883,17 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::DistinctColorsAmongPermanents { .. }
         | QuantityRef::DistinctCounterKindsAmong { .. }
         | QuantityRef::EnteredThisTurn { .. }
+        // CR 611.3a + CR 608.2i: a continuous effect from a static ability is
+        // never "locked in", and this operand is the CR 608.2i look-back tally
+        // over `battlefield_entries_this_turn` — a per-turn journal that
+        // `record_battlefield_entry` (restrictions.rs) APPENDS to on every
+        // battlefield entry, including one produced by a sibling resolution. So
+        // an object entering DOES change this value even though it is a history
+        // journal rather than a live board census. Layer 7c magnitudes built on
+        // it (Kinbinding) must force the incremental-flush escalation scan in
+        // `active_effects_force_incremental_escalation` or a plain token entry
+        // leaves PRE-EXISTING recipients stale.
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::CommanderManaValue { .. } => true,
         // Distinct card types reads battlefield population ONLY when its source
         // is the object-filter variant; zone / linked-exile sources do not.
@@ -934,7 +958,6 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
-        | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -1035,7 +1058,22 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
-        | QuantityRef::EnteredThisTurn { filter } => {
+        | QuantityRef::EnteredThisTurn { filter }
+        // CR 611.3a + CR 608.2i: narrowed to "would THIS object's entry join the
+        // counted population?" via the same live-filter probe the
+        // `EnteredThisTurn` sibling uses. MONOTONICITY, not equivalence, is the
+        // guarantee: the arm this replaces was a constant `false`, and every
+        // consumer is a should-we-recompute gate where `true` schedules more work
+        // and never less, so pointwise `false <= false || matches_target_filter(..)`
+        // makes this strictly less stale than before for ANY filter. It is NOT a
+        // superset of the ledger matcher (`battlefield_entry_matches_filter`):
+        // that one reads the ENTRY-TIME record snapshot, so a
+        // `FilterProp::WithKeyword` whose keyword a Layer-6 effect later removes,
+        // or a controller-bearing filter under a non-`Controller` `player` scope,
+        // can still under-trigger. Neither is reachable from any producer today
+        // (all emit a bare `Typed`/`Or[Typed]`); the upgrade is a plain `=> true`
+        // if one becomes reachable.
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
             matches_target_filter(state, entered.id, filter, ctx)
         }
         QuantityRef::DistinctCardTypes { source } => match source {
@@ -1131,7 +1169,6 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
-        | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -1528,11 +1565,14 @@ fn resolve_event_scoped_ref(
                 },
         } => {
             let id = crate::game::targeting::extract_source_from_event(event)?;
+            // No latch routing: the read subject is the triggering SPELL from
+            // the event, never the listener's own latched source.
             resolve_mana_spent_to_cast_metric(
                 state,
                 id,
                 metric,
                 &FilterContext::from_source(state, id),
+                None,
             )
         }
         QuantityExpr::Ref {
@@ -1551,15 +1591,44 @@ pub(crate) fn resolve_mana_spent_to_cast_metric(
     cast_object: ObjectId,
     metric: &CastManaSpentMetric,
     filter_ctx: &FilterContext<'_>,
+    trigger_source: Option<&TriggerSourceContext>,
 ) -> Option<i32> {
-    let obj = state.objects.get(&cast_object)?;
+    // CR 603.4 + CR 400.7d + CR 608.2h: when the cast object IS the latched
+    // trigger source, read all three cast-payment stamps through the exact
+    // event-time authority (`source_read`) — a source that left its observed
+    // zone (or re-entered as a new incarnation, CR 400.7) answers from the
+    // latch; a later same-id object never answers for it. Mirrors how
+    // `check_trigger_condition`'s spend-color arms read the per-color tally.
+    let source_read = trigger_source
+        .filter(|source| source.identity.reference.object_id == cast_object)
+        .map(|source| source.source_read(state));
+    let (spent_amount, spent_colors, source_snapshots) = match source_read {
+        Some(crate::types::game_state::TriggerSourceRead::ExactLive(object)) => (
+            object.mana_spent_to_cast_amount,
+            &object.colors_spent_to_cast,
+            &object.mana_spent_source_snapshots,
+        ),
+        Some(crate::types::game_state::TriggerSourceRead::Latched(context)) => (
+            context.mana_spent_to_cast_amount,
+            &context.colors_spent_to_cast,
+            &context.mana_spent_source_snapshots,
+        ),
+        None => {
+            let object = state.objects.get(&cast_object)?;
+            (
+                object.mana_spent_to_cast_amount,
+                &object.colors_spent_to_cast,
+                &object.mana_spent_source_snapshots,
+            )
+        }
+    };
     Some(match metric {
-        CastManaSpentMetric::Total => u32_to_i32_saturating(obj.mana_spent_to_cast_amount),
+        CastManaSpentMetric::Total => u32_to_i32_saturating(spent_amount),
         CastManaSpentMetric::DistinctColors => {
-            usize_to_i32_saturating(obj.colors_spent_to_cast.distinct_colors())
+            usize_to_i32_saturating(spent_colors.distinct_colors())
         }
         CastManaSpentMetric::FromSource { source_filter } => usize_to_i32_saturating(
-            obj.mana_spent_source_snapshots
+            source_snapshots
                 .iter()
                 .filter(|snapshot| {
                     crate::game::filter::matches_target_filter_on_lki_snapshot(
@@ -3014,7 +3083,18 @@ fn resolve_ref(
                 }),
             };
             cast_object
-                .and_then(|id| resolve_mana_spent_to_cast_metric(state, id, metric, &filter_ctx))
+                .and_then(|id| {
+                    // CR 603.4 + CR 400.7d: the resolver reads through the
+                    // latched trigger source when (and only when) it is the
+                    // cast object being asked about.
+                    resolve_mana_spent_to_cast_metric(
+                        state,
+                        id,
+                        metric,
+                        &filter_ctx,
+                        ctx.trigger_source.as_ref(),
+                    )
+                })
                 .unwrap_or(0)
         }
         // CR 903.4 + CR 903.4f: Number of distinct colors in the controller's
@@ -3275,7 +3355,9 @@ fn resolve_ref(
                 u32_to_i32_saturating(p.cards_drawn_this_turn)
             })
         }
-        // CR 403.3 + CR 608.2h: Battlefield entries this turn for the scoped player.
+        // CR 403.3 + CR 608.2h + CR 608.2i: Battlefield entries this turn for the
+        // scoped player. CR 608.2i is the look-back exception that makes a
+        // departed permanent still count.
         QuantityRef::BattlefieldEntriesThisTurn { player, ref filter } => {
             resolve_per_player_scalar(
                 state,
@@ -3295,6 +3377,7 @@ fn resolve_ref(
                                         record,
                                         filter,
                                         controller,
+                                        &state.all_creature_types,
                                         Some(filter_ctx.source_id),
                                     )
                             })
@@ -4389,13 +4472,26 @@ fn resolve_counters_on_scope(
         // (where the cleared field becomes `None`); the counter analogue must
         // be zone-keyed because an empty `HashMap<CounterType, u32>` is
         // `Some({})`, not `None`.
-        ObjectScope::Source | ObjectScope::EventSource => {
-            if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
+        // clause subject and no per-recipient static to bind it, so the pronoun
+        // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
+        // Enrage reflex. Grouped with `Source` so the unbound anaphor keeps
+        // exactly the referent it had before the scope carried provenance.
+        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::Anaphoric => {
+            if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric)
+                && ctx.trigger_source.is_some()
+            {
                 return source_lki_for_context(state, &ctx)
                     .map(|lki| counter_count_from_map(&lki.counters, counter_type))
                     .unwrap_or(0);
             }
-            let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+            // An unbound anaphor resolves through the `Source` lookup — the
+            // generic scope helpers have no referent for `Anaphoric` itself.
+            let lookup_scope = match scope {
+                ObjectScope::Anaphoric => ObjectScope::Source,
+                other => other,
+            };
+            let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
                 return 0;
             };
             let live = state.objects.get(&object_id);
@@ -4814,9 +4910,19 @@ where
         // cost referent (slot 3: `cost_paid_object`). This arm differs from
         // `CostPaidObject` only in slot priority — instruction-order (608.2c)
         // first, vs. cost referent (608.2k) first.
+        //
+        // CR 608.2h: When the snapshot exists but its embedded LKI lacks the
+        // requested characteristic (cache-gap after a redirected sacrifice),
+        // fall through to live-then-LKI by object id — same ladder as
+        // `AmassedArmy` — so Consuming Vapors-class life gain still reads the
+        // sacrificed creature's toughness (issue #5925).
         ObjectScope::Demonstrative => ability
             .and_then(|a| a.effect_context_object.as_ref())
-            .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .and_then(|snapshot| {
+                lki_extract(&snapshot.lki).or_else(|| {
+                    read_object_pt_by_id(state, snapshot.object_id, &obj_extract, &lki_extract)
+                })
+            })
             .or_else(|| {
                 // CR 400.7 + CR 608.2h: slot 2 trigger-event source uses exact
                 // ETB incarnation identity. Slots 1 and 3 are unchanged.

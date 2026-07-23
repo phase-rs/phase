@@ -281,30 +281,6 @@ jobs:
             || { echo "::error::brotli round-trip failed for scryfall-sets.json"; fail=1; }
           [ "$fail" = "0" ]
 
-      - name: Dispatch preview server artifact build
-        # A dispatch miss self-heals on the next deploy for this fingerprint;
-        # never cancel the content deploy over a transient GitHub API failure.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          FINGERPRINT: ${{ steps.engine-fingerprint.outputs.fingerprint }}
-          CARD_DATA_SHA256: ${{ steps.card-data-hash.outputs.card_data_sha256 }}
-          CARD_DATA_HASH16: ${{ steps.card-data-hash.outputs.hash }}
-          DRAFT_POOLS_SHA256: ${{ steps.card-data-hash.outputs.draft_pools_sha256 }}
-          DRAFT_POOLS_HASH16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
-        run: |
-          # Dispatch from main (workflow_dispatch refs must be a branch/tag,
-          # never a bare SHA — same pattern as nightly-release.yml); the exact
-          # source tree is pinned separately by the `commit` input below.
-          if ! gh workflow run preview-server.yml --ref main \
-            -f "fingerprint=$FINGERPRINT" \
-            -f "commit=$DEPLOY_SHA" \
-            -f "card_data_sha256=$CARD_DATA_SHA256" \
-            -f "card_data_hash16=$CARD_DATA_HASH16" \
-            -f "draft_pools_sha256=$DRAFT_POOLS_SHA256" \
-            -f "draft_pools_hash16=$DRAFT_POOLS_HASH16"; then
-            echo "::warning::Could not dispatch preview-server.yml for $FINGERPRINT; a later deploy will retry."
-          fi
-
   # ── WASM build (parallel with card-data) ────────────────────────────────────
   # Compiles the engine + draft WASM bundles. Depends on nothing the data
   # pipeline produces — card-data is fetched at runtime — so it runs fully in
@@ -323,6 +299,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # An env RUSTFLAGS (this action's default is "-D warnings") overrides
+          # ALL .cargo/config.toml rustflags, silently dropping the
+          # [target.wasm32-unknown-unknown] 16 MiB shadow-stack link-arg that
+          # build-wasm.sh's assert_wasm_stack guard requires. Keep config.toml
+          # authoritative.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         with:
@@ -360,10 +342,31 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── Frontend + Pages deploy (needs card-data hash + WASM) ───────────────────
+  # ── Signed preview server (must precede the fingerprinted frontend) ─────────
+  # The shell uses ENGINE_FINGERPRINT to fetch this exact binary. Keep the
+  # server publication in the same workflow graph so Pages can never publish a
+  # fingerprint whose signed server artifact is missing from the manifest.
+  preview-server:
+    name: Publish Preview Server
+    needs: [card-data]
+    if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
+    uses: ./.github/workflows/preview-server.yml
+    with:
+      fingerprint: ${{ needs.card-data.outputs.engine_fingerprint }}
+      commit: ${{ github.event.workflow_run.head_sha || github.sha }}
+      card_data_sha256: ${{ needs.card-data.outputs.card_data_sha256 }}
+      card_data_hash16: ${{ needs.card-data.outputs.card_data_hash16 }}
+      draft_pools_sha256: ${{ needs.card-data.outputs.draft_pools_sha256 }}
+      draft_pools_hash16: ${{ needs.card-data.outputs.draft_pools_hash16 }}
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
+
+  # ── Frontend + Pages deploy (needs server artifact + card-data + WASM) ──────
   build-pages:
     name: Build & Deploy Pages
-    needs: [card-data, build-wasm]
+    needs: [card-data, build-wasm, preview-server]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -394,6 +397,30 @@ jobs:
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
+      - name: Compute content-addressed engine WASM filename
+        id: engine-wasm-hash
+        run: |
+          ENGINE_WASM_SHA256=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | awk '{print $1}')
+          ENGINE_WASM_HASH16=${ENGINE_WASM_SHA256:0:16}
+          echo "sha256=$ENGINE_WASM_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$ENGINE_WASM_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=engine_wasm_bg-$ENGINE_WASM_HASH16.wasm" >> "$GITHUB_OUTPUT"
+
+      - name: Upload engine WASM to R2 (staging)
+        # Keep the binary raw: wasm-bindgen uses streaming instantiation, which
+        # requires R2 to serve the object as application/wasm. The immutable
+        # content-addressed URL is baked into the frontend build below.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
+        run: |
+          npx wrangler r2 object put "phase-rs-data/staging/wasm/$ENGINE_WASM_FILENAME" \
+            --file client/src/wasm/engine_wasm_bg.wasm \
+            --remote \
+            --content-type application/wasm \
+            --cache-control "public, max-age=31536000, immutable"
+
       - name: Use preview icons
         run: |
           cp client/public/preview-icons/favicon.ico client/public/favicon.ico
@@ -412,6 +439,7 @@ jobs:
           # card-data it was built against (filename from the card-data job).
           DATA_BASE_URL: "https://data.phase-rs.dev/staging"
           CARD_DATA_URL: "https://data.phase-rs.dev/staging/${{ needs.card-data.outputs.card_data_filename }}"
+          ENGINE_WASM_URL: "https://data.phase-rs.dev/staging/wasm/${{ steps.engine-wasm-hash.outputs.filename }}"
           ENGINE_FINGERPRINT: ${{ needs.card-data.outputs.engine_fingerprint }}
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Cloud-sync config. The anon/publishable key is client-safe (RLS is the
@@ -446,6 +474,19 @@ jobs:
           rm -f client/dist/card-data.json client/dist/card-data.json.br \
             client/dist/card-data-????????????????.json \
             client/dist/card-data-????????????????.json.br
+
+      - name: Guard Cloudflare Pages asset size limit
+        # Preview publishes to GitHub Pages today, but production Cloudflare
+        # Pages has a hard 25 MiB per-file ceiling. Keep the preview artifact
+        # within that ceiling so release cannot fail only at Pages deployment.
+        shell: bash
+        run: |
+          oversized=$(find client/dist -type f -size +25M -print -quit)
+          if [ -n "$oversized" ]; then
+            size=$(du -h "$oversized" | awk '{print $1}')
+            echo "::error::Cloudflare Pages 25 MiB file limit exceeded: $oversized ($size)"
+            exit 1
+          fi
 
       - name: SPA fallback for GitHub Pages
         run: cp client/dist/index.html client/dist/404.html
@@ -505,7 +546,11 @@ jobs:
         # No chmod here: upload-artifact strips the executable bit anyway;
         # push-server-image re-applies it (and the Dockerfile chmods in-image).
         run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          # -p scopes feature unification to phase-server's own graph: an
+          # unscoped workspace build unifies feed-scraper's native-tls reqwest
+          # features into phase-server, dragging openssl-sys into the musl
+          # cross-compile (which has no OpenSSL and fails).
+          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact

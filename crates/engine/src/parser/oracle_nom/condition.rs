@@ -676,11 +676,7 @@ fn parse_resolution_context_conditions(input: &str) -> OracleResult<'_, StaticCo
 /// effect, with no per-noun filter, so the noun threads nowhere.
 fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you put ").parse(input)?;
-    let (rest, comparator) = alt((
-        value(Comparator::LT, tag("fewer than ")),
-        value(Comparator::GT, tag("more than ")),
-    ))
-    .parse(rest)?;
+    let (rest, comparator) = parse_strict_comparator_prefix(rest)?;
     let (rest, n) = parse_number(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
     // CR 608.2c: "this way" scopes to objects moved by this resolution.
@@ -3335,6 +3331,25 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // "you have N or more [you-only quantity-suffix]"
     let (rest, n) = parse_number(rest)?;
 
+    // CR 401.3 + CR 603.4: A library's card count is public, and this
+    // intervening-if threshold is checked at trigger detection and resolution.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>(" or more cards in your library").parse(rest)
+    {
+        return Ok((
+            rest,
+            make_quantity_ge(
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+                n,
+            ),
+        ));
+    }
+
     if let Ok((after_or_more, _)) = tag::<_, _, OracleError<'_>>(" or more ").parse(rest) {
         // CR 603.4 + CR 404.2: Oversold Cemetery's intervening-if predicate
         // counts face-up creature cards in its controller's graveyard.
@@ -3713,6 +3728,21 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
             let rest = rest.trim_start();
             Ok((rest, n))
         },
+    ))
+    .parse(input)
+}
+
+/// CR 107.1: Magic numbers are integers; "fewer than N" / "more than N"
+/// are the strict-inequality prefix idioms (LT / GT), in contrast to the
+/// "N or more" (GE) / "N or fewer" (LE) suffix idioms. Single authority for
+/// the comparator-prefix family — shared by `parse_put_onto_battlefield_this_way`
+/// ("you put fewer than two lands onto the battlefield this way") and
+/// `parse_there_are_conditions` ("there are fewer than six creature cards in
+/// your graveyard").
+fn parse_strict_comparator_prefix(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(Comparator::LT, tag("fewer than ")),
+        value(Comparator::GT, tag("more than ")),
     ))
     .parse(input)
 }
@@ -5698,7 +5728,11 @@ fn parse_object_put_into_graveyard_from_battlefield_this_turn(
 /// `TargetFilter::Any` into a fresh `Typed` filter carrying the same property
 /// set; returns other variants (`Player`, `SpecificObject`, …) unchanged
 /// because owner-tagging is meaningless on non-typed shapes.
-fn add_owned_with_props(
+///
+/// Shared with `oracle_nom::quantity` so the where-X / CDA reading of "cards
+/// put into [possessive] graveyard from anywhere this turn" (Fraying Sanity)
+/// builds the same owned+nontoken population the Ravenous Trap condition uses.
+pub(crate) fn add_owned_with_props(
     filter: TargetFilter,
     controller: ControllerRef,
     extras: &[FilterProp],
@@ -7622,8 +7656,10 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         return parse_entered_this_turn_subject(rest, had_enter_suffix, 1, PlayerScope::Controller);
     }
 
-    // CR 403.3 + CR 608.2h: self-inclusive disjunct "~ or another/a <type>
-    // entered the battlefield under your control this turn" (Master's
+    // CR 403.3 + CR 608.2h + CR 608.2i: self-inclusive disjunct "~ or another/a
+    // <type> entered the battlefield under your control this turn". CR 608.2i is
+    // the look-back exception that makes a departed permanent still count.
+    // (Master's
     // Manufactory: "this artifact or another artifact entered ..."). The
     // source's own entry counts, so the disjunct reduces to a bare `<type>`
     // filter carrying NO `FilterProp::Another` — a `~`-only entry (the source
@@ -7672,8 +7708,9 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     parse_entered_this_turn_subject(input, entered_suffix, 1, PlayerScope::Controller)
 }
 
-/// CR 403.3 + CR 608.2h: Parse "N or more [type] <suffix>" into a GE threshold
-/// on the this-turn battlefield-entry count. Shared by the bare past-tense
+/// CR 403.3 + CR 608.2h + CR 608.2i: Parse "N or more [type] <suffix>" into a GE
+/// threshold on the this-turn battlefield-entry count. CR 608.2i is the look-back
+/// exception that makes a departed permanent still count. Shared by the bare past-tense
 /// surface ("N or more creatures entered the battlefield under your control
 /// this turn") and the "you had"-auxiliary present-tense surface ("you had N
 /// or more creatures enter the battlefield under your control this turn", e.g.
@@ -7737,8 +7774,10 @@ fn parse_entered_this_turn_subject<'a>(
     ))
 }
 
-/// CR 102.2 + CR 102.3 + CR 608.2h: "an opponent had [N or more] <type> enter the
-/// battlefield under their control this turn" — the opponent-scoped mirror of
+/// CR 102.2 + CR 102.3 + CR 608.2h + CR 608.2i: "an opponent had [N or more]
+/// <type> enter the battlefield under their control this turn" — CR 608.2i is the
+/// look-back exception that makes a departed permanent still count. The
+/// opponent-scoped mirror of
 /// `parse_entered_this_turn`'s "you had …" auxiliary surface (the Zendikar trap
 /// cycle: Baloth Cage Trap, Lavaball Trap, Permafrost Trap, Whiplash Trap).
 ///
@@ -7772,32 +7811,49 @@ fn parse_opponent_had_entered_this_turn(input: &str) -> OracleResult<'_, StaticC
     parse_entered_this_turn_subject(rest, suffix, 1, player)
 }
 
-/// Parse "there are N [or more] [things] ..." conditions.
+/// Parse "there are [fewer than/more than] N [or more] [things] ..." conditions.
 ///
 /// Covers threshold ("seven or more cards"), delirium ("four or more card types"),
 /// mana values ("five or more mana values"), and typed cards ("creature cards",
 /// "instant and/or sorcery cards", "land cards", "historic cards", etc.).
 ///
-/// The "or more" modifier is optional. When present, the comparator is GE.
-/// When absent — e.g. "there are five basic land types among lands you control"
-/// (A-Nael, Avizoa Aeronaut) — English grammar reads as "exactly N", so the
-/// comparator is EQ. CR 107.1a: Magic uses integer comparisons; exact-value
-/// checks are distinct from threshold checks.
+/// Two comparator axes exist and they are mutually exclusive:
+/// - a strict-inequality **prefix** before N — "fewer than" (LT) / "more than"
+///   (GT), e.g. "there are fewer than six creature cards in your graveyard"
+///   (Shadowborn Demon) and "there are fewer than eight cards in your graveyard"
+///   (The Warring Triad, where subtype/graveyard canonicalization composes with
+///   the prefix);
+/// - a threshold **suffix** after N — "or more" (GE), e.g. "there are seven or
+///   more lands on the battlefield" (Impending Disaster).
+///
+/// When neither is present — e.g. "there are five basic land types among lands
+/// you control" (A-Nael, Avizoa Aeronaut) — English grammar reads as "exactly
+/// N", so the comparator is EQ. A prefix and an "or more" suffix together
+/// ("fewer than N or more") is not English and is refused rather than guessed.
+///
+/// CR 107.1: Magic numbers are integers; exact-value checks are distinct
+/// from threshold checks. Consumers evaluate the resulting comparison under
+/// CR 603.4 (intervening-"if" triggered abilities) and CR 611.3a (static
+/// continuous "as long as" gates), both of which re-read the condition against
+/// live game state at check time.
 fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("there are ").parse(input)?;
+    let (rest, prefix) = opt(parse_strict_comparator_prefix).parse(rest)?;
     let (rest, n) = parse_number(rest)?;
     let (rest, _) = tag(" ").parse(rest)?;
     let (rest, or_more) = opt(tag("or more ")).parse(rest)?;
+    let comparator = match (prefix, or_more) {
+        // "fewer than N or more" is not English — refuse to guess.
+        (Some(_), Some(_)) => return Err(oracle_err(input)),
+        (Some(c), None) => c,
+        (None, Some(_)) => Comparator::GE,
+        (None, None) => Comparator::EQ,
+    };
     if let Ok((rest_after_type, type_text)) =
         take_until::<_, _, OracleError<'_>>(" cards total in ").parse(rest)
     {
         let (rest_after_zone, _) = tag(" cards total in ").parse(rest_after_type)?;
         let (rest_after_zone, (zone, scope)) = parse_scoped_zone_count_ref(rest_after_zone)?;
-        let comparator = if or_more.is_some() {
-            Comparator::GE
-        } else {
-            Comparator::EQ
-        };
         return Ok((
             rest_after_zone,
             make_quantity_comparison(
@@ -7813,11 +7869,6 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
         ));
     }
     let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
-    let comparator = if or_more.is_some() {
-        Comparator::GE
-    } else {
-        Comparator::EQ
-    };
     Ok((
         rest,
         make_quantity_comparison(
@@ -8928,6 +8979,42 @@ pub fn parse_you_sacrifice_this_way_clause(input: &str) -> OracleResult<'_, (Tar
         value((), tag::<_, _, OracleError<'_>>("at least one ")),
         value((), tag("one or more ")),
         value((), tag("any number of ")),
+        parse_article,
+    ))
+    .parse(rest)?;
+    let (filter, after_filter) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    let after_filter = after_filter.trim_start();
+    let (rest, _) = tag("this way").parse(after_filter)?;
+    Ok((rest, (filter, false)))
+}
+
+/// CR 608.2c + CR 701.16a: Parse "you exile[d] [quantifier] [type] this way"
+/// — the active-voice reflexive gate created by a preceding "exile
+/// [quantifier] [type]" instruction in the same ability. Covers BOTH tenses
+/// of the printed idiom: the past-tense "If you exiled a card this way, …"
+/// (Ardyn, the Usurper's actual current Oracle text, issue #5989) and the
+/// present-tense "When you exile a card this way, …" sibling shape.
+///
+/// CR 400.2: exile is a public zone, so the exiled card is published into
+/// `state.last_zone_changed_ids` by the parent `ChangeZone` effect just like
+/// the discard/sacrifice siblings below. Semantically identical to the active
+/// `parse_you_discard_this_way_clause` / `parse_you_sacrifice_this_way_clause`
+/// existential check, differing only in the active verb ("exile"/"exiled")
+/// and its exile-zone destination — unlike those two, exile's destination is
+/// not fixed to the graveyard, so no destination is implied here.
+pub fn parse_you_exile_this_way_clause(input: &str) -> OracleResult<'_, (TargetFilter, bool)> {
+    let (rest, _) = tag("you exile").parse(input)?;
+    let (rest, _) = opt(tag("d")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("at least one ")),
+        value((), tag("one or more ")),
         parse_article,
     ))
     .parse(rest)?;
@@ -11373,6 +11460,73 @@ mod tests {
     }
 
     #[test]
+    fn test_library_count_ge_200_exact_ast() {
+        let (rest, condition) =
+            parse_inner_condition("you have 200 or more cards in your library").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 200 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_library_count_ge_is_generic_over_threshold() {
+        let (rest, condition) =
+            parse_inner_condition("you have 37 or more cards in your library").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 37 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_library_count_ge_preserves_comma_remainder() {
+        let (rest, condition) =
+            parse_inner_condition("you have 200 or more cards in your library, you win the game")
+                .unwrap();
+        assert_eq!(rest, ", you win the game");
+        assert!(matches!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types,
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 200 },
+            } if card_types.is_empty()
+        ));
+    }
+
+    #[test]
     fn test_typed_graveyard_creature_count_ge() {
         let (rest, c) =
             parse_inner_condition("you have four or more creature cards in your graveyard")
@@ -12544,6 +12698,147 @@ mod tests {
             } => {}
             other => panic!("expected BasicLandTypeCount EQ 5, got {other:?}"),
         }
+    }
+
+    /// CR 107.1 + CR 603.4: "there are fewer than N ..." → strict-inequality
+    /// prefix (LT). Shadowborn Demon's intervening-if clause counts creature
+    /// cards in the controller's graveyard.
+    #[test]
+    fn test_there_are_fewer_than_creature_cards_in_graveyard_lt() {
+        let (rest, c) =
+            parse_inner_condition("there are fewer than six creature cards in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                card_types,
+                                filter: None,
+                                scope: CountScope::Controller,
+                            },
+                    },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 6 },
+            } => {
+                assert_eq!(card_types, vec![TypeFilter::Creature]);
+            }
+            other => panic!("expected ZoneCardCount Creature LT 6, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1 + CR 611.3a: "there are fewer than N cards ..." with the plain
+    /// graveyard-size canonicalization composing with the strict prefix. The
+    /// Warring Triad's "as long as there are fewer than eight cards in your
+    /// graveyard" gate.
+    #[test]
+    fn test_there_are_fewer_than_cards_in_graveyard_lt() {
+        let (rest, c) =
+            parse_inner_condition("there are fewer than eight cards in your graveyard").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::GraveyardSize {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::LT,
+                rhs: QuantityExpr::Fixed { value: 8 },
+            } => {}
+            other => panic!("expected GraveyardSize LT 8, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1: "there are more than N ..." → strict-inequality prefix (GT),
+    /// the mirror of the "fewer than" LT arm.
+    #[test]
+    fn test_there_are_more_than_creature_cards_in_graveyard_gt() {
+        let (rest, c) =
+            parse_inner_condition("there are more than two creature cards in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount { .. },
+                    },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {}
+            other => panic!("expected ZoneCardCount GT 2, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1: suffix regression — the "or more" (GE) suffix axis still parses
+    /// after the prefix axis was added. Impending Disaster shape.
+    #[test]
+    fn test_there_are_or_more_suffix_regression_ge() {
+        let (rest, c) =
+            parse_inner_condition("there are seven or more lands on the battlefield").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { .. },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 7 },
+            } => {}
+            other => panic!("expected ObjectCount GE 7, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1: bare-EQ regression — with neither prefix nor "or more" suffix
+    /// the comparator is EQ. A-Nael shape, re-asserted through the deduped
+    /// comparator computation.
+    #[test]
+    fn test_there_are_bare_exact_regression_eq() {
+        let (rest, c) =
+            parse_inner_condition("there are five basic land types among lands you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 5 },
+                ..
+            } => {}
+            other => panic!("expected EQ 5, got {other:?}"),
+        }
+    }
+
+    /// CR 107.1: hostile negatives. "fewer than N or more" mixes both
+    /// comparator axes and is not English — the combinator's reject arm refuses
+    /// to guess. "there are fewer cards ... than each opponent" has no strict
+    /// prefix ("fewer" without "than ") and is not a "there are N" count, so
+    /// this combinator must not claim it.
+    #[test]
+    fn test_there_are_prefix_hostile_negatives() {
+        assert!(
+            parse_there_are_conditions("there are fewer than six or more cards in your graveyard")
+                .is_err(),
+            "mixed prefix + or-more suffix must be rejected"
+        );
+        assert!(
+            parse_inner_condition("there are fewer than six or more cards in your graveyard")
+                .is_err(),
+            "mixed prefix + or-more suffix must not be claimed end-to-end"
+        );
+        assert!(
+            parse_there_are_conditions(
+                "there are fewer cards in your graveyard than each opponent"
+            )
+            .is_err(),
+            "'fewer' without 'than ' is not a strict prefix; combinator must not claim it"
+        );
     }
 
     #[test]

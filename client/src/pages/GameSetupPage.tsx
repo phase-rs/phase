@@ -33,6 +33,7 @@ import {
 import { useCardImage } from "../hooks/useCardImage";
 import { BRACKET_LABEL } from "../types/bracket";
 import { effectiveAiDifficulty, isDeckCedhLegal } from "../services/cedhLock";
+import { canAttemptNativeEngine } from "../services/nativeEngine";
 import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
@@ -197,7 +198,11 @@ export function GameSetupPage() {
       deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
-    saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
+    // The native server owns a fresh AI session and v1 deliberately has no
+    // resume contract. Preserve the existing pointer only for the WASM route.
+    if (!canAttemptNativeEngine(prefs.nativeEngineEnabled) || firstPlayer !== "random") {
+      saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
+    }
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     // CR 732.2a: carry the creation-time combo-detector opt-in into the game URL;

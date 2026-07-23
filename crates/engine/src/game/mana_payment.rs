@@ -147,7 +147,7 @@ pub fn refill_infinite_mana(state: &mut GameState) {
         for (color, count) in to_add {
             for _ in 0..count {
                 // CR 118.3a: stamp pip ids so debug-refilled mana is pinnable too.
-                state.add_mana_to_pool(
+                let _ = state.add_mana_to_pool(
                     player_id,
                     ManaUnit::new(color, ObjectId(0), false, Vec::new()),
                 );
@@ -263,6 +263,64 @@ pub enum PaymentError {
     InvalidCost,
 }
 
+/// Typed failure while applying an already-selected exact pool removal.
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub(crate) enum ExactManaRemovalError {
+    #[error("duplicate exact mana pip {0:?}")]
+    DuplicatePip(ManaPipId),
+    #[error("missing exact mana pip {0:?}")]
+    MissingPip(ManaPipId),
+    #[error("mismatched exact mana unit for pip {0:?}")]
+    MismatchedUnit(ManaPipId),
+}
+
+/// CR 118.3a: Apply a payment solver's exact selected units in consumption
+/// order. This is deliberately separate from selection: it never chooses a
+/// substitute unit when a recorded pip is absent or differs.
+pub(crate) fn remove_exact_mana_units(
+    pool: &mut ManaPool,
+    units: &[ManaUnit],
+) -> Result<(), ExactManaRemovalError> {
+    let mut seen = std::collections::HashSet::new();
+    for unit in units {
+        if unit.pip_id.0 != 0 && !seen.insert(unit.pip_id) {
+            return Err(ExactManaRemovalError::DuplicatePip(unit.pip_id));
+        }
+    }
+    // Validate against a scratch pool first, so a malformed replay command
+    // cannot partially debit a real pool. The final pass then performs the
+    // same exact semantic removals on the live pool; it never replaces it.
+    let mut validation_pool = pool.clone();
+    remove_exact_mana_units_once(&mut validation_pool, units)?;
+    remove_exact_mana_units_once(pool, units)
+}
+
+fn remove_exact_mana_units_once(
+    pool: &mut ManaPool,
+    units: &[ManaUnit],
+) -> Result<(), ExactManaRemovalError> {
+    for unit in units {
+        let position = pool
+            .mana
+            .iter()
+            .position(|candidate| candidate.pip_id == unit.pip_id && *candidate == *unit);
+        match position {
+            Some(position) => {
+                pool.mana.swap_remove(position);
+            }
+            None if pool
+                .mana
+                .iter()
+                .any(|candidate| candidate.pip_id == unit.pip_id) =>
+            {
+                return Err(ExactManaRemovalError::MismatchedUnit(unit.pip_id));
+            }
+            None => return Err(ExactManaRemovalError::MissingPip(unit.pip_id)),
+        }
+    }
+    Ok(())
+}
+
 /// Result of a Phyrexian mana payment that used life instead of mana (CR 107.4f).
 ///
 /// CR 107.4f: A Phyrexian mana symbol represents a cost that can be paid either
@@ -287,7 +345,7 @@ pub fn produce_mana(
     player_id: PlayerId,
     tapped_for_mana: bool,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     produce_mana_with_attributes(
         state,
         source_id,
@@ -298,7 +356,7 @@ pub fn produce_mana(
         &[],
         None,
         events,
-    );
+    )
 }
 
 /// Produce mana and add it to a player's mana pool, carrying spend restrictions,
@@ -320,7 +378,7 @@ pub fn produce_mana_with_attributes(
     grants: &[ManaSpellGrant],
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     let source_could_produce_two_or_more_colors =
         super::mana_sources::source_could_produce_two_or_more_colors(state, source_id, player_id);
     produce_mana_with_attributes_from_source_quality(
@@ -334,7 +392,7 @@ pub fn produce_mana_with_attributes(
         grants,
         expiry,
         events,
-    );
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -349,7 +407,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     grants: &[ManaSpellGrant],
     expiry: Option<ManaExpiry>,
     events: &mut Vec<GameEvent>,
-) {
+) -> Vec<ManaUnit> {
     use crate::game::replacement::{self, ReplacementResult};
     use crate::types::proposed_event::ProposedEvent;
 
@@ -362,7 +420,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
             ..
         }) => (resolved, count),
         // CR 614.1: A fully-prevented mana production produces no mana.
-        ReplacementResult::Prevented => return,
+        ReplacementResult::Prevented => return Vec::new(),
         // CR 614.5: Mana-type replacements do not require a player choice; any
         // other outcome (including unexpected pipeline results) falls back to
         // the original type so mana production is never silently dropped.
@@ -372,6 +430,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     // CR 107.4h + CR 106.3: mana produced by a snow source is snow mana (payable for {S}).
     let source_is_snow = super::mana_sources::source_is_snow(state, source_id);
 
+    let mut produced = Vec::with_capacity(final_count as usize);
     for _ in 0..final_count {
         let unit = ManaUnit {
             color: final_mana_type,
@@ -385,7 +444,9 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
         };
 
         // CR 118.3a: stamp a stable pip id on pool entry so the unit can be pinned.
-        state.add_mana_to_pool(player_id, unit);
+        if let Some(unit) = state.add_mana_to_pool(player_id, unit) {
+            produced.push(unit);
+        }
 
         events.push(GameEvent::ManaAdded {
             player_id,
@@ -397,6 +458,7 @@ pub(crate) fn produce_mana_with_attributes_from_source_quality(
     if final_count > 0 && has_unspent_mana_continuous_effects(state) {
         state.layers_dirty.mark_full();
     }
+    produced
 }
 
 /// Check if the mana pool can pay the given cost (CR 202.1a).
@@ -1147,8 +1209,38 @@ pub fn pay_cost_with_demand_and_choices(
     // which makes the spend byte-identical to the pre-feature ordering.
     pins: &[ManaPipId],
 ) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
+    let payment = select_mana_payment(
+        pool,
+        cost,
+        hand_demand,
+        spell,
+        any_color,
+        phyrexian_choices,
+        life_colors,
+        pins,
+    )?;
+    remove_exact_mana_units(pool, &payment.0).map_err(|_| PaymentError::InsufficientMana)?;
+    Ok(payment)
+}
+
+/// Resolve which exact units pay a mana cost without mutating the real pool.
+///
+/// The scratch solver remains the authority for all payment choices. Live
+/// `GameState` callers pass its result to the resolved-command applier, while
+/// detached preview pools may use [`pay_cost_with_demand_and_choices`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_mana_payment(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    hand_demand: Option<&ColorDemand>,
+    spell: Option<&PaymentContext<'_>>,
+    any_color: bool,
+    phyrexian_choices: Option<&[ShardChoice]>,
+    life_colors: crate::types::mana::LifePaymentColors,
+    pins: &[ManaPipId],
+) -> Result<(Vec<ManaUnit>, Vec<LifePayment>), PaymentError> {
     // CR 601.2h: Partial payments are not allowed. Spend from scratch pools so a
-    // failed attempt never leaks a partial payment into the caller's mana pool.
+    // failed attempt never leaks a partial payment into the caller's real pool.
     let mut scratch = pool.clone();
     match pay_cost_with_demand_and_choices_once(
         &mut scratch,
@@ -1160,10 +1252,7 @@ pub fn pay_cost_with_demand_and_choices(
         life_colors,
         pins,
     ) {
-        Ok(payment) => {
-            *pool = scratch;
-            Ok(payment)
-        }
+        Ok(payment) => Ok(payment),
         Err(PaymentError::InsufficientMana) if hand_demand.is_some() => {
             let mut fallback = pool.clone();
             match pay_cost_with_demand_and_choices_once(
@@ -1176,10 +1265,7 @@ pub fn pay_cost_with_demand_and_choices(
                 life_colors,
                 pins,
             ) {
-                Ok(payment) => {
-                    *pool = fallback;
-                    Ok(payment)
-                }
+                Ok(payment) => Ok(payment),
                 Err(error) => Err(error),
             }
         }
@@ -2715,6 +2801,22 @@ mod tests {
             grants: vec![ManaSpellGrant::CantBeCountered],
             expiry: Some(ManaExpiry::EndOfTurn),
         }
+    }
+
+    #[test]
+    fn exact_removal_is_atomic_when_a_recorded_pip_is_missing() {
+        let present = rich_unit(ManaType::Blue, 1, 1);
+        let missing = rich_unit(ManaType::Green, 2, 2);
+        let mut pool = ManaPool {
+            mana: vec![present.clone()],
+        };
+        let before = fingerprint(&pool.mana);
+
+        assert_eq!(
+            remove_exact_mana_units(&mut pool, &[present, missing]),
+            Err(ExactManaRemovalError::MissingPip(ManaPipId(2)))
+        );
+        assert_eq!(fingerprint(&pool.mana), before);
     }
 
     fn make_two_or_more_color_source_unit(color: ManaType) -> ManaUnit {

@@ -214,6 +214,34 @@ fn glory_of_battle_trigger_gates_on_creature_recipient() {
     }
 }
 
+#[test]
+fn damage_done_recipient_gates_on_blocking_creature() {
+    // CR 509.1g + CR 120.3 (issue #5951): "Whenever equipped creature deals
+    // damage to a blocking creature, ..." (Kusari-Gama) must set a typed
+    // `valid_target` carrying `FilterProp::Blocking` so the trigger fires ONLY
+    // when the damaged object is a blocker — not when the equipped creature
+    // deals combat damage to a player. A bare combat-status adjective on the
+    // recipient is the class fixed here, so exercise the building block
+    // ("a blocking creature") rather than the single card.
+    let def = parse_trigger_line(
+        "Whenever equipped creature deals damage to a blocking creature, \
+         this Equipment deals that much damage to each other creature defending player controls.",
+        "Kusari-Gama",
+    );
+    assert_eq!(def.mode, TriggerMode::DamageDone);
+    match &def.valid_target {
+        Some(TargetFilter::Typed(tf)) => {
+            assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+            assert!(
+                tf.properties.contains(&FilterProp::Blocking),
+                "recipient must be gated on the blocking combat status, got {:?}",
+                tf.properties,
+            );
+        }
+        other => panic!("expected a blocking-creature valid_target, got {other:?}"),
+    }
+}
+
 fn blocking_source_beyond_first_expr() -> QuantityExpr {
     let count_minus_one = QuantityExpr::Offset {
         inner: Box::new(QuantityExpr::Ref {
@@ -1797,6 +1825,55 @@ fn parse_wave_of_rats_dies_dealt_combat_damage_intervening_if() {
             }
         ),
         "execute must be ChangeZone->Battlefield (return it), got {:?}",
+        execute.effect,
+    );
+    assert!(
+        !matches!(*execute.effect, Effect::Unimplemented { .. }),
+        "execute must not be Unimplemented",
+    );
+}
+
+/// CR 603.4 + CR 107.1: Shadowborn Demon — the hoisted intervening-"if"
+/// gate ("if there are fewer than six creature cards in your graveyard")
+/// must lift to a strict-inequality `QuantityComparison` on the controller's
+/// graveyard creature count (LT 6), the same seam Impending Disaster's
+/// "or more" suffix uses in the opposite comparator direction. Pre-fix the
+/// "fewer than" prefix was unrecognized and the condition silently swallowed,
+/// so the demon sacrificed a creature on every upkeep regardless of graveyard
+/// size.
+#[test]
+fn parse_shadowborn_demon_upkeep_fewer_than_creatures_intervening_if() {
+    let def = parse_trigger_line(
+        "At the beginning of your upkeep, if there are fewer than six creature cards in your \
+         graveyard, sacrifice a creature.",
+        "Shadowborn Demon",
+    );
+
+    // Revert-guard: pre-fix `def.condition` is None (swallowed).
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![TypeFilter::Creature],
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::LT,
+            rhs: QuantityExpr::Fixed { value: 6 },
+        }),
+        "upkeep intervening-if must lift to ZoneCardCount(Graveyard, Creature, Controller) LT 6, got {:?}",
+        def.condition,
+    );
+
+    // Positive reach-guard: the sacrifice body still parses (not swallowed into
+    // the condition, not Unimplemented, no residual "if …" text).
+    let execute = def.execute.as_deref().expect("execute must be Some");
+    assert!(
+        matches!(*execute.effect, Effect::Sacrifice { .. }),
+        "execute must be Sacrifice, got {:?}",
         execute.effect,
     );
     assert!(
@@ -14767,6 +14844,69 @@ fn phase_trigger_exactly_thirteen_cards_in_hand_win_the_game() {
     }
 }
 
+/// CR 401.3 + CR 603.4 + CR 104.2b: Battle of Wits' full Oracle text must
+/// preserve its controller-library threshold as an intervening-if on the upkeep
+/// trigger, then execute the ordinary controller-scoped win effect.
+#[test]
+fn battle_of_wits_full_oracle_parses_library_threshold_win_trigger() {
+    const ORACLE: &str = "At the beginning of your upkeep, if you have 200 or more cards in your library, you win the game.";
+
+    let parsed = parse_oracle_text(ORACLE, "Battle of Wits", &[], &[], &[]);
+    assert!(
+        parsed.abilities.is_empty(),
+        "trigger text must not leak into spell abilities"
+    );
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "expected exactly one upkeep trigger"
+    );
+
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        trigger.constraint,
+        Some(TriggerConstraint::OnlyDuringYourTurn)
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Library,
+                    card_types: Vec::new(),
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 200 },
+        })
+    );
+
+    let execute = trigger
+        .execute
+        .as_deref()
+        .expect("win trigger must have an effect");
+    assert!(matches!(execute.effect.as_ref(), Effect::WinTheGame { .. }));
+    assert!(
+        execute.condition.is_none(),
+        "the leading intervening-if must exist only on the trigger"
+    );
+
+    fn assert_no_unimplemented(ability: &AbilityDefinition) {
+        assert!(
+            !matches!(ability.effect.as_ref(), Effect::Unimplemented { .. }),
+            "Battle of Wits must not contain Unimplemented effects: {ability:?}"
+        );
+        if let Some(sub_ability) = ability.sub_ability.as_deref() {
+            assert_no_unimplemented(sub_ability);
+        }
+    }
+    assert_no_unimplemented(execute);
+}
+
 /// CR 603.2b + CR 603.4 + CR 102.1: Ghirapur Orrery — the intervening-if
 /// "if that player has no cards in hand" must hoist onto the trigger
 /// definition as a `QuantityComparison` against `HandSize { ScopedPlayer }`,
@@ -14889,6 +15029,66 @@ fn phase_trigger_enchanted_players_first_upkeep() {
             ..
         }) if followed_by.is_empty()
     ));
+}
+
+/// CR 701.17a + CR 404.1 + CR 303.4b + CR 111.7 (issue #5947): Fraying Sanity —
+/// "At the beginning of each end step, enchanted player mills X cards, where X
+/// is the number of cards put into their graveyard from anywhere this turn."
+/// Must lower to `Effect::Mill` (not `Unimplemented { where_x_binding }`) with:
+///   - `target: AttachedTo` (the enchanted player)
+///   - `count: ZoneChangeCountThisTurn { from: None, to: Graveyard,
+///      filter: Owned{EnchantedPlayer} + NonToken }`
+#[test]
+fn fraying_sanity_mills_zone_change_count_this_turn() {
+    use crate::types::ability::{
+        ControllerRef, FilterProp, QuantityExpr, QuantityRef, TypedFilter,
+    };
+    use crate::types::zones::Zone;
+
+    let def = parse_trigger_line(
+        "At the beginning of each end step, enchanted player mills X cards, where X is \
+         the number of cards put into their graveyard from anywhere this turn.",
+        "Fraying Sanity",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    let execute = def.execute.as_ref().expect("execute");
+    // Duration must NOT steal the quantity's "this turn" suffix.
+    assert!(
+        execute.duration.is_none(),
+        "where-X's 'this turn' must not become UntilEndOfTurn duration, got {:?}",
+        execute.duration
+    );
+    match execute.effect.as_ref() {
+        Effect::Mill {
+            count,
+            target,
+            destination,
+        } => {
+            assert_eq!(
+                *target,
+                TargetFilter::AttachedTo,
+                "mill target must be the enchanted player"
+            );
+            assert_eq!(*destination, Zone::Graveyard);
+            assert_eq!(
+                count,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: None,
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::Owned {
+                                controller: ControllerRef::EnchantedPlayer,
+                            },
+                            FilterProp::NonToken,
+                        ])),
+                    },
+                }
+            );
+        }
+        other => panic!("expected Mill with ZoneChangeCountThisTurn, got {other:?}"),
+    }
 }
 
 #[test]
@@ -20056,6 +20256,197 @@ fn extract_had_no_typed_counters_negates() {
     );
 }
 
+/// CR 603.4 + CR 603.10a + CR 400.7 + issue #5937: the UN-negated past-tense
+/// keyword-possession form "if it had <keyword>" binds the dying event
+/// object's zone-change look-back filter at `KeywordKind` granularity
+/// (synthetic — the printed class card, Wilhelt, uses the negated form,
+/// locked end-to-end by tests/integration/wilhelt_decayed_intervening_if_5937).
+#[test]
+fn extract_had_keyword_binds_dying_event_object_filter() {
+    use crate::types::keywords::KeywordKind;
+    use crate::types::zones::Zone;
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it had flying, draw a card.",
+        "Test Flier Mourner",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::HasKeywordKind {
+                    value: KeywordKind::Flying,
+                },
+            ])),
+        }),
+        "un-negated \"had <keyword>\" must bind the event-object look-back filter"
+    );
+}
+
+/// Priority lock: "if it had a +1/+1 counter on it" on a full dies trigger
+/// still routes to `HadCounters` — the counter extractor runs BEFORE the new
+/// keyword-possession arm, and the keyword arm itself rejects the fragment
+/// ("a +1/+1..." is not a keyword name). Guards the seam between the two
+/// past-tense "if it had" families.
+#[test]
+fn extract_had_counter_still_beats_keyword_possession_arm() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it had a +1/+1 counter on it, draw a card.",
+        "Test Counter Mourner",
+    );
+    assert_eq!(
+        def.condition,
+        Some(TriggerCondition::HadCounters {
+            counter_type: Some(crate::types::counter::CounterType::Plus1Plus1),
+        }),
+        "counter form must stay HadCounters, not the keyword-possession filter"
+    );
+}
+
+/// Coverage honesty: a non-keyword object of "didn't have" ("fun" is not a
+/// keyword) must NOT bind a condition — and the Condition_If swallow warning
+/// still fires, keeping the dropped clause visible rather than silently
+/// un-gating the trigger. The `KeywordKind::Unknown` guard in the new arm is
+/// what rejects it (madness-family keywords fold to Unknown too).
+#[test]
+fn extract_didnt_have_non_keyword_stays_swallowed() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it didn't have fun, draw a card.",
+        "Test Joyless Mourner",
+    );
+    assert_eq!(
+        def.condition, None,
+        "a non-keyword possession object must not bind a condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the rejected clause).
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control dies, if it didn't have fun, draw a card.",
+        "Test Joyless Mourner",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the unparsed clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// Coverage honesty (CR 702.14a): landwalk forms are real KEYWORDS-table
+/// entries the keyword-name combinator accepts, but `Keyword::Landwalk(_)`
+/// folds to the single `KeywordKind::Landwalk`, so a kind-level gate would
+/// over-match across land types ("if it had islandwalk" also matching
+/// forestwalk — each [type]walk is a distinct ability). The arm's guard must
+/// reject walk forms so no condition binds — and the Condition_If swallow
+/// warning still fires, keeping the dropped clause visible until exact-match
+/// support is built for a real card.
+#[test]
+fn extract_didnt_have_landwalk_stays_swallowed() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control dies, if it didn't have islandwalk, draw a card.",
+        "Test Landlocked Mourner",
+    );
+    assert_eq!(
+        def.condition, None,
+        "a landwalk possession object must not bind a kind-level condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the rejected clause).
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control dies, if it didn't have islandwalk, draw a card.",
+        "Test Landlocked Mourner",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the rejected landwalk clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// Soundness (CR 603.4 + issue #5937 review): the keyword-possession look-back
+/// pins origin Battlefield → destination Graveyard, so its negated form FAILS
+/// OPEN on any non-dies event (inner filter false → `Not` → true →
+/// unconditional trigger). The arm must therefore decline unless the enclosing
+/// trigger head is a PROVEN dies shape: an ETB head carrying the same clause
+/// binds NO condition — and the Condition_If swallow warning still fires,
+/// keeping the unsupported form honestly swallowed until the grammar derives
+/// zones from the trigger's actual event shape.
+#[test]
+fn extract_didnt_have_keyword_on_etb_trigger_stays_swallowed() {
+    let def = parse_trigger_line(
+        "When this creature enters, if it didn't have decayed, draw a card.",
+        "Test Fresh Arrival",
+    );
+    assert_eq!(
+        def.condition, None,
+        "keyword possession on an ETB head must not bind a dies look-back condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the dropped clause).
+    let parsed = parse_oracle_text(
+        "When this creature enters, if it didn't have decayed, draw a card.",
+        "Test Fresh Arrival",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the shape-rejected clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
+/// Soundness (CR 603.4 + issue #5937 review): sibling non-dies shape — a
+/// leaves-the-battlefield head is a zone change whose destination is NOT
+/// provably the graveyard (exile/hand/library departures fire it too), so the
+/// Battlefield→Graveyard look-back mis-models the event and its negation fails
+/// open on every non-graveyard departure. The arm must decline and the clause
+/// stays honestly swallowed.
+#[test]
+fn extract_didnt_have_keyword_on_ltb_trigger_stays_swallowed() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control leaves the battlefield, if it didn't have decayed, draw a card.",
+        "Test Departure Watcher",
+    );
+    assert_eq!(
+        def.condition, None,
+        "keyword possession on an LTB head must not bind a dies look-back condition"
+    );
+    // The swallow warning must still fire at the card-parse level (coverage
+    // stays honest for the dropped clause).
+    let parsed = parse_oracle_text(
+        "Whenever a creature you control leaves the battlefield, if it didn't have decayed, draw a card.",
+        "Test Departure Watcher",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        parsed.parse_warnings.iter().any(|w| matches!(
+            w,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Condition_If swallow must still fire for the shape-rejected clause: {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 702.188a + CR 603.4 (issue: Spiders-Man, Heroic Horde): the ETB
 /// intervening-if "if they were cast using web-slinging" must gate the
 /// life-gain + token effects. Before the fix `extract_if_condition` had no
@@ -23725,7 +24116,7 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
     // (1) P0 taps its own Island for mana. Simulate the base {U} the land
     // produced (CR 106.12a) and fire the delayed trigger; P0 must gain the
     // ADDITIONAL {U} on top (net +2 blue in the pool: base + bonus).
-    runner
+    let _ = runner
         .state_mut()
         .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
     check_delayed_triggers(
@@ -23747,7 +24138,7 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
     // (2) P1 (a DIFFERENT player, not the caster) taps THEIR Island. The bonus
     // must go to P1's pool — proving the recipient is TriggeringPlayer, not the
     // caster P0.
-    runner
+    let _ = runner
         .state_mut()
         .add_mana_to_pool(P1, ManaUnit::new(ManaType::Blue, isl1, false, vec![]));
     check_delayed_triggers(
@@ -23790,7 +24181,7 @@ fn high_tide_runtime_bonus_mana_routes_to_triggering_player_and_expires_at_eot()
             .mana_pool
             .clear();
     }
-    runner
+    let _ = runner
         .state_mut()
         .add_mana_to_pool(P0, ManaUnit::new(ManaType::Blue, isl0, false, vec![]));
     check_delayed_triggers(

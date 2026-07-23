@@ -63,7 +63,7 @@ pub use reconnect::ReconnectManager;
 pub use seat_mutation_wire_guard::guard_seat_mutation;
 pub use session::{
     acting_player, acting_players, generate_game_code, generate_player_token, is_acting,
-    BroadcastSnapshot, SessionManager,
+    BroadcastSnapshot, RevisionedActionResult, SessionManager,
 };
 pub use spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,

@@ -24,6 +24,7 @@ import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
@@ -98,6 +99,7 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChooserModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
@@ -305,6 +307,7 @@ export function GamePage() {
               : rawMode === "ai"
                 ? "ai"
                 : "local";
+  const isOnlineMode = mode === "online" || mode === "spectate";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -408,6 +411,7 @@ export function GamePage() {
         if (hasConcededRef.current) break;
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -490,6 +494,11 @@ export function GamePage() {
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
+        // Native engine sockets emit an error before close; the provider disposes
+        // that terminal adapter, so no reconnectFailed event follows.
+        if (!isOnlineMode) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "deckRejected":
         navigate("/multiplayer", {
@@ -501,7 +510,7 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode, t]);
+  }, [gameId, navigate, joinCode, isOnlineMode, t]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -610,6 +619,7 @@ export function GamePage() {
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -695,7 +705,7 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
+      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
       }
@@ -711,7 +721,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
-        isOnlineMode={mode === "online" || mode === "spectate"}
+        isOnlineMode={isOnlineMode}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -811,6 +821,7 @@ function GamePageContent({
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
+  useGameViewportLock();
   const focusedGridTemplateRows = useResolvedGridRows();
   const splitGridTemplateRows = useResolvedSplitGridRows();
   const gameState = useGameStore((s) => s.gameState);
@@ -833,13 +844,22 @@ function GamePageContent({
   // identity-ref latch makes the consume idempotent under React StrictMode's
   // double-invoke and after the clear (the re-run sees `null`).
   const startingContest = useGameStore((s) => s.startingContest);
+  const openingTurnOrder = useGameStore((s) => s.gameState?.derived?.turn_order);
+  const openingViewerTurnNumber = useGameStore(
+    (s) => s.gameState?.derived?.viewer_turn_number,
+  );
   const consumedContestRef = useRef<typeof startingContest>(null);
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
     consumedContestRef.current = startingContest;
-    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    flashStartingPlayerContest(
+      startingContest.events,
+      startingContest.startingPlayer,
+      openingTurnOrder,
+      openingViewerTurnNumber,
+    );
     useGameStore.getState().clearStartingContest();
-  }, [startingContest]);
+  }, [openingTurnOrder, openingViewerTurnNumber, startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
   // mulligan UI appears (the roll determines who's on the play, which precedes
   // drawing opening hands). True from `initGame` setting the carrier through the
@@ -1320,20 +1340,23 @@ function GamePageContent({
           gridTemplateColumns: "1fr",
         }}
       >
-        {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
+        {/* Row 1: Opponent hand + zone piles. Equal flexible side tracks keep
+            the focused hand centered on the viewport while the piles remain
+            right-aligned; split layouts render their hands inside seat panes. */}
         <div
-          className={`relative z-20 min-w-0 flex w-full ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
+          className={`relative z-20 min-w-0 w-full ${renderFocusedOpponentTopRow ? "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]" : "flex"} ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
           data-flex-zone="opp-row"
         >
           {renderFocusedOpponentTopRow && (
             <>
-              <div className="min-w-0 flex-1">
+              <div aria-hidden />
+              <div className="min-w-0">
                 <OpponentHand showCards={showAiHand} />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
                 flexZone="opponentPiles"
-                className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+                className="flex items-start justify-self-end gap-1.5 px-1 py-1"
                 style={playerZoneRailStyle}
               >
                 {activeOpponentId != null ? (
@@ -1724,6 +1747,7 @@ function GamePageContent({
         <MeldChoiceModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
+        <ZoneOpponentChooserModal />
         <PileOpponentModal />
         <AnnouncingOpponentModal />
         <TributeModal />

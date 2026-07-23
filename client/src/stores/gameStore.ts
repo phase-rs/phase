@@ -24,10 +24,11 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
     stuckDiagnostic: result.stuckDiagnostic ?? null,
@@ -53,6 +54,7 @@ export {
 
 export type GameMode =
   | "ai"
+  | "native-ai"
   | "online"
   | "local"
   | "p2p-host"
@@ -65,7 +67,8 @@ export type GameMode =
  * must not build a stateHistory or expose an Undo affordance. */
 export function isMultiplayerMode(mode: GameMode | null): boolean {
   return (
-    mode === "online"
+    mode === "native-ai"
+    || mode === "online"
     || mode === "p2p-host"
     || mode === "p2p-join"
     || mode === "draft-match"
@@ -76,6 +79,10 @@ export function isMultiplayerMode(mode: GameMode | null): boolean {
 interface GameStoreState {
   gameId: string | null;
   gameMode: GameMode | null;
+  /** Transport selected for the current solo-AI game. F.5 telemetry reads this
+   * alongside `nativeEngineFallbackReason`; neither field drives game rules. */
+  engineMode: "native" | "wasm" | null;
+  nativeEngineFallbackReason: string | null;
   gameState: GameState | null;
   events: GameEvent[];
   eventHistory: GameEvent[];
@@ -89,6 +96,8 @@ interface GameStoreState {
   waitingFor: WaitingFor | null;
   legalActions: GameAction[];
   autoPassRecommended: boolean;
+  /** Exact engine-authored actions dispatched by the tap-all-mana shortcut. */
+  manaPaymentShortcutActions: GameAction[];
   /** Effective mana costs for castable spells, keyed by object_id string. */
   spellCosts: Record<string, ManaCost>;
   /**
@@ -175,6 +184,7 @@ type CommitExtraState = Partial<Omit<GameStoreState,
   | "waitingFor"
   | "legalActions"
   | "autoPassRecommended"
+  | "manaPaymentShortcutActions"
   | "spellCosts"
   | "legalActionsByObject"
   | "stuckDiagnostic"
@@ -252,6 +262,7 @@ interface GameStoreActions {
     },
   ) => boolean;
   setGameMode: (mode: GameMode) => void;
+  setEngineMode: (mode: "native" | "wasm" | null, fallbackReason?: string | null) => void;
   setLobbyProgress: (progress: { joined: number; total: number } | null) => void;
   setResolutionProgress: (progress: { resolved: number; total: number } | null) => void;
   setIsResolvingAll: (isResolvingAll: boolean) => void;
@@ -273,6 +284,8 @@ export type GameStore = GameStoreState & GameStoreActions;
 const initialState: GameStoreState = {
   gameId: null,
   gameMode: null,
+  engineMode: null,
+  nativeEngineFallbackReason: null,
   gameState: null,
   events: [],
   eventHistory: [],
@@ -283,6 +296,7 @@ const initialState: GameStoreState = {
   waitingFor: null,
   legalActions: [],
   autoPassRecommended: false,
+  manaPaymentShortcutActions: [],
   spellCosts: {},
   legalActionsByObject: {},
   stuckDiagnostic: null,
@@ -529,6 +543,10 @@ export const useGameStore = create<GameStore>()(
 
     setGameMode: (mode) => {
       set({ gameMode: mode });
+    },
+
+    setEngineMode: (mode, fallbackReason = null) => {
+      set({ engineMode: mode, nativeEngineFallbackReason: fallbackReason });
     },
 
     setLobbyProgress: (progress) => {

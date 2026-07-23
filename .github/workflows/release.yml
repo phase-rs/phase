@@ -87,6 +87,11 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # Keep .cargo/config.toml's [target.wasm32-unknown-unknown] 16 MiB
+          # shadow-stack rustflags authoritative: an env RUSTFLAGS (this
+          # action's default "-D warnings") would override them and trip
+          # build-wasm.sh's assert_wasm_stack guard.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         with:
@@ -250,6 +255,30 @@ jobs:
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
 
+      - name: Compute content-addressed engine WASM filename
+        id: engine-wasm-hash
+        run: |
+          ENGINE_WASM_SHA256=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | awk '{print $1}')
+          ENGINE_WASM_HASH16=${ENGINE_WASM_SHA256:0:16}
+          echo "sha256=$ENGINE_WASM_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$ENGINE_WASM_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=engine_wasm_bg-$ENGINE_WASM_HASH16.wasm" >> "$GITHUB_OUTPUT"
+
+      - name: Upload engine WASM to R2
+        # The engine WASM is intentionally uncompressed: wasm-bindgen's
+        # cross-origin streaming initialization needs application/wasm, and the
+        # immutable content-addressed URL below is its cache key.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
+        run: |
+          npx wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
+            --file client/src/wasm/engine_wasm_bg.wasm \
+            --remote \
+            --content-type application/wasm \
+            --cache-control "public, max-age=31536000, immutable"
+
       - name: Build frontend
         env:
           # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
@@ -257,6 +286,7 @@ jobs:
           # WASM bundle to its content-addressed card-data forever.
           DATA_BASE_URL: "https://data.phase-rs.dev"
           CARD_DATA_URL: "https://data.phase-rs.dev/${{ steps.card-data-hash.outputs.filename }}"
+          ENGINE_WASM_URL: "https://data.phase-rs.dev/wasm/${{ steps.engine-wasm-hash.outputs.filename }}"
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Tagged production release: surfaces the "try the preview build" CTA
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
@@ -319,6 +349,7 @@ jobs:
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
           DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
         run: |
           BASE="https://data.phase-rs.dev"
           fail=0
@@ -340,6 +371,7 @@ jobs:
           }
           check "$CARD_DATA_FILENAME"
           check "$DRAFT_POOLS_FILENAME"
+          check "wasm/$ENGINE_WASM_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
@@ -402,6 +434,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-shared-key: rust-server-linux
+          # CI owns the warning-as-error gate. Release profiles compile out
+          # debug-only assertions, which can legitimately leave their inputs
+          # unused in an otherwise CI-clean tagged source tree.
+          rustflags: ""
 
       - name: Install musl tools and target
         run: |
@@ -413,7 +449,10 @@ jobs:
         # No chmod here: upload-artifact strips the executable bit anyway; both
         # consumers (image build, slim-asset packaging) re-apply it.
         run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          # -p scopes feature unification to phase-server's own graph — an
+          # unscoped workspace build unifies feed-scraper's native-tls reqwest
+          # features in, dragging openssl-sys into the musl cross-compile.
+          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
@@ -496,6 +535,16 @@ jobs:
       - name: Inject Cloudflare Pages _headers
         run: cp client/deploy/cloudflare-pages/_headers dist/_headers
 
+      - name: Guard Cloudflare Pages asset size limit
+        shell: bash
+        run: |
+          oversized=$(find dist -type f -size +25M -print -quit)
+          if [ -n "$oversized" ]; then
+            size=$(du -h "$oversized" | awk '{print $1}')
+            echo "::error::Cloudflare Pages 25 MiB file limit exceeded: $oversized ($size)"
+            exit 1
+          fi
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
         with:
@@ -534,6 +583,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # Same as the wasm job: broker-wasm needs the config.toml
+          # [target.wasm32-unknown-unknown] shadow-stack rustflags, which an
+          # env RUSTFLAGS would override.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         if: steps.lobby-worker.outputs.exists == 'true'
@@ -567,7 +620,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.94.0"
+          wranglerVersion: "4.113.0"
           workingDirectory: lobby-worker
           command: deploy
 
@@ -609,12 +662,16 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-shared-key: rust-server-${{ matrix.os }}
+          # Keep this artifact build consistent with the primary Linux build:
+          # CI, rather than a release-only cfg shape, enforces warnings.
+          rustflags: ""
 
       - name: Build phase-server (macOS/Windows)
         # Linux musl is compiled once in build-server-binary and reused below;
         # only the non-musl targets compile here.
         if: matrix.triple != 'x86_64-unknown-linux-musl'
-        run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+        # -p scopes feature unification (see the Linux leg's note).
+        run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Download prebuilt linux binary
         # Reuse the single musl build from build-server-binary, placed at the
@@ -861,26 +918,47 @@ jobs:
             | { grep -v "^- chore: update coverage" || true; } \
             >> changelog.md
 
+      - name: Build release asset list
+        id: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHELL_UPDATER_BRIDGE_AVAILABLE: ${{ steps.shell-updater-bridge.outputs.available }}
+        run: |
+          set -euo pipefail
+
+          # Immutable releases cannot accept a late asset upload. Include the
+          # optional bridge in the initial create/publish request, but skip it
+          # for recovery runs targeting a release that is already published.
+          release_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)
+          include_bridge=false
+          if [ "$SHELL_UPDATER_BRIDGE_AVAILABLE" = true ] && [ "$release_draft" != false ]; then
+            include_bridge=true
+          elif [ "$SHELL_UPDATER_BRIDGE_AVAILABLE" = true ]; then
+            echo "Release $RELEASE_TAG is already published; skipping optional shell updater migration bridge."
+          fi
+
+          {
+            echo "files<<EOF"
+            cat <<'EOF'
+          artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
+          artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+          artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
+          artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
+          artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
+          artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
+          release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
+          release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
+          EOF
+            if [ "$include_bridge" = true ]; then
+              echo "artifacts/update.json"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
           fail_on_unmatched_files: true
-          files: |
-            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
-            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
-            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
-            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
-            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
-            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
-            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
-            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
-
-      - name: Attach shell updater migration bridge
-        if: steps.shell-updater-bridge.outputs.available == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          fail_on_unmatched_files: true
-          files: artifacts/update.json
+          files: ${{ steps.release-assets.outputs.files }}

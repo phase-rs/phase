@@ -2328,22 +2328,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
     }
 
-    // CR 701.20a + CR 608.2c: A bare private "look at the top N cards" instruction
+    // CR 701.20e + CR 608.2c: A bare private "look at the top N cards" instruction
     // is only a look; it does not move a chosen card to hand. Continuations that
     // actually choose cards from among them patch destination/keep_count before this
     // pass. Anything still in the raw private-Dig shape is a pure peek: skip
     // DigChoice and only populate last_revealed_ids for downstream conditions.
     for def in &mut defs {
-        if let Effect::Dig {
-            reveal: false,
-            keep_count: None,
-            keep_count_expr: None,
-            filter: TargetFilter::Any,
-            destination: None,
-            rest_destination: None,
-            ..
-        } = &*def.effect
-        {
+        if super::effect_is_bare_private_peek(&def.effect) {
             if let Effect::Dig { keep_count, .. } = &mut *def.effect {
                 *keep_count = Some(0);
             }

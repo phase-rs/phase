@@ -3100,6 +3100,22 @@ pub enum ResolutionCastSuccessAction {
         zones: Vec<Zone>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exile_instead_of_graveyard: bool,
+        /// CR 406.6: Source object of the granting ability, threaded so
+        /// `ExiledBySource`-style filters (Plargg and Nassari) can rebuild the
+        /// re-offer candidate set against the right exile links. Zero sentinel
+        /// for saved states predating the field (graveyard/hand windows never
+        /// read it).
+        #[serde(default = "super::game_state::zero_object_id")]
+        source: super::identifiers::ObjectId,
+        /// CR 607.2a + CR 608.2g: THIS resolution's "exiled this way" batch,
+        /// threaded from the window that offered the cast so the re-offer's
+        /// candidate set stays confined to the current resolution's exile
+        /// batch (Plargg and Nassari) rather than the source's complete live
+        /// linked-exile ledger. Empty means "no batch restriction" (Invoke
+        /// Calamity's graveyard/hand window; saved states predating the
+        /// field).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        member_pool: Vec<super::identifiers::ObjectId>,
     },
 }
 
@@ -5785,9 +5801,11 @@ pub enum QuantityRef {
     /// "you've drawn two or more cards this turn" and "an opponent has drawn
     /// four or more cards this turn" reuse the existing per-player aggregate axis.
     CardsDrawnThisTurn { player: PlayerScope },
-    /// CR 403.3 + CR 608.2h: Count of battlefield entries this turn by the scoped
-    /// player matching `filter`, using `battlefield_entries_this_turn` snapshots
-    /// (lands that entered and later left still count). Smuggler's Share class:
+    /// CR 403.3 + CR 608.2h + CR 608.2i: Count of battlefield entries this turn by
+    /// the scoped player matching `filter`, using `battlefield_entries_this_turn`
+    /// snapshots. CR 608.2i is the look-back exception that makes a departed
+    /// permanent still count (lands that entered and later left still count).
+    /// Smuggler's Share class:
     /// "for each opponent who had two or more lands enter the battlefield under
     /// their control this turn."
     BattlefieldEntriesThisTurn {
@@ -12542,6 +12560,16 @@ pub enum Effect {
         /// object selection is the parent `ChooseFromZone`'s responsibility).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         object_source: Option<TargetFilter>,
+        /// CR 110.2a: Controller-on-entry override — the player instructed to
+        /// cloak puts the card onto the battlefield, so it enters under that
+        /// player's control (Etrata, Deadly Fugitive: the cloaker controls the
+        /// face-down card while the library owner keeps owning it). `None` =
+        /// the owner default, reserved for future third-person subjects ("its
+        /// controller cloaks ... their library"). Mirrors `Manifest.enters_under`
+        /// and resolves through the single `resolve_enters_under_player`
+        /// authority.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enters_under: Option<ControllerRef>,
     },
     /// CR 406.3 + CR 701.20a: Turn a face-down card face up via a resolving effect (not the
     /// morph special action). Used by the Imprint "flip" cards — Clone Shell,
@@ -16173,23 +16201,35 @@ pub enum CastingRestriction {
     CantSpendMana,
 }
 
-/// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
-/// "This ability costs {N} less to activate for each [condition]" (scaling), or
-/// "This ability costs {N} less to activate if [condition]" (conditional flat:
-/// `count = Fixed(1)` gated by `condition`).
+/// CR 602.2b + CR 601.2f: Self-referential activation/cast cost modification.
+/// "This ability costs {N} less/more to activate for each [condition]" (scaling), or
+/// "This ability costs {N} less/more to activate if [condition]" (conditional flat:
+/// `count = Fixed(1)` gated by `condition`). Direction is the same
+/// [`CostModifyMode`] axis used by external `ReduceAbilityCost` statics — not a
+/// sibling `CostIncrease` type (parameterize, don't proliferate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostReduction {
-    /// Generic mana reduced per counted object (the {N} value).
+    /// CR 601.2f: `Reduce` subtracts generic mana (floor {0}); `Raise` adds it
+    /// (Loreseeker's Stone class). `Minimum` is not emitted for self-referential
+    /// ability text — only Reduce/Raise. Serde-defaults to Reduce so pre-field
+    /// card-data remains a reduction.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::statics::is_cost_modify_mode_reduce"
+    )]
+    pub mode: crate::types::statics::CostModifyMode,
+    /// Generic mana adjusted per counted object (the {N} value).
     pub amount_per: u32,
     /// How many objects to count (e.g., legendary creatures you control).
     /// For the conditional flat form this is `Fixed(1)`.
     pub count: QuantityExpr,
-    /// CR 602.2b + CR 601.2f: Optional gate for the conditional flat form — the reduction
-    /// applies only when this condition holds at cost-determination time
-    /// (Razorlash Transmogrant, Esquire of the King, …). `None` = unconditional
-    /// (the "for each" scaling form and all pre-existing reductions). Evaluated
-    /// at runtime via the shared `restrictions::evaluate_condition`, the same
-    /// path `ActivationRestriction::RequiresCondition` uses.
+    /// CR 602.2b + CR 601.2f: Optional gate for the conditional flat form — the
+    /// modification applies only when this condition holds at cost-determination
+    /// time (Razorlash Transmogrant, Esquire of the King, …). `None` =
+    /// unconditional (the "for each" scaling form and all pre-existing
+    /// reductions). Evaluated at runtime via the shared
+    /// `restrictions::evaluate_condition`, the same path
+    /// `ActivationRestriction::RequiresCondition` uses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<ParsedCondition>,
 }

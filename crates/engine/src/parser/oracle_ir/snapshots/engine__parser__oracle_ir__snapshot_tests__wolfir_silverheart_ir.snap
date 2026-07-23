@@ -59,29 +59,33 @@ expression: "&ir"
         "fragment": "As long as ~ is paired with another creature, each of those creatures gets +4/+4."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "SourceOrPaired"
-          },
-          "modifications": [
-            {
-              "type": "AddPower",
-              "value": 4
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SourceOrPaired"
             },
-            {
-              "type": "AddToughness",
-              "value": 4
-            }
-          ],
-          "condition": {
-            "type": "SourceIsPaired"
+            "modifications": [
+              {
+                "type": "AddPower",
+                "value": 4
+              },
+              {
+                "type": "AddToughness",
+                "value": 4
+              }
+            ],
+            "condition": {
+              "type": "SourceIsPaired"
+            },
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "As long as ~ is paired with another creature, each of those creatures gets +4/+4."
           },
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "As long as ~ is paired with another creature, each of those creatures gets +4/+4."
+          "source_text": "As long as ~ is paired with another creature, each of those creatures gets +4/+4.",
+          "body_ir": null
         }
       }
     }

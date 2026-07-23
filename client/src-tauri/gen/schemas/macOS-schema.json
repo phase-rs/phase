@@ -393,6 +393,12 @@
           "markdownDescription": "Allows first-party remote content to confirm legacy storage import."
         },
         {
+          "description": "Allows first-party remote content to open a shell-pinned native-engine bridge.",
+          "type": "string",
+          "const": "allow-connect-native-engine",
+          "markdownDescription": "Allows first-party remote content to open a shell-pinned native-engine bridge."
+        },
+        {
           "description": "Allows first-party remote content to prepare a signed native engine for a typed channel key.",
           "type": "string",
           "const": "allow-ensure-native-engine",
@@ -403,6 +409,18 @@
           "type": "string",
           "const": "allow-mark-remote-load-ok",
           "markdownDescription": "Allows first-party remote content to mark a successful remote load."
+        },
+        {
+          "description": "Allows first-party remote content to close its native-engine bridge.",
+          "type": "string",
+          "const": "allow-native-engine-bridge-close",
+          "markdownDescription": "Allows first-party remote content to close its native-engine bridge."
+        },
+        {
+          "description": "Allows first-party remote content to send JSON text through its native-engine bridge.",
+          "type": "string",
+          "const": "allow-native-engine-bridge-send",
+          "markdownDescription": "Allows first-party remote content to send JSON text through its native-engine bridge."
         },
         {
           "description": "Allows first-party remote content to persist its selected channel.",

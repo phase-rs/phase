@@ -2384,20 +2384,28 @@ fn settle_sacrifice_for_cost_events(
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
     }
-    state.consumed_before_priority_trigger_events.extend(
-        events[current_start..current_end]
-            .iter()
-            .enumerate()
-            .map(|(offset, event)| {
-                let index = current_start + offset;
-                crate::game::triggers::ConsumedTriggerEventOccurrence {
-                    event: event.clone(),
-                    occurrence: events[..index]
-                        .iter()
-                        .filter(|prior| *prior == event)
-                        .count(),
-                }
-            }),
+    let occurrences = events[current_start..current_end]
+        .iter()
+        .enumerate()
+        .map(|(offset, event)| {
+            let index = current_start + offset;
+            crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: events[..index]
+                    .iter()
+                    .filter(|prior| *prior == event)
+                    .count(),
+            }
+        })
+        .collect();
+    crate::game::triggers::resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect(
+        "sacrifice-cost settlement consumed-before-priority trigger journal cause must be live",
     );
 }
 
@@ -6368,11 +6376,20 @@ fn pay_additional_cost_with_source(
                 super::quantity::resolve_quantity(state, &amount, player, pending.object_id).max(0),
             )
             .unwrap_or(0);
-            let player_state = &mut state.players[player.0 as usize];
-            if player_state.energy < amount {
+            let energy = state.players[player.0 as usize].energy;
+            if energy < amount {
                 return Err(EngineError::ActionNotAllowed("Not enough energy".into()));
             }
-            player_state.energy -= amount;
+            if amount > 0 {
+                state
+                    .resolve_and_apply_player_edit(
+                        player,
+                        crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                            delta: -(amount as i32),
+                        },
+                    )
+                    .expect("preflighted cast energy payment must apply");
+            }
             events.push(GameEvent::EnergyChanged {
                 player,
                 delta: -(amount as i32),
@@ -8576,7 +8593,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
             ..
         } => {
-            state.graveyard_cast_permissions_used.insert(source);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCast,
+            )
+            .expect("graveyard cast permission must have an unused ledger slot");
         }
         CastingVariant::GraveyardPermission {
             source,
@@ -8585,9 +8607,14 @@ fn finalize_cast_with_phyrexian_choices_inner(
             ..
         } => {
             // CR 110.4: Consume the chosen permanent-type slot for this source.
-            state
-                .graveyard_cast_permissions_used_per_type
-                .insert((source, slot));
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCastPermanentType {
+                    permanent_type: slot,
+                },
+            )
+            .expect("graveyard permanent-type slot must be unused");
         }
         CastingVariant::GraveyardPermission {
             frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
@@ -8604,7 +8631,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurn,
         } => {
-            state.hand_cast_free_permissions_used.insert(source);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::HandCastFree,
+            )
+            .expect("hand cast permission must have an unused ledger slot");
         }
         // CR 601.2a + CR 113.6b: Maralen-class exile-cast permission. Stamp
         // the per-source slot when the static is `OncePerTurn`; `Unlimited`
@@ -8617,7 +8649,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
             source,
             frequency: crate::types::statics::CastFrequency::OncePerTurnPerPermanentType,
         } => {
-            state.exile_cast_permissions_used.insert(source);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExileCast,
+            )
+            .expect("exile cast permission must have an unused ledger slot");
         }
         _ => {}
     }
@@ -8630,12 +8667,22 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // every sibling permission. As Foretold's grant rides `CastingVariant::Normal`,
     // so the `match casting_variant` above never covers it — this is a separate block.
     if let Some(src) = alt_cost_grant_source {
-        state.alt_cost_grant_permissions_used.insert(src);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            src,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::AlternativeCostGrant,
+        )
+        .expect("alternative-cost grant must have an unused ledger slot");
     }
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
         exile_play_permission_source
     {
-        state.exile_play_permissions_used.insert(source);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExilePlay,
+        )
+        .expect("exile play permission must have an unused ledger slot");
     }
     // CR 601.2a + CR 401.5: Consume the per-turn slot ONLY when the *selected*
     // authorizing top-of-library permission is `OncePerTurn` (Assemble the
@@ -8646,7 +8693,12 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if let Some((source, crate::types::statics::CastFrequency::OncePerTurn)) =
         top_of_library_permission_source
     {
-        state.top_of_library_cast_permissions_used.insert(source);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            source,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::TopOfLibraryCast,
+        )
+        .expect("top-of-library cast permission must have an unused ledger slot");
     }
     // CR 601.2a + CR 603.7 + CR 611.2a: A single-use exile-cast grant is spent
     // on this cast. Record the group and strip the now-void `PlayFromExile` grant from
@@ -8976,6 +9028,8 @@ fn handle_resolution_cast_success(
             filter,
             zones,
             exile_instead_of_graveyard,
+            source,
+            member_pool,
         } => {
             if exile_instead_of_graveyard {
                 // CR 614.1a: Invoke Calamity's free-cast rider redirects to exile.
@@ -8995,9 +9049,14 @@ fn handle_resolution_cast_success(
             let mut candidates = crate::game::effects::free_cast_from_zones::eligible_candidates(
                 state,
                 controller,
+                source,
                 &filter,
                 &zones,
                 budget_left,
+                // CR 607.2a: the re-offer stays confined to THIS resolution's
+                // "exiled this way" batch (Plargg and Nassari) — see the
+                // window's `member_pool` docs; empty means no restriction.
+                &member_pool,
             );
             // CR 608.2g: Finalize runs before the chosen card is removed from
             // its origin zone; it cannot be offered again while already cast.
@@ -9014,6 +9073,8 @@ fn handle_resolution_cast_success(
                     filter,
                     zones,
                     exile_instead_of_graveyard,
+                    source,
+                    member_pool,
                 },
             }))
         }
@@ -9519,11 +9580,24 @@ fn collect_sorted_auto_tap_source_options(
         .filter(|oid| !excluded_sources.contains(oid))
         .filter_map(|&oid| {
             let obj = state.objects.get(&oid)?;
+            if obj.controller != player {
+                return None;
+            }
+            // CR 106.12 + CR 302.6: The tapped prefilter only holds for `{T}`
+            // sources. A permanent whose payable mana ability is an unambiguous
+            // self-sacrifice (Gold's "Sacrifice this token: Add one mana of any
+            // color.") can still pay while tapped, so it must reach
+            // `auto_tap_mana_options`, which re-applies the per-ability `{T}`
+            // gate. Every other tapped source is dropped here as before.
+            if obj.tapped && !mana_sources::object_has_tapless_self_sacrifice_mana_ability(obj) {
+                return None;
+            }
             // CR 701.26a + CR 508.1f: a "can't become tapped" mana source (e.g. a
-            // goaded mana dork) can't be auto-tapped to pay for a spell.
-            if obj.controller != player
-                || obj.tapped
-                || crate::game::restrictions::object_cant_tap(state, oid)
+            // goaded mana dork) can't be auto-tapped for its `{T}` ability. A
+            // self-sacrifice source needs no tap, so this restriction does not
+            // apply to it; the per-ability gate keeps `{T}` costs off-limits.
+            if crate::game::restrictions::object_cant_tap(state, oid)
+                && !mana_sources::object_has_tapless_self_sacrifice_mana_ability(obj)
             {
                 return None;
             }
@@ -9818,7 +9892,7 @@ fn auto_tap_mana_sources_inner(
                 .objects
                 .get(&option.object_id)
                 .and_then(|obj| obj.abilities.get(ability_index))
-                .is_some_and(|ability| mana_sub_cost_of(&ability.cost).is_none())
+                .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
         });
         if option.atomic_combination.is_none()
             && option.mana_type == ManaType::Colorless
@@ -9971,6 +10045,22 @@ fn auto_tap_mana_sources_inner(
     }
 
     // Phase 3: activate each selected mana source.
+    //
+    // CR 601.2g permits mana-ability activation; CR 605.3b resolves it
+    // immediately; CR 605.3c prevents reactivation. Those rules do not prescribe
+    // this ordering. Engine scheduling policy: selected sources without a mana
+    // sub-cost resolve first, stably, so their mana is available to pay a later cost.
+    // This preserves the plan and `used_sources` reservation; it changes only order.
+    to_tap.sort_by_key(|option| {
+        option.ability_index.is_some_and(|ability_index| {
+            state
+                .objects
+                .get(&option.object_id)
+                .and_then(|object| object.abilities.get(ability_index))
+                .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_some())
+        })
+    });
+
     // Sources with an explicit ability delegate to resolve_mana_ability (the single
     // authority for cost payment — handles tap, sacrifice, and future cost types).
     // The basic-land-subtype fallback (ability_index: None) uses inline tap + produce.
@@ -10016,7 +10106,7 @@ fn auto_tap_mana_sources_inner(
                 // before resolving, so without this the sub-cost could grab a source
                 // the outer cost still needs. Unioning `used_sources` supersedes the
                 // prior `excluded.insert(option.object_id)`.
-                let sub_cost = mana_sub_cost_of(&ability_def.cost);
+                let sub_cost = mana_abilities::mana_sub_cost_of(&ability_def.cost);
                 let excluded_buf;
                 // CR 107.4b + CR 118.10: The outer cost's colored shards are
                 // reserved; computed once (only when a mana sub-cost is present, so
@@ -10093,32 +10183,39 @@ fn auto_tap_mana_sources_inner(
             }
         } else {
             // Basic-land-subtype fallback — no explicit ability, just tap + produce.
-            if let Some(obj) = state.objects.get_mut(&option.object_id) {
-                if !obj.tapped {
-                    obj.tapped = true;
+            let node = state.begin_activated_mana_journal_node(option.object_id);
+            state.with_rules_execution_node(node, |state| {
+                if crate::game::object_state::resolve_and_apply_object_edit(
+                    state,
+                    option.object_id,
+                    crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                    true,
+                )
+                .expect("auto-tap source must remain a live exact object")
+                {
                     events.push(GameEvent::PermanentTapped {
                         object_id: option.object_id,
                         caused_by: None,
                     });
                 }
-            }
-            mana_payment::produce_mana(
-                state,
-                option.object_id,
-                option.mana_type,
-                player,
-                true,
-                events,
-            );
-            // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
-            // always includes `{T}` in its cost, so this auto-tap fallback
-            // taps the land for mana. Emit one `TappedForMana` per resolution
-            // so `TapsForMana` triggers fire exactly once.
-            events.push(GameEvent::TappedForMana {
-                player_id: player,
-                source_id: option.object_id,
-                produced: vec![option.mana_type],
-                tap_state: ManaTapState::FromTap,
+                mana_payment::produce_mana(
+                    state,
+                    option.object_id,
+                    option.mana_type,
+                    player,
+                    true,
+                    events,
+                );
+                // CR 106.12 + CR 106.12a: a basic land's intrinsic mana ability
+                // always includes `{T}` in its cost, so this auto-tap fallback
+                // taps the land for mana. Emit one `TappedForMana` per resolution
+                // so `TapsForMana` triggers fire exactly once.
+                events.push(GameEvent::TappedForMana {
+                    player_id: player,
+                    source_id: option.object_id,
+                    produced: vec![option.mana_type],
+                    tap_state: ManaTapState::FromTap,
+                });
             });
         }
     }
@@ -10185,17 +10282,6 @@ pub(crate) fn production_override_for_option(
         | crate::types::ability::ManaProduction::ChoiceAmongCombinations { .. }
         | crate::types::ability::ManaProduction::DistinctColorsAmongPermanents { .. }
         | crate::types::ability::ManaProduction::TriggerEventManaType => None,
-    }
-}
-
-fn mana_sub_cost_of(cost: &Option<AbilityCost>) -> Option<&ManaCost> {
-    match cost {
-        Some(AbilityCost::Mana { cost }) => Some(cost),
-        Some(AbilityCost::Composite { costs }) => costs.iter().find_map(|sub| match sub {
-            AbilityCost::Mana { cost } => Some(cost),
-            _ => None,
-        }),
-        _ => None,
     }
 }
 
@@ -10843,12 +10929,36 @@ pub(super) fn apply_committed_assist(
             "Assist mana payment is awaiting a replacement choice".to_string(),
         ));
     }
-    if let Some(p) = state.players.iter_mut().find(|p| p.id == helper) {
-        mana_payment::pay_from_pool(&mut p.mana_pool, &probe).map_err(|e| {
+    if state.players.iter().any(|p| p.id == helper) {
+        state.restamp_pool_pip_ids(helper);
+        let (spent, _) = mana_payment::select_mana_payment(
+            &state
+                .players
+                .iter()
+                .find(|p| p.id == helper)
+                .expect("assisting player exists")
+                .mana_pool,
+            &probe,
+            None,
+            None,
+            false,
+            None,
+            crate::types::mana::LifePaymentColors::EMPTY,
+            &[],
+        )
+        .map_err(|e| {
             EngineError::ActionNotAllowed(format!(
                 "Assisting player could not pay {generic} generic mana at finalization: {e:?}"
             ))
         })?;
+        let recipient = state.mana_payment_recipient(pending.object_id, helper);
+        state
+            .resolve_and_apply_mana_spend(helper, recipient, &spent)
+            .map_err(|_| {
+                EngineError::ActionNotAllowed(
+                    "Assisting player's mana pool changed before payment applied".to_string(),
+                )
+            })?;
         if mana_payment::has_unspent_mana_continuous_effects(state) {
             state.layers_dirty.mark_full();
         }
@@ -13194,7 +13304,7 @@ mod tests {
             &mut state,
             CardId(100),
             caster,
-            "Spawn-Funded Spell".to_string(),
+            "Ironworks-Funded Spell".to_string(),
             Zone::Hand,
         );
         state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Instant];
@@ -13234,18 +13344,21 @@ mod tests {
                 .cost(AbilityCost::Tap),
             );
         }
+        // CR 605.3a + CR 701.21: an ambiguous sacrifice cost (choosing among
+        // multiple artifacts, not just the source itself) still requires a
+        // manual player choice, so it must not be auto-tapped — unlike a
+        // self-sacrifice mana source (Gold, Treasure), which auto-tap can
+        // now select on its own (issue #6157).
         let spawn = create_object(
             &mut state,
             CardId(102),
             caster,
-            "Eldrazi Spawn".to_string(),
+            "Krark-Clan Ironworks".to_string(),
             Zone::Battlefield,
         );
         {
             let obj = state.objects.get_mut(&spawn).unwrap();
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.card_types.subtypes.push("Eldrazi".to_string());
-            obj.card_types.subtypes.push("Spawn".to_string());
+            obj.card_types.core_types.push(CoreType::Artifact);
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
@@ -13260,7 +13373,7 @@ mod tests {
                     },
                 )
                 .cost(AbilityCost::Sacrifice(SacrificeCost::count(
-                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                     1,
                 ))),
             );

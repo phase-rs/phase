@@ -13,6 +13,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use crate::types::zones::Zone;
 
 use super::effects;
@@ -670,6 +673,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::TopOrBottomChoice { .. }
             | WaitingFor::PopulateChoice { .. }
             | WaitingFor::ClashChooseOpponent { .. }
+            | WaitingFor::ChooseFromZoneOpponentChooser { .. }
             | WaitingFor::ClashCardPlacement { .. }
             | WaitingFor::VoteChoice { .. }
             | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -1962,6 +1966,8 @@ pub(super) fn handle_resolution_choice(
                         filter,
                         zones,
                         exile_instead_of_graveyard,
+                        source,
+                        member_pool,
                     },
             },
             GameAction::FreeCastWindowChoice { selection },
@@ -2015,6 +2021,8 @@ pub(super) fn handle_resolution_choice(
                         filter,
                         zones,
                         exile_instead_of_graveyard,
+                        source,
+                        member_pool,
                     },
             };
             let result = casting::initiate_cast_during_resolution(
@@ -2393,14 +2401,28 @@ pub(super) fn handle_resolution_choice(
                 }
                 PayableResource::Energy => {
                     // CR 107.14: Remove N energy counters from the player.
-                    if let Some(p) = state.players.iter_mut().find(|p| p.id == player) {
-                        if p.energy < amount {
+                    if let Some(energy) = state
+                        .players
+                        .iter()
+                        .find(|candidate| candidate.id == player)
+                        .map(|candidate| candidate.energy)
+                    {
+                        if energy < amount {
                             return Err(EngineError::InvalidAction(format!(
                                 "Player {:?} has {} energy, cannot pay {}",
-                                player, p.energy, amount
+                                player, energy, amount
                             )));
                         }
-                        p.energy -= amount;
+                        if amount > 0 {
+                            state
+                                .resolve_and_apply_player_edit(
+                                    player,
+                                    crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                                        delta: -(amount as i32),
+                                    },
+                                )
+                                .expect("preflighted resolution energy payment must apply");
+                        }
                         events.push(GameEvent::EnergyChanged {
                             player,
                             delta: -(amount as i32),
@@ -2557,6 +2579,44 @@ pub(super) fn handle_resolution_choice(
                 set_priority(state, player);
                 super::engine::resume_pending_continuation_if_priority(state, events)
                     .expect("a settled clash choice must resume its continuation");
+            }
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player,
+                candidates,
+                ability,
+            },
+            GameAction::ChooseZoneOpponentChooser { opponent },
+        ) => {
+            // CR 608.2d: The picked opponent must be one of the offered
+            // candidates (a live opponent of the choose's controller).
+            if !candidates.contains(&opponent) {
+                return Err(EngineError::InvalidAction(format!(
+                    "Chosen zone-choice opponent {opponent:?} is not a legal opponent"
+                )));
+            }
+            // CR 608.2d: Present the parked zone selection to the picked
+            // opponent. This re-enters the standard `ChooseFromZoneChoice`
+            // pause (or completes with no choice if the pool emptied), so the
+            // already-parked continuation frame is untouched — exactly as if
+            // the opponent had been the chooser from the start.
+            effects::choose_from_zone::resolve_with_choosing_player(
+                state, &ability, opponent, events,
+            )
+            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // With an empty pool the choose completed without a new pause —
+            // hand priority back to the controller (mirroring the settled-clash
+            // arm above) so the parked continuation can actually drain: the
+            // drain helper is gated on `WaitingFor::Priority`, and without
+            // `set_priority` the stale opponent-chooser pause would wedge the
+            // resolution (CR 608.2d — the choice is skipped, not the rest of
+            // the ability).
+            if !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }) {
+                set_priority(state, player);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled opponent-chooser pick must resume its continuation");
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -3253,9 +3313,14 @@ pub(super) fn handle_resolution_choice(
             // replacement's decline ability runs via `pending_continuation`, which the
             // effect's resolver populated with the decline branch before the prompt.
             if optional && chosen.is_empty() {
-                for &card_id in &cards {
-                    state.revealed_cards.remove(&card_id);
-                }
+                state
+                    .resolve_and_apply_information(
+                        &cards,
+                        ResolvedInformationAudience::Controller(player),
+                        ResolvedInformationLifetime::UntilActionBoundary,
+                        ResolvedInformationEdit::Hide,
+                    )
+                    .expect("reveal-choice cleanup must reference live card occurrences");
                 state.private_look_ids.clear();
                 state.private_look_player = None;
                 set_priority(state, player);
@@ -3296,9 +3361,14 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            for &card_id in &cards {
-                state.revealed_cards.remove(&card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &cards,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-choice cleanup must reference live card occurrences");
             state.private_look_ids.clear();
             state.private_look_player = None;
 
@@ -3799,6 +3869,27 @@ pub(super) fn handle_resolution_choice(
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 let cont = &mut frame.pending;
                 cont.chain.targets = chosen.iter().map(|&id| TargetRef::Object(id)).collect();
+                // CR 607.2a + CR 608.2g: A `FreeCastFromZones` continuation
+                // over "the other cards exiled this way" (Plargg and Nassari)
+                // must confine its offer to THIS resolution's exile batch. The
+                // choose's offered pool (`cards`) IS that typed, concrete
+                // batch — it was derived from the chain's tracked set the
+                // exile clause published within this resolution — so forward
+                // the FULL pool (not just `chosen`) as the window head's
+                // object targets; the resolver reads them as its member pool
+                // and intersects the exile-zone scan with it BEFORE the
+                // filter's `Not(InTrackedSet)` chosen-card exclusion. Without
+                // this, `ExiledBySource` alone reads the source's complete
+                // live linked-exile ledger and a linked nonland card left in
+                // exile by a PREVIOUS resolution would be wrongly offered. The
+                // window never reads `ParentTarget`, so overriding the generic
+                // `targets = chosen` forward is safe for this head.
+                if matches!(
+                    cont.chain.effect,
+                    crate::types::ability::Effect::FreeCastFromZones { .. }
+                ) {
+                    cont.chain.targets = cards.iter().map(|&id| TargetRef::Object(id)).collect();
+                }
                 // CR 700.2 + CR 608.2c: The "unchosen" partition is forwarded
                 // to the sub-ability ONLY for the zone-partition pattern
                 // (`ChooseFromZone`: chosen cards go one place, the rest go
@@ -4280,6 +4371,7 @@ pub(super) fn handle_resolution_choice(
                 library_position,
                 is_cost_payment,
                 enters_modified_if,
+                duration,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -4456,6 +4548,26 @@ pub(super) fn handle_resolution_choice(
                     // No decline fallback: the taken continuation is discarded —
                     // the subless decline consumes it without granting a
                     // permission (below).
+                    if zone == Zone::Library {
+                        // CR 401.4: declining the one-shot self-library peek
+                        // cast bottoms every looked-at card in a random order.
+                        // `library_position: None` is guaranteed by the sole
+                        // `open_private_zone_cast_selection` producer.
+                        let looked_at = effects::cast_from_zone::looked_at_controller_library_cards(
+                            state,
+                            ability.controller,
+                        );
+                        if matches!(
+                            effects::cascade::shuffle_to_bottom(
+                                state, &looked_at, source_id, None, events,
+                            ),
+                            crate::game::zone_pipeline::BatchMoveResult::NeedsChoice
+                        ) {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                    }
                 }
                 // CR 609.1 / CR 601.2a: Declining an optional Electrodominance-
                 // style hand cast consumes the stashed CastFromZone continuation
@@ -4541,6 +4653,13 @@ pub(super) fn handle_resolution_choice(
                             if state.active_ability_continuation().is_none() {
                                 state.finish_active_paused_post_replacement_dispatch();
                             }
+                            // CR 608.2c + CR 701.21a: Singular sacrificed referent
+                            // for a chained Demonstrative / CostPaidObject consumer
+                            // is stamped once at the sacrifice-completion seam
+                            // (`perform_player_scope_sacrifices` when
+                            // `propagate_parent_context` is set). Do not re-scan
+                            // here — a second authority drifts when the snapshot
+                            // ladder changes (issue #5925).
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(
@@ -4596,7 +4715,13 @@ pub(super) fn handle_resolution_choice(
                             enters_attacking,
                             enter_with_counters: per_obj_enter_counters,
                             conditional_enter_with_counters: vec![],
-                            duration: None,
+                            // CR 611.2a + CR 610.3: the duration carried across
+                            // the `EffectZoneChoice` round-trip — an
+                            // "exile ... until ~ leaves the battlefield" move
+                            // must keep its bound on the interactive
+                            // multi-candidate path, not just the
+                            // single-candidate shortcut (issue #4235 review).
+                            duration: duration.clone(),
                             track_exiled_by_source,
                             // CR 708.2a + CR 708.3: thread the face-down profile that
                             // was carried across the `EffectZoneChoice` round-trip into
@@ -5018,6 +5143,10 @@ pub(super) fn handle_resolution_choice(
                         enters_attacking,
                         enter_with_counters: vec![],
                         conditional_enter_with_counters: vec![],
+                        // CR 118.3: cost-payment exile is unbounded — no
+                        // "until ..." duration idiom pays a cost, so the
+                        // round-trip `duration` (always `None` for `PayCost`
+                        // producers) is deliberately not threaded here.
                         duration: None,
                         track_exiled_by_source,
                         face_down_profile: face_down_profile.clone(),
@@ -6763,8 +6892,14 @@ pub(crate) fn run_batch_completion(
             player,
             source_id,
             members,
+            enters_under,
         } => effects::cloak::complete_tracked_set_exile_delivery(
-            state, player, source_id, members, events,
+            state,
+            player,
+            source_id,
+            members,
+            enters_under,
+            events,
         ),
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
@@ -7108,9 +7243,14 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
-            for card_id in &clear_markers {
-                state.revealed_cards.remove(card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &clear_markers,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-rest cleanup must reference live card occurrences");
             if let Some(kept) = publish_tracked_set {
                 effects::publish_fresh_tracked_set(state, kept.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {

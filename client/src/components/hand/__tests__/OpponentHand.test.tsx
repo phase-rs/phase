@@ -12,6 +12,11 @@ import {
   buildPlayers,
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
+import {
+  OPPONENT_HAND_VERTICAL_SCALE,
+  handFanGeometry,
+  handFanVerticalMetrics,
+} from "../handFanPresentation.ts";
 import { OpponentHand } from "../OpponentHand.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -64,6 +69,11 @@ describe("OpponentHand", () => {
 
   afterEach(() => {
     cleanup();
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: 768,
+    });
   });
 
   it("uses explicit playerId instead of focusedOpponent", () => {
@@ -71,6 +81,71 @@ describe("OpponentHand", () => {
 
     expect(screen.getByAltText("Explicit Opponent Card")).toBeInTheDocument();
     expect(screen.queryByAltText("Focused Opponent Card")).toBeNull();
+  });
+
+  it("mirrors the shared wide, shallow hand fan geometry", () => {
+    const cards = Array.from({ length: 8 }, (_, index) =>
+      cardObject(100 + index, 1, `Opponent Card ${index + 1}`),
+    );
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: buildPlayers([0, { id: 1, hand: cards.map((card) => card.id) }]),
+        objects: buildObjectMap(...cards),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildPriorityWaitingFor(),
+        seat_order: [0, 1],
+        eliminated_players: [],
+      }),
+    });
+
+    const { container } = render(<OpponentHand playerId={1} />);
+    const renderedCards = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-opponent-hand-card]"),
+    );
+    const verticalMetrics = handFanVerticalMetrics(false, OPPONENT_HAND_VERTICAL_SCALE);
+    const expectedFan = handFanGeometry(
+      cards.length,
+      "--opponent-hand-card-w",
+      verticalMetrics.arcScale,
+    );
+
+    expect(renderedCards).toHaveLength(cards.length);
+    renderedCards.forEach((card, index) => {
+      expect(Number(card.dataset.handRotation)).toBeCloseTo(-expectedFan.rotation(index));
+      expect(Number(card.dataset.handArc)).toBeCloseTo(expectedFan.arc(index));
+    });
+  });
+
+  it("scales the mirrored fan depth on compact-height screens", () => {
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      writable: true,
+      value: 440,
+    });
+    const cards = Array.from({ length: 8 }, (_, index) =>
+      cardObject(200 + index, 1, `Compact Opponent Card ${index + 1}`),
+    );
+    useGameStore.setState({
+      gameState: buildGameState({
+        players: buildPlayers([0, { id: 1, hand: cards.map((card) => card.id) }]),
+        objects: buildObjectMap(...cards),
+        battlefield: [],
+        exile: [],
+        stack: [],
+        waiting_for: buildPriorityWaitingFor(),
+        seat_order: [0, 1],
+        eliminated_players: [],
+      }),
+    });
+
+    const { container } = render(<OpponentHand playerId={1} />);
+    const firstCard = container.querySelector<HTMLElement>("[data-opponent-hand-card]");
+
+    expect(Number(firstCard?.dataset.handArc)).toBeCloseTo(
+      16 * OPPONENT_HAND_VERTICAL_SCALE,
+    );
   });
 
   // CR 701.20e (phase-rs/phase#5251): Glasses of Urza / Gitaxian Probe "look at

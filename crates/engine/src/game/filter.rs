@@ -2716,7 +2716,7 @@ fn zone_change_filter_inner(
 /// Changeling. This helper is the canonical fallback for non-battlefield
 /// zones — library, hand, graveyard, exile, stack, plus zone-change snapshots
 /// and spell-cast records — where the layer system does not run.
-fn subtype_matches_with_changeling(
+pub(crate) fn subtype_matches_with_changeling(
     subtype: &str,
     subtypes: &[String],
     keywords: &[Keyword],
@@ -2737,7 +2737,7 @@ fn subtype_matches_with_changeling(
     false
 }
 
-fn subtype_matches_host_supertype(subtype: &str, supertypes: &[Supertype]) -> bool {
+pub(crate) fn subtype_matches_host_supertype(subtype: &str, supertypes: &[Supertype]) -> bool {
     subtype.eq_ignore_ascii_case("host") && supertypes.contains(&Supertype::Host)
 }
 

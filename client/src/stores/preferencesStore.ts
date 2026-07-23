@@ -299,6 +299,7 @@ function buildDefaultPreferences(): PreferencesState {
     battlefieldPeekOnHover: true,
     cardPreviewMode: "follow",
     cardPreviewHoverDelayMs: 0,
+    showCardPreviewFooter: true,
     stackDockSide: "right",
     opponentHudDensity: "comfortable",
     multiplayerBoardLayout: "focused",
@@ -317,6 +318,7 @@ function buildDefaultPreferences(): PreferencesState {
     artOverrides: {} as Record<string, CardArtOverride>,
     flexLayout: defaultFlexLayout(),
     telemetryEnabled: true,
+    nativeEngineEnabled: true,
   };
 }
 
@@ -384,6 +386,9 @@ interface PreferencesState {
    *  modes. `0` = instant (default). Ignored in "shift" mode, which is
    *  keypress-triggered. See {@link CARD_PREVIEW_HOVER_DELAY_MAX}. */
   cardPreviewHoverDelayMs: number;
+  /** Whether desktop hover previews show the informational footer beneath the
+   *  card art (name, legal activated abilities, and keyboard hints). */
+  showCardPreviewFooter: boolean;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
   /** Density of the multi-opponent HUD rail (comfortable two-row vs compact thin row). */
@@ -415,6 +420,9 @@ interface PreferencesState {
    *  effect immediately. Builds without a `__TELEMETRY_URL__` define never send
    *  regardless. See `services/telemetry.ts`. */
   telemetryEnabled: boolean;
+  /** Prefer the shell-managed native engine for eligible desktop local games
+   * and P2P games hosted through a lobby. */
+  nativeEngineEnabled: boolean;
 }
 
 interface PreferencesActions {
@@ -462,6 +470,7 @@ interface PreferencesActions {
   setBattlefieldPeekOnHover: (enabled: boolean) => void;
   setCardPreviewMode: (mode: CardPreviewMode) => void;
   setCardPreviewHoverDelayMs: (ms: number) => void;
+  setShowCardPreviewFooter: (show: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
@@ -514,6 +523,7 @@ interface PreferencesActions {
   resetFlexLayout: () => void;
   /** Toggle anonymous crash & usage telemetry. */
   setTelemetryEnabled: (enabled: boolean) => void;
+  setNativeEngineEnabled: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -625,6 +635,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
             CARD_PREVIEW_HOVER_DELAY_MAX,
           ),
         }),
+      setShowCardPreviewFooter: (show) => set({ showCardPreviewFooter: show }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
@@ -770,10 +781,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       applyFlexPreset: (config) => set({ flexLayout: cloneFlexLayout(config) }),
       resetFlexLayout: () => set({ flexLayout: defaultFlexLayout() }),
       setTelemetryEnabled: (enabled) => set({ telemetryEnabled: enabled }),
+      setNativeEngineEnabled: (enabled) => set({ nativeEngineEnabled: enabled }),
     }),
     {
       name: "phase-preferences",
-      version: 26,
+      version: 28,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -829,6 +841,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          to Standard rather than enabling the experimental mode.
       // v25 → v26: Rename the experimental Smart value to the behavior it
       //          actually enables: SkipLowUseWindows.
+      // v26 → v27: Add nativeEngineEnabled; the default-state shallow merge
+      //             preserves the intended enabled-by-default behavior.
+      // v27 → v28: Add showCardPreviewFooter; legacy stores default to true
+      //          via the shallow merge, preserving the prior presentation.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

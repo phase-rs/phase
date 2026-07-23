@@ -442,9 +442,20 @@ pub fn place_attacking_alongside(
     attack_target: AttackTarget,
     _events: &mut Vec<GameEvent>,
 ) {
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.tapped = true;
-        obj.entered_battlefield_turn = Some(state.turn_number);
+    if state.objects.contains_key(&object_id) {
+        let turn_number = state.turn_number;
+        crate::game::object_state::resolve_and_apply_object_edit(
+            state,
+            object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            true,
+        )
+        .expect("an existing attacker must satisfy the resolved tap precondition");
+        let obj = state
+            .objects
+            .get_mut(&object_id)
+            .expect("the resolved attacker must remain present");
+        obj.entered_battlefield_turn = Some(turn_number);
         // CR 302.6: Ninjutsu/Sneak places a new permanent already attacking.
         // The attack declaration itself bypasses the normal summoning-
         // sickness check for attacking, but the flag remains true so {T}
@@ -2640,14 +2651,6 @@ pub(crate) fn must_attack_player_directives_for_creature(
         .collect()
 }
 
-/// CR 508.1d: does `obj` carry an intrinsic generic `MustAttack` static? The
-/// single authority both `creature_must_attack_with_attackable_players_gated`
-/// and `must_attack_sources_gated` consume for the local must-attack arm.
-fn has_local_must_attack(state: &GameState, obj: &GameObject) -> bool {
-    super::functioning_abilities::active_static_definitions(state, obj)
-        .any(|sd| sd.mode == StaticMode::MustAttack)
-}
-
 /// CR 508.1d + CR 701.15b/c: sorted, deduped carriers of every must-attack cause
 /// on `obj`. Called by the producer ONLY when the enforcement bool already
 /// returned true (all exemptions cleared), so no exemption re-check is needed.
@@ -2657,16 +2660,18 @@ fn has_local_must_attack(state: &GameState, obj: &GameObject) -> bool {
 /// Direct `goaded_by` designations contribute NO source (CR 701.15b, player-level).
 fn must_attack_sources_gated(
     state: &GameState,
-    obj: &GameObject,
     obj_id: ObjectId,
     gates: &CombatStaticGates,
     attackable_must_player_carriers: &[ObjectId],
 ) -> Vec<ObjectId> {
     let mut sources = Vec::new();
-    // CR 508.1d: intrinsic generic MustAttack (Juggernaut) → carrier = the creature.
-    if has_local_must_attack(state, obj) {
-        sources.push(obj_id);
-    }
+    // CR 508.1d + CR 109.5: every functioning generic MustAttack carrier whose
+    // `affected` filter matches this creature — an intrinsic self static
+    // (Juggernaut's SelfRef → carrier = the creature) OR a cross-permanent scope
+    // ("All creatures attack each combat if able"). The affected filter is the
+    // single authority for WHO must attack, so a remote-scoped carrier (Fumiko
+    // the Lowblood's "creatures your opponents control attack each combat") is
+    // NOT reported as a source against ITSELF.
     if gates.has_must_attack {
         sources.extend(crate::game::static_abilities::check_static_ability_sources(
             state,
@@ -2723,21 +2728,29 @@ fn creature_must_attack_with_attackable_players_gated(
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
         return false;
     }
-    // CR 508.1d: MustAttack — either directly on this creature or from a
-    // cross-permanent static (e.g., "All creatures attack each combat if able").
-    let has_must_attack = has_local_must_attack(state, obj)
-        || (gates.has_must_attack
-            && crate::game::static_abilities::check_static_ability(
-                state,
-                StaticMode::MustAttack,
-                &static_target_ctx(obj_id),
-            ));
-    // CR 701.15b: Goaded creatures must attack each combat if able.
-    let is_goaded = !goading_players_for_creature_gated(state, obj_id, gates.has_goad).is_empty();
+    // CR 508.1d + CR 109.5: MustAttack — from any functioning static whose
+    // `affected` filter matches this creature: an intrinsic self static
+    // (Juggernaut's SelfRef) or a cross-permanent scope ("All creatures attack
+    // each combat if able"). The affected filter is the single authority for WHO
+    // is required to attack, so a remote-scoped carrier (Fumiko the Lowblood's
+    // "creatures your opponents control attack each combat") never forces ITSELF
+    // to attack.
+    let has_must_attack = gates.has_must_attack
+        && crate::game::static_abilities::check_static_ability(
+            state,
+            StaticMode::MustAttack,
+            &static_target_ctx(obj_id),
+        );
+    // CR 508.1d + CR 701.15b (first clause): a creature under an "attacks a
+    // player other than X if able" requirement — whether from the goad
+    // designation or from the spelled-out `MustAttackAwayFromSource` grant —
+    // also attacks each combat if able.
+    let must_attack_away =
+        !players_to_attack_away_from_gated(state, obj_id, gates.has_goad).is_empty();
     let has_attackable_must_attack_player = must_attack_players_for_creature(state, obj)
         .iter()
         .any(|player| attackable_players.contains(player));
-    if !has_must_attack && !is_goaded && !has_attackable_must_attack_player {
+    if !has_must_attack && !must_attack_away && !has_attackable_must_attack_player {
         return false;
     }
     // Exemptions: tapped, defender (no override), summoning sick.
@@ -3045,10 +3058,16 @@ enum AttackRequirement {
         player: PlayerId,
     },
     /// CR 701.15b (second clause) + CR 701.15c: `creature` attacks a player other
-    /// than `goader` if able. Obeyed iff `creature` attacks a player ≠ `goader`.
-    Goad {
+    /// than `avoided` if able. Obeyed iff `creature` attacks a player ≠
+    /// `avoided`. Two source classes produce it — the goad DESIGNATION
+    /// (`goaded_by` / `StaticMode::Goaded`, CR 701.15a/b) and the spelled-out
+    /// requirement without any designation (`StaticMode::MustAttackAwayFromSource`
+    /// — Kardur, Doomscourge; Maximum Carnage chapter I) — so the variant is
+    /// named for the requirement, not for goad. Each distinct avoided player is
+    /// an additional requirement (CR 701.15c).
+    AttackAwayFrom {
         creature: ObjectId,
-        goader: PlayerId,
+        avoided: PlayerId,
     },
 }
 
@@ -3339,27 +3358,27 @@ impl AttackDeclarationConstraints {
             let Some(obj) = state.objects.get(&cid) else {
                 continue;
             };
-            // CR 508.1d: generic "attacks each combat if able" (local or remote).
-            let has_generic_must =
-                super::functioning_abilities::active_static_definitions(state, obj)
-                    .any(|sd| sd.mode == StaticMode::MustAttack)
-                    || (gates.has_must_attack
-                        && crate::game::static_abilities::check_static_ability(
-                            state,
-                            StaticMode::MustAttack,
-                            &crate::game::static_abilities::StaticCheckContext {
-                                target_id: Some(cid),
-                                ..Default::default()
-                            },
-                        ));
-            // CR 701.15b: goaders (distinct players).
-            let goaders = goading_players_for_creature_gated(state, cid, gates.has_goad);
-            // CR 701.15b (first clause): a goaded creature ALSO "attacks each
-            // combat if able" — emit the generic requirement independently so it
-            // is scored even when the second (attack-a-non-goader) clause is
-            // unsatisfiable. This is executor-confirmation #1 implemented by
-            // construction rather than relying on the shared predicate.
-            if has_generic_must || !goaders.is_empty() {
+            // CR 508.1d + CR 109.5: generic "attacks each combat if able" — any
+            // functioning static whose `affected` filter matches this creature.
+            // The affected filter is the single authority for WHO is required to
+            // attack; a remote-scoped carrier (Fumiko the Lowblood's "creatures
+            // your opponents control attack each combat") never forces itself.
+            let has_generic_must = gates.has_must_attack
+                && crate::game::static_abilities::check_static_ability(
+                    state,
+                    StaticMode::MustAttack,
+                    &static_target_ctx(cid),
+                );
+            // CR 508.1d + CR 701.15b: the distinct players this creature must
+            // attack away from (goad designations + spelled-out grants).
+            let avoided = players_to_attack_away_from_gated(state, cid, gates.has_goad);
+            // CR 701.15b (first clause): a creature under the away-from
+            // requirement ALSO "attacks each combat if able" — emit the generic
+            // requirement independently so it is scored even when the second
+            // (attack-a-different-player) clause is unsatisfiable. This is
+            // executor-confirmation #1 implemented by construction rather than
+            // relying on the shared predicate.
+            if has_generic_must || !avoided.is_empty() {
                 requirements.push(AttackRequirement::MustAttackGeneric { creature: cid });
             }
             for player in must_attack_players_for_creature(state, obj) {
@@ -3370,12 +3389,12 @@ impl AttackDeclarationConstraints {
                     });
                 }
             }
-            let mut goader_list: Vec<PlayerId> = goaders.into_iter().collect();
-            goader_list.sort_unstable_by_key(|p| p.0);
-            for goader in goader_list {
-                requirements.push(AttackRequirement::Goad {
+            let mut avoided_list: Vec<PlayerId> = avoided.into_iter().collect();
+            avoided_list.sort_unstable_by_key(|p| p.0);
+            for avoided_player in avoided_list {
+                requirements.push(AttackRequirement::AttackAwayFrom {
                     creature: cid,
-                    goader,
+                    avoided: avoided_player,
                 });
             }
             // CR 506.5: CombatAlone classification.
@@ -3482,9 +3501,9 @@ fn requirement_obeyed(req: &AttackRequirement, attacks: &[(ObjectId, AttackTarge
         AttackRequirement::MustAttackPlayer { creature, player } => attacks
             .iter()
             .any(|(c, t)| c == creature && matches!(t, AttackTarget::Player(p) if p == player)),
-        AttackRequirement::Goad { creature, goader } => attacks
+        AttackRequirement::AttackAwayFrom { creature, avoided } => attacks
             .iter()
-            .any(|(c, t)| c == creature && matches!(t, AttackTarget::Player(p) if p != goader)),
+            .any(|(c, t)| c == creature && matches!(t, AttackTarget::Player(p) if p != avoided)),
     }
 }
 
@@ -4184,6 +4203,79 @@ pub(crate) fn goading_players_for_creature_gated(
     players
 }
 
+/// CR 508.1d + CR 701.15b: the players `creature_id` must attack AWAY from —
+/// the single authority for the "attacks a player other than X if able"
+/// requirement. Three contributors, all producing the same requirement:
+///  1. `obj.goaded_by` — the goad designation (CR 701.15a/b);
+///  2. `StaticMode::Goaded` statics — a continuous designation (CR 701.15b);
+///  3. `StaticMode::MustAttackAwayFromSource` — the requirement WITHOUT any
+///     designation (CR 701.15a: only a spell/ability that *goads* makes a
+///     creature goaded; Kardur, Doomscourge / Maximum Carnage chapter I).
+///
+/// (1) and (2) are designations that IMPLY the requirement; (3) is the
+/// requirement alone. `goading_players_for_creature_gated` remains the
+/// DESIGNATION-only query and must NOT absorb (3) — `FilterProp::Goaded`
+/// (filter.rs) reads the designation, and these two cards must not match it.
+///
+/// Union semantics are legality-neutral (CR 508.1d): two contributors naming the
+/// same player collapse to one requirement, which adds +1 to BOTH
+/// `score_declaration` and `max_no_payment`, leaving `score == max` unchanged.
+/// Distinct players still yield independent requirements (CR 701.15c).
+///
+/// No `CombatStaticGates` field: this is a PER-OBJECT scan of
+/// `active_static_definitions`, exactly like
+/// `must_attack_player_directives_for_creature` — not a battlefield sweep.
+///
+/// Source attribution for the frontend badge is deliberately NOT extended here
+/// (see `must_attack_sources_gated`): this mode does not carry `source_object`,
+/// so the badge renders bare, which the client already handles.
+///
+/// The scan below deliberately ignores `sd.affected`, mirroring the adjacent
+/// `must_attack_player_directives_for_creature` sibling. This is NOT the #6296
+/// (`has_local_must_attack`) case where a remote-scoped carrier forced ITSELF to
+/// attack: that bug needs a PRINTED remote-scoped def, which only generic
+/// `MustAttack` has (Fumiko the Lowblood). `MustAttackAwayFromSource` is
+/// grafted-only — the parser (`must_attack_away_static_definition`) is the sole
+/// producer, `StaticMode`'s `FromStr` is test-only, and the graft always stamps
+/// `affected: TargetFilter::SelfRef` on the recipient (`layers.rs`), so a carrier
+/// never receives its own remote-scoped def. Add an `sd.affected` check here the
+/// moment a printed (non-grafted) producer of this mode appears.
+pub(crate) fn players_to_attack_away_from_gated(
+    state: &GameState,
+    creature_id: ObjectId,
+    has_goad_static: bool,
+) -> HashSet<PlayerId> {
+    let mut players = goading_players_for_creature_gated(state, creature_id, has_goad_static);
+    if let Some(obj) = state.objects.get(&creature_id) {
+        // CR 109.5: the avoided player is the anchor snapshotted at graft time.
+        // `unwrap_or(obj.controller)` is a defensive default with NO producer
+        // today — the parser is the sole producer of this mode and always routes
+        // through the transient graft, which stamps the anchor (layers.rs). It is
+        // the correct reading for a hypothetical printed static ("…other than
+        // you" on a permanent means that permanent's controller).
+        players.extend(
+            super::functioning_abilities::active_static_definitions(state, obj)
+                .filter(|sd| sd.mode == StaticMode::MustAttackAwayFromSource)
+                .map(|sd| {
+                    // Tripwire for the deferral documented above: both shapes
+                    // below mean "the carrier itself" (`None` skips the filter
+                    // check in `static_ability_match_applies`; the graft stamps
+                    // `SelfRef`). Anything else is a remote-scoped def, which
+                    // this scan would wrongly apply to its own carrier.
+                    debug_assert!(
+                        matches!(sd.affected, Some(TargetFilter::SelfRef) | None),
+                        "MustAttackAwayFromSource is grafted-only (layers.rs stamps \
+                         SelfRef); a printed remote-scoped producer needs an \
+                         `sd.affected` check here, got {:?}",
+                        sd.affected
+                    );
+                    sd.source_controller.unwrap_or(obj.controller)
+                }),
+        );
+    }
+    players
+}
+
 /// CR 701.15c: `(goading player, goad-static carrier id)` for each functioning
 /// `StaticMode::Goaded` static affecting `creature_id`. The single authority
 /// both the player-set query (`goading_players_for_creature_gated`) and the
@@ -4426,7 +4518,7 @@ pub fn attacker_constraints_for_active_player(
                     .map(|(_, src)| src.unwrap_or(obj_id))
                     .collect();
                 let sources =
-                    must_attack_sources_gated(state, obj, obj_id, &gates, &attackable_carriers);
+                    must_attack_sources_gated(state, obj_id, &gates, &attackable_carriers);
                 constraints.insert(obj_id, CombatRequirement::MustAttack { players, sources });
             }
         } else if creature_cant_attack_gated(state, obj_id, &gates) {
@@ -5659,7 +5751,7 @@ mod tests {
     /// two-player state carries no tax statics, so free_targets == legal_targets.
     #[test]
     fn best_free_declaration_matches_brute_force_oracle() {
-        use AttackRequirement::{Goad, MustAttackGeneric, MustAttackPlayer};
+        use AttackRequirement::{AttackAwayFrom, MustAttackGeneric, MustAttackPlayer};
         let state = GameState::new_two_player(42);
         let p = |n: u8| AttackTarget::Player(PlayerId(n));
         let pid = PlayerId;
@@ -5770,9 +5862,9 @@ mod tests {
                         MustAttackGeneric {
                             creature: ObjectId(10),
                         },
-                        Goad {
+                        AttackAwayFrom {
                             creature: ObjectId(10),
-                            goader: pid(1),
+                            avoided: pid(1),
                         },
                     ],
                     None,
@@ -5800,9 +5892,9 @@ mod tests {
                         MustAttackGeneric {
                             creature: ObjectId(12),
                         },
-                        Goad {
+                        AttackAwayFrom {
                             creature: ObjectId(10),
-                            goader: pid(1),
+                            avoided: pid(1),
                         },
                     ],
                     Some(2),

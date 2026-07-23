@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::database::CardDatabase;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
-use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog};
+use crate::types::replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
 
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
 use super::engine::{apply, start_game, start_game_with_starting_player};
@@ -31,6 +31,10 @@ const CHECKPOINT_INTERVAL: u32 = 20;
 
 #[derive(Debug, Error)]
 pub enum ReplayError {
+    #[error("replay is missing its format version")]
+    MissingFormatVersion,
+    #[error("unsupported replay format version {version}; this engine supports version 2")]
+    UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
     /// during reconstruction. This means the recording and the engine version
     /// replaying it have diverged (e.g. an engine change altered behavior for
@@ -128,6 +132,11 @@ impl ReplayPlayer {
     /// `reconstruct_initial_state`, which errors if `log.header.deck_data`
     /// is `Some` and `db` is `None` — see that function's doc comment.
     pub fn load(log: ReplayLog, db: Option<&CardDatabase>) -> Result<Self, ReplayError> {
+        match log.format_version {
+            Some(REPLAY_FORMAT_VERSION) => {}
+            Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
+            None => return Err(ReplayError::MissingFormatVersion),
+        }
         let initial = reconstruct_initial_state(&log.header, db)?;
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
@@ -197,9 +206,14 @@ impl ReplayPlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use crate::types::actions::GameAction;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::WaitingFor;
+    use crate::types::game_state::{ProductionOverride, WaitingFor};
+    use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use crate::types::mana::{
+        ManaSourcePenalty, ManaSourceSelection, ManaType, TapsForManaSelection,
+    };
     use crate::types::match_config::MatchConfig;
 
     fn two_player_header(seed: u64) -> ReplayHeader {
@@ -222,6 +236,59 @@ mod tests {
             WaitingFor::Priority { player } => Some((player, GameAction::PassPriority)),
             _ => None,
         }
+    }
+
+    #[test]
+    fn load_rejects_missing_format_version_before_reconstruction() {
+        let mut log = ReplayLog::new(two_player_header(1));
+        log.format_version = None;
+        let error = ReplayPlayer::load(log, None).expect_err("legacy replay must be rejected");
+        assert!(matches!(error, ReplayError::MissingFormatVersion));
+    }
+
+    #[test]
+    fn load_rejects_unknown_format_version_before_reconstruction() {
+        let mut log = ReplayLog::new(two_player_header(1));
+        log.format_version = Some(REPLAY_FORMAT_VERSION + 1);
+        let error = ReplayPlayer::load(log, None).expect_err("future replay must be rejected");
+        assert!(matches!(
+            error,
+            ReplayError::UnsupportedFormatVersion { version }
+                if version == REPLAY_FORMAT_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn version_two_roundtrips_semantic_mana_source_selections() {
+        let source = ObjectIncarnationRef::of(ObjectId(7), 3);
+        let aura = ObjectIncarnationRef::of(ObjectId(9), 2);
+        let action = GameAction::TapLandForMana {
+            selection: ManaSourceSelection {
+                source,
+                ability_index: None,
+                mana_type: ManaType::Green,
+                atomic_combination: None,
+                restrictions: Vec::new(),
+                penalty: ManaSourcePenalty::None,
+                taps_for_mana: vec![TapsForManaSelection {
+                    source: aura,
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                    production_override: ProductionOverride::SingleColor(ManaType::Red),
+                }],
+            },
+        };
+        let mut log = ReplayLog::new(two_player_header(5));
+        log.push_action(PlayerId(0), action.clone());
+
+        let json = serde_json::to_string(&log).expect("serialize replay v2");
+        let restored: ReplayLog = serde_json::from_str(&json).expect("deserialize replay v2");
+
+        assert_eq!(restored.format_version, Some(REPLAY_FORMAT_VERSION));
+        assert_eq!(restored.actions.len(), 1);
+        assert_eq!(restored.actions[0].action, action);
     }
 
     #[test]

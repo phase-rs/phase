@@ -96,34 +96,38 @@ expression: "&ir"
         "fragment": "~ can block only creatures with flying."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": {
-            "BlockRestriction": {
-              "filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Creature"
-                ],
-                "controller": null,
-                "properties": [
-                  {
-                    "type": "WithKeyword",
-                    "value": "Flying"
-                  }
-                ]
+        "Static": {
+          "definition": {
+            "mode": {
+              "BlockRestriction": {
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": null,
+                  "properties": [
+                    {
+                      "type": "WithKeyword",
+                      "value": "Flying"
+                    }
+                  ]
+                }
               }
-            }
+            },
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ can block only creatures with flying."
           },
-          "affected": {
-            "type": "SelfRef"
-          },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "~ can block only creatures with flying."
+          "source_text": "~ can block only creatures with flying.",
+          "body_ir": null
         }
       }
     }

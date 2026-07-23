@@ -80,6 +80,10 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.10: no mana was spent to cast a spell copy — reset the
+        // cast-payment stamps so spend-color riders ("if {W}{W} was spent to
+        // cast it", issue #5943) do not re-fire off the original's payment.
+        copy_obj.clear_cast_payment_stamps();
         apply_spell_copy_modifications(
             &mut copy_obj,
             &additional_modifications,
@@ -887,8 +891,11 @@ mod tests {
         ControllerRef, CopyRetargetPermission, Effect, EffectScope, QuantityExpr, QuantityRef,
         TapStateChange, TargetFilter, TargetRef,
     };
+    use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+    use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
 
     /// Helper: push a spell onto the stack with a matching GameObject.
@@ -991,6 +998,125 @@ mod tests {
             }
             _ => panic!("Expected both entries to be Spells with abilities"),
         }
+    }
+
+    /// CR 707.10 (issue #5943): a spell copy is not cast — the copy born by
+    /// `resolve(Effect::CopySpell)` must carry NO cast-payment record even
+    /// though it clones the original object. All five stamps reset to their
+    /// no-payment defaults; the original keeps its own record (reach-guard).
+    #[test]
+    fn spell_copy_resets_cast_payment_stamps() {
+        let mut state = GameState::new_two_player(42);
+
+        let original_ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        push_spell(
+            &mut state,
+            ObjectId(10),
+            CardId(1),
+            PlayerId(0),
+            "Compleated Test Walker",
+            original_ability,
+            CastingVariant::Normal,
+        );
+        // Stamp all five cast-payment fields non-default, including a
+        // synthetic Phyrexian life payment, to verify the copy reset.
+        {
+            let lki = state.objects[&ObjectId(10)].snapshot_for_mana_spent();
+            let obj = state.objects.get_mut(&ObjectId(10)).unwrap();
+            obj.mana_spent_to_cast = true;
+            obj.colors_spent_to_cast
+                .add(crate::types::mana::ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            obj.phyrexian_life_paid = 1;
+            obj.mana_spent_source_snapshots.push(
+                crate::types::game_state::ManaSpentSourceSnapshot {
+                    source_id: ObjectId(10),
+                    lki,
+                },
+            );
+            obj.card_types.core_types = vec![CoreType::Planeswalker];
+            obj.base_card_types = obj.card_types.clone();
+            obj.loyalty = Some(5);
+            obj.base_loyalty = Some(5);
+            obj.keywords.push(Keyword::Compleated);
+            obj.base_keywords.push(Keyword::Compleated);
+        }
+
+        let copy_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::Any,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &copy_ability, &mut events).unwrap();
+
+        let copy_id = state.stack.back().expect("copy on stack").id;
+        assert_ne!(copy_id, ObjectId(10), "the copy is a distinct object");
+        let copy = state.objects.get(&copy_id).expect("copy object exists");
+        assert!(!copy.mana_spent_to_cast, "copy: bool must be default");
+        assert!(
+            copy.colors_spent_to_cast.is_empty(),
+            "copy: per-color tally must be default (spend-color riders must not re-fire)"
+        );
+        assert_eq!(
+            copy.mana_spent_to_cast_amount, 0,
+            "copy: amount must be default"
+        );
+        assert_eq!(
+            copy.phyrexian_life_paid, 0,
+            "copy: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            copy.mana_spent_source_snapshots.is_empty(),
+            "copy: payment-source snapshots must be default"
+        );
+        // Reach-guard: the ORIGINAL keeps its payment record — the reset hit
+        // only the copy.
+        assert_eq!(
+            state.objects[&ObjectId(10)].mana_spent_to_cast_amount,
+            2,
+            "original keeps its own payment record"
+        );
+        assert_eq!(
+            state.objects[&ObjectId(10)].phyrexian_life_paid,
+            1,
+            "original keeps its own Phyrexian life-payment record"
+        );
+
+        // Runtime regression: resolve the copied permanent spell through the
+        // production stack/entry-replacement pipeline. If the copy inherited
+        // the source's life payment, Compleated would reduce its 5 loyalty to 3.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        let copy = state
+            .objects
+            .get(&copy_id)
+            .expect("copy persists after resolution");
+        assert_eq!(
+            copy.zone,
+            Zone::Battlefield,
+            "copy must resolve as a permanent"
+        );
+        assert_eq!(
+            copy.counters.get(&CounterType::Loyalty),
+            Some(&5),
+            "CR 702.150a: a spell copy has no source Phyrexian life payment to reduce loyalty"
+        );
     }
 
     /// GATE #2 — CR 702.10a + CR 603.1 + CR 608.3f / CR 707.10f: a spell copy's

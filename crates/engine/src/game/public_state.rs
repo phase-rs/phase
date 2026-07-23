@@ -594,6 +594,7 @@ mod tests {
             count_param: 0,
             library_position: None,
             is_cost_payment: false,
+            duration: None,
         };
 
         finalize_rules_state(&mut state);

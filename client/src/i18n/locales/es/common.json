@@ -15,6 +15,16 @@
     "enter": "Activar pantalla completa",
     "exit": "Salir de pantalla completa"
   },
+  "nativeEngineProgress": {
+    "title": "Actualizando el motor nativo",
+    "resolving": "Buscando el servidor local correcto…",
+    "downloadingBinary": "Descargando el servidor actualizado…",
+    "verifying": "Verificando el servidor…",
+    "downloadingData": "Descargando datos del juego…",
+    "spawning": "Iniciando el servidor local…",
+    "ready": "Motor nativo listo",
+    "failed": "No se pudo preparar el motor nativo"
+  },
   "buildBadge": {
     "downloading": "descargando… {{progress}}%",
     "checking": "comprobando…",
@@ -22,6 +32,7 @@
     "updatePending": "actualización pendiente tras la partida",
     "cards": "cartas {{age}} ({{commit}})",
     "cardDataTitle": "Datos de cartas generados el {{date}} desde {{commit}}",
+    "desktopAppVersion": "Aplicación de escritorio v{{version}}",
     "checkForUpdates": "Buscar actualizaciones",
     "updaterDebugInfo": "Información de depuración del actualizador",
     "updaterIssue": "Problema del actualizador: {{error}}",
@@ -246,7 +257,13 @@
     "youPlayFirst": "Juegas primero",
     "playerPlaysFirst": "{{name}} juega primero",
     "heads": "Cara",
-    "tails": "Cruz"
+    "tails": "Cruz",
+    "coinFlip": "Lanzamiento de moneda",
+    "wonCoinFlip": "{{name}} ganó el lanzamiento",
+    "lostCoinFlip": "{{name}} perdió el lanzamiento",
+    "turnOrder": "Orden de turnos",
+    "turnOrderItem": "Turno {{turn}}: {{name}}",
+    "youTakeTurn": "Juegas el turno {{turn}}"
   },
   "chrome": {
     "back": "Atrás",

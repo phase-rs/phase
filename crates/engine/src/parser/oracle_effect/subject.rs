@@ -1671,23 +1671,28 @@ fn try_parse_subject_restriction_clause(
                 unless_pay: None,
             });
         }
-        // CR 701.15a + CR 701.15b: "[subject] attacks each combat if able and
-        // attacks a player other than you if able" is the printed goad definition
-        // (Maximum Carnage chapter I). Map it to `Effect::GoadAll` over the subject
-        // population so the goad mechanic (goaded_by mark, "attack a player other
-        // than the goading player", goading-player next-turn cleanup) handles it.
-        // Tried before the plain attack recognizer since the goad compound is the
-        // strict superset and must win. The subject is a population ("each
-        // creature"), so the GoadAll target is `application.affected`.
-        if imperative::try_parse_goad_equivalent(&predicate) {
+        // CR 508.1d + CR 701.15b + CR 611.2c: "[subject] attacks each combat if
+        // able and attacks a player other than you if able" is the goad
+        // *requirement pair* printed in full (Kardur, Doomscourge; Maximum
+        // Carnage chapter I). CR 701.15a: only a spell or ability that *goads*
+        // makes a creature goaded, so this lowers to combat requirements and NOT
+        // to the goad mechanic — official Maximum Carnage ruling (2025-09-19):
+        // "that ability doesn't cause any creatures to become goaded. Effects
+        // that refer to 'goaded creatures' won't apply."
+        // Tried before the plain attack recognizer since the compound is the
+        // strict superset. `duration: None` — the stated duration ("Until your
+        // next turn,") arrives on `ability.duration` and wins in
+        // `effects/effect.rs::resolve`.
+        if imperative::try_parse_attack_away_requirement(&predicate) {
             let application = parse_subject_application(subject, ctx)?;
-            let goad_target = application
-                .target
-                .clone()
-                .unwrap_or_else(|| application.affected.clone());
+            let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
-                effect: Effect::GoadAll {
-                    target: goad_target,
+                effect: Effect::GenericEffect {
+                    static_abilities: vec![
+                        imperative::must_attack_away_static_definition().affected(affected)
+                    ],
+                    duration: None,
+                    target: application.target,
                 },
                 distribute: None,
                 multi_target: application.multi_target,
@@ -2382,6 +2387,16 @@ pub(super) fn parse_subject_application(
             inherits_parent: false,
             is_optional: false,
         });
+    }
+    // CR 303.4b + CR 702.5a + CR 701.17a (issue #5947): "enchanted player"
+    // names the Aura's attached player host — `AttachedTo`, not a Typed
+    // EnchantedBy filter (which is object-only). Used by curse bodies such as
+    // Fraying Sanity's "enchanted player mills X cards".
+    if all_consuming(tag::<_, _, OracleError<'_>>("enchanted player"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return subject_filter_application(TargetFilter::AttachedTo, false);
     }
     // "those creatures" / "those lands" — anaphoric reference to previous
     // targets. Maps to ParentTarget so the restriction applies to the same
@@ -3318,7 +3333,8 @@ fn try_split_pump_compound(
 
     // CR 608.2d: a pump compounded with a modal keyword grant --
     // "gets +1/+1 and gains your choice of deathtouch or lifelink" (Alchemist's
-    // Gift) -- has a grant half that is a two-branch player choice, so it cannot
+    // Gift) -- has a grant half that is an N-branch player choice (two or more
+    // options, e.g. Golem Artisan's "flying, trample, or haste"), so it cannot
     // collapse into a single `ContinuousModification` the way a fixed "and gains
     // trample" does (which the guard above routes to `build_continuous_clause`'s
     // coalescing path). Route the choice through the same
@@ -3353,7 +3369,7 @@ fn try_split_pump_compound(
 }
 
 /// CR 608.2d: build the modal keyword-grant half of a pump
-/// compound ("gets +1/+1 AND gains your choice of X or Y") as a `ChooseOneOf`
+/// compound ("gets +1/+1 AND gains your choice of X, Y, or Z") as a `ChooseOneOf`
 /// sub_ability. Reuses the same `parse_keyword_choice_grant` /
 /// `keyword_choice_branch` builders as the standalone `build_keyword_choice_clause`,
 /// keyed to the pumped creature via `static_affected_for_application`
@@ -3369,13 +3385,13 @@ fn build_keyword_choice_sub_ability(
     // "gains your choice of ...". `parse_keyword_choice_grant` anchors on the
     // bare "gain ..." form, so deconjugate the remainder here first.
     let normalized = deconjugate_verb(remainder);
-    let (first, second, duration) = parse_keyword_choice_grant(&normalized)?;
+    let (keywords, duration) = parse_keyword_choice_grant(&normalized)?;
     let affected = static_affected_for_application(application);
     let choice_duration = duration.clone();
-    let branches = vec![
-        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
-        keyword_choice_branch(second, affected, None, duration),
-    ];
+    let branches = keywords
+        .into_iter()
+        .map(|kw| keyword_choice_branch(kw, affected.clone(), None, duration.clone()))
+        .collect();
     Some((
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -3388,18 +3404,29 @@ fn build_keyword_choice_sub_ability(
     ))
 }
 
-fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
+fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<Duration>)> {
     let lower = predicate.to_lowercase();
 
-    // Shape 1: "gain your choice of X or Y" — an explicit keyword-grant menu.
+    // Shape 1: "gain your choice of X, Y, or Z" — an explicit keyword-grant menu
+    // of two OR MORE options (Golem Artisan: "flying, trample, or haste"). Reuse
+    // the nom-based `split_choice_list_items` splitter (shared with the counter-
+    // choice and "from among" paths) so an Oxford-comma N-ary list parses without
+    // manual byte slicing.
     if let Ok((choice_text, _)) =
         tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
     {
         let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-        let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-        let first = parse_granted_keyword_fragment(left.trim())?;
-        let second = parse_granted_keyword_fragment(right.trim())?;
-        return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
+        let items = super::split_choice_list_items(keyword_text.trim())?;
+        // `separated_list1` succeeds on a single item when there is no separator
+        // at all; require ≥2 so a lone keyword is not mistaken for a "choice".
+        if items.len() < 2 {
+            return None;
+        }
+        let keywords: Vec<Keyword> = items
+            .iter()
+            .map(|item| parse_granted_keyword_fragment(item.trim()))
+            .collect::<Option<Vec<Keyword>>>()?;
+        return Some((keywords, duration.or(Some(Duration::UntilEndOfTurn))));
     }
 
     // Shape 2: "gain/have protection from X or from the color of your choice"
@@ -3431,7 +3458,10 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Opti
     let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
         right.trim(),
     ));
-    Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
+    Some((
+        vec![first, second],
+        duration.or(Some(Duration::UntilEndOfTurn)),
+    ))
 }
 
 fn keyword_choice_branch(
@@ -3461,12 +3491,12 @@ fn build_keyword_choice_clause(
     application: &SubjectApplication,
     predicate: &str,
 ) -> Option<ParsedEffectClause> {
-    let (first, second, duration) = parse_keyword_choice_grant(predicate)?;
+    let (keywords, duration) = parse_keyword_choice_grant(predicate)?;
     let affected = static_affected_for_application(application);
-    let branches = vec![
-        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
-        keyword_choice_branch(second, affected, None, duration),
-    ];
+    let branches = keywords
+        .into_iter()
+        .map(|kw| keyword_choice_branch(kw, affected.clone(), None, duration.clone()))
+        .collect();
 
     let choose_effect = Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
@@ -3594,6 +3624,23 @@ fn build_continuous_clause(
             keyword: crate::types::keywords::Keyword::Suspend { .. },
         }]
     ) {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
+    // CR 205.1b + CR 611.2a: an additive type grant — "becomes a <type> in
+    // addition to its other [creature] types" (Sensei Golden-Tail's training
+    // grant: "gains bushido 1 and becomes a Samurai in addition to its other
+    // creature types") — states no duration and therefore lasts until end of
+    // game: the granted type/keyword is added for as long as the affected object
+    // exists. Without this the unstated `None` duration flips to UntilEndOfTurn in
+    // `effect.rs::resolve` and the grant is swept by `prune_end_of_turn_effects`,
+    // so it wrongly "wears off" after the turn. Only fires when NO duration was
+    // parsed, so an explicit "... in addition to its other types until end of
+    // turn" keeps its stated turn-scoped duration. Mirrors the Suspend and
+    // `build_become_clause` (CR 611.2b) default-permanent precedents.
+    let duration = if duration.is_none() && has_in_addition_to_other_types(predicate_text) {
         Some(Duration::Permanent)
     } else {
         duration

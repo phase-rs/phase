@@ -69,6 +69,7 @@ use super::oracle_ir::doc::{
 use super::oracle_ir::feature::ItemIdTracks;
 use super::oracle_ir::relation::{DocumentRelationIr, LinkedChoiceKind, LinkedReturnOutcome};
 use super::oracle_ir::replacement::ReplacementIr;
+use super::oracle_ir::static_ir::StaticIr;
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     is_keyword_cost_line, is_kicker_family_line, parse_kicker_additional_cost_line,
@@ -1172,6 +1173,7 @@ fn item_trigger(item: &OracleItemIr) -> Option<&TriggerDefinition> {
 
 fn item_static(item: &OracleItemIr) -> Option<&StaticDefinition> {
     match &item.node {
+        OracleNodeIr::Static(ir) => Some(&ir.definition),
         OracleNodeIr::PreLoweredStatic(def) => Some(def),
         _ => None,
     }
@@ -1330,7 +1332,14 @@ fn quantity_ref_uses_filter_prop(qty: &QuantityRef, pred: &impl Fn(&FilterProp) 
         | QuantityRef::ControlledByEachPlayer { filter, .. }
         | QuantityRef::DistinctColorsAmongPermanents { filter }
         | QuantityRef::DistinctCounterKindsAmong { filter }
-        | QuantityRef::EnteredThisTurn { filter } => target_filter_uses_filter_prop(filter, pred),
+        | QuantityRef::EnteredThisTurn { filter }
+        // CR 608.2i: the look-back sibling carries a `TargetFilter` too, and this
+        // predicate's question ("does any `TargetFilter` reachable from this
+        // quantity use `pred`?") is variant-agnostic — so it must recurse rather
+        // than fall to `_ => false`.
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => {
+            target_filter_uses_filter_prop(filter, pred)
+        }
         QuantityRef::DistinctCardTypes {
             source: crate::types::ability::CardTypeSetSource::Objects { filter },
         }
@@ -1998,7 +2007,10 @@ fn push_graveyard_keyword_same_is_true_tail(
         statics.push(new_def);
     }
     for __item in statics {
-        emitter.static_at(item_line, __item);
+        emitter.static_ir_at(
+            item_line,
+            StaticIr::from_definition(modeled_sentence, __item),
+        );
     }
     if !unqualified.is_empty() {
         emitter.ability_at(
@@ -3440,6 +3452,13 @@ impl<'a> DocEmitter<'a> {
         self.last_static = Some(def.clone());
         self.emit_at(line, OracleNodeIr::PreLoweredStatic(def));
     }
+    fn static_ir_at(&mut self, line: usize, ir: StaticIr) {
+        self.last_static = Some(lower_static_ir(&ir));
+        self.emit_at(line, OracleNodeIr::Static(ir));
+    }
+    fn replacement_ir_at(&mut self, line: usize, ir: ReplacementIr) {
+        self.emit_at(line, OracleNodeIr::Replacement(ir));
+    }
 
     /// Last-emitted node per category — the read-only peeks for
     /// `parsed_result_recently_granted_flashback` (the one mid-loop reader of
@@ -3914,7 +3933,7 @@ pub(crate) fn parse_oracle_ir(
                         },
                         None => StaticCondition::AdditionalCostPaid,
                     });
-                    emitter.static_at(item_line, def);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_text, def));
                 }
             }
             i += 1;
@@ -4049,7 +4068,10 @@ pub(crate) fn parse_oracle_ir(
                     if let Some(static_def) =
                         try_parse_graveyard_keyword_static_with_continuation(&combined_static_line)
                     {
-                        emitter.static_at(item_line, static_def);
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(&combined_static_line, static_def),
+                        );
                         i += 2;
                         continue;
                     }
@@ -4080,7 +4102,8 @@ pub(crate) fn parse_oracle_ir(
                 );
             if is_self_color_cda {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4101,7 +4124,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4163,7 +4187,10 @@ pub(crate) fn parse_oracle_ir(
                             None,
                             None,
                         ) {
-                            emitter.static_at(item_line, __item);
+                            emitter.static_ir_at(
+                                item_line,
+                                StaticIr::from_definition(&clause_dot, __item),
+                            );
                         }
                     }
                 }
@@ -4180,7 +4207,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4354,6 +4382,7 @@ pub(crate) fn parse_oracle_ir(
                 // CR 702.193b + CR 602.2b + CR 601.2f + CR 302.6: the activation cost's
                 // generic mana is reduced by the source's mana value if it entered this turn.
                 def.cost_reduction = Some(CostReduction {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
                     amount_per: 1,
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::SelfManaValue,
@@ -4680,7 +4709,7 @@ pub(crate) fn parse_oracle_ir(
                     lines.get(i + 1).map(|l| l.to_lowercase())
                 })
             {
-                emitter.static_at(item_line, static_def);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&line, static_def));
                 i += if consumes_next_line { 2 } else { 1 };
                 continue;
             }
@@ -4694,7 +4723,7 @@ pub(crate) fn parse_oracle_ir(
         // Effect::PayCost.
         if is_spells_alternative_cost_pattern(&lower) {
             if let Some(static_def) = parse_spells_alternative_cost(&line) {
-                emitter.static_at(item_line, static_def);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&line, static_def));
                 i += 1;
                 continue;
             }
@@ -4707,7 +4736,7 @@ pub(crate) fn parse_oracle_ir(
             let defs = parse_cast_spells_alternative_cost_multi(&line);
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(&line, __item));
                 }
                 i += 1;
                 continue;
@@ -4721,7 +4750,7 @@ pub(crate) fn parse_oracle_ir(
         // and would miss this verb form.
         if is_collect_evidence_alt_cost_pattern(&lower) {
             if let Some(static_def) = parse_collect_evidence_alt_cost(&line) {
-                emitter.static_at(item_line, static_def);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&line, static_def));
                 i += 1;
                 continue;
             }
@@ -4738,7 +4767,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 i += 1;
                 continue;
@@ -4750,7 +4780,7 @@ pub(crate) fn parse_oracle_ir(
         // New Perspectives (cycling) / Heart of Kiran (crew) / Gavi class.
         if is_alternative_keyword_cost_pattern(&lower) {
             if let Some(static_def) = parse_alternative_keyword_cost(&line) {
-                emitter.static_at(item_line, static_def);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&line, static_def));
                 i += 1;
                 continue;
             }
@@ -4776,7 +4806,8 @@ pub(crate) fn parse_oracle_ir(
             );
             if !defs.is_empty() {
                 for __item in defs {
-                    emitter.static_at(item_line, __item);
+                    emitter
+                        .static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
                 }
                 consumed = true;
             }
@@ -4806,7 +4837,7 @@ pub(crate) fn parse_oracle_ir(
             parse_static_replacement_compound(&static_line, &static_line_lower, card_name)
         {
             for __item in statics {
-                emitter.static_at(item_line, __item);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
             for replacement_ir in replacements {
                 emitter.emit_at(item_line, OracleNodeIr::Replacement(replacement_ir));
@@ -4827,9 +4858,12 @@ pub(crate) fn parse_oracle_ir(
         // silently drops it. Split so both layers see their conjunct.
         if let Some((statics, replacement)) = try_split_and_cant_become_untapped(&static_line) {
             for __item in statics {
-                emitter.static_at(item_line, __item);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
-            emitter.replacement_at(item_line, replacement);
+            emitter.replacement_ir_at(
+                item_line,
+                ReplacementIr::from_definition(&static_line, replacement),
+            );
             i += 1;
             continue;
         }
@@ -4863,7 +4897,10 @@ pub(crate) fn parse_oracle_ir(
                     let rider_gap =
                         TriggerDefinition::new(TriggerMode::Unknown("when you do".to_string()))
                             .description(line.to_string());
-                    emitter.static_at(item_line, static_def.description(line.to_string()));
+                    emitter.static_ir_at(
+                        item_line,
+                        StaticIr::from_definition(&line, static_def.description(line.to_string())),
+                    );
                     emitter.trigger_at(item_line, rider_gap);
                     i += 1;
                     continue;
@@ -4897,7 +4934,7 @@ pub(crate) fn parse_oracle_ir(
                     parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
                 ) {
                     emitter.keyword_at(item_line, kw);
-                    emitter.static_at(item_line, def);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_part, def));
                     i += 1;
                     continue;
                 }
@@ -5012,7 +5049,10 @@ pub(crate) fn parse_oracle_ir(
                             def.description = Some(line.to_string());
                         }
                         for __item in defs {
-                            emitter.static_at(item_line, __item);
+                            emitter.static_ir_at(
+                                item_line,
+                                StaticIr::from_definition(&effect_static, __item),
+                            );
                         }
                         i += 1;
                         continue;
@@ -5031,7 +5071,10 @@ pub(crate) fn parse_oracle_ir(
                                 None,
                                 None,
                             ) {
-                                emitter.static_at(item_line, __item);
+                                emitter.static_ir_at(
+                                    item_line,
+                                    StaticIr::from_definition(&clause_dot, __item),
+                                );
                             }
                         }
                     }
@@ -5052,7 +5095,10 @@ pub(crate) fn parse_oracle_ir(
                                 None,
                                 None,
                             ) {
-                                emitter.static_at(item_line, __item);
+                                emitter.static_ir_at(
+                                    item_line,
+                                    StaticIr::from_definition(&clause_dot, __item),
+                                );
                             }
                         }
                     }
@@ -5070,7 +5116,10 @@ pub(crate) fn parse_oracle_ir(
                 );
                 if !defs.is_empty() {
                     for __item in defs {
-                        emitter.static_at(item_line, __item);
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(&static_line, __item),
+                        );
                     }
                     i += 1;
                     continue;
@@ -5786,7 +5835,7 @@ pub(crate) fn parse_oracle_ir(
                     parse_flashback_trailing_self_spell_cost_reduction(reduction_part),
                 ) {
                     emitter.keyword_at(item_line, kw);
-                    emitter.static_at(item_line, def);
+                    emitter.static_ir_at(item_line, StaticIr::from_definition(reduction_part, def));
                     i += 1;
                     continue;
                 }
@@ -5899,7 +5948,10 @@ pub(crate) fn parse_oracle_ir(
                         }
                     }
                     for __item in defs {
-                        emitter.static_at(item_line, __item);
+                        emitter.static_ir_at(
+                            item_line,
+                            StaticIr::from_definition(&effect_static, __item),
+                        );
                     }
                     i += 1;
                     continue;
@@ -5927,7 +5979,7 @@ pub(crate) fn parse_oracle_ir(
         );
         if !defs.is_empty() {
             for __item in defs {
-                emitter.static_at(item_line, __item);
+                emitter.static_ir_at(item_line, StaticIr::from_definition(&static_line, __item));
             }
             i += 1;
             continue;

@@ -222,7 +222,7 @@ fn resolve_double_mana(
     for (mana_type, count) in mana_to_add {
         for _ in 0..count {
             // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 player_id,
                 ManaUnit {
                     color: mana_type,
@@ -712,7 +712,7 @@ mod tests {
         // Add 3 red mana to player 0's pool
         let p0 = state.players[0].id;
         for _ in 0..3 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 p0,
                 ManaUnit {
                     color: ManaType::Red,

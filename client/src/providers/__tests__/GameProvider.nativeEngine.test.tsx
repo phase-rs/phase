@@ -1,0 +1,561 @@
+import { cleanup, render, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
+
+type NativeAdapterEvent =
+  | { type: "reconnectFailed" }
+  | { type: "error"; message: string };
+
+const {
+  NativeEngineVersionMismatchError,
+  WebSocketAdapter,
+  WasmAdapter,
+  clearActiveGame,
+  ensureNativeEngine,
+  fetchAvatarArtUrl,
+  gameStoreState,
+  getSharedAdapter,
+  nativeAdapterInitialize,
+  nativeAdapters,
+  multiplayerDraftGetState,
+  multiplayerGetState,
+  multiplayerState,
+  preferences,
+  saveActiveGame,
+  useGameStore,
+  wasmAdapters,
+} = vi.hoisted(() => {
+  class NativeEngineVersionMismatchError extends Error {
+    constructor() {
+      super("Native engine version does not match this release");
+      this.name = "NativeEngineVersionMismatchError";
+    }
+  }
+
+  const nativeAdapterInitialize = vi.fn<() => Promise<void>>();
+  const fetchAvatarArtUrl = vi.fn<() => Promise<string | null>>();
+  const preferences = {
+    aiArchetypeFilter: "Any",
+    aiCoverageFloor: 0,
+    aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
+    cedhMode: false,
+    nativeEngineEnabled: true,
+  };
+  class WebSocketAdapter {
+    private listener: ((event: NativeAdapterEvent) => void) | null = null;
+    readonly nativeAiOptions: { aiSeats: Array<{ difficulty: string }> } | undefined;
+    dispose = vi.fn();
+    onEvent = vi.fn((listener: (event: NativeAdapterEvent) => void) => {
+      this.listener = listener;
+      return () => {
+        this.listener = null;
+      };
+    });
+
+    constructor(
+      _serverUrl: string,
+      _mode: string,
+      _deck: unknown,
+      _joinGameCode?: string,
+      _joinPassword?: string,
+      _reservationToken?: string,
+      _displayName?: string,
+      options?: { nativeAi?: { aiSeats: Array<{ difficulty: string }> } },
+    ) {
+      this.nativeAiOptions = options?.nativeAi;
+      nativeAdapters.push(this);
+    }
+
+    initialize(): Promise<void> {
+      return nativeAdapterInitialize();
+    }
+
+    emit(event: NativeAdapterEvent): void {
+      this.listener?.(event);
+    }
+  }
+  const nativeAdapters: WebSocketAdapter[] = [];
+
+  class WasmAdapter {
+    cardDbLoaded = true;
+    initialize = vi.fn(async () => {});
+    resetGameState = vi.fn();
+  }
+  const wasmAdapters: InstanceType<typeof WasmAdapter>[] = [];
+  const getSharedAdapter = vi.fn(() => {
+    const adapter = new WasmAdapter();
+    wasmAdapters.push(adapter);
+    return adapter;
+  });
+
+  const gameStoreState = {
+    adapter: null as unknown,
+    gameId: null as string | null,
+    gameState: null,
+    initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }) => {
+      gameStoreState.gameId = gameId;
+      gameStoreState.adapter = adapter;
+      await adapter.initialize();
+    }),
+    resumeGame: vi.fn(),
+    resumeP2PHost: vi.fn(),
+    reset: vi.fn(),
+    setEngineMode: vi.fn(),
+    setGameMode: vi.fn(),
+  };
+  const useGameStore = Object.assign(
+    vi.fn((selector: (state: typeof gameStoreState) => unknown) => selector(gameStoreState)),
+    {
+      getState: () => gameStoreState,
+      setState: (partial: Record<string, unknown>) => Object.assign(gameStoreState, partial),
+      subscribe: vi.fn<(listener: (state: typeof gameStoreState) => void) => () => void>(
+        () => () => {},
+      ),
+    },
+  );
+  const multiplayerState = {
+    displayName: "Player",
+    setActionPending: vi.fn(),
+    setConnectionStatus: vi.fn(),
+    setIsSpectator: vi.fn(),
+    setLatency: vi.fn(),
+    setSpectators: vi.fn(),
+    showToast: vi.fn(),
+  };
+  const multiplayerGetState = vi.fn(() => multiplayerState);
+  const multiplayerDraftGetState = vi.fn(() => ({ matchPairing: null }));
+
+  return {
+    NativeEngineVersionMismatchError,
+    WebSocketAdapter,
+    WasmAdapter,
+    clearActiveGame: vi.fn(),
+    ensureNativeEngine: vi.fn(),
+    fetchAvatarArtUrl,
+    gameStoreState,
+    getSharedAdapter,
+    nativeAdapterInitialize,
+    nativeAdapters,
+    multiplayerDraftGetState,
+    multiplayerGetState,
+    multiplayerState,
+    preferences,
+    saveActiveGame: vi.fn(),
+    useGameStore,
+    wasmAdapters,
+  };
+});
+
+vi.mock("../../adapter/ws-adapter", () => ({
+  NativeEngineVersionMismatchError,
+  WebSocketAdapter,
+}));
+
+vi.mock("../../adapter/wasm-adapter", () => ({
+  WasmAdapter,
+  getSharedAdapter,
+}));
+
+vi.mock("../../services/nativeEngine", () => ({
+  canAttemptNativeEngine: () => true,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin: () => ({ release: { version: "0.0.0-test" } }),
+}));
+
+vi.mock("../../services/nativeEngineSocket", () => ({
+  NativeEngineSocket: class {},
+}));
+
+vi.mock("../../stores/gameStore", () => ({
+  clearActiveGame,
+  clearGame: vi.fn(),
+  clearP2PHostSession: vi.fn(),
+  loadActiveGame: vi.fn(() => null),
+  loadGame: vi.fn(async () => null),
+  loadP2PHostSession: vi.fn(),
+  nextGameSessionGeneration: vi.fn(() => 1),
+  saveActiveGame,
+  useGameStore,
+}));
+
+vi.mock("../../constants/storage", () => ({
+  ACTIVE_DECK_KEY: "active-deck",
+  isRandomDeckSelection: () => false,
+  loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
+  loadSavedDeckBracket: () => null,
+}));
+
+vi.mock("../../services/aiDeckCatalog", () => ({
+  buildLegalAiDeckCatalog: vi.fn(async () => ({
+    candidates: [{ id: "ai-deck", deck: { main: ["Mountain"], sideboard: [] }, bracket: null }],
+  })),
+}));
+
+vi.mock("../../services/randomDeckSelection", () => ({
+  pickRandomDeckCandidate: (candidates: unknown[]) => candidates[0],
+}));
+
+vi.mock("../../services/deckParser", () => ({
+  expandParsedDeck: (deck: { main: string[]; sideboard: string[] }) => ({
+    main_deck: deck.main,
+    sideboard: deck.sideboard,
+    commander: [],
+    planar_deck: [],
+    scheme_deck: [],
+    signature_spell: [],
+    companion: [],
+    sticker_sheets: [],
+  }),
+}));
+
+vi.mock("../../data/formatRegistry", () => ({
+  formatSuppliesDeck: () => false,
+}));
+
+vi.mock("../../stores/preferencesStore", () => {
+  return {
+    AI_DECK_RANDOM: "Random",
+    usePreferencesStore: Object.assign(vi.fn(), { getState: () => preferences }),
+  };
+});
+
+vi.mock("../../services/cedhLock", () => ({
+  effectiveAiDifficulty: (difficulty: string) => difficulty,
+}));
+
+vi.mock("../../game/controllers/gameLoopController", () => ({
+  createGameLoopController: vi.fn(() => ({ start: vi.fn(), dispose: vi.fn(), stop: vi.fn() })),
+}));
+
+vi.mock("../../game/dispatch", () => ({
+  dispatchAction: vi.fn(),
+  processRemoteUpdate: vi.fn(),
+}));
+
+vi.mock("../../game/sessionCleanup", () => ({
+  clearPromptOverlayState: vi.fn(),
+}));
+
+vi.mock("../../hooks/useGameplayPreferencesSync", () => ({
+  useGameplayPreferencesSync: vi.fn(),
+}));
+
+vi.mock("../../audio/AudioManager", () => ({
+  audioManager: { setContext: vi.fn() },
+}));
+
+vi.mock("../../stores/multiplayerStore", () => ({
+  useMultiplayerStore: Object.assign(vi.fn(), { getState: multiplayerGetState, setState: vi.fn() }),
+}));
+
+vi.mock("../../stores/multiplayerDraftStore", () => ({
+  useMultiplayerDraftStore: { getState: multiplayerDraftGetState },
+}));
+
+vi.mock("../../services/playerAvatars", () => ({
+  assignRandomAvatars: vi.fn(() => [
+    { name: "Jace", cardName: "Jace, the Mind Sculptor" },
+    { name: "Liliana", cardName: "Liliana of the Veil" },
+  ]),
+  avatarCardNameForName: vi.fn(),
+  fetchAvatarArtUrl,
+}));
+
+vi.mock("../../services/multiplayerSession", () => ({
+  clearWsSession: vi.fn(),
+  loadWsSession: vi.fn(() => null),
+  saveWsSession: vi.fn(),
+}));
+
+vi.mock("../../pwa/updateMarker", () => ({
+  consumeRecentAutoUpdateMarker: vi.fn(),
+}));
+
+vi.mock("../../services/quickDraftPersistence", () => ({
+  loadDraftRun: vi.fn(),
+}));
+
+vi.mock("../../services/serverDetection", () => ({
+  detectServerUrl: vi.fn(async () => "ws://test-server"),
+}));
+
+import { GameProvider } from "../GameProvider";
+import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { clearPromptOverlayState } from "../../game/sessionCleanup";
+
+describe("GameProvider native AI routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useGameStore.subscribe.mockReset();
+    useGameStore.subscribe.mockImplementation(() => () => {});
+    clearActiveGame.mockReset();
+    ensureNativeEngine.mockReset();
+    fetchAvatarArtUrl.mockReset();
+    nativeAdapterInitialize.mockReset();
+    saveActiveGame.mockReset();
+    nativeAdapters.splice(0);
+    wasmAdapters.splice(0);
+    multiplayerDraftGetState.mockReset();
+    multiplayerDraftGetState.mockReturnValue({ matchPairing: null });
+    multiplayerGetState.mockReset();
+    multiplayerGetState.mockReturnValue(multiplayerState);
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    preferences.cedhMode = false;
+    gameStoreState.adapter = null;
+    gameStoreState.gameId = null;
+    gameStoreState.gameState = null;
+    ensureNativeEngine.mockResolvedValue({ port: 9375 });
+    fetchAvatarArtUrl.mockResolvedValue(null);
+    nativeAdapterInitialize.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    cleanup();
+    gameStoreState.adapter = null;
+    gameStoreState.gameId = null;
+    gameStoreState.gameState = null;
+  });
+
+  it("falls back to WASM when release parity rejects the native engine", async () => {
+    nativeAdapterInitialize.mockRejectedValue(new NativeEngineVersionMismatchError());
+
+    render(
+      <GameProvider gameId="native-parity" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith(
+        "wasm",
+        "server_version_mismatch",
+      );
+    });
+    expect(ensureNativeEngine).toHaveBeenCalledWith({ release: { version: "0.0.0-test" } });
+    expect(saveActiveGame).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "native-parity", mode: "ai" }),
+    );
+    expect(wasmAdapters).toHaveLength(1);
+  });
+
+  it("does not write a resume pointer for a native game and concedes on exit", async () => {
+    const view = render(
+      <GameProvider gameId="native-no-resume" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+    });
+    const nativeEngineModeCall = gameStoreState.setEngineMode.mock.calls.findIndex(
+      ([mode]) => mode === "native",
+    );
+    expect(nativeEngineModeCall).toBeGreaterThanOrEqual(0);
+    expect(gameStoreState.setEngineMode.mock.invocationCallOrder[nativeEngineModeCall]).toBeLessThan(
+      gameStoreState.initGame.mock.invocationCallOrder[0],
+    );
+    expect(clearActiveGame).toHaveBeenCalledOnce();
+    expect(saveActiveGame).not.toHaveBeenCalled();
+    expect(multiplayerGetState).not.toHaveBeenCalled();
+
+    view.unmount();
+    expect(nativeAdapters).toHaveLength(1);
+    expect(nativeAdapters[0].dispose).toHaveBeenCalledWith({ concede: true });
+  });
+
+  it("uses each commander's name for native AI opponents", async () => {
+    gameStoreState.gameId = "native-commander-names";
+    gameStoreState.gameState = {
+      command_zone: [1, 2],
+      objects: {
+        1: { name: "Aesi, Tyrant of Gyre Strait", owner: 0, is_commander: true },
+        2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+      },
+    } as never;
+
+    render(
+      <GameProvider gameId="native-commander-names" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerNames: new Map([[0, "Aesi"], [1, "Muldrotha"]]),
+        }),
+      );
+    });
+  });
+
+  it("waits for the new AI game state before assigning commander names", async () => {
+    let gameStateListener: ((state: typeof gameStoreState) => void) | undefined;
+    useGameStore.subscribe.mockImplementation((listener) => {
+      gameStateListener = listener;
+      return () => {};
+    });
+    gameStoreState.gameId = "previous-ai-game";
+    gameStoreState.gameState = {
+      command_zone: [1, 2],
+      objects: {
+        1: { name: "Aesi, Tyrant of Gyre Strait", owner: 0, is_commander: true },
+        2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+      },
+    } as never;
+
+    render(
+      <GameProvider gameId="next-ai-game" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.initGame.mock.calls.some(([id]) => id === "next-ai-game")).toBe(true);
+    });
+    expect(useMultiplayerStore.setState).not.toHaveBeenCalled();
+
+    gameStoreState.gameId = "next-ai-game";
+    gameStoreState.gameState = {
+      command_zone: [3, 4],
+      objects: {
+        3: { name: "Tatyova, Benthic Druid", owner: 0, is_commander: true },
+        4: { name: "Krenko, Mob Boss", owner: 1, is_commander: true },
+      },
+    } as never;
+    expect(gameStateListener).toBeDefined();
+    gameStateListener!(gameStoreState);
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerNames: new Map([[0, "Tatyova"], [1, "Krenko"]]),
+        }),
+      );
+    });
+  });
+
+  it("preserves every exact server AI difficulty label from buildLocalAiDeckList", async () => {
+    preferences.aiSeats = [
+      { difficulty: "VeryEasy", deckId: "Random" },
+      { difficulty: "Easy", deckId: "Random" },
+      { difficulty: "Medium", deckId: "Random" },
+      { difficulty: "Hard", deckId: "Random" },
+      { difficulty: "VeryHard", deckId: "Random" },
+      { difficulty: "CEDH", deckId: "Random" },
+    ];
+
+    render(
+      <GameProvider gameId="native-difficulties" mode="ai" playerCount={7}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats.map((seat) => seat.difficulty)).toEqual([
+      "VeryEasy",
+      "Easy",
+      "Medium",
+      "Hard",
+      "VeryHard",
+      "CEDH",
+    ]);
+  });
+
+  async function expectNativeTerminalEvent(event: NativeAdapterEvent) {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    nativeAdapter.emit(event);
+
+    expect(nativeAdapter.dispose).toHaveBeenCalledOnce();
+    expect(gameStoreState.adapter).toBeNull();
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+  }
+
+  it("disposes a native game and surfaces reconnect failure as terminal", async () => {
+    await expectNativeTerminalEvent({ type: "reconnectFailed" });
+  });
+
+  it("disposes a native game and surfaces bridge errors as terminal", async () => {
+    await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("clears prompt overlays when a draft match unmounts", () => {
+    gameStoreState.gameId = "draft-match";
+    gameStoreState.adapter = {} as never;
+    gameStoreState.gameState = {} as never;
+
+    const view = render(
+      <GameProvider gameId="draft-match" mode="draft-match">
+        <div />
+      </GameProvider>,
+    );
+
+    vi.mocked(clearPromptOverlayState).mockClear();
+    view.unmount();
+
+    expect(clearPromptOverlayState).toHaveBeenCalledOnce();
+  });
+});
+
+describe("GameProvider online deck rejection", () => {
+  it("surfaces only typed deck rejections from online initialization", async () => {
+    const onWsEvent = vi.fn();
+    nativeAdapterInitialize.mockRejectedValue(
+      new AdapterError(AdapterErrorCode.DECK_REJECTED, "Invalid deck contents", false),
+    );
+
+    render(
+      <GameProvider gameId="online-deck-rejected" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(onWsEvent).toHaveBeenCalledWith({
+        type: "deckRejected",
+        reason: "Invalid deck contents",
+      });
+    });
+
+    cleanup();
+    onWsEvent.mockClear();
+    const connectionStatusCallCount = multiplayerState.setConnectionStatus.mock.calls.length;
+    nativeAdapterInitialize.mockRejectedValue(
+      new AdapterError(
+        AdapterErrorCode.ACTION_REJECTED,
+        "Deck not legal for this format",
+        true,
+      ),
+    );
+
+    render(
+      <GameProvider gameId="online-action-rejected" mode="online" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(
+        multiplayerState.setConnectionStatus.mock.calls.slice(connectionStatusCallCount),
+      ).toContainEqual(["disconnected"]);
+    });
+    expect(onWsEvent).not.toHaveBeenCalledWith(expect.objectContaining({ type: "deckRejected" }));
+  });
+});

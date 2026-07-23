@@ -229,6 +229,60 @@ fn register_transient_effect(
         }
     }
 
+    // CR 611.2c + CR 613.11 + CR 508.1d: A duration-bound combat REQUIREMENT
+    // ("until your next turn, creatures your opponents control attack each
+    // combat if able and attack a player other than you if able") modifies no
+    // characteristics and changes no controller, so per CR 611.2c it modifies
+    // the rules of the game and "can affect objects that weren't affected when
+    // that continuous effect began". Official rulings agree: Kardur
+    // (2021-02-05) "including any that enter the battlefield after the ability
+    // resolves"; Maximum Carnage (2025-09-19) "regardless of whether or not they
+    // were on the battlefield at the time the ability resolved". Keep the
+    // affected filter INTACT on one TCE so the layer pass re-evaluates WHICH
+    // OBJECTS it matches against the live board every derivation, instead of
+    // letting the broadcast branch below freeze it to a resolution-time
+    // `SpecificObject` set. Mirrors the `MayLookAtFaceDown` / `ReduceAbilityCost`
+    // branches above; unlike those, this one IS grafted onto objects, so it
+    // stays out of the layer skip list.
+    //
+    // Only the OBJECT SET is re-derived. The filter's "your opponents" PLAYER
+    // reference must NOT be — CR 109.5: for a triggered ability, "you" is the
+    // controller of the object when the ability triggered; CR 611.2c makes only
+    // "the set of objects" dynamic. `layers.rs` reads that player from this
+    // TCE's snapshotted `controller` rather than from the source object's
+    // current controller, so a Kardur that changes controller mid-window does
+    // not flip the bound population onto its new controller's opponents.
+    //
+    // The inherited-target guard is a shape check, not a card check: no printed
+    // card reaches it today (both members carry a broadcast `Typed` filter), but
+    // `subject::static_affected_for_application` returns `TargetFilter::ParentTarget`
+    // whenever the subject is a chosen target, and a `ParentTarget` TCE is
+    // exactly what the broadcast arm below refuses. Falling through lets the
+    // chosen-targets arms bind the single named object — correct for a targeted
+    // grant, where CR 611.2c's dynamic-population concern does not arise.
+    if modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: crate::types::statics::StaticMode::MustAttackAwayFromSource,
+            }
+        )
+    }) {
+        if let Some(affected) = static_def.affected.clone() {
+            if !generic_effect_affected_uses_inherited_targets(&affected) {
+                state.add_transient_continuous_effect(
+                    ability.source_id,
+                    ability.controller,
+                    duration.clone(),
+                    affected,
+                    modifications,
+                    static_def.condition.clone(),
+                );
+                return;
+            }
+        }
+    }
+
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
