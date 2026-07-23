@@ -499,13 +499,22 @@
     "clickToFocus": "clicca per mettere a fuoco"
   },
   "manaPool": {
+    "onlyForSpell": "Spendi solo per lanciare magie",
     "onlyForSpellType": "Spendi solo per lanciare magie di un tipo specifico",
     "onlyForCreatureType": "Spendi solo per lanciare una magia creatura del tipo scelto",
     "onlyForTypeSpellsOrAbilities": "Spendi solo su magie o abilità di un tipo specifico",
+    "onlyForTaggedActivation": "Spendi solo per attivare abilità di un tipo specifico",
     "onlyForSpellWithKeywordKind": "Spendi solo per lanciare magie con una parola chiave specifica",
     "onlyForSpellWithKeywordKindFromZone": "Spendi solo per lanciare magie con parola chiave da un cimitero",
+    "onlyForSpellWithManaValue": "Spendi solo per lanciare magie che soddisfano un requisito di valore di mana",
+    "onlyForSpellMatchingCostCriteria": "Spendi solo per lanciare magie che soddisfano un requisito di costo",
+    "onlyForSpellWithColorCount": "Spendi solo per lanciare magie che soddisfano un requisito sul numero di colori",
+    "onlyForSpellFromZone": "Spendi solo per lanciare magie da una zona consentita",
+    "onlyForFaceDownSpell": "Spendi solo per lanciare magie a faccia in giù",
     "onlyForActivation": "Spendi solo per attivare abilità",
     "onlyForXCosts": "Spendi solo su costi che includono {X}",
+    "onlyForAny": "Spendi solo per uno degli usi elencati",
+    "onlyForSpecialAction": "Spendi solo per un'azione speciale specifica",
     "convokePayment": "Pagamento di Convocare",
     "grantsProperty": "Concede una proprietà alla magia",
     "grantCantBeCountered": "Spendi per questa magia per renderla impossibile da neutralizzare"

@@ -499,13 +499,22 @@
     "clickToFocus": "haz clic para enfocar"
   },
   "manaPool": {
+    "onlyForSpell": "Gastar solo para lanzar hechizos",
     "onlyForSpellType": "Gastar solo para lanzar hechizos de un tipo específico",
     "onlyForCreatureType": "Gastar solo para lanzar un hechizo de criatura del tipo elegido",
     "onlyForTypeSpellsOrAbilities": "Gastar solo en hechizos o habilidades de un tipo específico",
+    "onlyForTaggedActivation": "Gastar solo para activar habilidades de un tipo específico",
     "onlyForSpellWithKeywordKind": "Gastar solo para lanzar hechizos con una palabra clave específica",
     "onlyForSpellWithKeywordKindFromZone": "Gastar solo para lanzar hechizos con palabra clave desde un cementerio",
+    "onlyForSpellWithManaValue": "Gastar solo para lanzar hechizos que cumplan un requisito de valor de maná",
+    "onlyForSpellMatchingCostCriteria": "Gastar solo para lanzar hechizos que cumplan un requisito de coste",
+    "onlyForSpellWithColorCount": "Gastar solo para lanzar hechizos que cumplan un requisito de cantidad de colores",
+    "onlyForSpellFromZone": "Gastar solo para lanzar hechizos desde una zona permitida",
+    "onlyForFaceDownSpell": "Gastar solo para lanzar hechizos boca abajo",
     "onlyForActivation": "Gastar solo para activar habilidades",
     "onlyForXCosts": "Gastar solo en costes que incluyan {X}",
+    "onlyForAny": "Gastar solo en uno de los usos indicados",
+    "onlyForSpecialAction": "Gastar solo en una acción especial específica",
     "convokePayment": "Pago de convocar",
     "grantsProperty": "Otorga una propiedad al hechizo",
     "grantCantBeCountered": "Gástalo en este hechizo para que no se pueda contrarrestar"

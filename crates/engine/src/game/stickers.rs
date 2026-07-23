@@ -17,6 +17,7 @@ use crate::types::keywords::Keyword;
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::mana::ManaCost;
 use crate::types::player::{PlayerCounterKind, PlayerId};
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::stickers::{AppliedSticker, StickerKind, StickerLocator};
 use crate::types::zones::Zone;
 
@@ -373,13 +374,24 @@ pub fn apply_selected_sticker(
     };
 
     if pay_ticket {
-        let Some(player_entry) = state.players.iter_mut().find(|p| p.id == player) else {
+        // CR 122.1: Ticket payment removes counters through the scalar authority.
+        let Some(player_entry) = state.players.iter().find(|p| p.id == player) else {
             return;
         };
         if player_entry.player_counter(&PlayerCounterKind::Ticket) < ticket_cost {
             return;
         }
-        player_entry.remove_player_counters(&PlayerCounterKind::Ticket, ticket_cost);
+        if ticket_cost > 0 {
+            state
+                .resolve_and_apply_player_edit(
+                    player,
+                    ResolvedPlayerEdit::Counter {
+                        kind: PlayerCounterKind::Ticket,
+                        delta: -(ticket_cost as i32),
+                    },
+                )
+                .expect("the checked ticket cost must satisfy its resolved precondition");
+        }
     }
 
     let timestamp = state.next_timestamp();

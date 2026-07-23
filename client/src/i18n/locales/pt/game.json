@@ -499,13 +499,22 @@
     "clickToFocus": "clique para focar"
   },
   "manaPool": {
+    "onlyForSpell": "Gaste apenas para conjurar mágicas",
     "onlyForSpellType": "Gaste apenas para conjurar mágicas de um tipo específico",
     "onlyForCreatureType": "Gaste apenas para conjurar uma mágica de criatura do tipo escolhido",
     "onlyForTypeSpellsOrAbilities": "Gaste apenas em mágicas ou habilidades de um tipo específico",
+    "onlyForTaggedActivation": "Gaste apenas para ativar habilidades de um tipo específico",
     "onlyForSpellWithKeywordKind": "Gaste apenas para conjurar mágicas com uma palavra-chave específica",
     "onlyForSpellWithKeywordKindFromZone": "Gaste apenas para conjurar mágicas com palavra-chave de um cemitério",
+    "onlyForSpellWithManaValue": "Gaste apenas para conjurar mágicas que atendam a um requisito de valor de mana",
+    "onlyForSpellMatchingCostCriteria": "Gaste apenas para conjurar mágicas que atendam a um requisito de custo",
+    "onlyForSpellWithColorCount": "Gaste apenas para conjurar mágicas que atendam a um requisito de quantidade de cores",
+    "onlyForSpellFromZone": "Gaste apenas para conjurar mágicas a partir de uma zona permitida",
+    "onlyForFaceDownSpell": "Gaste apenas para conjurar mágicas com a face voltada para baixo",
     "onlyForActivation": "Gaste apenas para ativar habilidades",
     "onlyForXCosts": "Gaste apenas em custos que incluam {X}",
+    "onlyForAny": "Gaste apenas em um dos usos listados",
+    "onlyForSpecialAction": "Gaste apenas em uma ação especial específica",
     "convokePayment": "Pagamento de convocação",
     "grantsProperty": "Concede uma propriedade à mágica",
     "grantCantBeCountered": "Gaste nesta mágica para que ela não possa ser anulada"

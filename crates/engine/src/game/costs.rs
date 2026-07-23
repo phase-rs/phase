@@ -741,8 +741,14 @@ fn pay_ability_cost_inner(
                     "Cannot pay untap cost: permanent is already untapped".to_string(),
                 ));
             }
-            let obj = state.objects.get_mut(&source_id).unwrap();
-            obj.tapped = false;
+            let untapped = crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                source_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                false,
+            )
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            debug_assert!(untapped, "preflighted untap cost must transition status");
             events.push(GameEvent::PermanentUntapped {
                 object_id: source_id,
             });
@@ -1226,6 +1232,7 @@ fn pay_ability_cost_inner(
                     library_position: None,
                     is_cost_payment: true,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(PaymentOutcome::Paused {
                     remaining_cost: None,
@@ -1298,11 +1305,20 @@ fn pay_ability_cost_inner(
                 resolve_cost_quantity(state, amount, player, source_id, scope).max(0),
             )
             .unwrap_or(0);
-            let player_state = &mut state.players[player.0 as usize];
-            if player_state.energy < amount {
+            let energy = state.players[player.0 as usize].energy;
+            if energy < amount {
                 return Ok(payment_failed("Not enough energy"));
             }
-            player_state.energy -= amount;
+            if amount > 0 {
+                state
+                    .resolve_and_apply_player_edit(
+                        player,
+                        crate::types::resolved_commands::ResolvedPlayerEdit::Energy {
+                            delta: -(amount as i32),
+                        },
+                    )
+                    .expect("preflighted energy payment must apply");
+            }
             events.push(GameEvent::EnergyChanged {
                 player,
                 delta: -(amount as i32),

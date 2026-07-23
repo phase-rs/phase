@@ -8,27 +8,34 @@ import type {
 // Discriminant key of a `ManaRestriction` — the bare string for unit variants,
 // or the single object key for data variants. Exhaustive so adding a new
 // restriction variant forces an update to the label map below.
-export type ManaRestrictionTag =
-  | "OnlyForSpellType"
-  | "OnlyForCreatureType"
-  | "OnlyForTypeSpellsOrAbilities"
-  | "OnlyForSpellWithKeywordKind"
-  | "OnlyForSpellWithKeywordKindFromZone"
-  | "OnlyForActivation"
-  | "OnlyForXCosts"
-  | "ConvokePayment";
+type ExternallyTaggedVariantName<T> = T extends string
+  ? T
+  : T extends Record<infer K, unknown>
+    ? Extract<K, string>
+    : never;
+
+export type ManaRestrictionTag = ExternallyTaggedVariantName<ManaRestriction>;
 
 // i18n key (under the `manaPool` group) per restriction variant. Exhaustive
 // `Record` — adding a `ManaRestriction` variant without a tooltip key here is a
 // type error.
 export const RESTRICTION_LABEL_KEYS: Record<ManaRestrictionTag, string> = {
+  OnlyForSpell: "manaPool.onlyForSpell",
   OnlyForSpellType: "manaPool.onlyForSpellType",
   OnlyForCreatureType: "manaPool.onlyForCreatureType",
   OnlyForTypeSpellsOrAbilities: "manaPool.onlyForTypeSpellsOrAbilities",
+  OnlyForTaggedActivation: "manaPool.onlyForTaggedActivation",
   OnlyForSpellWithKeywordKind: "manaPool.onlyForSpellWithKeywordKind",
   OnlyForSpellWithKeywordKindFromZone: "manaPool.onlyForSpellWithKeywordKindFromZone",
+  OnlyForSpellWithManaValue: "manaPool.onlyForSpellWithManaValue",
+  OnlyForSpellMatchingCostCriteria: "manaPool.onlyForSpellMatchingCostCriteria",
+  OnlyForSpellWithColorCount: "manaPool.onlyForSpellWithColorCount",
+  OnlyForSpellFromZone: "manaPool.onlyForSpellFromZone",
+  OnlyForFaceDownSpell: "manaPool.onlyForFaceDownSpell",
   OnlyForActivation: "manaPool.onlyForActivation",
   OnlyForXCosts: "manaPool.onlyForXCosts",
+  OnlyForAny: "manaPool.onlyForAny",
+  OnlyForSpecialAction: "manaPool.onlyForSpecialAction",
   ConvokePayment: "manaPool.convokePayment",
 };
 

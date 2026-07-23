@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "commander",
   "version": 1,
-  "updated": "2026-07-22T00:00:00Z",
+  "updated": "2026-07-23T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/commander",
   "decks": [
     {
@@ -2416,14 +2416,6 @@
         },
         {
           "count": 1,
-          "name": "Stormcatch Mentor"
-        },
-        {
-          "count": 1,
-          "name": "Goblin Electromancer"
-        },
-        {
-          "count": 1,
           "name": "Tidal Barracuda"
         },
         {
@@ -2464,10 +2456,6 @@
         },
         {
           "count": 1,
-          "name": "Karn's Temporal Sundering"
-        },
-        {
-          "count": 1,
           "name": "Nexus of Fate"
         },
         {
@@ -2489,10 +2477,6 @@
         {
           "count": 1,
           "name": "Thrill of Possibility"
-        },
-        {
-          "count": 1,
-          "name": "Wizards of Thay"
         },
         {
           "count": 1,
@@ -2645,6 +2629,22 @@
         {
           "count": 1,
           "name": "Emergence Zone"
+        },
+        {
+          "count": 1,
+          "name": "Mystical Tutor"
+        },
+        {
+          "count": 1,
+          "name": "Vampiric Tutor"
+        },
+        {
+          "count": 1,
+          "name": "Thassa's Oracle"
+        },
+        {
+          "count": 1,
+          "name": "Demonic Tutor"
         }
       ],
       "sideboard": []

@@ -54,6 +54,8 @@ export default defineConfig({
       process.env.DEFAULT_MULTIPLAYER_SERVER_URL || "wss://lobby.phase-rs.dev/ws",
     ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
+    __PREVIEW_SITE_URL__: JSON.stringify("https://preview.phase-rs.dev"),
+    __RELEASE_SITE_URL__: JSON.stringify("https://phase-rs.dev"),
     __IS_RELEASE_BUILD__: JSON.stringify(false),
     // Empty ⇒ telemetry is build-disabled in tests (no network egress).
     __TELEMETRY_URL__: JSON.stringify(""),

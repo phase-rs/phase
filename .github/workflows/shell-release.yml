@@ -283,6 +283,7 @@ jobs:
       - name: Stage shell artifacts
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p staging
           find client/src-tauri/target/release/bundle \
             -maxdepth 2 \
@@ -290,6 +291,24 @@ jobs:
                -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \
                -o -name '*.exe' -o -name '*.exe.sig' \) \
             -exec cp {} staging/ \;
+
+          rename_artifact() {
+            local pattern="$1"
+            local destination="$2"
+            local source
+            source=$(find staging -maxdepth 1 -type f -name "$pattern" -print -quit)
+            [ -n "$source" ] || return 0
+            mv "$source" "staging/$destination"
+            if [ -f "$source.sig" ]; then
+              mv "$source.sig" "staging/$destination.sig"
+            fi
+          }
+
+          rename_artifact '*-setup.exe' 'Phase-Desktop-Windows-x64-Setup.exe'
+          rename_artifact '*.dmg' 'Phase-Desktop-macOS-Apple-Silicon.dmg'
+          rename_artifact '*.app.tar.gz' 'Phase-Desktop-macOS-Apple-Silicon.app.tar.gz'
+          rename_artifact '*.AppImage' 'Phase-Desktop-Linux-x86_64.AppImage'
+          rename_artifact '*.deb' 'Phase-Desktop-Linux-x86_64.deb'
           ls -la staging/
 
       - name: Upload shell artifact
@@ -335,9 +354,9 @@ jobs:
               "$REPO" "$TAG" "$(jq -rn --arg value "$name" '$value | @uri')"
           }
 
-          LINUX_PAYLOAD=$(first_match "artifacts/shell-tauri-linux/*.AppImage")
-          MACOS_PAYLOAD=$(first_match "artifacts/shell-tauri-macos/*.app.tar.gz")
-          WINDOWS_PAYLOAD=$(first_match "artifacts/shell-tauri-windows/*-setup.exe")
+          LINUX_PAYLOAD=$(first_match "artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage")
+          MACOS_PAYLOAD=$(first_match "artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz")
+          WINDOWS_PAYLOAD=$(first_match "artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe")
 
           LINUX_SIG=""
           MACOS_SIG=""
@@ -368,13 +387,23 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.SHELL_TAG }}
-          name: ${{ env.SHELL_TAG }}
-          body: Shell installer release.
+          name: Phase Desktop v${{ env.SHELL_VERSION }}
+          body: |
+            ## Install Phase Desktop
+
+            Download the installer for your platform:
+
+            - **Windows:** `Phase-Desktop-Windows-x64-Setup.exe`
+            - **macOS (Apple Silicon):** `Phase-Desktop-macOS-Apple-Silicon.dmg`
+            - **Linux:** `Phase-Desktop-Linux-x86_64.deb` or `Phase-Desktop-Linux-x86_64.AppImage`
+
+            This is the official desktop app for [phase-rs.dev](https://phase-rs.dev).
+            `update.json` is used by automatic updates; it is not a manual download.
           fail_on_unmatched_files: true
           files: |
-            artifacts/shell-tauri-linux/*.deb
-            artifacts/shell-tauri-linux/*.AppImage
-            artifacts/shell-tauri-macos/*.dmg
-            artifacts/shell-tauri-macos/*.app.tar.gz
-            artifacts/shell-tauri-windows/*.exe
+            artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.deb
+            artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage
+            artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.dmg
+            artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz
+            artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe
             artifacts/update.json

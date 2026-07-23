@@ -30,8 +30,37 @@ type TriggerTargetSelectionWaitingFor = Extract<
 >;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type AssistPaymentWaitingFor = Extract<WaitingFor, { type: "AssistPayment" }>;
+type CastOfferWaitingFor = Extract<WaitingFor, { type: "CastOffer" }>;
 type LoopShortcutWaitingFor = Extract<WaitingFor, { type: "LoopShortcut" }>;
 type RespondToShortcutWaitingFor = Extract<WaitingFor, { type: "RespondToShortcut" }>;
+type WaitingForWithData = Extract<WaitingFor, { data: object }>;
+
+/**
+ * Shared base for a concrete `WaitingFor` variant factory.
+ *
+ * `withData` merges top-level payload fields rather than replacing the entire
+ * `data` object, so callers retain the variant's valid defaults while changing
+ * only the fields relevant to a test.
+ */
+export abstract class WaitingForFactory<T extends WaitingForWithData> extends Factory<T> {
+  withData(data: Partial<T["data"]>) {
+    return this.afterBuild((waitingFor) => {
+      Object.assign(waitingFor.data, data);
+      return waitingFor;
+    });
+  }
+}
+
+abstract class PlayerWaitingForFactory<
+  T extends WaitingForWithData & { data: { player: PlayerId } },
+> extends WaitingForFactory<T> {
+  forPlayer(player: PlayerId) {
+    return this.afterBuild((waitingFor) => {
+      waitingFor.data.player = player;
+      return waitingFor;
+    });
+  }
+}
 
 /**
  * Convenience-method factory for `Player`:
@@ -123,7 +152,9 @@ export const buildCommanderFormatConfig = (
   });
 };
 
-export const priorityWaitingForFactory = Factory.define<PriorityWaitingFor>(() => ({
+export class PriorityWaitingForFactory extends PlayerWaitingForFactory<PriorityWaitingFor> {}
+
+export const priorityWaitingForFactory = PriorityWaitingForFactory.define((): PriorityWaitingFor => ({
   type: "Priority",
   data: { player: 0 },
 }));
@@ -131,10 +162,12 @@ export const priorityWaitingForFactory = Factory.define<PriorityWaitingFor>(() =
 export const buildPriorityWaitingFor = (
   overrides: Partial<PriorityWaitingFor> = {},
 ): PriorityWaitingFor => {
-  return { ...priorityWaitingForFactory.build(), ...overrides };
+  return priorityWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
-export const manaPaymentWaitingForFactory = Factory.define<ManaPaymentWaitingFor>(() => ({
+export class ManaPaymentWaitingForFactory extends PlayerWaitingForFactory<ManaPaymentWaitingFor> {}
+
+export const manaPaymentWaitingForFactory = ManaPaymentWaitingForFactory.define((): ManaPaymentWaitingFor => ({
   type: "ManaPayment",
   data: { player: 0 },
 }));
@@ -142,7 +175,7 @@ export const manaPaymentWaitingForFactory = Factory.define<ManaPaymentWaitingFor
 export const buildManaPaymentWaitingFor = (
   overrides: Partial<ManaPaymentWaitingFor> = {},
 ): ManaPaymentWaitingFor => {
-  return { ...manaPaymentWaitingForFactory.build(), ...overrides };
+  return manaPaymentWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
 export const pendingCastFactory = Factory.define<PendingCast>(() => ({
@@ -181,8 +214,10 @@ export const buildTargetSelectionProgress = (
   return { ...targetSelectionProgressFactory.build(), ...overrides };
 };
 
+export class TargetSelectionWaitingForFactory extends PlayerWaitingForFactory<TargetSelectionWaitingFor> {}
+
 export const targetSelectionWaitingForFactory =
-  Factory.define<TargetSelectionWaitingFor>(() => ({
+  TargetSelectionWaitingForFactory.define((): TargetSelectionWaitingFor => ({
     type: "TargetSelection",
     data: {
       player: 0,
@@ -195,11 +230,13 @@ export const targetSelectionWaitingForFactory =
 export const buildTargetSelectionWaitingFor = (
   overrides: Partial<TargetSelectionWaitingFor> = {},
 ): TargetSelectionWaitingFor => {
-  return { ...targetSelectionWaitingForFactory.build(), ...overrides };
+  return targetSelectionWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class TriggerTargetSelectionWaitingForFactory extends PlayerWaitingForFactory<TriggerTargetSelectionWaitingFor> {}
+
 export const triggerTargetSelectionWaitingForFactory =
-  Factory.define<TriggerTargetSelectionWaitingFor>(() => ({
+  TriggerTargetSelectionWaitingForFactory.define((): TriggerTargetSelectionWaitingFor => ({
     type: "TriggerTargetSelection",
     data: {
       player: 0,
@@ -211,11 +248,13 @@ export const triggerTargetSelectionWaitingForFactory =
 export const buildTriggerTargetSelectionWaitingFor = (
   overrides: Partial<TriggerTargetSelectionWaitingFor> = {},
 ): TriggerTargetSelectionWaitingFor => {
-  return { ...triggerTargetSelectionWaitingForFactory.build(), ...overrides };
+  return triggerTargetSelectionWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class ChooseXValueWaitingForFactory extends PlayerWaitingForFactory<ChooseXValueWaitingFor> {}
+
 export const chooseXValueWaitingForFactory =
-  Factory.define<ChooseXValueWaitingFor>(() => ({
+  ChooseXValueWaitingForFactory.define((): ChooseXValueWaitingFor => ({
     type: "ChooseXValue",
     data: {
       player: 0,
@@ -227,11 +266,21 @@ export const chooseXValueWaitingForFactory =
 export const buildChooseXValueWaitingFor = (
   overrides: Partial<ChooseXValueWaitingFor> = {},
 ): ChooseXValueWaitingFor => {
-  return { ...chooseXValueWaitingForFactory.build(), ...overrides };
+  return chooseXValueWaitingForFactory.withData(overrides.data ?? {}).build();
 };
 
+export class AssistPaymentWaitingForFactory extends WaitingForFactory<AssistPaymentWaitingFor> {
+  withCaster(caster: PlayerId) {
+    return this.withData({ caster });
+  }
+
+  withChosen(chosen: PlayerId) {
+    return this.withData({ chosen });
+  }
+}
+
 export const assistPaymentWaitingForFactory =
-  Factory.define<AssistPaymentWaitingFor>(() => ({
+  AssistPaymentWaitingForFactory.define((): AssistPaymentWaitingFor => ({
     type: "AssistPayment",
     data: {
       caster: 1,
@@ -243,7 +292,48 @@ export const assistPaymentWaitingForFactory =
 export const buildAssistPaymentWaitingFor = (
   overrides: Partial<AssistPaymentWaitingFor> = {},
 ): AssistPaymentWaitingFor => {
-  return { ...assistPaymentWaitingForFactory.build(), ...overrides };
+  return assistPaymentWaitingForFactory.withData(overrides.data ?? {}).build();
+};
+
+export class CastOfferWaitingForFactory extends PlayerWaitingForFactory<CastOfferWaitingFor> {
+  withKind(kind: CastOfferWaitingFor["data"]["kind"]) {
+    return this.withData({ kind });
+  }
+
+  adventure(objectId: ObjectId, cardId: ObjectId = objectId) {
+    return this.withKind({
+      type: "Adventure",
+      object_id: objectId,
+      card_id: cardId,
+      payment_mode: { type: "Auto" },
+    });
+  }
+}
+
+export const castOfferWaitingForFactory = CastOfferWaitingForFactory.define((): CastOfferWaitingFor => ({
+  type: "CastOffer",
+  data: {
+    player: 0,
+    kind: {
+      type: "Adventure",
+      object_id: 1,
+      card_id: 1,
+      payment_mode: { type: "Auto" },
+    },
+  },
+}));
+
+export const buildCastOfferWaitingFor = ({
+  player,
+  kind,
+}: {
+  player?: PlayerId;
+  kind?: CastOfferWaitingFor["data"]["kind"];
+} = {}): CastOfferWaitingFor => {
+  let factory = castOfferWaitingForFactory;
+  if (player !== undefined) factory = factory.forPlayer(player);
+  if (kind !== undefined) factory = factory.withKind(kind);
+  return factory.build();
 };
 
 interface WaitingForTransient {
@@ -260,35 +350,44 @@ interface WaitingForTransient {
  * variants never deep-merges one variant's `data` keys into another's.
  * Use one variant method per chain.
  */
-export class WaitingForFactory extends Factory<WaitingFor, WaitingForTransient> {
+export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTransient> {
   priority(player: PlayerId = 0) {
-    return this.variant(buildPriorityWaitingFor({ data: { player } }));
+    return this.variant(priorityWaitingForFactory.forPlayer(player).build());
   }
 
   manaPayment(player: PlayerId = 0) {
-    return this.variant(buildManaPaymentWaitingFor({ data: { player } }));
+    return this.variant(manaPaymentWaitingForFactory.forPlayer(player).build());
   }
 
   targetSelection(data: Partial<TargetSelectionWaitingFor["data"]> = {}) {
-    const base = buildTargetSelectionWaitingFor();
-    return this.variant({ ...base, data: { ...base.data, ...data } });
+    return this.variant(targetSelectionWaitingForFactory.withData(data).build());
   }
 
   triggerTargetSelection(
     data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
   ) {
-    const base = buildTriggerTargetSelectionWaitingFor();
-    return this.variant({ ...base, data: { ...base.data, ...data } });
+    return this.variant(triggerTargetSelectionWaitingForFactory.withData(data).build());
   }
 
   chooseXValue(data: Partial<ChooseXValueWaitingFor["data"]> = {}) {
-    const base = buildChooseXValueWaitingFor();
-    return this.variant({ ...base, data: { ...base.data, ...data } });
+    return this.variant(chooseXValueWaitingForFactory.withData(data).build());
   }
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
-    const base = buildAssistPaymentWaitingFor();
-    return this.variant({ ...base, data: { ...base.data, ...data } });
+    return this.variant(assistPaymentWaitingForFactory.withData(data).build());
+  }
+
+  castOffer({
+    player,
+    kind,
+  }: {
+    player?: PlayerId;
+    kind?: CastOfferWaitingFor["data"]["kind"];
+  } = {}) {
+    let factory = castOfferWaitingForFactory;
+    if (player !== undefined) factory = factory.forPlayer(player);
+    if (kind !== undefined) factory = factory.withKind(kind);
+    return this.variant(factory.build());
   }
 
   private variant(variant: WaitingFor) {
@@ -296,11 +395,43 @@ export class WaitingForFactory extends Factory<WaitingFor, WaitingForTransient> 
   }
 }
 
-export const waitingForFactory = WaitingForFactory.define(
+export const waitingForFactory = WaitingForVariantFactory.define(
   ({ transientParams }) => transientParams.variant ?? buildPriorityWaitingFor(),
 );
 
-export const loopShortcutWaitingForFactory = Factory.define<LoopShortcutWaitingFor>(() => ({
+export class LoopShortcutWaitingForFactory extends WaitingForFactory<LoopShortcutWaitingFor> {
+  withProposer(proposer: PlayerId) {
+    return this.withData({ proposer });
+  }
+
+  withPredictedWinner(predictedWinner: PlayerId | null) {
+    return this.withData({ predicted_winner: predictedWinner });
+  }
+
+  withCertificate(certificate: Partial<LoopCertificate>) {
+    return this.afterBuild((waitingFor) => {
+      waitingFor.data.certificate = { ...waitingFor.data.certificate, ...certificate };
+      return waitingFor;
+    });
+  }
+
+  withSchema(schema: Partial<ShortcutDecisionSchema>) {
+    return this.afterBuild((waitingFor) => {
+      const mergedSchema = { ...waitingFor.data.schema, ...schema };
+      mergedSchema.convoke_tappable_count = mergedSchema.points.reduce(
+        (total, point) =>
+          typeof point.kind === "object" && "ConvokeTaps" in point.kind
+            ? total + point.kind.ConvokeTaps.tappable.length
+            : total,
+        0,
+      );
+      waitingFor.data.schema = mergedSchema;
+      return waitingFor;
+    });
+  }
+}
+
+export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.define((): LoopShortcutWaitingFor => ({
   type: "LoopShortcut",
   data: {
     proposer: 0,
@@ -330,32 +461,25 @@ export const buildLoopShortcutWaitingFor = ({
   certificate?: Partial<LoopCertificate>;
   schema?: Partial<ShortcutDecisionSchema>;
 } = {}): LoopShortcutWaitingFor => {
-  const waitingFor = loopShortcutWaitingForFactory.build();
-  const mergedSchema = { ...waitingFor.data.schema, ...schema };
-  // The engine owns convoke_tappable_count (build_shortcut_schema sums the ConvokeTaps
-  // tappable lengths); mirror that here so overriding `points` keeps the count consistent
-  // and the modal — which reads the field directly — renders the matching value.
-  mergedSchema.convoke_tappable_count = mergedSchema.points.reduce(
-    (total, point) =>
-      typeof point.kind === "object" && "ConvokeTaps" in point.kind
-        ? total + point.kind.ConvokeTaps.tappable.length
-        : total,
-    0,
-  );
-  return {
-    ...waitingFor,
-    data: {
-      ...waitingFor.data,
-      ...(proposer === undefined ? {} : { proposer }),
-      ...(predictedWinner === undefined ? {} : { predicted_winner: predictedWinner }),
-      certificate: { ...waitingFor.data.certificate, ...certificate },
-      schema: mergedSchema,
-    },
-  };
+  let factory = loopShortcutWaitingForFactory;
+  if (proposer !== undefined) factory = factory.withProposer(proposer);
+  if (predictedWinner !== undefined) factory = factory.withPredictedWinner(predictedWinner);
+  if (certificate !== undefined) factory = factory.withCertificate(certificate);
+  if (schema !== undefined) factory = factory.withSchema(schema);
+  return factory.build();
 };
 
+export class RespondToShortcutWaitingForFactory extends PlayerWaitingForFactory<RespondToShortcutWaitingFor> {
+  withProposal(proposal: Partial<ShortcutProposal>) {
+    return this.afterBuild((waitingFor) => {
+      waitingFor.data.proposal = { ...waitingFor.data.proposal, ...proposal };
+      return waitingFor;
+    });
+  }
+}
+
 export const respondToShortcutWaitingForFactory =
-  Factory.define<RespondToShortcutWaitingFor>(() => ({
+  RespondToShortcutWaitingForFactory.define((): RespondToShortcutWaitingFor => ({
     type: "RespondToShortcut",
     data: {
       player: 0,
@@ -376,15 +500,10 @@ export const buildRespondToShortcutWaitingFor = ({
   player?: PlayerId;
   proposal?: Partial<ShortcutProposal>;
 } = {}): RespondToShortcutWaitingFor => {
-  const waitingFor = respondToShortcutWaitingForFactory.build();
-  return {
-    ...waitingFor,
-    data: {
-      ...waitingFor.data,
-      ...(player === undefined ? {} : { player }),
-      proposal: { ...waitingFor.data.proposal, ...proposal },
-    },
-  };
+  let factory = respondToShortcutWaitingForFactory;
+  if (player !== undefined) factory = factory.forPlayer(player);
+  if (proposal !== undefined) factory = factory.withProposal(proposal);
+  return factory.build();
 };
 
 export const stackEntryFactory = Factory.define<StackEntry>(({ sequence }) => ({
@@ -494,6 +613,16 @@ export class GameStateFactory extends Factory<GameState> {
 
   assistPayment(data: Partial<AssistPaymentWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.assistPayment(data).build());
+  }
+
+  castOffer({
+    player,
+    kind,
+  }: {
+    player?: PlayerId;
+    kind?: CastOfferWaitingFor["data"]["kind"];
+  } = {}) {
+    return this.waitingFor(waitingForFactory.castOffer({ player, kind }).build());
   }
 
   /**

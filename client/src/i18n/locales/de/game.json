@@ -499,13 +499,22 @@
     "clickToFocus": "zum Fokussieren klicken"
   },
   "manaPool": {
+    "onlyForSpell": "Nur zum Wirken von Zaubersprüchen ausgeben",
     "onlyForSpellType": "Nur zum Wirken von Zaubersprüchen eines bestimmten Typs ausgeben",
     "onlyForCreatureType": "Nur zum Wirken eines Kreaturenzauberspruchs des gewählten Typs ausgeben",
     "onlyForTypeSpellsOrAbilities": "Nur für Zaubersprüche oder Fähigkeiten eines bestimmten Typs ausgeben",
+    "onlyForTaggedActivation": "Nur zum Aktivieren von Fähigkeiten einer bestimmten Art ausgeben",
     "onlyForSpellWithKeywordKind": "Nur zum Wirken von Zaubersprüchen mit einem bestimmten Schlüsselwort ausgeben",
     "onlyForSpellWithKeywordKindFromZone": "Nur zum Wirken von Schlüsselwort-Zaubersprüchen aus einem Friedhof ausgeben",
+    "onlyForSpellWithManaValue": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Anforderung an den Manabetrag erfüllen",
+    "onlyForSpellMatchingCostCriteria": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Kostenanforderung erfüllen",
+    "onlyForSpellWithColorCount": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Anforderung an die Anzahl der Farben erfüllen",
+    "onlyForSpellFromZone": "Nur zum Wirken von Zaubersprüchen aus einer erlaubten Zone ausgeben",
+    "onlyForFaceDownSpell": "Nur zum Wirken verdeckter Zaubersprüche ausgeben",
     "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten ausgeben",
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
+    "onlyForAny": "Nur für eine der aufgeführten Verwendungen ausgeben",
+    "onlyForSpecialAction": "Nur für eine bestimmte Sonderaktion ausgeben",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
     "grantCantBeCountered": "Für diesen Zauberspruch ausgeben, damit er nicht neutralisiert werden kann"

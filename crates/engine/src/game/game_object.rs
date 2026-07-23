@@ -1038,8 +1038,13 @@ pub struct GameObject {
 
     /// CR 601.2h: Per-color breakdown of mana spent to cast this object.
     /// Populated during casting finalization; consumed by trigger conditions
-    /// like Adamant (CR 207.2c). Cleared in lockstep with `mana_spent_to_cast`
-    /// (see `triggers::clear_transient_cast_state`).
+    /// like Adamant (CR 207.2c) and spend-color ETB riders ("if {W}{W} was
+    /// spent to cast it", Emptiness — issue #5943). Unlike the transient
+    /// `mana_spent_to_cast` boolean, this tally SURVIVES post-collection
+    /// cleanup for objects on the Battlefield or Stack so CR 603.4
+    /// intervening-if re-checks read it at resolution
+    /// (`triggers::clear_post_collection_transients`); it is cleared in other
+    /// zones there, and at battlefield exit via `clear_cast_payment_stamps`.
     #[serde(default, skip_serializing_if = "ColoredManaCount::is_empty")]
     pub colors_spent_to_cast: ColoredManaCount,
 
@@ -1051,10 +1056,16 @@ pub struct GameObject {
     /// for spell-resolution effects that read their own cost (Molten Note,
     /// "deals damage equal to the amount of mana spent to cast this spell").
     ///
-    /// Unlike `mana_spent_to_cast` / `colors_spent_to_cast`, this field is NOT
-    /// cleared after trigger collection — it is a historical fact about the
-    /// object that remains valid through spell resolution and beyond. Set once
-    /// at cast finalization; initialized to 0 by `GameObject::new`.
+    /// Unlike the transient `mana_spent_to_cast` boolean, this field SURVIVES
+    /// post-collection cleanup for objects on the Battlefield or Stack — it is
+    /// a historical fact about the object that remains valid through spell
+    /// resolution (`triggers::clear_post_collection_transients`); like the
+    /// other payment stamps it is cleared in all other zones there (a
+    /// countered/fizzled spell loses its payment record at the next
+    /// collection pass), and at battlefield exit via
+    /// `clear_cast_payment_stamps` (CR 400.7: a re-entering permanent is a
+    /// new object with no payment record). Set once at cast finalization;
+    /// initialized to 0 by `GameObject::new`.
     #[serde(default, skip_serializing_if = "is_zero_u32_field")]
     pub mana_spent_to_cast_amount: u32,
 
@@ -1071,6 +1082,10 @@ pub struct GameObject {
     /// object. One entry per spent mana lets source-qualified dynamic quantities
     /// count "mana from a Cave/Treasure/artifact source" without depending on
     /// the mana source still existing or retaining the same characteristics.
+    /// Rides the shared cast-payment-stamp lifecycle: survives post-collection
+    /// cleanup on the Battlefield/Stack, cleared in all other zones by
+    /// `triggers::clear_post_collection_transients` and at battlefield exit,
+    /// both via `clear_cast_payment_stamps` (CR 400.7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mana_spent_source_snapshots: Vec<crate::types::game_state::ManaSpentSourceSnapshot>,
 
@@ -1824,6 +1839,12 @@ impl GameObject {
                 mana_spent_to_cast: self.mana_spent_to_cast,
                 colors_spent_to_cast: self.colors_spent_to_cast.clone(),
                 mana_spent_to_cast_amount: self.mana_spent_to_cast_amount,
+                // CR 400.7d + CR 603.4: latched WITH the bool/color/amount
+                // stamps above — a source-qualified rider ("mana from a
+                // Treasure spent to cast it") reads this vector at its
+                // resolution re-check after the source has left and the live
+                // vector was cleared at the exit boundary (CR 400.7).
+                mana_spent_source_snapshots: self.mana_spent_source_snapshots.clone(),
                 kickers_paid: self.kickers_paid.clone(),
                 additional_cost_payment_count: self.additional_cost_payment_count,
                 additional_cost_payments: self.additional_cost_payments.clone(),
@@ -2297,10 +2318,6 @@ impl GameObject {
         // CR 701.60a / CR 702.112b: Suspect and renowned are battlefield designations.
         self.is_suspected = false;
         self.is_renowned = false;
-        // CR 400.7 + CR 702.150a: Compleated's life-payment count belongs to
-        // the cast that created this permanent. Once it leaves the battlefield,
-        // a later entry has no memory of that payment.
-        self.phyrexian_life_paid = 0;
         // CR 702.171b: Saddled clears when the Mount leaves the battlefield.
         self.is_saddled = false;
         self.saddled_by.clear();
@@ -2319,6 +2336,15 @@ impl GameObject {
         // is a new object on any re-entry — clear the stale cast provenance.
         self.cast_from_zone = None;
         self.cast_controller = None;
+        // CR 400.7 + CR 702.150a: a re-entering permanent is a new object with
+        // no memory of the cast that paid for its previous existence — clear all
+        // five cast-payment stamps, including Compleated's Phyrexian life-payment
+        // count (fixes the Satoru-class blink leak: a reanimated or blinked
+        // permanent must not read a stale "mana was spent" record).
+        // Exit-time LKI / zone-change snapshots are captured before this reset
+        // runs (zones.rs: exit seam → snapshot → reset), so latched trigger
+        // contexts keep the payment record of the departing incarnation.
+        self.clear_cast_payment_stamps();
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on the same zone-change boundary.
         self.cast_spell_keywords.clear();
@@ -2359,6 +2385,28 @@ impl GameObject {
         // id so a re-entering object cannot point at a stale transient effect.
         self.merge_layer_effect_id = None;
         self.room_unlocks = None;
+    }
+
+    /// CR 707.10 + CR 707.12: a spell copy is not cast (and a cast copy pays
+    /// its own costs), so no payment record carries over — reset all five
+    /// cast-payment stamps to their no-payment defaults. Also the CR 400.7
+    /// battlefield-exit authority via [`Self::reset_for_battlefield_exit`],
+    /// and the post-collection clear for objects outside the Battlefield/
+    /// Stack provenance zones (`triggers::clear_post_collection_transients`:
+    /// a countered/fizzled spell loses its payment record at the next
+    /// trigger-collection pass, mirroring `cast_from_zone`).
+    ///
+    /// Call sites cover every stack-copy birth: the `allow-raw-zone:
+    /// ...spell-copy birth` markers enumerate them (`copy_spell.rs`,
+    /// `epic.rs`, `cast_copy_of_card.rs`, `paradigm.rs`). `prepare.rs`'s
+    /// exile-copy is out of this class — a later cast of that copy re-stamps
+    /// through the normal `casting.rs` payment blocks.
+    pub fn clear_cast_payment_stamps(&mut self) {
+        self.mana_spent_to_cast = false;
+        self.colors_spent_to_cast = ColoredManaCount::default();
+        self.mana_spent_to_cast_amount = 0;
+        self.phyrexian_life_paid = 0;
+        self.mana_spent_source_snapshots.clear();
     }
 
     /// Check if this object has a specific keyword, using discriminant-based matching.
@@ -2638,6 +2686,120 @@ mod tests {
     };
     use crate::types::counter::parse_counter_type;
     use crate::types::triggers::TriggerMode;
+
+    /// Stamp all five cast-payment fields non-default, including a synthetic
+    /// Phyrexian life payment, to verify the shared reset authority.
+    fn stamp_cast_payment(obj: &mut GameObject) {
+        obj.mana_spent_to_cast = true;
+        obj.colors_spent_to_cast
+            .add(crate::types::mana::ManaColor::White, 2);
+        obj.mana_spent_to_cast_amount = 2;
+        obj.phyrexian_life_paid = 1;
+        let lki = obj.snapshot_for_mana_spent();
+        obj.mana_spent_source_snapshots
+            .push(crate::types::game_state::ManaSpentSourceSnapshot {
+                source_id: obj.id,
+                lki,
+            });
+    }
+
+    fn assert_cast_payment_stamps_default(obj: &GameObject, context: &str) {
+        assert!(!obj.mana_spent_to_cast, "{context}: bool must be default");
+        assert!(
+            obj.colors_spent_to_cast.is_empty(),
+            "{context}: per-color tally must be default"
+        );
+        assert_eq!(
+            obj.mana_spent_to_cast_amount, 0,
+            "{context}: amount must be default"
+        );
+        assert_eq!(
+            obj.phyrexian_life_paid, 0,
+            "{context}: Phyrexian life-payment count must be default"
+        );
+        assert!(
+            obj.mana_spent_source_snapshots.is_empty(),
+            "{context}: payment-source snapshots must be default"
+        );
+    }
+
+    /// R-helper pin: `clear_cast_payment_stamps` resets all five fields.
+    #[test]
+    fn clear_cast_payment_stamps_resets_all_five_fields() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Stack,
+        );
+        stamp_cast_payment(&mut obj);
+        obj.clear_cast_payment_stamps();
+        assert_cast_payment_stamps_default(&obj, "after clear_cast_payment_stamps");
+    }
+
+    /// CR 400.7 (issue #5943): `reset_for_battlefield_exit` clears the five
+    /// cast-payment stamps alongside `cast_from_zone` — a re-entering
+    /// permanent has no memory of the cast that paid for its previous
+    /// existence (Satoru-class blink leak).
+    #[test]
+    fn reset_for_battlefield_exit_clears_cast_payment_stamps() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Battlefield,
+        );
+        stamp_cast_payment(&mut obj);
+        obj.cast_from_zone = Some(Zone::Hand);
+
+        obj.reset_for_battlefield_exit();
+
+        assert_cast_payment_stamps_default(&obj, "after reset_for_battlefield_exit");
+        // Pin the pre-existing exit-clear neighbor so the stamps clear cannot
+        // drift away from the CR 400.7 cast-provenance authority.
+        assert!(
+            obj.cast_from_zone.is_none(),
+            "cast_from_zone exit-clear pin (CR 400.7 + CR 603.4)"
+        );
+    }
+
+    /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change
+    /// snapshot latches all four trigger-relevant mana-payment stamps — including the
+    /// per-mana-unit source-snapshot vector — into the owned trigger source
+    /// context, so a source-qualified rider ("mana from a Treasure spent to
+    /// cast it") can still resolve after the exit-boundary clear wipes the
+    /// live object.
+    #[test]
+    fn snapshot_for_zone_change_latches_cast_payment_stamps() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Marut".to_string(),
+            Zone::Battlefield,
+        );
+        stamp_cast_payment(&mut obj);
+
+        let record = obj.snapshot_for_zone_change(obj.id, Some(Zone::Battlefield), Zone::Graveyard);
+        let context = record
+            .trigger_source_context()
+            .expect("zone-change snapshot always owns a trigger source context");
+
+        assert!(context.mana_spent_to_cast, "latched bool");
+        assert_eq!(context.mana_spent_to_cast_amount, 2, "latched amount");
+        assert!(!context.colors_spent_to_cast.is_empty(), "latched colors");
+        assert_eq!(
+            context.mana_spent_source_snapshots.len(),
+            1,
+            "latched payment-source snapshot vector"
+        );
+        assert_eq!(
+            context.mana_spent_source_snapshots[0].source_id, obj.id,
+            "latched snapshot must keep its payment-time source identity"
+        );
+    }
 
     #[test]
     fn game_object_has_all_rules_relevant_fields() {

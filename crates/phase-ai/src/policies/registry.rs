@@ -664,10 +664,7 @@ mod shared_invariant_tests {
     fn candidate(action: GameAction, tactical_class: TacticalClass) -> CandidateAction {
         CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), tactical_class),
         }
     }
 

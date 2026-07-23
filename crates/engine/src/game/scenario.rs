@@ -308,7 +308,7 @@ impl GameScenario {
     /// appending is equivalent to replacing.
     pub fn with_mana_pool(&mut self, player: PlayerId, mana: Vec<ManaUnit>) -> &mut Self {
         for unit in mana {
-            self.state.add_mana_to_pool(player, unit);
+            let _ = self.state.add_mana_to_pool(player, unit);
         }
         self
     }

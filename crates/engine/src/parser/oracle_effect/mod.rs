@@ -297,28 +297,42 @@ fn if_you_do_object_anchor(
         })
 }
 
-/// CR 608.2c + CR 708.7: Reinterpret a generic "if you can't" rider for a
-/// preceding effect that performs no zone change.
+/// CR 608.2c + CR 708.7 + CR 118.1: Reinterpret a generic "if you can't" rider
+/// for a preceding effect that performs no zone change.
 ///
 /// `try_nom_condition_as_ability_condition` lowers "if you can't" to
 /// `Not { ZoneChangedThisWay { Any } }` — the right proxy for the common
 /// zone-changing parent ("search …. If you can't, draw"), where an absence of
 /// `last_zone_changed_ids` means the instruction did nothing. But that proxy is
-/// WRONG for an effect whose success produces no `ZoneChanged` event: a
-/// successful `Effect::TurnFaceUp` (Etrata, Deadly Fugitive's granted
-/// "{2}{U}{B}: Turn this creature face up. If you can't, exile it …") only
-/// clears `face_down`/restores `back_face` and emits `TurnedFaceUp`, so the
-/// zone-change ledger stays empty and `Not { ZoneChangedThisWay }` would be
-/// true even after the turn-up SUCCEEDED — firing the exile rider every time.
+/// WRONG for an effect whose success produces no `ZoneChanged` event:
+///
+///   - a successful `Effect::TurnFaceUp` (Etrata, Deadly Fugitive's granted
+///     "{2}{U}{B}: Turn this creature face up. If you can't, exile it …")
+///     only clears `face_down`/restores `back_face` and emits `TurnedFaceUp`.
+///   - a successful `Effect::PayCost` (Greenbelt Rampager's "When this
+///     creature enters, pay {E}{E}. If you can't, return this creature to its
+///     owner's hand and you get {E}." — issue #4955, and every other
+///     mandatory-cost-then-"if you can't" card: mana, life, energy, loyalty,
+///     speed) only deducts the paid resource and emits e.g.
+///     `EnergyChanged`/`LifeChanged`/`ManaSpent`, never `ZoneChanged`.
+///
+/// For both, the zone-change ledger stays empty and `Not { ZoneChangedThisWay }`
+/// would be true even after the instruction SUCCEEDED — firing the rider every
+/// time regardless of affordability.
 ///
 /// The correct general signal for "the preceding instruction couldn't be
 /// performed" is `Not { OptionalEffectPerformed }`: a mandatory parent whose
 /// action occurred seeds `optional_effect_performed` via
-/// `effects::mod::mandatory_parent_effect_performed`, which has a `TurnFaceUp`
-/// arm keyed on `GameEvent::TurnedFaceUp`. Rewrite the condition to that signal
-/// only when the immediately-preceding clause is exactly a `TurnFaceUp` — the
-/// one effect class in this position whose success is invisible to the
-/// zone-change ledger. Other effects keep the zone-change proxy unchanged.
+/// `effects::mod::mandatory_parent_effect_performed`. That function has no
+/// explicit `PayCost` arm, so it falls to its `_ => true` default — meaning
+/// the seed's own `!state.cost_payment_failed_flag` guard (set by
+/// `pay::resolve`/`resolve_ability_cost_payment` on an unpayable cost) is the
+/// sole gate for a `PayCost` parent, which is exactly CR 118.3's "can't pay
+/// without the resources" signal. Rewrite the condition to
+/// `Not { OptionalEffectPerformed }` when the immediately-preceding clause is
+/// one of these zone-change-ledger-invisible effect classes; other effects
+/// (Sacrifice, Exile, Discard, Mill, …) keep the zone-change proxy unchanged,
+/// since their success IS a `ZoneChanged`/`PermanentSacrificed` event.
 fn rewrite_cant_rider_for_non_zone_change_parent(
     condition: Option<AbilityCondition>,
     clauses: &[ClauseIr],
@@ -336,14 +350,68 @@ fn rewrite_cant_rider_for_non_zone_change_parent(
     if !is_generic_cant {
         return condition;
     }
-    let prev_is_turn_face_up = clauses
+    let prev_is_ledger_invisible = clauses
         .iter()
         .rev()
         .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
-        .is_some_and(|clause| matches!(clause.parsed.effect, Effect::TurnFaceUp { .. }));
-    if prev_is_turn_face_up {
+        .is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::TurnFaceUp { .. } | Effect::PayCost { .. }
+            )
+        });
+    if prev_is_ledger_invisible {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::effect_performed()),
+        });
+    }
+    condition
+}
+
+/// CR 603.12 + CR 701.16a + CR 608.2c: rebind an active-past "you exiled …
+/// this way" reflexive gate to the zone-change ledger when its antecedent is
+/// an EXILE EFFECT in the same chain (Ardyn, the Usurper: "exile up to one
+/// target creature card from a graveyard. If you exiled a card this way,
+/// create a token that's a copy of that card…", issue #5989).
+///
+/// The context-free condition grammar reads "you exiled a[n] X this way" as
+/// `CostPaidObjectMatchesFilter` — correct for its original cost-paid class
+/// (the Shilgengar shape, where the exile happened as a COST and the
+/// `cost_paid_object` snapshot answers the check), but wrong when the exile
+/// is the immediately-preceding EFFECT instruction: no cost snapshot exists,
+/// and the runtime fallback constrains the moved object's controller to the
+/// ability controller — a card exiled from an OPPONENT's graveyard fails that
+/// check, which is exactly the reported "only works on my own graveyard"
+/// symptom. Only the clause context can disambiguate the two classes, so this
+/// rewrite (mirroring `rewrite_cant_rider_for_non_zone_change_parent` above)
+/// fires ONLY when the previous non-continuation clause is a
+/// `ChangeZone { destination: Exile }` effect; the cost-paid class (no such
+/// preceding clause) and the subject-scoped sacrifice class (Deadly Brew's
+/// "If you sacrificed a permanent this way" after a per-player sacrifice,
+/// whose `Sacrifice` parent is not a `ChangeZone`) are untouched.
+fn rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
+    condition: Option<AbilityCondition>,
+    clauses: &[ClauseIr],
+) -> Option<AbilityCondition> {
+    let Some(AbilityCondition::CostPaidObjectMatchesFilter { filter }) = &condition else {
+        return condition;
+    };
+    let prev_is_effect_exile = clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    ..
+                }
+            )
+        });
+    if prev_is_effect_exile {
+        return Some(AbilityCondition::ZoneChangedThisWay {
+            filter: filter.clone(),
         });
     }
     condition
@@ -15249,8 +15317,12 @@ fn try_parse_verb_and_target<'a>(
             // UTF-8 char boundary and `text[..text.len() - rem.len()]` is sound.
             let primary_clause = &text[..text.len() - rem.len()];
             let primary_clause_lower = primary_clause.to_ascii_lowercase();
+            // CR 608.2c: A `ParentTarget` placement subject ("each of them") is
+            // an anaphor to a bounded set of chosen objects, not a battlefield-
+            // wide type scan — mirror imperative.rs mass-classification authority.
             let ast = if imperative::counter_placement_is_mass(&primary_clause_lower)
                 && multi_target.is_none()
+                && !matches!(target, TargetFilter::ParentTarget)
             {
                 ZoneCounterImperativeAst::PutCounterAll {
                     counter_type,
@@ -27928,6 +28000,13 @@ pub(crate) fn parse_effect_chain_ir(
         // zone-change ledger (a successful turn-up changes no zone). See the
         // helper for the full rationale (Etrata, Deadly Fugitive).
         let condition = rewrite_cant_rider_for_non_zone_change_parent(condition, builder.clauses());
+        // CR 603.12 + CR 701.16a: "If you exiled … this way" after an exile
+        // EFFECT is the reflexive zone-change gate, not the cost-paid class —
+        // see the helper for the full disambiguation rationale (issue #5989).
+        let condition = rewrite_cost_paid_exiled_reflexive_for_effect_exile_parent(
+            condition,
+            builder.clauses(),
+        );
         // CR 608.2c: "[effect] a number of times equal to the difference" — when
         // a leading comparison condition was just stripped, a trailing
         // difference-repeat suffix repeats the effect by the unsigned magnitude

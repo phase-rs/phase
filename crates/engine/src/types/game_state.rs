@@ -31,6 +31,7 @@ use super::identifiers::{
     CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
     TrackedSetId,
 };
+use super::interaction::{ActiveInteractionSlot, InteractionSessionId};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
     ColoredManaCount, ManaColor, ManaCost, ManaPipId, ManaType, ManaUnit, StepEndManaAction,
@@ -48,6 +49,15 @@ use super::resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, MultiDrawFrame, OptionalEffectFrame,
     PendingCoinFlip, PendingMutateMerge, PendingProliferateActions, RepeatedOptionalPaymentFrame,
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+};
+use super::resolved_commands::{
+    ManaPaymentRecipient, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
+    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ResolvedRngReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -67,8 +77,39 @@ fn default_game_number() -> u8 {
     1
 }
 
+fn default_interaction_serial() -> String {
+    "1".to_string()
+}
+
+fn is_default_interaction_serial(value: &str) -> bool {
+    value == "1"
+}
+
 fn is_zero_u32(value: &u32) -> bool {
     *value == 0
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
+    (delta != 0)
+        .then_some(delta.unsigned_abs())
+        .ok_or(ResolvedPlayerEditReplayInvariantError::ZeroDelta)
+}
+
+fn apply_u32_delta(value: u32, delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
+    let amount = nonzero_delta_magnitude(delta)?;
+    if delta.is_positive() {
+        value
+            .checked_add(amount)
+            .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)
+    } else {
+        value
+            .checked_sub(amount)
+            .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceUnderflow)
+    }
 }
 
 pub(crate) fn is_zero_usize(value: &usize) -> bool {
@@ -455,6 +496,14 @@ pub struct TriggerSourceContext {
     pub colors_spent_to_cast: ColoredManaCount,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub mana_spent_to_cast_amount: u32,
+    /// CR 400.7d + CR 601.2h: per-mana-unit payment source snapshots, latched
+    /// with the other cast-payment stamps so a source-qualified rider ("mana
+    /// from a Treasure spent to cast it") still resolves after the source
+    /// leaves before its trigger does (CR 603.4). The live vector is cleared at
+    /// the battlefield-exit boundary (CR 400.7); this latch is the departing
+    /// incarnation's only surviving source-payment provenance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mana_spent_source_snapshots: Vec<ManaSpentSourceSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<KickerVariant>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -525,7 +574,14 @@ impl std::fmt::Debug for TriggerSourceContext {
             .field("cast_spell_keywords", &self.cast_spell_keywords)
             .field("mana_spent_to_cast", &self.mana_spent_to_cast)
             .field("colors_spent_to_cast", &self.colors_spent_to_cast)
-            .field("mana_spent_to_cast_amount", &self.mana_spent_to_cast_amount)
+            .field("mana_spent_to_cast_amount", &self.mana_spent_to_cast_amount);
+        if !self.mana_spent_source_snapshots.is_empty() {
+            debug.field(
+                "mana_spent_source_snapshots",
+                &self.mana_spent_source_snapshots,
+            );
+        }
+        debug
             .field("kickers_paid", &self.kickers_paid)
             .field(
                 "additional_cost_payment_count",
@@ -1115,6 +1171,12 @@ pub enum LoopAction {
         source_id: ObjectId,
         ability_index: usize,
     },
+    /// CR 605.3a: re-activate the exact engine-authored land-mana option selected by
+    /// `TapLandForMana`. The semantic selection preserves either the printed ability index or
+    /// the typed subtype-derived fallback identity and is revalidated live on every iteration.
+    TapLandForMana {
+        selection: crate::types::mana::ManaSourceSelection,
+    },
 }
 
 impl LoopAction {
@@ -1127,7 +1189,9 @@ impl LoopAction {
     /// to declare its optionality at compile time rather than silently defaulting to offerable.
     pub fn is_voluntarily_repeatable(&self) -> bool {
         match self {
-            LoopAction::Recast { .. } | LoopAction::Activate { .. } => true,
+            LoopAction::Recast { .. }
+            | LoopAction::Activate { .. }
+            | LoopAction::TapLandForMana { .. } => true,
         }
     }
 }
@@ -5923,6 +5987,11 @@ pub struct PendingManaAbility {
     pub player: PlayerId,
     pub source_id: ObjectId,
     pub ability_index: usize,
+    /// The P1 execution scope assigned when this activation begins. It survives
+    /// player-choice suspension so exact produced and spent mana keep the same
+    /// causal node after resumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_execution_node: Option<RulesExecutionNodeRef>,
     /// CR 605.3b + CR 400.7: Mana ability choices can be answered after the
     /// source paid a cost that moved it out of existence (Treasure tokens, etc.).
     /// Preserve the activated ability definition from activation time so the
@@ -7853,6 +7922,17 @@ pub enum WaitingFor {
         /// use). Mirrors the `enter_tapped` / `enters_attacking` carry-through above.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enters_modified_if: Option<crate::types::ability::TargetFilter>,
+        /// CR 611.2a + CR 610.3: the `ChangeZone` duration carried across the
+        /// `EffectZoneChoice` round-trip, so an interactive multi-candidate
+        /// selection preserves a bounded move ("exile ... until ~ leaves the
+        /// battlefield" → the `UntilSourceLeaves` exile link). Without this
+        /// carry-through the resume authority reconstructed the move ctx with
+        /// `duration: None` and the chosen card was exiled PERMANENTLY —
+        /// while the single-candidate shortcut (no pause) kept the duration,
+        /// making the bug visible only when a real choice existed. Mirrors
+        /// the `face_down_profile` / `enters_modified_if` carry-through above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<crate::types::ability::Duration>,
     },
     /// Player chooses which drawn-this-turn hand cards to put on top of their
     /// library. Each unchosen required card is kept by paying life.
@@ -10985,6 +11065,11 @@ pub struct GameState {
     /// games don't re-mint colliding ids.
     #[serde(default)]
     pub next_pip_id: u64,
+    /// Resolved-rules journal for exact mana provenance and P2 mana commands.
+    /// It is serialized so a restored game retains the command operands needed
+    /// by later retained-prefix replay.
+    #[serde(default)]
+    pub resolved_rules_journal: ResolvedRulesJournal,
     /// CR 118.3a: transient carrier for the caster's pin hints during a single
     /// finalize spend. `finalize_mana_payment` takes `pending_cast` (removing the
     /// pins) BEFORE the spend runs, so the pins are moved here for the duration of
@@ -10992,6 +11077,13 @@ pub struct GameState {
     /// state equality — it is empty outside the synchronous finalize window.
     #[serde(skip)]
     pub active_payment_pins: Vec<ManaPipId>,
+    /// The synchronous rules-execution scope receiving newly produced mana.
+    /// It is empty outside an activation or inline trigger and is never wire
+    /// authority on its own.
+    // pub(crate) rather than private: functional-record-update construction
+    // (`..GameState::default()`) in sibling engine modules requires access.
+    #[serde(skip)]
+    pub(crate) active_rules_execution_node: Option<RulesExecutionNodeRef>,
     /// CR 601.2a: transient copy of the object-attached casting permission
     /// identity while finalization owns the `PendingCast` by value. Payment
     /// consults it only inside that synchronous window; it is never serialized.
@@ -11029,6 +11121,25 @@ pub struct GameState {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// Trusted interaction capability scope. Viewer-filtered copies always
+    /// redact this field; only the engine uses it to mint opaque decision IDs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_session_id: Option<InteractionSessionId>,
+    /// Trusted rollover generation for the per-session interaction serial.
+    /// Viewer projections redact it with the rest of the capability ledger.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub interaction_generation: u64,
+    /// Arbitrary-precision decimal monotonic serial. A decimal string keeps the
+    /// persisted counter JS-safe without imposing a 53-bit or 64-bit rollover.
+    #[serde(
+        default = "default_interaction_serial",
+        skip_serializing_if = "is_default_interaction_serial"
+    )]
+    pub next_interaction_serial: String,
+    /// Trusted semantic decision bindings. Viewer projections contain only the
+    /// authorized opportunity IDs, never this authority ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_interaction_slots: Vec<ActiveInteractionSlot>,
     /// Derived: true when waiting_for is part of the casting flow and can be
     /// backed out with CancelCast. Computed during derive_display_state so the
     /// frontend doesn't need to maintain a parallel list of casting states.
@@ -13731,12 +13842,18 @@ impl GameState {
         pending: PendingContinuation,
     ) -> Result<(), ResolutionStackError> {
         let choose_zone_trigger_context = pending.trigger_context.clone();
-        self.resolution_stack.insert_parent_of_active(
-            super::resolution::ResolutionFrame::AbilityContinuation(AbilityContinuationFrame {
-                pending,
-                choose_zone_trigger_context,
-            }),
-        )
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::InsertParentOfActive {
+            frame: super::resolution::ResolutionFrame::AbilityContinuation(
+                AbilityContinuationFrame {
+                    pending,
+                    choose_zone_trigger_context,
+                },
+            ),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
     }
 
     /// Inserts the continuation outside an active general-drain/draw pair so
@@ -14812,9 +14929,12 @@ impl GameState {
         let mut drains = PostReplacementDrainStack::default();
         let installed = drains.install(drain, policy);
         if self.active_multi_draw_frame().is_some() {
-            self.resolution_stack
-                .insert_parent_of_active(ResolutionFrame::PostReplacement(drains))
-                .expect("an active multi-draw frame accepts its exact post-replacement parent");
+            self.resolve_and_apply_frame_transition(
+                ResolvedFrameTransition::InsertParentOfActive {
+                    frame: ResolutionFrame::PostReplacement(drains),
+                },
+            )
+            .expect("an active multi-draw frame accepts its exact post-replacement parent");
         } else {
             self.resolution_stack.push_post_replacement(drains);
         }
@@ -15129,7 +15249,9 @@ impl GameState {
     /// serializing a faithfully-restorable snapshot invoke this first; the
     /// randomness logic lives here in the engine, not in transport layers.
     pub fn capture_rng_word_pos(&mut self) {
-        self.rng_word_pos = self.rng.get_word_pos();
+        let position = self.rng.get_word_pos();
+        self.advance_rng_high_water(position)
+            .expect("capturing a live ChaCha20 position must not rewind entropy");
     }
 
     /// Reconstruct `rng` from the serialized `rng_seed` and fast-forward it to
@@ -15142,24 +15264,580 @@ impl GameState {
         self.rng.set_word_pos(self.rng_word_pos);
     }
 
+    /// Advances the persisted entropy high-water without rewinding the live
+    /// ChaCha20 stream. Resolved random commands use this after installing
+    /// their recorded result, so replay never samples entropy to recreate it.
+    pub(crate) fn advance_rng_high_water(
+        &mut self,
+        requested: u128,
+    ) -> Result<(), ResolvedRngReplayInvariantError> {
+        if requested < self.rng_word_pos {
+            return Err(ResolvedRngReplayInvariantError::HighWaterRegression {
+                current: self.rng_word_pos,
+                requested,
+            });
+        }
+        let current = self.rng.get_word_pos();
+        if requested < current {
+            return Err(ResolvedRngReplayInvariantError::StreamPositionRegression {
+                current,
+                requested,
+            });
+        }
+        self.rng.set_word_pos(requested);
+        self.rng_word_pos = requested;
+        Ok(())
+    }
+
     /// CR 118.3a: Mint the next stable `ManaPipId` for a pool unit. Monotonic,
     /// never returns the `ManaPipId(0)` unstamped sentinel (counter starts at 1).
     fn next_pip_id(&mut self) -> ManaPipId {
+        // ManaPipId(0) is the "unstamped" sentinel the resolved-mana appliers
+        // fail closed on. Two legitimate states carry a zero allocator: a
+        // pre-provenance save (`#[serde(default)]`) and a loop-normalized
+        // clone (`normalize_for_loop` zeroes it for CR 104.4b comparison).
+        // Self-heal at mint so neither can ever stamp the sentinel.
+        if self.next_pip_id == 0 {
+            self.next_pip_id = 1;
+        }
         let id = self.next_pip_id;
         self.next_pip_id += 1;
         ManaPipId(id)
     }
 
-    /// CR 118.3a: Stamp a stable pip id on `unit` and add it to `player`'s mana
-    /// pool. This is the single authority for mana entering a *real* pool: every
+    /// CR 106.4 + CR 118.3a: Resolve and apply one real-pool mana insertion.
+    /// This is the single authority for mana entering a *real* pool: every
     /// production/refill/convoke/delve injection routes here so that each pooled
     /// unit has a unique id the player can pin to direct payment. Detached
     /// preview pools (with no `GameState`) keep calling `ManaPool::add` directly.
-    pub fn add_mana_to_pool(&mut self, player: PlayerId, mut unit: ManaUnit) {
+    pub fn add_mana_to_pool(&mut self, player: PlayerId, mut unit: ManaUnit) -> Option<ManaUnit> {
         unit.pip_id = self.next_pip_id();
-        if let Some(p) = self.players.iter_mut().find(|p| p.id == player) {
-            p.mana_pool.add(unit);
+        if !self.players.iter().any(|candidate| candidate.id == player) {
+            return None;
         }
+        let producer = self.current_or_begin_rules_execution_node();
+        let command = ResolvedManaInsertCommand {
+            player,
+            unit: unit.clone(),
+            producer,
+        };
+        self.apply_resolved_mana_insert(&command)
+            .expect("fresh mana insertion must satisfy its replay preconditions");
+        self.resolved_rules_journal
+            .record_mana_insert(command)
+            .expect("stamped mana must have one unique journal producer");
+        Some(unit)
+    }
+
+    /// CR 608.2c: Applies one already-resolved frame transition in the
+    /// instruction order that the resolving spell or ability established.
+    pub fn apply_resolved_frame_transition(
+        &mut self,
+        command: &ResolvedFrameTransitionCommand,
+    ) -> Result<(), ResolvedFrameTransitionReplayInvariantError> {
+        let mut resolution_stack = self.resolution_stack.clone();
+        match &command.transition {
+            ResolvedFrameTransition::Push { frame } => resolution_stack.push_inner(frame.clone()),
+            ResolvedFrameTransition::InsertParentOfActive { frame } => {
+                resolution_stack.insert_parent_of_active(frame.clone())?;
+            }
+            ResolvedFrameTransition::PopExpected { kind } => {
+                let _ = resolution_stack.pop_expected(*kind)?;
+            }
+            ResolvedFrameTransition::ReplaceActive { frame } => {
+                resolution_stack.replace_active(frame.clone())?;
+            }
+        }
+        resolution_stack.validate(&self.waiting_for)?;
+        self.resolution_stack = resolution_stack;
+        Ok(())
+    }
+
+    /// Applies and journals one bounded resolution-frame transition.
+    pub fn resolve_and_apply_frame_transition(
+        &mut self,
+        transition: ResolvedFrameTransition,
+    ) -> Result<ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError> {
+        let command = ResolvedFrameTransitionCommand {
+            transition,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_frame_transition(&command)?;
+        self.resolved_rules_journal
+            .record_frame_transition(command.clone())
+            .expect("resolved frame transition must have a live journal cause");
+        Ok(command)
+    }
+
+    /// Applies and journals one already-resolved player resource edit.
+    ///
+    /// Replacements and dynamic quantities must be settled before this boundary;
+    /// the command is the final composable semantic edit against the live prefix.
+    pub fn resolve_and_apply_player_edit(
+        &mut self,
+        player: PlayerId,
+        edit: ResolvedPlayerEdit,
+    ) -> Result<(), ResolvedPlayerEditReplayInvariantError> {
+        let command = ResolvedPlayerEditCommand {
+            player,
+            edit,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_player_edit(&command)?;
+        self.resolved_rules_journal
+            .record_player_edit(command)
+            .expect("resolved player edit must have a live journal cause");
+        Ok(())
+    }
+
+    /// Applies one final player-resource edit without replacements, quantity
+    /// evaluation, or an implicit player selection.
+    pub fn apply_resolved_player_edit(
+        &mut self,
+        command: &ResolvedPlayerEditCommand,
+    ) -> Result<(), ResolvedPlayerEditReplayInvariantError> {
+        let player = self
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == command.player)
+            .ok_or(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(
+                command.player,
+            ))?;
+
+        match &command.edit {
+            ResolvedPlayerEdit::Life { delta } => {
+                let amount = nonzero_delta_magnitude(*delta)?;
+                let life = player
+                    .life
+                    .checked_add(*delta)
+                    .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                if *delta > 0 {
+                    let gained = player
+                        .life_gained_this_turn
+                        .checked_add(amount)
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                    player.life = life;
+                    player.life_gained_this_turn = gained;
+                } else {
+                    let lost = player
+                        .life_lost_this_turn
+                        .checked_add(amount)
+                        .ok_or(ResolvedPlayerEditReplayInvariantError::ResourceOverflow)?;
+                    player.life = life;
+                    player.life_lost_this_turn = lost;
+                }
+            }
+            ResolvedPlayerEdit::Energy { delta } => {
+                player.energy = apply_u32_delta(player.energy, *delta)?;
+            }
+            ResolvedPlayerEdit::Counter { kind, delta } => {
+                let count = apply_u32_delta(player.player_counter(kind), *delta)?;
+                match kind {
+                    PlayerCounterKind::Poison => player.poison_counters = count,
+                    _ if count == 0 => {
+                        player.player_counters.remove(kind);
+                    }
+                    _ => {
+                        player.player_counters.insert(*kind, count);
+                    }
+                }
+            }
+            ResolvedPlayerEdit::Speed { old, new } => {
+                if player.speed != *old {
+                    return Err(
+                        ResolvedPlayerEditReplayInvariantError::SpeedPreconditionMismatch {
+                            expected: *old,
+                            found: player.speed,
+                        },
+                    );
+                }
+                if old == new {
+                    return Err(ResolvedPlayerEditReplayInvariantError::ZeroDelta);
+                }
+                player.speed = *new;
+            }
+        }
+        Ok(())
+    }
+
+    /// CR 701.20a: Construct, apply, and journal one exact reveal or hide
+    /// transition after the ordinary path has selected the affected cards.
+    ///
+    /// Replays apply the stored occurrences directly; they never inspect a
+    /// library, hand, target filter, or event payload to determine what was
+    /// revealed. Already-correct occurrences are deliberately omitted so an
+    /// empty or duplicate reveal/hide never creates a journal entry.
+    pub fn resolve_and_apply_information(
+        &mut self,
+        object_ids: &[ObjectId],
+        audience: ResolvedInformationAudience,
+        lifetime: ResolvedInformationLifetime,
+        edit: ResolvedInformationEdit,
+    ) -> Result<Option<ResolvedInformationCommand>, ResolvedInformationReplayInvariantError> {
+        let mut seen = HashSet::new();
+        let mut occurrences = Vec::with_capacity(object_ids.len());
+        for object_id in object_ids {
+            if !seen.insert(*object_id) {
+                continue;
+            }
+            let Some(object) = self.objects.get(object_id) else {
+                continue;
+            };
+            let occurrence = ObjectIncarnationRef::from_object(object);
+            let active = match audience {
+                ResolvedInformationAudience::Controller(_) => {
+                    self.revealed_cards.contains(object_id)
+                }
+                ResolvedInformationAudience::Public => {
+                    self.public_revealed_cards.contains(object_id)
+                }
+            };
+            if matches!(edit, ResolvedInformationEdit::Reveal) != active {
+                occurrences.push(occurrence);
+            }
+        }
+        if occurrences.is_empty() {
+            return Ok(None);
+        }
+
+        let command = ResolvedInformationCommand {
+            occurrences,
+            audience,
+            lifetime,
+            edit,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_information(&command)?;
+        self.resolved_rules_journal
+            .record_information(command.clone())
+            .expect("resolved information edit must have a live journal cause");
+        Ok(Some(command))
+    }
+
+    /// CR 701.20a + CR 400.7: Apply one exact information-boundary transition
+    /// without re-evaluating the effect that disclosed the card.
+    pub fn apply_resolved_information(
+        &mut self,
+        command: &ResolvedInformationCommand,
+    ) -> Result<(), ResolvedInformationReplayInvariantError> {
+        self.apply_information_edit(
+            &command.occurrences,
+            command.audience,
+            command.lifetime,
+            command.edit,
+        )
+    }
+
+    /// CR 400.7: Clear object-incarnation-scoped reveal state at the zone
+    /// boundary. The future Zone command will invoke this same final mutation
+    /// primitive while owning the enclosing zone-change command and journal
+    /// entry; this legacy boundary intentionally does not create one itself.
+    pub(crate) fn clear_revealed_information_on_zone_exit(
+        &mut self,
+        occurrence: ObjectIncarnationRef,
+    ) {
+        let controller = self
+            .objects
+            .get(&occurrence.object_id)
+            .map(|object| object.controller)
+            .expect("zone-exit reveal clear must reference a live object");
+        for (audience, lifetime) in [
+            (
+                ResolvedInformationAudience::Controller(controller),
+                ResolvedInformationLifetime::UntilActionBoundary,
+            ),
+            (
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+            ),
+        ] {
+            let active = match audience {
+                ResolvedInformationAudience::Controller(_) => {
+                    self.revealed_cards.contains(&occurrence.object_id)
+                }
+                ResolvedInformationAudience::Public => {
+                    self.public_revealed_cards.contains(&occurrence.object_id)
+                }
+            };
+            if active {
+                self.apply_information_edit(
+                    &[occurrence],
+                    audience,
+                    lifetime,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("zone-exit reveal clear must match the live object occurrence");
+            }
+        }
+    }
+
+    fn apply_information_edit(
+        &mut self,
+        occurrences: &[ObjectIncarnationRef],
+        audience: ResolvedInformationAudience,
+        lifetime: ResolvedInformationLifetime,
+        edit: ResolvedInformationEdit,
+    ) -> Result<(), ResolvedInformationReplayInvariantError> {
+        let valid_lifetime = matches!(
+            (audience, lifetime),
+            (
+                ResolvedInformationAudience::Controller(_),
+                ResolvedInformationLifetime::UntilActionBoundary
+            ) | (
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange
+            )
+        );
+        if !valid_lifetime {
+            return Err(
+                ResolvedInformationReplayInvariantError::InvalidAudienceLifetime {
+                    audience,
+                    lifetime,
+                },
+            );
+        }
+        if occurrences.is_empty() {
+            return Err(ResolvedInformationReplayInvariantError::EmptyOccurrences);
+        }
+
+        let mut seen = HashSet::new();
+        for occurrence in occurrences {
+            if !seen.insert(occurrence.object_id) {
+                return Err(
+                    ResolvedInformationReplayInvariantError::DuplicateOccurrence(*occurrence),
+                );
+            }
+            let object = self.objects.get(&occurrence.object_id).ok_or(
+                ResolvedInformationReplayInvariantError::MissingObject(*occurrence),
+            )?;
+            let found = ObjectIncarnationRef::from_object(object);
+            if found != *occurrence {
+                return Err(ResolvedInformationReplayInvariantError::StaleObject {
+                    expected: *occurrence,
+                    found,
+                });
+            }
+            let active = match audience {
+                ResolvedInformationAudience::Controller(_) => {
+                    self.revealed_cards.contains(&occurrence.object_id)
+                }
+                ResolvedInformationAudience::Public => {
+                    self.public_revealed_cards.contains(&occurrence.object_id)
+                }
+            };
+            match edit {
+                ResolvedInformationEdit::Reveal if active => {
+                    return Err(
+                        ResolvedInformationReplayInvariantError::RevealAlreadyActive(*occurrence),
+                    );
+                }
+                ResolvedInformationEdit::Hide if !active => {
+                    return Err(
+                        ResolvedInformationReplayInvariantError::HideWithoutActiveReveal(
+                            *occurrence,
+                        ),
+                    );
+                }
+                ResolvedInformationEdit::Reveal | ResolvedInformationEdit::Hide => {}
+            }
+        }
+
+        let revealed_cards = match audience {
+            ResolvedInformationAudience::Controller(_) => &mut self.revealed_cards,
+            ResolvedInformationAudience::Public => &mut self.public_revealed_cards,
+        };
+        for occurrence in occurrences {
+            match edit {
+                ResolvedInformationEdit::Reveal => {
+                    revealed_cards.insert(occurrence.object_id);
+                }
+                ResolvedInformationEdit::Hide => {
+                    revealed_cards.remove(&occurrence.object_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// CR 106.4: Apply one exact, already-resolved mana insertion without
+    /// allocating a replacement pip or consulting mana-production state.
+    pub fn apply_resolved_mana_insert(
+        &mut self,
+        command: &ResolvedManaInsertCommand,
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        if command.unit.pip_id.0 == 0 {
+            return Err(ResolvedManaReplayInvariantError::UnstampedManaPip);
+        }
+        let player = self
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == command.player)
+            .ok_or(ResolvedManaReplayInvariantError::UnknownPlayer(
+                command.player,
+            ))?;
+        if player
+            .mana_pool
+            .mana
+            .iter()
+            .any(|unit| unit.pip_id == command.unit.pip_id)
+        {
+            return Err(ResolvedManaReplayInvariantError::DuplicateManaPip(
+                command.unit.pip_id,
+            ));
+        }
+        player.mana_pool.add(command.unit.clone());
+        self.advance_pip_high_water(command.unit.pip_id)
+    }
+
+    /// CR 118.3a: Construct, journal, and apply the solver-selected exact mana
+    /// payment. Solver choice happens before this boundary; this method never
+    /// re-solves or substitutes units.
+    pub(crate) fn resolve_and_apply_mana_spend(
+        &mut self,
+        payer: PlayerId,
+        recipient: ManaPaymentRecipient,
+        spent: &[ManaUnit],
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        let Some(command) = self
+            .resolved_rules_journal
+            .record_mana_spend(payer, recipient, spent)
+            .expect("every paid mana pip must have one unique journal producer")
+        else {
+            return Ok(());
+        };
+        self.apply_resolved_mana_spend(&command)
+    }
+
+    /// CR 118.3a: Apply one exact, already-resolved mana payment. A missing or
+    /// mismatched pip is a typed replay-invariant failure, never an invitation
+    /// to choose substitute mana.
+    pub fn apply_resolved_mana_spend(
+        &mut self,
+        command: &ResolvedManaSpendCommand,
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        let player = self
+            .players
+            .iter_mut()
+            .find(|candidate| candidate.id == command.payer)
+            .ok_or(ResolvedManaReplayInvariantError::UnknownPlayer(
+                command.payer,
+            ))?;
+        let units: Vec<ManaUnit> = command
+            .units
+            .iter()
+            .map(|spent| spent.unit.clone())
+            .collect();
+        for unit in &units {
+            if unit.pip_id.0 == 0 {
+                return Err(ResolvedManaReplayInvariantError::UnstampedManaPip);
+            }
+        }
+        crate::game::mana_payment::remove_exact_mana_units(&mut player.mana_pool, &units).map_err(
+            |error| match error {
+                crate::game::mana_payment::ExactManaRemovalError::DuplicatePip(pip) => {
+                    ResolvedManaReplayInvariantError::DuplicateSpentManaPip(pip)
+                }
+                crate::game::mana_payment::ExactManaRemovalError::MissingPip(pip) => {
+                    ResolvedManaReplayInvariantError::MissingExactManaUnit(pip)
+                }
+                crate::game::mana_payment::ExactManaRemovalError::MismatchedUnit(pip) => {
+                    ResolvedManaReplayInvariantError::MismatchedExactManaUnit(pip)
+                }
+            },
+        )
+    }
+
+    fn advance_pip_high_water(
+        &mut self,
+        pip: ManaPipId,
+    ) -> Result<(), ResolvedManaReplayInvariantError> {
+        let next = pip
+            .0
+            .checked_add(1)
+            .ok_or(ResolvedManaReplayInvariantError::ManaPipIdOverflow(pip))?;
+        self.next_pip_id = self.next_pip_id.max(next);
+        Ok(())
+    }
+
+    pub(crate) fn current_or_begin_rules_execution_node(&mut self) -> RulesExecutionNodeRef {
+        self.active_rules_execution_node.unwrap_or_else(|| {
+            self.resolved_rules_journal
+                .begin_proposal()
+                .expect("resolved-rules journal proposal ordinal overflow")
+        })
+    }
+
+    /// CR 605.3b: Begin the distinct, immediate execution node for one
+    /// activated mana ability. A nested activation records its active parent as
+    /// the causal dependency without changing activation behavior.
+    pub(crate) fn begin_activated_mana_journal_node(
+        &mut self,
+        source_id: ObjectId,
+    ) -> RulesExecutionNodeRef {
+        let source = self
+            .objects
+            .get(&source_id)
+            .map(ObjectIncarnationRef::from_object)
+            .expect("mana ability activation source must exist");
+        self.resolved_rules_journal
+            .begin_activated_mana(source, self.active_rules_execution_node)
+            .expect("resolved-rules journal settlement ordinal overflow")
+    }
+
+    /// CR 605.4a: Begin the distinct inline node for a triggered mana ability.
+    /// Its event-derived cause wins over the ambient activation scope, so a
+    /// trigger from a nested mana source stays bundled with that source.
+    pub(crate) fn begin_triggered_mana_journal_node(
+        &mut self,
+        source: ObjectIncarnationRef,
+        trigger: Option<TriggerDefinitionRef>,
+        caused_by: Option<RulesExecutionNodeRef>,
+    ) -> RulesExecutionNodeRef {
+        self.resolved_rules_journal
+            .begin_triggered_mana(
+                source,
+                trigger,
+                caused_by.or(self.active_rules_execution_node),
+            )
+            .expect("resolved-rules journal settlement ordinal overflow")
+    }
+
+    pub(crate) fn with_rules_execution_node<T>(
+        &mut self,
+        node: RulesExecutionNodeRef,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = self.active_rules_execution_node.replace(node);
+        let result = operation(self);
+        self.active_rules_execution_node = previous;
+        result
+    }
+
+    /// `with_rules_execution_node` for callers whose node is conditional
+    /// (CR 603.3d source-gone triggered mana): with `None` the operation runs
+    /// under the enclosing scope unchanged, so produced mana falls back to the
+    /// ambient node or the automatic Proposal attribution.
+    pub(crate) fn with_optional_rules_execution_node<T>(
+        &mut self,
+        node: Option<RulesExecutionNodeRef>,
+        operation: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        match node {
+            Some(node) => self.with_rules_execution_node(node, operation),
+            None => operation(self),
+        }
+    }
+
+    pub(crate) fn mana_payment_recipient(
+        &self,
+        recipient: ObjectId,
+        fallback_player: PlayerId,
+    ) -> ManaPaymentRecipient {
+        self.objects
+            .get(&recipient)
+            .map(ObjectIncarnationRef::from_object)
+            .map(ManaPaymentRecipient::Object)
+            .unwrap_or(ManaPaymentRecipient::Player(fallback_player))
     }
 
     /// CR 118.3a: defensively guarantee every unit in `player`'s mana pool carries
@@ -15185,27 +15863,38 @@ impl GameState {
             .iter()
             .filter(|u| u.pip_id.0 == 0 || !seen.insert(u.pip_id.0))
             .count();
-        if needed == 0 {
-            return;
-        }
-        // Mint the fresh ids before borrowing the pool mutably (`next_pip_id` needs
-        // `&mut self`), so the assignment pass can use `iter_mut` — idiomatic and
-        // compatible with both `Vec` and `im::Vector` without relying on `IndexMut`.
-        let mut fresh = Vec::with_capacity(needed);
-        for _ in 0..needed {
-            fresh.push(self.next_pip_id());
-        }
-        let mut fresh = fresh.into_iter();
-        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for unit in self.players[idx].mana_pool.mana.iter_mut() {
-            if unit.pip_id.0 != 0 && seen.insert(unit.pip_id.0) {
-                continue; // already unique and stamped — leave it
+        if needed > 0 {
+            // Mint the fresh ids before borrowing the pool mutably (`next_pip_id` needs
+            // `&mut self`), so the assignment pass can use `iter_mut` — idiomatic and
+            // compatible with both `Vec` and `im::Vector` without relying on `IndexMut`.
+            let mut fresh = Vec::with_capacity(needed);
+            for _ in 0..needed {
+                fresh.push(self.next_pip_id());
             }
-            let id = fresh
-                .next()
-                .expect("minted exactly one fresh id per unit needing one");
-            seen.insert(id.0);
-            unit.pip_id = id;
+            let mut fresh = fresh.into_iter();
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            for unit in self.players[idx].mana_pool.mana.iter_mut() {
+                if unit.pip_id.0 != 0 && seen.insert(unit.pip_id.0) {
+                    continue; // already unique and stamped — leave it
+                }
+                let id = fresh
+                    .next()
+                    .expect("minted exactly one fresh id per unit needing one");
+                seen.insert(id.0);
+                unit.pip_id = id;
+            }
+        }
+        let pool_units: Vec<ManaUnit> = self.players[idx].mana_pool.mana.to_vec();
+        for unit in pool_units {
+            if !self.resolved_rules_journal.has_produced_pip(unit.pip_id) {
+                let producer = self
+                    .resolved_rules_journal
+                    .begin_proposal()
+                    .expect("resolved-rules journal proposal ordinal overflow");
+                self.resolved_rules_journal
+                    .record_produced_mana(producer, unit)
+                    .expect("restamped pool mana must have one unique journal producer");
+            }
         }
     }
 
@@ -15368,7 +16057,6 @@ impl GameState {
         let seat_order: Vec<PlayerId> = (0..player_count).map(PlayerId).collect();
         let starting_player = config.starting_player();
         let archenemy = config.archenemy_player();
-
         GameState {
             turn_number: 0,
             active_player: starting_player,
@@ -15387,7 +16075,9 @@ impl GameState {
             // CR 118.3a: start at 1 so minted pip ids never collide with the
             // `ManaPipId(0)` unstamped sentinel.
             next_pip_id: 1,
+            resolved_rules_journal: ResolvedRulesJournal::default(),
             active_payment_pins: Vec::new(),
+            active_rules_execution_node: None,
             active_casting_permission_index: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
@@ -15401,6 +16091,10 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: starting_player,
             },
+            interaction_session_id: None,
+            interaction_generation: 0,
+            next_interaction_serial: default_interaction_serial(),
+            active_interaction_slots: Vec::new(),
             has_pending_cast: false,
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
@@ -16071,6 +16765,15 @@ impl GameState {
         // CR 104.4b: pip-id counter is a volatile monotonic field; zero it (like
         // next_object_id) so two otherwise-identical loop states compare equal.
         clone.next_pip_id = 0;
+        // P1 provenance is append-only historical evidence, not live rules
+        // state. Clear it with the other monotonic identity carriers so it
+        // cannot hide a genuine CR 104.4b repeated position.
+        clone.resolved_rules_journal = ResolvedRulesJournal::default();
+        // Interaction IDs are volatile capabilities, not game-position state.
+        clone.interaction_session_id = None;
+        clone.interaction_generation = 0;
+        clone.next_interaction_serial = "1".to_string();
+        clone.active_interaction_slots.clear();
         clone.layers_dirty = LayersDirty::full();
         clone.public_state_dirty = PublicStateDirty::all_dirty();
         // PR-3 (Option C): snapshots stored in `loop_detect_ring` are produced BY this
@@ -16606,7 +17309,9 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_object_id: _,
         next_logical_zone_change_group_id: _,
         next_pip_id: _,
+        resolved_rules_journal: _,
         active_payment_pins: _,
+        active_rules_execution_node: _,
         active_casting_permission_index: _,
         battlefield: _,
         stack: _,
@@ -16618,6 +17323,10 @@ fn _gamestate_partition_is_total(s: &GameState) {
         rng: _,
         combat: _,
         waiting_for: _,
+        interaction_session_id: _,
+        interaction_generation: _,
+        next_interaction_serial: _,
+        active_interaction_slots: _,
         has_pending_cast: _,
         lands_played_this_turn: _,
         max_lands_per_turn: _,
@@ -16912,6 +17621,7 @@ impl PartialEq for GameState {
             && self.objects.len() == other.objects.len()
             && self.next_object_id == other.next_object_id
             && self.next_pip_id == other.next_pip_id
+            && self.resolved_rules_journal == other.resolved_rules_journal
             && self.battlefield == other.battlefield
             && self.stack == other.stack
             && self.stack_paid_facts == other.stack_paid_facts
@@ -17099,6 +17809,183 @@ impl PartialEq for GameState {
 }
 
 impl Eq for GameState {}
+
+#[cfg(test)]
+mod resolved_information_tests {
+    use super::*;
+    use crate::game::effects;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        CardSelectionMode, Effect, QuantityExpr, ResolvedAbility, RevealUntilDisposition,
+        TargetFilter, TargetRef,
+    };
+    use crate::types::identifiers::CardId;
+    use crate::types::resolved_commands::{
+        ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+        ResolvedPlayerEdit, ResolvedRulesCommand,
+    };
+
+    #[test]
+    fn reveal_hand_resolves_through_information_command_and_replays_with_player_edit() {
+        let mut state = GameState::new_two_player(42);
+        let revealed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Revealed Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+                count: None,
+                selection: CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let pre_state = state.clone();
+        let mut events = Vec::new();
+
+        effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.revealed_cards.contains(&revealed));
+        assert!(state.public_revealed_cards.contains(&revealed));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![revealed]
+        )));
+        assert!(state
+            .resolve_and_apply_information(
+                &[revealed],
+                ResolvedInformationAudience::Controller(PlayerId(0)),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Reveal,
+            )
+            .unwrap()
+            .is_none());
+        assert!(state
+            .resolve_and_apply_information(
+                &[revealed],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .unwrap()
+            .is_none());
+
+        state
+            .resolve_and_apply_player_edit(PlayerId(0), ResolvedPlayerEdit::Life { delta: -2 })
+            .unwrap();
+        state
+            .resolve_and_apply_information(
+                &[revealed],
+                ResolvedInformationAudience::Controller(PlayerId(0)),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Hide,
+            )
+            .unwrap()
+            .expect("the active reveal lease must record one hide command");
+        let information = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::Information(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            information.len(),
+            3,
+            "the real reveal, its public disclosure, and final hide each record one command"
+        );
+        assert!(matches!(
+            information[0].audience,
+            ResolvedInformationAudience::Controller(PlayerId(0))
+        ));
+        assert!(matches!(
+            information[1].audience,
+            ResolvedInformationAudience::Public
+        ));
+        let player_edit = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::PlayerEdit(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("cross-family player edit must be recorded");
+
+        let mut replay = pre_state;
+        replay.apply_resolved_information(&information[0]).unwrap();
+        replay.apply_resolved_information(&information[1]).unwrap();
+        replay.apply_resolved_player_edit(&player_edit).unwrap();
+        replay.apply_resolved_information(&information[2]).unwrap();
+
+        assert_eq!(replay.revealed_cards, state.revealed_cards);
+        assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+        assert_eq!(replay.players[0].life, state.players[0].life);
+    }
+
+    #[test]
+    fn reveal_until_reveal_only_records_exact_retained_information() {
+        let mut state = GameState::new_two_player(42);
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Retained Library Card".to_string(),
+            Zone::Library,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::RevealOnly,
+                kept_destination: Zone::Library,
+                rest_destination: Zone::Library,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        let pre_state = state.clone();
+        let mut events = Vec::new();
+
+        effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.revealed_cards.contains(&revealed));
+        assert!(state.public_revealed_cards.contains(&revealed));
+        let information = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::Information(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(information.len(), 2);
+
+        let mut replay = pre_state;
+        for command in &information {
+            replay.apply_resolved_information(command).unwrap();
+        }
+        assert_eq!(replay.revealed_cards, state.revealed_cards);
+        assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+    }
+}
 
 #[cfg(test)]
 mod active_search_provenance_tests {
@@ -19066,7 +19953,7 @@ mod tests {
         let mut a = GameState::new_two_player(7);
         let player = a.players[0].id;
         // One floated unit, stamped with a distinct pip_id on pool entry.
-        a.add_mana_to_pool(
+        let _ = a.add_mana_to_pool(
             player,
             ManaUnit::new(ManaType::Red, ObjectId(900), false, vec![]),
         );
@@ -20123,6 +21010,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         }));
         variants.push(Box::new(WaitingFor::DefilerPayment {
             player: PlayerId(0),
@@ -20247,6 +21135,7 @@ mod tests {
                     player: PlayerId(0),
                     source_id: ObjectId(1),
                     ability_index: 0,
+                    rules_execution_node: None,
                     ability_snapshot: None,
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
@@ -20461,6 +21350,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
@@ -21010,6 +21900,7 @@ mod tests {
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
         let json = serde_json::to_string(&wf).expect("serialize");
         // Modern shape must be emitted, NOT the legacy bool field.

@@ -65,6 +65,7 @@ pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
 pub mod haunt;
+pub mod interaction;
 // Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
 // so `haunt.rs` stays implementation-only).
 #[cfg(test)]
@@ -72,6 +73,8 @@ pub mod haunt;
 mod haunt_tests;
 pub mod keywords;
 pub mod layers;
+pub mod ledger;
+pub mod library;
 pub mod life_costs;
 pub mod log;
 pub mod mana_abilities;
@@ -105,6 +108,7 @@ mod conspiracy_tests;
 mod merge_tests;
 pub mod morph;
 pub mod mulligan;
+pub mod object_state;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
