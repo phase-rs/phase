@@ -174,29 +174,25 @@ fn mutable_pupa_accumulates_every_matching_keyword() {
 // data/card-data.json. The counter recipient, "any creature you control", now
 // parses to a real `TargetFilter::Typed{Creature, controller: You}` (see the
 // `parse_type_phrase_with_ctx` "any " quantifier fix) instead of falling back
-// to the degenerate `TargetFilter::Any`, so the ETB opens a real trigger
-// target-selection prompt; the cast driver carries the declared Kathril choice
-// forward to that prompt and chain propagation carries it through every
-// subsequent independently-gated sibling.
+// to the degenerate `TargetFilter::Any`.
 //
-// KNOWN LIMITATION (not fixed by this PR, tracked separately from #6321): the
-// recipient is still chosen ONCE, at trigger-stack time, and that single
-// choice is reused for every replicated keyword node via chain-target
-// propagation (`resolve_chain_body`'s `sub_resolved.targets = ability.targets
-// .clone()`). Per CR 608.2d, an untargeted "any creature you control" choice
-// with no literal "target" wording should be re-offered independently at EACH
-// instruction's own resolution — so on a board with more than one legal
-// creature, a real Kathril should let the controller spread flying/trample/
-// vigilance/etc. across different creatures, not force them all onto whichever
-// one was picked first. `target_choice_timing_for_clause`'s `PutCounter` guard
-// (`oracle_effect/lower.rs`) only flips to per-instance `Resolution` timing for
-// source-attached-host filters (Equipped/Enchanted), not general "creature you
-// control" targets — extending that classification has broader blast radius
-// across every other card using this target shape and is out of scope for the
-// list-collapse fix this test exists to prove. This scenario deliberately
-// gives P0 only ONE creature (Kathril itself), so the single-shared-choice
-// gap is not observable here — the assertions below are correct FOR THIS
-// BOARD but do not exercise or claim the multi-creature CR 608.2d case.
+// CR 608.2d: an untargeted "any creature you control" choice (no literal
+// "target") is made independently at EACH instruction's own resolution, not
+// once when the whole ability goes on the stack. `target_choice_timing_for_
+// clause` (`oracle_effect/lower.rs`) marks every untargeted, non-context-ref
+// `PutCounter` recipient `Resolution`-timed (widened from the narrower
+// Equipped/Enchanted-only case, matching `MultiplyCounter`'s existing
+// pattern); `resolve_chain_body` skips copying a parent's already-chosen
+// target into a `Resolution`-timed sub; and each such instruction that
+// reaches resolution with an empty, multi-candidate recipient opens an
+// interactive `WaitingFor::ChooseFromZoneChoice` prompt (a single legal
+// candidate auto-binds with no prompt; zero is a silent no-op — CR 608.2d:
+// "The player can't choose an option that's illegal or impossible") —
+// reusing the SAME parked-continuation machinery already proven
+// for `PutCounter` (the Bolster keyword action). The two tests below cover
+// both the single-creature case (no observable choice, matches the original
+// #6321 regression exactly) and the multi-creature case (proves the choice
+// is genuinely independent per instruction, not one shared pick).
 // -----------------------------------------------------------------------
 
 const KATHRIL: &str = "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.";
@@ -258,5 +254,85 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
         count(CounterType::Plus1Plus1),
         1,
         "exactly one +1/+1 counter is placed for the one counter put on a creature this way",
+    );
+}
+
+// Discriminating case for CR 608.2d: the graveyard has BOTH flying and
+// trample, so TWO independent PutCounter instructions fire (flying is node 0,
+// the head; trample is node 9, reached only via the SAME per-item independent
+// gate the test above proves). P0 controls TWO creatures — Kathril plus
+// "Second Recipient", already on the battlefield — so each instruction's "any
+// creature you control" choice has a genuine, non-trivial answer. Declaring
+// [second_recipient, kathril] in that order pins the flying prompt (which
+// fires first, since flying resolves before trample in Oracle-text order) to
+// second_recipient and leaves kathril for the trample prompt. If the two
+// instructions wrongly shared one upfront choice (the bug this test guards
+// against), both counters would land on whichever object was bound first and
+// second_recipient would have NEITHER counter.
+#[test]
+fn kathril_offers_each_matching_counter_its_own_independent_recipient() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // A creature card with BOTH flying and trample in P0's graveyard, so both
+    // the head (flying) and the trample sibling fire their own instruction.
+    scenario
+        .add_creature_to_graveyard(P0, "Skybound Charger", 3, 3)
+        .flying()
+        .trample();
+    // Already on the battlefield when Kathril enters — the second legal
+    // recipient for each "any creature you control" choice.
+    let second_recipient = scenario.add_creature(P0, "Second Recipient", 1, 1).id();
+    let kathril = scenario
+        .add_creature_to_hand_from_oracle(P0, "Kathril, Aspect Warper", 3, 3, KATHRIL)
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::White, ObjectId(9_996), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_997), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(9_998), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(10_000), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(kathril)
+        .target_objects(&[second_recipient, kathril])
+        .resolve();
+    outcome.assert_zone(&[kathril], Zone::Battlefield);
+
+    let state = outcome.state();
+    let count_on =
+        |id: ObjectId, ct: CounterType| state.objects[&id].counters.get(&ct).copied().unwrap_or(0);
+    let flying_ct = CounterType::Keyword(Keyword::Flying.kind());
+    let trample_ct = CounterType::Keyword(Keyword::Trample.kind());
+
+    // The flying instruction (resolved first) independently chose
+    // second_recipient — the first declared object still legal at that point.
+    assert_eq!(
+        count_on(second_recipient, flying_ct.clone()),
+        1,
+        "second_recipient receives the flying counter (first instruction's own choice)",
+    );
+    assert_eq!(
+        count_on(second_recipient, trample_ct.clone()),
+        0,
+        "second_recipient must not also receive the trample counter",
+    );
+    // The trample instruction (resolved later, past flying/first_strike/…'s
+    // now-satisfied-then-irrelevant gates — trample's OWN gate is what matters
+    // here) independently chose kathril — the only object left declared.
+    assert_eq!(
+        count_on(kathril, trample_ct),
+        1,
+        "kathril receives the trample counter (second instruction's OWN, independent choice)",
+    );
+    assert_eq!(
+        count_on(kathril, flying_ct),
+        0,
+        "kathril must not also receive the flying counter — the two choices are independent, \
+         not one shared pick forced onto a single recipient",
     );
 }

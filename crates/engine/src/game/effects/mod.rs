@@ -14,8 +14,8 @@ use crate::types::ability::{
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
-    TargetRef, ThisWayCause,
+    SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
+    TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -1645,7 +1645,7 @@ pub(crate) fn resolve_effect_pay_cost_rider(
         return Ok(());
     };
     let mut rider = sub.as_ref().clone();
-    if rider.targets.is_empty() && !ability.targets.is_empty() {
+    if should_propagate_parent_targets(ability, &rider) {
         rider.targets = ability.targets.clone();
     }
     apply_parent_chain_context(&mut rider, ability, None, state);
@@ -1671,7 +1671,7 @@ pub(crate) fn prepend_remaining_pay_cost_continuation(
 
     if let Some(sub) = ability.sub_ability.as_ref() {
         let mut sub_clone = sub.as_ref().clone();
-        if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+        if should_propagate_parent_targets(ability, &sub_clone) {
             sub_clone.targets = ability.targets.clone();
         }
         apply_parent_chain_context(&mut sub_clone, ability, None, state);
@@ -2419,6 +2419,22 @@ fn apply_parent_chain_context(
     }
 }
 
+/// CR 608.2d: whether `ability`'s already-chosen targets should propagate into
+/// an empty-targeted `sub`. Single authority for every `sub.targets =
+/// ability.targets.clone()` propagation site in this file — a `Resolution`-
+/// timed sub makes its OWN untargeted choice at its own resolution (see the
+/// interactive `PutCounter` recipient prompt in `resolve_chain_body`) and must
+/// NOT inherit an earlier instruction's already-chosen recipient, or every
+/// replicated instruction in a chain collapses onto whichever single object
+/// the first one picked (Kathril, Aspect Warper, issue #6321 / PR #6533).
+/// Every other sub keeps today's behavior: parent targets propagate when the
+/// sub declares none of its own.
+fn should_propagate_parent_targets(ability: &ResolvedAbility, sub: &ResolvedAbility) -> bool {
+    sub.targets.is_empty()
+        && !ability.targets.is_empty()
+        && sub.target_choice_timing != TargetChoiceTiming::Resolution
+}
+
 fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     matches!(
         waiting_for,
@@ -2619,8 +2635,7 @@ pub(super) fn resolve_optional_effect_decision(
                 // carries its OWN target filter (e.g. a Chaos-Wand cleanup that
                 // returns `ExiledBySource` cards) from being clobbered with the
                 // parent's targets.
-                if resolved.targets.is_empty()
-                    && !ability.targets.is_empty()
+                if should_propagate_parent_targets(ability, &resolved)
                     && effect_refs_parent_target(&resolved.effect)
                 {
                     resolved.targets = ability.targets.clone();
@@ -8212,7 +8227,7 @@ fn resolve_chain_body(
         if !evaluate_condition(condition, state, ability) {
             if let Some(ref else_branch) = ability.else_ability {
                 let mut else_resolved = else_branch.as_ref().clone();
-                if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                if should_propagate_parent_targets(ability, &else_resolved) {
                     else_resolved.targets = ability.targets.clone();
                 }
                 else_resolved.context = ability.context.clone();
@@ -8292,7 +8307,16 @@ fn resolve_chain_body(
                         && sub.condition.is_none())
                 {
                     let mut sub_resolved = sub.as_ref().clone();
-                    if sub_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                    // CR 608.2d: a `Resolution`-timed sub makes its OWN
+                    // untargeted choice at its own resolution (see the
+                    // interactive `PutCounter` recipient prompt in this
+                    // function) — inheriting the parent's already-chosen
+                    // target here would force every replicated instruction
+                    // onto whichever single recipient the parent picked,
+                    // instead of letting each independently-gated sibling
+                    // offer its own choice (Kathril, Aspect Warper, issue
+                    // #6321 / PR #6533).
+                    if should_propagate_parent_targets(ability, &sub_resolved) {
                         sub_resolved.targets = ability.targets.clone();
                     }
                     sub_resolved.context = ability.context.clone();
@@ -8661,6 +8685,84 @@ fn resolve_chain_body(
                     },
                 };
                 return Ok(());
+            }
+        }
+    }
+
+    // CR 608.2d + CR 115.10a: An untargeted `PutCounter` recipient ("any
+    // creature you control", no literal "target") is chosen while APPLYING
+    // the effect — at THIS instruction's OWN resolution, independently of any
+    // sibling instruction's own choice — not once, when the whole ability
+    // went on the stack. `target_choice_timing_for_clause` (parser) marks
+    // such clauses `Resolution`; the `ReplicatedOrBranch` propagation-skip
+    // above (via `should_propagate_parent_targets`) ensures such a node
+    // reaches here with `ability.targets` still empty rather than inheriting
+    // a parent's already-made choice. Mirrors the existing
+    // `filter_chosen_player_index` 0/1/N pattern above (a single legal
+    // recipient auto-binds with no prompt; zero legal recipients is a silent
+    // no-op — CR 608.2d: "The player can't choose an option that's illegal or
+    // impossible") and reuses the SAME `ChooseFromZoneChoice` +
+    // parked-continuation machinery already proven for `PutCounter`
+    // continuations — `engine_resolution_choices.rs`'s `is_partition` gate on
+    // this exact drain path names `Effect::PutCounter` explicitly (the
+    // Bolster keyword action). Kathril, Aspect Warper — issue #6321 / PR
+    // #6533.
+    //
+    // Candidates are enumerated via a PLAIN filter scan (`matches_target_filter`
+    // over the battlefield), NOT the targeting-legality path
+    // (`find_legal_targets`/`can_target`) — per CR 115.10a this is a CHOICE, not
+    // a target, so hexproof/shroud/protection/"can't be the target of" must NOT
+    // restrict candidacy. Mirrors `MultiplyCounter`'s existing untargeted
+    // enumeration a few lines below and `bolster.rs`'s own doc comment
+    // ("Bolster is a keyword action that 'chooses' (not 'targets') — hexproof
+    // and shroud do not prevent bolster").
+    //
+    // EXCLUDES `contains_source_attachment_host()` (Equipped/Enchanted)
+    // targets — those have no real CHOICE (the host is uniquely determined by
+    // the attachment relationship) and already resolve deterministically via
+    // `resolve_defined_or_targets`'s existing `resolved_object_ids_for_filter`
+    // fallback in `counters.rs`; routing them through an interactive prompt
+    // here would be wrong (and untested against that resolver's semantics).
+    if ability.target_choice_timing == TargetChoiceTiming::Resolution
+        && ability.targets.is_empty()
+        && ability.distribution.is_none()
+    {
+        if let Effect::PutCounter { target, .. } = &ability.effect {
+            if !target.contains_source_attachment_host() {
+                let effective_filter = resolved_object_filter(ability, target);
+                let filter_ctx = filter::FilterContext::from_ability(ability);
+                let legal: Vec<ObjectId> = state
+                    .battlefield_phased_in_ids()
+                    .into_iter()
+                    .filter(|id| {
+                        filter::matches_target_filter(state, *id, &effective_filter, &filter_ctx)
+                    })
+                    .collect();
+                match legal.len() {
+                    0 => {}
+                    1 => {
+                        let mut bound = ability.clone();
+                        bound.targets = vec![TargetRef::Object(legal[0])];
+                        return resolve_ability_chain(state, &bound, events, depth);
+                    }
+                    _ => {
+                        let mut cont = ability.clone();
+                        cont.targets.clear();
+                        state.park_ability_continuation(PendingContinuation::new(
+                            Box::new(cont),
+                            state,
+                        ));
+                        state.waiting_for = WaitingFor::ChooseFromZoneChoice {
+                            player: ability.controller,
+                            cards: legal,
+                            count: 1,
+                            up_to: false,
+                            constraint: None,
+                            source_id: ability.source_id,
+                        };
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -9308,7 +9410,7 @@ fn resolve_chain_body(
             ) {
                 if let Some(ref base_chain) = sub.else_ability {
                     let mut resolved = base_chain.as_ref().clone();
-                    if resolved.targets.is_empty() && !ability.targets.is_empty() {
+                    if should_propagate_parent_targets(ability, &resolved) {
                         resolved.targets = ability.targets.clone();
                     }
                     apply_parent_chain_context(
@@ -9373,7 +9475,7 @@ fn resolve_chain_body(
                                     resolved.targets.insert(0, TargetRef::Object(source));
                                 }
                             }
-                        } else if resolved.targets.is_empty() && !ability.targets.is_empty() {
+                        } else if should_propagate_parent_targets(ability, &resolved) {
                             resolved.targets = ability.targets.clone();
                         }
                         apply_parent_chain_context(
@@ -9444,7 +9546,7 @@ fn resolve_chain_body(
                     || condition_awaits_resolution_only_referent(condition, state, ability))
             {
                 let mut sub_clone = sub.as_ref().clone();
-                if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+                if should_propagate_parent_targets(ability, &sub_clone) {
                     sub_clone.targets = ability.targets.clone();
                 }
                 apply_parent_chain_context(
@@ -9523,7 +9625,7 @@ fn resolve_chain_body(
                             .iter()
                             .map(|&id| TargetRef::Object(id))
                             .collect();
-                    } else if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                    } else if should_propagate_parent_targets(ability, &else_resolved) {
                         else_resolved.targets = ability.targets.clone();
                     }
                     apply_parent_chain_context(
@@ -9559,7 +9661,7 @@ fn resolve_chain_body(
                     while let Some(ref sibling) = current {
                         if sibling.sub_link == SubAbilityLink::SequentialSibling {
                             let mut sibling_resolved = sibling.as_ref().clone();
-                            if sibling_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                            if should_propagate_parent_targets(ability, &sibling_resolved) {
                                 sibling_resolved.targets = ability.targets.clone();
                             }
                             apply_parent_chain_context(
@@ -9688,7 +9790,7 @@ fn resolve_chain_body(
             && waits_for_resolution_choice(&state.waiting_for)
         {
             let mut sub_clone = sub.as_ref().clone();
-            if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+            if should_propagate_parent_targets(ability, &sub_clone) {
                 sub_clone.targets = ability.targets.clone();
             }
             apply_parent_chain_context(
@@ -9721,7 +9823,7 @@ fn resolve_chain_body(
         // rather than immediately processing it (which would bypass the UI).
         if waits_for_resolution_choice(&state.waiting_for) {
             let mut sub_clone = sub.as_ref().clone();
-            if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
+            if should_propagate_parent_targets(ability, &sub_clone) {
                 sub_clone.targets = ability.targets.clone();
             }
             apply_parent_chain_context(
@@ -9868,6 +9970,14 @@ fn resolve_chain_body(
                     }
                 } else if sub_with_context.targets.is_empty()
                     && !effect_uses_implicit_tracked_set_targets(&sub.effect)
+                    // CR 608.2d: a `Resolution`-timed sub makes its OWN untargeted
+                    // choice at its own resolution — neither inheriting the
+                    // parent's target NOR force-binding the just-moved
+                    // forward_result object is correct for it; leave `targets`
+                    // empty so the interactive `PutCounter` recipient prompt
+                    // handles it when this sub's own turn to resolve comes
+                    // (Kathril, Aspect Warper, issue #6321 / PR #6533).
+                    && sub_with_context.target_choice_timing != TargetChoiceTiming::Resolution
                 {
                     // CR 608.2c: ParentTarget consumers in a forward_result sub-chain
                     // need the moved object's id in `targets`, not just a rebound
