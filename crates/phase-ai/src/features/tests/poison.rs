@@ -197,11 +197,12 @@ fn superfriends_proliferate_is_pinned_below_floor() {
     assert!(feature.commitment < POISON_CLOCK_FLOOR);
 }
 
-/// CR 104.3d: lands are excluded from the commitment denominator (they are not
-/// part of the poison plan's nonland payload). Two decks with identical nonland
-/// content score identically no matter how many lands pad the manabase — pinning
-/// the `CoreType::Land` guard in `detect`, whose removal would inflate the
-/// denominator and silently lower every commitment.
+/// Lands are excluded from the commitment denominator — they are not part of
+/// the poison plan's nonland payload. This is a deck-modelling choice, not a
+/// rules requirement, so it carries no CR citation. Two decks with identical
+/// nonland content score identically no matter how many lands pad the manabase,
+/// pinning the `CoreType::Land` guard in `detect`, whose removal would inflate
+/// the denominator and silently lower every commitment.
 #[test]
 fn lands_are_excluded_from_commitment_denominator() {
     let core = |extra: Vec<DeckEntry>| {
