@@ -2121,8 +2121,8 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     }
 
     // Extract the "choose a ..." clause — `scan_preceded` yields the suffix
-    // AFTER `choose ` so the object-choice path parses the descriptor directly
-    // (no second leading-`choose ` re-parse).
+    // AFTER `choose ` so named-choice parsing receives the object table with
+    // "choose " already stripped.
     let (prefix_lower, _, choose_suffix) = nom_primitives::scan_preceded(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
@@ -2130,15 +2130,12 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     // (not parsing dispatch). `parse_named_choice_object` expects the phrase
     // with "choose " already stripped.
     let choose_object = choose_suffix.trim_end().trim_end_matches('.').trim();
-    // CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." is an
-    // as-enters OBJECT choice, not a named-attribute choice, so
-    // `parse_named_choice_object` (color/type/name/etc.) fails. Fall back to
-    // the object-choice combinator, which claims the line as a Moved replacement
-    // with a loud unsupported marker until `CopyChosenHost` proves the
-    // companion CopyChosen static (Metamorphic Alteration).
-    let Some(choice_type) = parse_named_choice_object(choose_object) else {
-        return parse_as_enters_choose_permanent(choose_suffix, original_text);
-    };
+    // Named-attribute choices only. Object choices ("choose a creature") are
+    // deliberately NOT claimed here — see `LinkedChoiceKind::CopyChosenHost`.
+    // Claiming them as Moved+unsupported would reshape every as-enters
+    // permanent-choose card (Dauntless Bodyguard, Scheming Fence, …) even when
+    // no CopyChosen consumer exists.
+    let choice_type = parse_named_choice_object(choose_object)?;
 
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -2289,9 +2286,10 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
 
 /// CR 614.12a + CR 707.2c: Recognizer for an as-enters OBJECT choice phrase —
 /// the suffix after (or including) `choose `, e.g. `"a creature."` or
-/// `"choose a creature."`. Shared by the Priority-8 classifier
-/// (`is_as_enters_choose_pattern`) and `parse_as_enters_choose_permanent` so
-/// routing and lowering agree on the same descriptor grammar.
+/// `"choose a creature."`. Used by `LinkedChoiceKind::CopyChosenHost` detection
+/// to identify Unimplemented ability gaps that pair with a CopyChosen static —
+/// never by line-local replacement classification (that would claim Moved for
+/// every permanent-choose card).
 pub(crate) fn is_as_enters_choose_permanent_phrase(choose_text: &str) -> bool {
     as_enters_choose_permanent_filter(choose_text).is_some()
 }
@@ -2301,8 +2299,8 @@ pub(crate) fn is_as_enters_choose_permanent_phrase(choose_text: &str) -> bool {
 /// clause. Requires full consumption and a concrete `Typed` filter.
 ///
 /// `pub(crate)` so the `CopyChosenHost` document-relation apply step can
-/// re-derive the filter from an unsupported chooser's description when upgrading
-/// to `ChoosePermanent { CopiableSnapshot }`.
+/// derive the filter from an Unimplemented ability's description when injecting
+/// `ChoosePermanent { CopiableSnapshot }`.
 pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
     // Structural optional-prefix + trailing-period cleanup (not dispatch):
     // callers may pass the match-at-start slice or the post-`choose ` suffix.
@@ -2325,44 +2323,6 @@ pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<Tar
     // CR 707.2c: the copy source is a permanent — only a concrete object filter
     // (never a player/zone/`Any` descriptor) is a valid copy-source pool.
     matches!(filter, TargetFilter::Typed(_)).then_some(filter)
-}
-
-/// CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." — the
-/// as-enters OBJECT-choice analogue of `parse_as_enters_choose` (which only
-/// handles named-attribute choices: color, creature type, card name, etc.).
-///
-/// Line-local lowering does **not** emit `ChoosePermanentPersist::CopiableSnapshot`:
-/// that persist purpose installs a Layer-1 copy on an Aura's enchanted host and
-/// is only rules-correct when a companion `ContinuousModification::CopyChosen`
-/// consumer is also present (Metamorphic Alteration). Emit a loud unsupported
-/// marker instead; `LinkedChoiceKind::CopyChosenHost` upgrades it at the
-/// document-relation seam when the consumer is proven.
-///
-/// `choose_text` is the object phrase (optionally still carrying a leading
-/// `"choose "`). Parsed with the shared `parse_target` descriptor grammar; the
-/// remainder must be empty and the filter must be `Typed` (proves the phrase is
-/// an object choice before we claim the line).
-fn parse_as_enters_choose_permanent(
-    choose_text: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    // Validate the object phrase is a concrete Typed filter — then leave the
-    // CopiableSnapshot lowering to the CopyChosenHost document relation.
-    let _filter = as_enters_choose_permanent_filter(choose_text)?;
-
-    let execute = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::unimplemented("as-enters-choose-permanent", original_text),
-    );
-
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(execute)
-            .valid_card(TargetFilter::SelfRef)
-            // CR 614.1c: battlefield-entry-scoped, mirroring the named-choice sibling.
-            .destination_zone(Zone::Battlefield)
-            .description(original_text.to_string()),
-    )
 }
 
 /// Parse "As ~ becomes attached [to a creature/permanent], choose …" into an
@@ -14723,28 +14683,19 @@ mod tests {
         ));
     }
 
-    /// CR 614.12a + CR 707.2c: object as-enters choice alone is loud-unsupported
-    /// until a companion `CopyChosen` static proves the host-copy relation
-    /// (`LinkedChoiceKind::CopyChosenHost`). Line-local parse must not emit
-    /// `ChoosePermanent { CopiableSnapshot }`.
+    /// CR 614.12a + CR 707.2c: object as-enters choice alone is NOT a
+    /// replacement line — line-local parse must leave it alone so non-CopyChosen
+    /// cards keep their unsupported ability shape. `CopyChosenHost` injects
+    /// ChoosePermanent only when the companion static is present.
     #[test]
-    fn as_enters_choose_a_creature_is_unsupported_without_copy_chosen() {
-        let def = parse_replacement_line(
-            "As this Aura enters, choose a creature.",
-            "Metamorphic Alteration",
-        )
-        .expect("as-enters choose-a-creature must claim a Moved replacement");
-        let execute = def.execute.as_ref().unwrap();
+    fn as_enters_choose_a_creature_is_not_a_line_local_replacement() {
         assert!(
-            matches!(
-                *execute.effect,
-                Effect::Unimplemented {
-                    name: ref n,
-                    ..
-                } if n == "as-enters-choose-permanent"
-            ),
-            "expected unsupported as-enters-choose-permanent marker, got {:?}",
-            execute.effect
+            parse_replacement_line(
+                "As this Aura enters, choose a creature.",
+                "Metamorphic Alteration",
+            )
+            .is_none(),
+            "bare object as-enters choose must not claim Moved without CopyChosen"
         );
     }
 

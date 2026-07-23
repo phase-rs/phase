@@ -585,11 +585,11 @@ fn non_spell_aura_entry_copies_chosen_creature() {
     );
 }
 
-/// SHAPE: the "As this Aura enters, choose a creature." line, paired with the
-/// companion CopyChosen static on the same card, lowers to an as-enters
+/// SHAPE: the full Metamorphic Oracle (choose line + CopyChosen static) lowers
+/// the choose gap via `CopyChosenHost` to an as-enters
 /// `Effect::ChoosePermanent { persist: CopiableSnapshot }` over a creature
 /// copy-source pool — never a `BecomeCopy` on the entering Aura. A bare choose
-/// line without CopyChosen stays unsupported (see unit test).
+/// line without CopyChosen stays an Unimplemented ability (see honesty test).
 #[test]
 fn as_enters_choose_a_creature_parses_to_choose_permanent() {
     let parsed = parse_oracle_text(
@@ -660,5 +660,62 @@ fn enchanted_is_a_copy_of_chosen_parses_to_copy_chosen_static() {
             "the copy static must affect the enchanted host (CR 303.4 + CR 613.1a)"
         ),
         other => panic!("expected a Typed enchanted-host filter, got {other:?}"),
+    }
+}
+
+/// COVERAGE HONESTY: as-enters permanent-object choices WITHOUT a CopyChosen
+/// companion must not gain a Moved / ChoosePermanent shape. Dauntless Bodyguard
+/// and Scheming Fence are the parse-diff blast-radius representatives — their
+/// choose lines stay explicit Unimplemented abilities.
+#[test]
+fn non_copy_chosen_as_enters_permanent_choose_stays_unsupported() {
+    const CASES: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "Dauntless Bodyguard",
+            "As this creature enters, choose another creature you control.\n\
+             Sacrifice this creature: The chosen creature gains indestructible until end of turn.",
+            &["Creature"],
+            &["Human", "Knight"],
+        ),
+        (
+            "Scheming Fence",
+            "As this creature enters, you may choose a nonland permanent.\n\
+             Activated abilities of the chosen permanent can't be activated.\n\
+             This creature has all activated abilities of the chosen permanent except for loyalty abilities. \
+             You may spend mana as though it were mana of any color to activate those abilities.",
+            &["Creature"],
+            &["Human", "Citizen"],
+        ),
+    ];
+
+    for &(name, oracle, types, subtypes) in CASES {
+        let type_strings: Vec<String> = types.iter().map(|s| (*s).to_string()).collect();
+        let subtype_strings: Vec<String> = subtypes.iter().map(|s| (*s).to_string()).collect();
+        let parsed = parse_oracle_text(oracle, name, &[], &type_strings, &subtype_strings);
+
+        assert!(
+            parsed.replacements.iter().all(|r| {
+                !matches!(
+                    r.execute.as_ref().map(|e| e.effect.as_ref()),
+                    Some(Effect::ChoosePermanent { .. })
+                )
+            }),
+            "{name}: must not emit ChoosePermanent without CopyChosen"
+        );
+        assert!(
+            !parsed.statics.iter().any(|s| {
+                s.modifications
+                    .contains(&ContinuousModification::CopyChosen)
+            }),
+            "{name}: sanity — no CopyChosen static on this class"
+        );
+        assert!(
+            parsed.abilities.iter().any(|a| {
+                a.effect
+                    .unimplemented_description()
+                    .is_some_and(|d| d.to_lowercase().contains("choose"))
+            }),
+            "{name}: as-enters permanent choose must remain an explicit Unimplemented ability gap"
+        );
     }
 }

@@ -30,7 +30,7 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_graveyard_keyword_grant_sentence;
 use super::oracle_nom::primitives::{
-    parse_number as nom_parse_number, scan_contains, scan_preceded,
+    parse_number as nom_parse_number, scan_at_word_boundaries, scan_contains, scan_preceded,
 };
 
 use super::oracle_attraction::parse_attraction_visit_triggers;
@@ -1678,18 +1678,18 @@ fn apply_linked_choice_persisted_player(
 
 // --- CR 607.2d + CR 707.2c: as-enters permanent choice → CopyChosen host copy --
 
-/// Pair an as-enters permanent-object choice (loud-unsupported until proven)
-/// with a `ContinuousModification::CopyChosen` consumer. First-match of each
-/// mirrors the other linked-choice detectors.
+/// Pair an as-enters permanent-object choice gap (Unimplemented ability) with a
+/// `ContinuousModification::CopyChosen` consumer. First-match of each mirrors
+/// the other linked-choice detectors. The chooser is deliberately NOT claimed
+/// as a Moved replacement at line-local parse — only this relation injects
+/// `ChoosePermanent`, so non-CopyChosen cards keep their prior unsupported shape.
 fn detect_linked_choice_copy_chosen_host(
     items: &[OracleItemIr],
     relations: &mut Vec<DocumentRelationIr>,
 ) {
-    let chooser = items.iter().find(|item| {
-        item_replacement(item)
-            .and_then(|replacement| replacement.execute.as_ref())
-            .is_some_and(|exec| is_as_enters_choose_permanent_unsupported(exec))
-    });
+    let chooser = items
+        .iter()
+        .find(|item| item_ability(item).is_some_and(ability_is_as_enters_choose_permanent_gap));
     let copy_static = items.iter().find(|item| {
         item_static(item).is_some_and(|s| {
             s.modifications
@@ -1708,14 +1708,15 @@ fn detect_linked_choice_copy_chosen_host(
     }
 }
 
-/// CR 607.2d + CR 707.2c + CR 614.12a: Upgrade a proven chooser from the
-/// unsupported marker to `Effect::ChoosePermanent { CopiableSnapshot }`. The
-/// filter is re-derived from the marker's Oracle description so line-local
-/// lowering never assigns copy-host semantics without this relation.
+/// CR 607.2d + CR 707.2c + CR 614.12a: Replace the proven chooser gap ability
+/// with a Moved `ChoosePermanent { CopiableSnapshot }` replacement. Filter is
+/// re-derived from the Unimplemented description so line-local parse never
+/// assigns copy-host semantics without this relation.
 fn apply_linked_choice_copy_chosen_host(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
-    replacement_ids: &[OracleItemId],
+    ability_ids: &mut Vec<OracleItemId>,
+    replacement_ids: &mut Vec<OracleItemId>,
 ) {
     for relation in relations {
         let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::CopyChosenHost { chooser, .. }) =
@@ -1723,44 +1724,63 @@ fn apply_linked_choice_copy_chosen_host(
         else {
             continue;
         };
-        let Some(pos) = position_of(replacement_ids, *chooser) else {
+        let Some(ability_pos) = position_of(ability_ids, *chooser) else {
             continue;
         };
-        let Some(execute) = result.replacements[pos].execute.as_mut() else {
-            continue;
-        };
-        if !is_as_enters_choose_permanent_unsupported(execute) {
-            continue;
-        }
-        let Some(description) = execute.effect.unimplemented_description().map(str::to_owned) else {
-            continue;
-        };
-        let lower = description.to_lowercase();
-        let Some((_, _, choose_suffix)) =
-            scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("choose ").parse(i))
+        let Some(description) = result.abilities[ability_pos]
+            .effect
+            .unimplemented_description()
+            .map(str::to_owned)
         else {
             continue;
         };
-        let Some(filter) =
-            super::oracle_replacement::as_enters_choose_permanent_filter(choose_suffix)
-        else {
+        let Some(filter) = filter_from_as_enters_choose_permanent_text(&description) else {
             continue;
         };
-        **execute = AbilityDefinition::new(
+        result.abilities.remove(ability_pos);
+        ability_ids.remove(ability_pos);
+        let execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChoosePermanent {
                 filter,
                 persist: ChoosePermanentPersist::CopiableSnapshot,
             },
         );
+        result.replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .execute(execute)
+                .valid_card(TargetFilter::SelfRef)
+                // CR 614.1c: battlefield-entry-scoped.
+                .destination_zone(Zone::Battlefield)
+                .description(description),
+        );
+        replacement_ids.push(*chooser);
     }
 }
 
-fn is_as_enters_choose_permanent_unsupported(def: &AbilityDefinition) -> bool {
-    matches!(
-        def.effect.as_ref(),
-        Effect::Unimplemented { name, .. } if name == "as-enters-choose-permanent"
-    )
+/// An Unimplemented ability whose fragment is an as-enters permanent-object
+/// choice ("As … enters, choose a creature/permanent…"). Framing + Typed filter
+/// must both match — same grammar as `as_enters_choose_permanent_filter`.
+fn ability_is_as_enters_choose_permanent_gap(def: &AbilityDefinition) -> bool {
+    let Some(description) = def.effect.unimplemented_description() else {
+        return false;
+    };
+    filter_from_as_enters_choose_permanent_text(description).is_some()
+}
+
+fn filter_from_as_enters_choose_permanent_text(description: &str) -> Option<TargetFilter> {
+    let lower = description.to_lowercase();
+    let has_as =
+        scan_at_word_boundaries(&lower, |i| tag::<_, _, OracleError<'_>>("as ").parse(i)).is_some();
+    let has_enters =
+        scan_at_word_boundaries(&lower, |i| tag::<_, _, OracleError<'_>>("enters").parse(i))
+            .is_some();
+    if !has_as || !has_enters {
+        return None;
+    }
+    let (_, _, choose_suffix) =
+        scan_preceded(&lower, |i| tag::<_, _, OracleError<'_>>("choose ").parse(i))?;
+    super::oracle_replacement::as_enters_choose_permanent_filter(choose_suffix)
 }
 
 /// Whether an ability's effect chain (recursing sub-abilities) makes a
@@ -2936,7 +2956,12 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     );
     reconcile_host_bound_phase_outs(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
-    apply_linked_choice_copy_chosen_host(&mut result, &ir.relations, &replacement_ids);
+    apply_linked_choice_copy_chosen_host(
+        &mut result,
+        &ir.relations,
+        &mut ability_ids,
+        &mut replacement_ids,
+    );
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause
@@ -2952,11 +2977,12 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // rather than the whole card's text. The draft-matters (CR 905) filter that used
     // to strip lines from the whole-card text moves inside as a per-item skip.
     //
-    // The tracks are sound to zip here: of the four relation passes above, three are
-    // length-preserving and `apply_linked_choice_etb_counter` removes from
-    // `result.replacements` and `replacement_ids` at the same index. This is also
-    // exactly why the audit stays HERE, post-relation: a pre-lowering audit is blind
-    // to relation-synthesized semantics (that pass *synthesizes a replacement*), so
+    // The tracks are sound to zip here: of the relation passes above,
+    // `apply_linked_choice_etb_counter` removes from `result.replacements` and
+    // `replacement_ids` at the same index, and `apply_linked_choice_copy_chosen_host`
+    // moves an ability id onto the replacement track. This is also exactly why
+    // the audit stays HERE, post-relation: a pre-lowering audit is blind to
+    // relation-synthesized semantics (that pass *synthesizes a replacement*), so
     // the false-positive wave U1 bounded to 31 faces would be caused, not avoided.
     //
     // Emitted into a local vec and appended, rather than passing `&mut
