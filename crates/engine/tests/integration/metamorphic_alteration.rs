@@ -35,7 +35,10 @@ const METAMORPHIC_ALTERATION: &str = "Enchant creature\nAs this Aura enters, cho
 /// mana cost) is set BEFORE `from_oracle_text`, which preserves identity fields
 /// while installing the parsed abilities/keywords/replacements/statics.
 fn stage_metamorphic(scenario: &mut GameScenario) -> ObjectId {
-    let aura = scenario
+    // CR 205.3h: Aura is an enchantment subtype. `as_enchantment` strips the
+    // Instant/Sorcery seed from `add_spell_to_hand` so this is a clean
+    // Enchantment — Aura spell (not a Sorcery+Enchantment hybrid).
+    scenario
         .add_spell_to_hand(P0, "Metamorphic Alteration", false)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
@@ -44,17 +47,7 @@ fn stage_metamorphic(scenario: &mut GameScenario) -> ObjectId {
             shards: vec![ManaCostShard::Blue],
         })
         .from_oracle_text(METAMORPHIC_ALTERATION)
-        .id();
-    // `add_spell_to_hand(_, is_instant = false)` seeds `CoreType::Sorcery`, and
-    // `as_enchantment` only strips `Creature`. CR 205.3h: Aura is an enchantment
-    // subtype — drop the stray non-permanent type so the staged card is a clean
-    // enchantment spell rather than a Sorcery+Enchantment hybrid.
-    let obj = scenario.state_mut().objects.get_mut(&aura).unwrap();
-    obj.card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Instant | CoreType::Sorcery));
-    obj.base_card_types = obj.card_types.clone();
-    aura
+        .id()
 }
 
 fn blue_pool(scenario: &mut GameScenario) {
@@ -425,12 +418,18 @@ fn host_copying_a_token_donor_routes_token_display() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let donor = scenario.add_creature(P0, "Angel", 4, 4).id();
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let aura = stage_metamorphic(&mut scenario);
+    blue_pool(&mut scenario);
+
+    let mut runner = scenario.build();
     // Make the donor a TRUE token so its display routes to the token art db
     // (CR 111.1): `is_token` with no `base_printed_ref` derives
     // `DisplaySource::Token` in the layer engine; its `token_image_ref` is its
-    // own art pointer.
+    // own art pointer. Mutate via `GameRunner::state_mut` (GameScenario has no
+    // mutable state escape hatch).
     {
-        let d = scenario.state_mut().objects.get_mut(&donor).unwrap();
+        let d = runner.state_mut().objects.get_mut(&donor).unwrap();
         d.is_token = true;
         d.base_printed_ref = None;
         d.token_image_ref = Some(TokenImageRef {
@@ -440,11 +439,6 @@ fn host_copying_a_token_donor_routes_token_display() {
             preset_id: "angel_4_4".to_string(),
         });
     }
-    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    let aura = stage_metamorphic(&mut scenario);
-    blue_pool(&mut scenario);
-
-    let mut runner = scenario.build();
     runner
         .cast(aura)
         .target_object(host)
