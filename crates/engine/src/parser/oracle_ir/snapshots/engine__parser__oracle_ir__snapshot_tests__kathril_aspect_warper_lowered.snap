@@ -17,7 +17,12 @@ expression: "&lowered"
             "value": 1
           },
           "target": {
-            "type": "Any"
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": "You",
+            "properties": []
           }
         },
         "cost": null,
@@ -31,7 +36,12 @@ expression: "&lowered"
               "value": 1
             },
             "target": {
-              "type": "Any"
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "You",
+              "properties": []
             }
           },
           "cost": null,
@@ -45,7 +55,12 @@ expression: "&lowered"
                 "value": 1
               },
               "target": {
-                "type": "Any"
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
               }
             },
             "cost": null,
@@ -59,7 +74,12 @@ expression: "&lowered"
                   "value": 1
                 },
                 "target": {
-                  "type": "Any"
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": []
                 }
               },
               "cost": null,
@@ -73,7 +93,12 @@ expression: "&lowered"
                     "value": 1
                   },
                   "target": {
-                    "type": "Any"
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": "You",
+                    "properties": []
                   }
                 },
                 "cost": null,
@@ -87,7 +112,12 @@ expression: "&lowered"
                       "value": 1
                     },
                     "target": {
-                      "type": "Any"
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": "You",
+                      "properties": []
                     }
                   },
                   "cost": null,
@@ -101,7 +131,12 @@ expression: "&lowered"
                         "value": 1
                       },
                       "target": {
-                        "type": "Any"
+                        "type": "Typed",
+                        "type_filters": [
+                          "Creature"
+                        ],
+                        "controller": "You",
+                        "properties": []
                       }
                     },
                     "cost": null,
@@ -115,7 +150,12 @@ expression: "&lowered"
                           "value": 1
                         },
                         "target": {
-                          "type": "Any"
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": "You",
+                          "properties": []
                         }
                       },
                       "cost": null,
@@ -129,7 +169,12 @@ expression: "&lowered"
                             "value": 1
                           },
                           "target": {
-                            "type": "Any"
+                            "type": "Typed",
+                            "type_filters": [
+                              "Creature"
+                            ],
+                            "controller": "You",
+                            "properties": []
                           }
                         },
                         "cost": null,
@@ -143,7 +188,12 @@ expression: "&lowered"
                               "value": 1
                             },
                             "target": {
-                              "type": "Any"
+                              "type": "Typed",
+                              "type_filters": [
+                                "Creature"
+                              ],
+                              "controller": "You",
+                              "properties": []
                             }
                           },
                           "cost": null,
@@ -157,7 +207,12 @@ expression: "&lowered"
                                 "value": 1
                               },
                               "target": {
-                                "type": "Any"
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Creature"
+                                ],
+                                "controller": "You",
+                                "properties": []
                               }
                             },
                             "cost": null,
@@ -647,13 +702,5 @@ expression: "&lowered"
   ],
   "statics": [],
   "replacements": [],
-  "extractedKeywords": [],
-  "parseWarnings": [
-    {
-      "type": "TargetFallback",
-      "context": "parse_target could not classify",
-      "text": "any creature you control",
-      "line_index": 0
-    }
-  ]
+  "extractedKeywords": []
 }

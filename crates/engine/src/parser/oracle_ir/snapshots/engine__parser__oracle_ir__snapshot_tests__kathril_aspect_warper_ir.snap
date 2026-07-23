@@ -34,7 +34,12 @@ expression: "&ir"
                 "value": 1
               },
               "target": {
-                "type": "Any"
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ],
+                "controller": "You",
+                "properties": []
               }
             },
             "cost": null,
@@ -48,7 +53,12 @@ expression: "&ir"
                   "value": 1
                 },
                 "target": {
-                  "type": "Any"
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": "You",
+                  "properties": []
                 }
               },
               "cost": null,
@@ -62,7 +72,12 @@ expression: "&ir"
                     "value": 1
                   },
                   "target": {
-                    "type": "Any"
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ],
+                    "controller": "You",
+                    "properties": []
                   }
                 },
                 "cost": null,
@@ -76,7 +91,12 @@ expression: "&ir"
                       "value": 1
                     },
                     "target": {
-                      "type": "Any"
+                      "type": "Typed",
+                      "type_filters": [
+                        "Creature"
+                      ],
+                      "controller": "You",
+                      "properties": []
                     }
                   },
                   "cost": null,
@@ -90,7 +110,12 @@ expression: "&ir"
                         "value": 1
                       },
                       "target": {
-                        "type": "Any"
+                        "type": "Typed",
+                        "type_filters": [
+                          "Creature"
+                        ],
+                        "controller": "You",
+                        "properties": []
                       }
                     },
                     "cost": null,
@@ -104,7 +129,12 @@ expression: "&ir"
                           "value": 1
                         },
                         "target": {
-                          "type": "Any"
+                          "type": "Typed",
+                          "type_filters": [
+                            "Creature"
+                          ],
+                          "controller": "You",
+                          "properties": []
                         }
                       },
                       "cost": null,
@@ -118,7 +148,12 @@ expression: "&ir"
                             "value": 1
                           },
                           "target": {
-                            "type": "Any"
+                            "type": "Typed",
+                            "type_filters": [
+                              "Creature"
+                            ],
+                            "controller": "You",
+                            "properties": []
                           }
                         },
                         "cost": null,
@@ -132,7 +167,12 @@ expression: "&ir"
                               "value": 1
                             },
                             "target": {
-                              "type": "Any"
+                              "type": "Typed",
+                              "type_filters": [
+                                "Creature"
+                              ],
+                              "controller": "You",
+                              "properties": []
                             }
                           },
                           "cost": null,
@@ -146,7 +186,12 @@ expression: "&ir"
                                 "value": 1
                               },
                               "target": {
-                                "type": "Any"
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Creature"
+                                ],
+                                "controller": "You",
+                                "properties": []
                               }
                             },
                             "cost": null,
@@ -160,7 +205,12 @@ expression: "&ir"
                                   "value": 1
                                 },
                                 "target": {
-                                  "type": "Any"
+                                  "type": "Typed",
+                                  "type_filters": [
+                                    "Creature"
+                                  ],
+                                  "controller": "You",
+                                  "properties": []
                                 }
                               },
                               "cost": null,
@@ -174,7 +224,12 @@ expression: "&ir"
                                     "value": 1
                                   },
                                   "target": {
-                                    "type": "Any"
+                                    "type": "Typed",
+                                    "type_filters": [
+                                      "Creature"
+                                    ],
+                                    "controller": "You",
+                                    "properties": []
                                   }
                                 },
                                 "cost": null,
@@ -665,13 +720,5 @@ expression: "&ir"
     }
   ],
   "source_text": "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.",
-  "card_name": "Kathril, Aspect Warper",
-  "diagnostics": [
-    {
-      "type": "TargetFallback",
-      "context": "parse_target could not classify",
-      "text": "any creature you control",
-      "line_index": 0
-    }
-  ]
+  "card_name": "Kathril, Aspect Warper"
 }
