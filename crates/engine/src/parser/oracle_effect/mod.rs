@@ -1786,6 +1786,14 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
 
     let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
         .valid_card(TargetFilter::SelfRef)
+        // CR 400.7: The rider is bound to the lifetime of the object it is
+        // installed on; stamp the expiry here so the lifetime is self-contained
+        // (not dependent on the ability frame's duration threading) and so
+        // `expiry_from_duration`'s `is_none` guard never retags it — mirrors the
+        // die-exile stamp precedent at `try_parse_die_exile_rider` /
+        // `parse_token_creation_replacement_effect`. Base-installed to survive
+        // CR 613.1 layer reseeds, non-copiable (CR 707.2), pruned on host exit.
+        .expiry(RestrictionExpiry::UntilHostLeavesPlay)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {

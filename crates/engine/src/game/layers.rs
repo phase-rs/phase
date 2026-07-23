@@ -15,7 +15,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
-    is_runtime_target_die_exile_replacement,
+    is_runtime_host_lifetime_replacement, is_runtime_target_die_exile_replacement,
 };
 use crate::game::quantity::{
     continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
@@ -694,9 +694,13 @@ pub(crate) fn prune_lapsed_controller_controls_source(state: &mut GameState) {
 /// CR 611.2b + CR 400.7: the captured source leaving play, OR the host leaving
 /// and re-entering as a new object (same storage ObjectId), ends the can't-untap
 /// continuous effect permanently — drop the gated def from base+live so it
-/// cannot revive on a same-ObjectId re-entry. Called from `zones.rs` on a
-/// battlefield exit, OUTSIDE `evaluate_layers`, so it marks layers full on change
-/// (mirroring `prune_host_left_effects`).
+/// cannot revive on a same-ObjectId re-entry. The same host-left arm also drops
+/// the turn-bound die-exile rider and the host-lifetime exile rider
+/// (`UntilHostLeavesPlay`, CR 702.84a): a base-installed rider must NOT revive
+/// when the object re-enters as a new CR 400.7 object reusing the same storage
+/// key. Called from `zones.rs` (`:481`) on a battlefield exit, OUTSIDE
+/// `evaluate_layers`, so it marks layers full on change (mirroring
+/// `prune_host_left_effects`).
 ///
 /// The predicate is purely id-based (`departed_id`), so no `&state` gate read is
 /// needed — each object is mutated in a single pass: case (b) the captured
@@ -720,15 +724,20 @@ pub(crate) fn prune_controller_controls_source_on_leave(
                         if source == departed_id
                 )
         };
-        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def or a
-        // turn-bound die-exile rider on the departing host is eligible to be dropped.
-        // The host-left arm must not wipe printed replacements or unrelated runtime riders.
+        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def, a
+        // turn-bound die-exile rider, or a host-lifetime exile rider
+        // (`UntilHostLeavesPlay`, CR 702.84a) on the departing host is eligible
+        // to be dropped. The host-left arm must not wipe printed replacements or
+        // unrelated runtime riders. Dropping the host-lifetime rider from
+        // base+live here is what prevents it reviving on a same-ObjectId
+        // re-entry (CR 400.7 — the returning object is new).
         let drop = |def: &crate::types::ability::ReplacementDefinition| {
             (matches!(
                 def.condition,
                 Some(ReplacementCondition::ControllerControlsSource { .. })
             ) && is_lapsed(def))
                 || (host_left && is_runtime_target_die_exile_replacement(def))
+                || (host_left && is_runtime_host_lifetime_replacement(def))
         };
         let before_live = obj.replacement_definitions.len();
         obj.replacement_definitions.retain(|d| !drop(d));
