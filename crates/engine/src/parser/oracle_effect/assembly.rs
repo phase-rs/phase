@@ -1121,7 +1121,8 @@ impl AssemblyEnv {
                 | AntecedentRole::DigOrMill
                 | AntecedentRole::DigLook
                 | AntecedentRole::DamageDealer
-                | AntecedentRole::CopySpellBearer => Vec::new(),
+                | AntecedentRole::CopySpellBearer
+                | AntecedentRole::PerpetualKeywordGrantHead => Vec::new(),
             },
         };
         members
