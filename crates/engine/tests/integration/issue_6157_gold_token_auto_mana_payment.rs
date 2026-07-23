@@ -274,7 +274,7 @@ fn led_shaped_discard_sacrifice_not_auto_tapped_stays_manual() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ManaPayment { player, .. } if *player == P0
+            WaitingFor::ManaPayment { player, .. } if player == P0
         ),
         "with only the LED-shaped source, auto payment must pause at manual mana payment, got {:?}",
         runner.state().waiting_for
