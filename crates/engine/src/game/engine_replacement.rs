@@ -1481,8 +1481,17 @@ fn handle_persist_chosen_attribute_choice(
     // replacement drain BEFORE replaying deferred entry events — otherwise a
     // nested OrderTriggers / trigger-target pause can return while the same
     // ChoosePermanent drain is still resident, and a later post-action pass
-    // re-drains it into a second `CopyTargetChoice` that the cast driver
-    // never clears (breaks sequential Metamorphic casts).
+    // re-drains it into a second `CopyTargetChoice`.
+    //
+    // Clear the prompt we just answered first: `state.waiting_for` is still the
+    // inbound `CopyTargetChoice`, and the completion tail below used to echo it
+    // via `if !Priority { return waiting_for }` — the cast driver then re-answered
+    // the same prompt until its 64-iteration cap, leaving sequential Metamorphic
+    // casts blocked (two_auras). Nested prompts raised during copy install /
+    // entry replay still overwrite `waiting_for` and propagate below.
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
     state.finish_active_paused_post_replacement_dispatch();
 
     // CR 614.12a + CR 603.2: replay the Aura's deferred battlefield-entry event
