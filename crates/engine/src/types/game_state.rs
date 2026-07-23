@@ -50,10 +50,11 @@ use super::resolution::{
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedManaInsertCommand, ResolvedManaReplayInvariantError,
-    ResolvedManaSpendCommand, ResolvedPlayerEdit, ResolvedPlayerEditCommand,
-    ResolvedPlayerEditReplayInvariantError, ResolvedRngReplayInvariantError, ResolvedRulesJournal,
-    RulesExecutionNodeRef,
+    ManaPaymentRecipient, ResolvedInformationAudience, ResolvedInformationCommand,
+    ResolvedInformationEdit, ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
+    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
+    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ResolvedRngReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -15359,6 +15360,205 @@ impl GameState {
         Ok(())
     }
 
+    /// CR 701.20a: Construct, apply, and journal one exact reveal or hide
+    /// transition after the ordinary path has selected the affected cards.
+    ///
+    /// Replays apply the stored occurrences directly; they never inspect a
+    /// library, hand, target filter, or event payload to determine what was
+    /// revealed. Already-correct occurrences are deliberately omitted so an
+    /// empty or duplicate reveal/hide never creates a journal entry.
+    pub fn resolve_and_apply_information(
+        &mut self,
+        object_ids: &[ObjectId],
+        audience: ResolvedInformationAudience,
+        lifetime: ResolvedInformationLifetime,
+        edit: ResolvedInformationEdit,
+    ) -> Result<Option<ResolvedInformationCommand>, ResolvedInformationReplayInvariantError> {
+        let mut seen = HashSet::new();
+        let mut occurrences = Vec::with_capacity(object_ids.len());
+        for object_id in object_ids {
+            if !seen.insert(*object_id) {
+                continue;
+            }
+            let Some(object) = self.objects.get(object_id) else {
+                continue;
+            };
+            let occurrence = ObjectIncarnationRef::from_object(object);
+            let active = match audience {
+                ResolvedInformationAudience::Controller(_) => {
+                    self.revealed_cards.contains(object_id)
+                }
+                ResolvedInformationAudience::Public => {
+                    self.public_revealed_cards.contains(object_id)
+                }
+            };
+            if matches!(edit, ResolvedInformationEdit::Reveal) != active {
+                occurrences.push(occurrence);
+            }
+        }
+        if occurrences.is_empty() {
+            return Ok(None);
+        }
+
+        let command = ResolvedInformationCommand {
+            occurrences,
+            audience,
+            lifetime,
+            edit,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_information(&command)?;
+        self.resolved_rules_journal
+            .record_information(command.clone())
+            .expect("resolved information edit must have a live journal cause");
+        Ok(Some(command))
+    }
+
+    /// CR 701.20a + CR 400.7: Apply one exact information-boundary transition
+    /// without re-evaluating the effect that disclosed the card.
+    pub fn apply_resolved_information(
+        &mut self,
+        command: &ResolvedInformationCommand,
+    ) -> Result<(), ResolvedInformationReplayInvariantError> {
+        self.apply_information_edit(
+            &command.occurrences,
+            command.audience,
+            command.lifetime,
+            command.edit,
+        )
+    }
+
+    /// CR 400.7: Clear object-incarnation-scoped reveal state at the zone
+    /// boundary. The future Zone command will invoke this same final mutation
+    /// primitive while owning the enclosing zone-change command and journal
+    /// entry; this legacy boundary intentionally does not create one itself.
+    pub(crate) fn clear_revealed_information_on_zone_exit(
+        &mut self,
+        occurrence: ObjectIncarnationRef,
+    ) {
+        let controller = self
+            .objects
+            .get(&occurrence.object_id)
+            .map(|object| object.controller)
+            .expect("zone-exit reveal clear must reference a live object");
+        for (audience, lifetime) in [
+            (
+                ResolvedInformationAudience::Controller(controller),
+                ResolvedInformationLifetime::UntilActionBoundary,
+            ),
+            (
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+            ),
+        ] {
+            let active = match audience {
+                ResolvedInformationAudience::Controller(_) => {
+                    self.revealed_cards.contains(&occurrence.object_id)
+                }
+                ResolvedInformationAudience::Public => {
+                    self.public_revealed_cards.contains(&occurrence.object_id)
+                }
+            };
+            if active {
+                self.apply_information_edit(
+                    &[occurrence],
+                    audience,
+                    lifetime,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("zone-exit reveal clear must match the live object occurrence");
+            }
+        }
+    }
+
+    fn apply_information_edit(
+        &mut self,
+        occurrences: &[ObjectIncarnationRef],
+        audience: ResolvedInformationAudience,
+        lifetime: ResolvedInformationLifetime,
+        edit: ResolvedInformationEdit,
+    ) -> Result<(), ResolvedInformationReplayInvariantError> {
+        let valid_lifetime = matches!(
+            (audience, lifetime),
+            (
+                ResolvedInformationAudience::Controller(_),
+                ResolvedInformationLifetime::UntilActionBoundary
+            ) | (
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange
+            )
+        );
+        if !valid_lifetime {
+            return Err(
+                ResolvedInformationReplayInvariantError::InvalidAudienceLifetime {
+                    audience,
+                    lifetime,
+                },
+            );
+        }
+        if occurrences.is_empty() {
+            return Err(ResolvedInformationReplayInvariantError::EmptyOccurrences);
+        }
+
+        let mut seen = HashSet::new();
+        for occurrence in occurrences {
+            if !seen.insert(occurrence.object_id) {
+                return Err(
+                    ResolvedInformationReplayInvariantError::DuplicateOccurrence(*occurrence),
+                );
+            }
+            let object = self.objects.get(&occurrence.object_id).ok_or(
+                ResolvedInformationReplayInvariantError::MissingObject(*occurrence),
+            )?;
+            let found = ObjectIncarnationRef::from_object(object);
+            if found != *occurrence {
+                return Err(ResolvedInformationReplayInvariantError::StaleObject {
+                    expected: *occurrence,
+                    found,
+                });
+            }
+            let active = match audience {
+                ResolvedInformationAudience::Controller(_) => {
+                    self.revealed_cards.contains(&occurrence.object_id)
+                }
+                ResolvedInformationAudience::Public => {
+                    self.public_revealed_cards.contains(&occurrence.object_id)
+                }
+            };
+            match edit {
+                ResolvedInformationEdit::Reveal if active => {
+                    return Err(
+                        ResolvedInformationReplayInvariantError::RevealAlreadyActive(*occurrence),
+                    );
+                }
+                ResolvedInformationEdit::Hide if !active => {
+                    return Err(
+                        ResolvedInformationReplayInvariantError::HideWithoutActiveReveal(
+                            *occurrence,
+                        ),
+                    );
+                }
+                ResolvedInformationEdit::Reveal | ResolvedInformationEdit::Hide => {}
+            }
+        }
+
+        let revealed_cards = match audience {
+            ResolvedInformationAudience::Controller(_) => &mut self.revealed_cards,
+            ResolvedInformationAudience::Public => &mut self.public_revealed_cards,
+        };
+        for occurrence in occurrences {
+            match edit {
+                ResolvedInformationEdit::Reveal => {
+                    revealed_cards.insert(occurrence.object_id);
+                }
+                ResolvedInformationEdit::Hide => {
+                    revealed_cards.remove(&occurrence.object_id);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// CR 106.4: Apply one exact, already-resolved mana insertion without
     /// allocating a replacement pip or consulting mana-production state.
     pub fn apply_resolved_mana_insert(
@@ -17509,6 +17709,183 @@ impl PartialEq for GameState {
 }
 
 impl Eq for GameState {}
+
+#[cfg(test)]
+mod resolved_information_tests {
+    use super::*;
+    use crate::game::effects;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        CardSelectionMode, Effect, QuantityExpr, ResolvedAbility, RevealUntilDisposition,
+        TargetFilter, TargetRef,
+    };
+    use crate::types::identifiers::CardId;
+    use crate::types::resolved_commands::{
+        ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+        ResolvedPlayerEdit, ResolvedRulesCommand,
+    };
+
+    #[test]
+    fn reveal_hand_resolves_through_information_command_and_replays_with_player_edit() {
+        let mut state = GameState::new_two_player(42);
+        let revealed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Revealed Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RevealHand {
+                target: TargetFilter::Any,
+                card_filter: TargetFilter::Any,
+                count: None,
+                selection: CardSelectionMode::Chosen,
+                choice_optional: false,
+                reveal: true,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let pre_state = state.clone();
+        let mut events = Vec::new();
+
+        effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.revealed_cards.contains(&revealed));
+        assert!(state.public_revealed_cards.contains(&revealed));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::CardsRevealed { card_ids, .. } if card_ids == &vec![revealed]
+        )));
+        assert!(state
+            .resolve_and_apply_information(
+                &[revealed],
+                ResolvedInformationAudience::Controller(PlayerId(0)),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Reveal,
+            )
+            .unwrap()
+            .is_none());
+        assert!(state
+            .resolve_and_apply_information(
+                &[revealed],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .unwrap()
+            .is_none());
+
+        state
+            .resolve_and_apply_player_edit(PlayerId(0), ResolvedPlayerEdit::Life { delta: -2 })
+            .unwrap();
+        state
+            .resolve_and_apply_information(
+                &[revealed],
+                ResolvedInformationAudience::Controller(PlayerId(0)),
+                ResolvedInformationLifetime::UntilActionBoundary,
+                ResolvedInformationEdit::Hide,
+            )
+            .unwrap()
+            .expect("the active reveal lease must record one hide command");
+        let information = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::Information(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            information.len(),
+            3,
+            "the real reveal, its public disclosure, and final hide each record one command"
+        );
+        assert!(matches!(
+            information[0].audience,
+            ResolvedInformationAudience::Controller(PlayerId(0))
+        ));
+        assert!(matches!(
+            information[1].audience,
+            ResolvedInformationAudience::Public
+        ));
+        let player_edit = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::PlayerEdit(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .expect("cross-family player edit must be recorded");
+
+        let mut replay = pre_state;
+        replay.apply_resolved_information(&information[0]).unwrap();
+        replay.apply_resolved_information(&information[1]).unwrap();
+        replay.apply_resolved_player_edit(&player_edit).unwrap();
+        replay.apply_resolved_information(&information[2]).unwrap();
+
+        assert_eq!(replay.revealed_cards, state.revealed_cards);
+        assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+        assert_eq!(replay.players[0].life, state.players[0].life);
+    }
+
+    #[test]
+    fn reveal_until_reveal_only_records_exact_retained_information() {
+        let mut state = GameState::new_two_player(42);
+        let revealed = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Retained Library Card".to_string(),
+            Zone::Library,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::RevealUntil {
+                player: TargetFilter::Controller,
+                filter: TargetFilter::Any,
+                count: QuantityExpr::Fixed { value: 1 },
+                matched_disposition: RevealUntilDisposition::RevealOnly,
+                kept_destination: Zone::Library,
+                rest_destination: Zone::Library,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                kept_optional_to: None,
+                enters_under: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        let pre_state = state.clone();
+        let mut events = Vec::new();
+
+        effects::resolve_effect(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.revealed_cards.contains(&revealed));
+        assert!(state.public_revealed_cards.contains(&revealed));
+        let information = state
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match &entry.command {
+                Some(ResolvedRulesCommand::Information(command)) => Some(command.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(information.len(), 2);
+
+        let mut replay = pre_state;
+        for command in &information {
+            replay.apply_resolved_information(command).unwrap();
+        }
+        assert_eq!(replay.revealed_cards, state.revealed_cards);
+        assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
+    }
+}
 
 #[cfg(test)]
 mod active_search_provenance_tests {

@@ -140,6 +140,48 @@ pub struct ResolvedObjectCounterCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// The audience that received one exact revealed-card fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedInformationAudience {
+    /// CR 701.20a: The controller's active reveal lease, retained only while
+    /// the resolving instruction still needs the revealed card.
+    Controller(PlayerId),
+    /// CR 701.20a: A fact that has been published to every player.
+    Public,
+}
+
+/// The precise lifetime of one revealed-card fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedInformationLifetime {
+    /// CR 701.20a: The reveal remains available through the current effect or
+    /// prompt and is cleared at the next applicable action boundary.
+    UntilActionBoundary,
+    /// CR 400.7: The published fact belongs to this object incarnation and
+    /// expires when that object changes zones.
+    UntilZoneChange,
+}
+
+/// The final information-boundary transition for exact object occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedInformationEdit {
+    Reveal,
+    Hide,
+}
+
+/// One resolved reveal or hide transition after all card selection is settled.
+///
+/// `occurrences` deliberately stores exact object incarnations rather than raw
+/// `ObjectId`s: CR 400.7 makes a zone-changed object a new object even when the
+/// engine reuses its storage id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedInformationCommand {
+    pub occurrences: Vec<ObjectIncarnationRef>,
+    pub audience: ResolvedInformationAudience,
+    pub lifetime: ResolvedInformationLifetime,
+    pub edit: ResolvedInformationEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// One exact constrained-trigger ledger fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedTriggerLedgerEdit {
@@ -232,6 +274,7 @@ pub enum ResolvedRulesCommand {
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
+    Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
 }
@@ -513,6 +556,60 @@ impl std::fmt::Display for ResolvedObjectCounterReplayInvariantError {
 }
 
 impl std::error::Error for ResolvedObjectCounterReplayInvariantError {}
+
+/// Typed failure while applying an exact revealed-information command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedInformationReplayInvariantError {
+    EmptyOccurrences,
+    DuplicateOccurrence(ObjectIncarnationRef),
+    MissingObject(ObjectIncarnationRef),
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    RevealAlreadyActive(ObjectIncarnationRef),
+    HideWithoutActiveReveal(ObjectIncarnationRef),
+    InvalidAudienceLifetime {
+        audience: ResolvedInformationAudience,
+        lifetime: ResolvedInformationLifetime,
+    },
+}
+
+impl std::fmt::Display for ResolvedInformationReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyOccurrences => write!(f, "resolved information command has no occurrences"),
+            Self::DuplicateOccurrence(occurrence) => {
+                write!(f, "resolved information command repeats {occurrence:?}")
+            }
+            Self::MissingObject(occurrence) => {
+                write!(f, "resolved information command cannot find {occurrence:?}")
+            }
+            Self::StaleObject { expected, found } => write!(
+                f,
+                "resolved information command expected {expected:?}, found {found:?}"
+            ),
+            Self::RevealAlreadyActive(occurrence) => {
+                write!(
+                    f,
+                    "resolved information command reveals active {occurrence:?}"
+                )
+            }
+            Self::HideWithoutActiveReveal(occurrence) => {
+                write!(
+                    f,
+                    "resolved information command hides inactive {occurrence:?}"
+                )
+            }
+            Self::InvalidAudienceLifetime { audience, lifetime } => write!(
+                f,
+                "resolved information command has incompatible {audience:?} and {lifetime:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedInformationReplayInvariantError {}
 
 /// Typed failure while applying an already-resolved per-event ledger command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -995,6 +1092,14 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::ObjectCounter(command))
     }
 
+    /// Records one exact information-boundary transition under its causal node.
+    pub fn record_information(
+        &mut self,
+        command: ResolvedInformationCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::Information(command))
+    }
+
     /// Records one exact semantic ledger mutation under its causal node.
     pub fn record_ledger_edit(
         &mut self,
@@ -1209,6 +1314,7 @@ impl ResolvedRulesJournal {
                 ResolvedRulesCommand::PlayerEdit(_)
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_) => {}
             }
@@ -1414,6 +1520,14 @@ impl ResolvedRulesJournal {
                     }
                 }
             }
+            ResolvedRulesCommand::Information(command) => {
+                if entry.node != command.cause || information_command_is_invalid(command) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "information command has an invalid occurrence, audience, lifetime, or cause"
+                            .to_string(),
+                    ));
+                }
+            }
             ResolvedRulesCommand::LedgerEdit(command) => {
                 if entry.node != command.cause
                     || ledger_edit_is_invalid(&command.edit)
@@ -1484,6 +1598,25 @@ fn object_counter_edit_is_empty(edit: &ResolvedObjectCounterEdit) -> bool {
         ResolvedObjectCounterEdit::Add { count, .. }
         | ResolvedObjectCounterEdit::Remove { count } => *count == 0,
     }
+}
+
+fn information_command_is_invalid(command: &ResolvedInformationCommand) -> bool {
+    let valid_lifetime = matches!(
+        (command.audience, command.lifetime),
+        (
+            ResolvedInformationAudience::Controller(_),
+            ResolvedInformationLifetime::UntilActionBoundary
+        ) | (
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilZoneChange
+        )
+    );
+    let mut object_ids = HashSet::new();
+    command.occurrences.is_empty()
+        || !valid_lifetime
+        || command.occurrences.iter().any(|occurrence| {
+            occurrence.incarnation == LEGACY_INCARNATION || !object_ids.insert(occurrence.object_id)
+        })
 }
 
 fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
@@ -1889,6 +2022,78 @@ mod tests {
             serde_json::to_value(zero_span_multi_card).unwrap()
         )
         .is_err());
+    }
+
+    #[test]
+    fn information_commands_roundtrip_and_reject_malformed_payloads() {
+        let mut journal = ResolvedRulesJournal::default();
+        let cause = journal.begin_proposal().unwrap();
+        let occurrence = ObjectIncarnationRef::of(ObjectId(9), 2);
+        journal
+            .record_information(ResolvedInformationCommand {
+                occurrences: vec![occurrence],
+                audience: ResolvedInformationAudience::Controller(PlayerId(0)),
+                lifetime: ResolvedInformationLifetime::UntilActionBoundary,
+                edit: ResolvedInformationEdit::Reveal,
+                cause,
+            })
+            .unwrap();
+        journal
+            .record_information(ResolvedInformationCommand {
+                occurrences: vec![occurrence],
+                audience: ResolvedInformationAudience::Public,
+                lifetime: ResolvedInformationLifetime::UntilZoneChange,
+                edit: ResolvedInformationEdit::Reveal,
+                cause,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serde_json::to_value(&journal).unwrap())
+                .unwrap(),
+            journal
+        );
+
+        let mut empty = journal.clone();
+        let Some(ResolvedRulesCommand::Information(command)) = empty.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the controller information command");
+        };
+        command.occurrences.clear();
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(empty).unwrap()
+        )
+        .is_err());
+
+        let mut invalid_lifetime = journal.clone();
+        let Some(ResolvedRulesCommand::Information(command)) =
+            invalid_lifetime.entries[2].command.as_mut()
+        else {
+            panic!("entry 2 must be the public information command");
+        };
+        command.lifetime = ResolvedInformationLifetime::UntilActionBoundary;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(invalid_lifetime).unwrap()
+        )
+        .is_err());
+
+        let mut legacy_occurrence = journal.clone();
+        let Some(ResolvedRulesCommand::Information(command)) =
+            legacy_occurrence.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the controller information command");
+        };
+        command.occurrences[0].incarnation = LEGACY_INCARNATION;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(legacy_occurrence).unwrap()
+        )
+        .is_err());
+
+        let mut missing_lifetime = serde_json::to_value(&journal).unwrap();
+        missing_lifetime["entries"][1]["command"]["Information"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lifetime");
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(missing_lifetime).is_err());
     }
 
     #[test]

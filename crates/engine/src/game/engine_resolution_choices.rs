@@ -13,6 +13,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use crate::types::zones::Zone;
 
 use super::effects;
@@ -3310,9 +3313,14 @@ pub(super) fn handle_resolution_choice(
             // replacement's decline ability runs via `pending_continuation`, which the
             // effect's resolver populated with the decline branch before the prompt.
             if optional && chosen.is_empty() {
-                for &card_id in &cards {
-                    state.revealed_cards.remove(&card_id);
-                }
+                state
+                    .resolve_and_apply_information(
+                        &cards,
+                        ResolvedInformationAudience::Controller(player),
+                        ResolvedInformationLifetime::UntilActionBoundary,
+                        ResolvedInformationEdit::Hide,
+                    )
+                    .expect("reveal-choice cleanup must reference live card occurrences");
                 state.private_look_ids.clear();
                 state.private_look_player = None;
                 set_priority(state, player);
@@ -3353,9 +3361,14 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            for &card_id in &cards {
-                state.revealed_cards.remove(&card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &cards,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-choice cleanup must reference live card occurrences");
             state.private_look_ids.clear();
             state.private_look_player = None;
 
@@ -7223,9 +7236,14 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
-            for card_id in &clear_markers {
-                state.revealed_cards.remove(card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &clear_markers,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-rest cleanup must reference live card occurrences");
             if let Some(kept) = publish_tracked_set {
                 effects::publish_fresh_tracked_set(state, kept.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {

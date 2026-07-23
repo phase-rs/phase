@@ -72,16 +72,37 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 #[test]
 fn cards_revealed_events_are_remembered_publicly() {
     let mut state = GameState::new_two_player(42);
-    let card_id = ObjectId(42);
+    let card_id = create_object(
+        &mut state,
+        CardId(42),
+        PlayerId(1),
+        "Known Card".to_string(),
+        Zone::Hand,
+    );
     let events = vec![GameEvent::CardsRevealed {
         player: PlayerId(1),
         card_ids: vec![card_id],
         card_names: vec!["Known Card".to_string()],
     }];
+    let pre_state = state.clone();
 
-    remember_public_reveals(&mut state, &events);
+    remember_public_reveals(&mut state, &events, 0);
 
     assert!(state.public_revealed_cards.contains(&card_id));
+    let command = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .find_map(|entry| match &entry.command {
+            Some(crate::types::resolved_commands::ResolvedRulesCommand::Information(command)) => {
+                Some(command.clone())
+            }
+            _ => None,
+        })
+        .expect("published reveal must record its exact information command");
+    let mut replay = pre_state;
+    replay.apply_resolved_information(&command).unwrap();
+    assert_eq!(replay.public_revealed_cards, state.public_revealed_cards);
 }
 
 /// CR 603.3d regression — reported turn-34 Commander freeze (All Will Be

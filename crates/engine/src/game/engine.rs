@@ -1,5 +1,5 @@
 use rand::Rng;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
@@ -21,6 +21,10 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedRulesCommand,
+};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -292,6 +296,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 ) -> Result<ActionResult, EngineError> {
     mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
     let boundary_snapshot = state.clone();
+    let journal_start = state.resolved_rules_journal.entries().len();
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -327,7 +332,7 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     // pool that a spend during this action depleted, before public state is
     // finalized and the next affordability probe runs. No-op when none flagged.
     super::mana_payment::refill_infinite_mana(state);
-    remember_public_reveals(state, &result.events);
+    remember_public_reveals(state, &result.events, journal_start);
     // Targeted public-state dirty marking over the full accumulated event set
     // (the auto-pass loop appends events). `finalize_public_state` is the only
     // consumer of `public_state_dirty`, so marking once here over the complete
@@ -2963,10 +2968,48 @@ fn handle_respond_to_shortcut(
     Ok(result)
 }
 
-fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
+fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_start: usize) {
+    // The journal is truncated at turn boundaries, so an action that
+    // auto-advances across a turn leaves `journal_start` past the current end.
+    // Clamp with `get(..)` so a truncated journal yields no this-action
+    // controller reveals rather than panicking on an out-of-bounds slice.
+    let controller_reveals = state
+        .resolved_rules_journal
+        .entries()
+        .get(journal_start..)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+        .filter_map(|command| match command {
+            ResolvedRulesCommand::Information(information)
+                if matches!(
+                    information.audience,
+                    ResolvedInformationAudience::Controller(_)
+                ) && matches!(information.edit, ResolvedInformationEdit::Reveal) =>
+            {
+                Some(&information.occurrences)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|occurrence| occurrence.object_id)
+        .collect::<HashSet<_>>();
+
     for event in events {
         if let GameEvent::CardsRevealed { card_ids, .. } = event {
-            state.public_revealed_cards.extend(card_ids.iter().copied());
+            let unpublished = card_ids
+                .iter()
+                .copied()
+                .filter(|card_id| !controller_reveals.contains(card_id))
+                .collect::<Vec<_>>();
+            state
+                .resolve_and_apply_information(
+                    &unpublished,
+                    ResolvedInformationAudience::Public,
+                    ResolvedInformationLifetime::UntilZoneChange,
+                    ResolvedInformationEdit::Reveal,
+                )
+                .expect("published reveal occurrences must be live and distinct");
         }
     }
 }

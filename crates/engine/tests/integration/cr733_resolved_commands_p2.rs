@@ -83,6 +83,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
             engine::game::library::apply_resolved_library_shuffle(state, command, &mut Vec::new())
                 .unwrap();
         }
+        ResolvedRulesCommand::Information(command) => {
+            state.apply_resolved_information(command).unwrap();
+        }
     }
 }
 
@@ -169,9 +172,8 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ObjectStatus(_)
             | ResolvedRulesCommand::ObjectCounter(_)
             | ResolvedRulesCommand::LedgerEdit(_)
-            | ResolvedRulesCommand::LibraryShuffle(_) => {
-                apply_semantic_command(&mut replay, command)
-            }
+            | ResolvedRulesCommand::LibraryShuffle(_)
+            | ResolvedRulesCommand::Information(_) => apply_semantic_command(&mut replay, command),
         }
     }
     assert!(

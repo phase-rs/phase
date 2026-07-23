@@ -136,15 +136,15 @@ pub(crate) fn apply_zone_exit_cleanup(
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
 ) {
     // CR 400.7: An object that changes zones becomes a new object with no
-    // memory of its previous existence. Both the short-lived `revealed_cards`
-    // (cleared at action boundaries) and the persistent `public_revealed_cards`
-    // (reveal memory that survives action boundaries so e.g. a Duress-revealed
-    // card stays visible in the opponent's hand) are keyed by ObjectId. Since
-    // ObjectId here is storage identity and persists across the zone change,
-    // we must drop both flags so a card shuffled back into the library and
-    // re-drawn does not surface as "still revealed."
-    state.revealed_cards.remove(&object_id);
-    state.public_revealed_cards.remove(&object_id);
+    // memory of its previous existence. The information authority receives the
+    // pre-move occurrence so the future Zone command can apply this same clear
+    // without ever exposing the new incarnation through the old reveal lease.
+    let occurrence = state
+        .objects
+        .get(&object_id)
+        .map(ObjectIncarnationRef::from_object)
+        .expect("zone-exit cleanup must reference a live object");
+    state.clear_revealed_information_on_zone_exit(occurrence);
     // CR 400.7 + CR 702.187b: The "discarded this turn" mark (Mayhem's gate)
     // belongs to the old object. Clear it on any zone change so a card that
     // leaves the graveyard and returns is not treated as still discarded; the
