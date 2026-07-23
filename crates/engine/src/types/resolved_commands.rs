@@ -11,7 +11,7 @@ use super::ability::TriggerDefinitionRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::SpellCastRecord;
-use super::identifiers::{ObjectIncarnationRef, LEGACY_INCARNATION};
+use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 
@@ -206,6 +206,21 @@ pub struct ResolvedLedgerEditCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// One exact library shuffle with its consumed ChaCha20 stream span.
+///
+/// CR 701.24a: the ordinary path randomizes the captured predecessor order
+/// once. Replay installs `resulting_order` and advances only through the
+/// recorded entropy span; it never samples the RNG again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedLibraryShuffleCommand {
+    pub player: PlayerId,
+    pub precondition_order: Vec<ObjectId>,
+    pub resulting_order: Vec<ObjectId>,
+    pub pre_word_pos: u128,
+    pub post_word_pos: u128,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -218,6 +233,112 @@ pub enum ResolvedRulesCommand {
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
+    LibraryShuffle(ResolvedLibraryShuffleCommand),
+}
+
+/// Typed failure while advancing the canonical ChaCha20 entropy high-water mark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedRngReplayInvariantError {
+    HighWaterRegression { current: u128, requested: u128 },
+    StreamPositionRegression { current: u128, requested: u128 },
+}
+
+impl std::fmt::Display for ResolvedRngReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HighWaterRegression { current, requested } => write!(
+                f,
+                "resolved entropy command would regress high-water from {current} to {requested}"
+            ),
+            Self::StreamPositionRegression { current, requested } => write!(
+                f,
+                "resolved entropy command would rewind the ChaCha20 stream from {current} to {requested}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedRngReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved library shuffle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedLibraryShuffleReplayInvariantError {
+    UnknownPlayer(PlayerId),
+    LibraryOrderPreconditionMismatch,
+    RngWordPositionPreconditionMismatch {
+        expected: u128,
+        found: u128,
+    },
+    RngCursorPositionPreconditionMismatch {
+        expected: u128,
+        found: u128,
+    },
+    InvalidLibraryOrderReceipt,
+    EntropyReceiptRegression {
+        pre: u128,
+        post: u128,
+    },
+    /// CR 701.24a: A Fisher-Yates shuffle of two or more cards always consumes
+    /// at least one random draw, so a multi-card receipt whose entropy span is
+    /// empty could not have come from a real shuffle. Accepting it would install
+    /// a permutation while leaving the RNG cursor unadvanced, desynchronizing
+    /// every later entropy-backed replay.
+    MultiCardReceiptWithoutEntropy {
+        cards: usize,
+        position: u128,
+    },
+    RngHighWater(ResolvedRngReplayInvariantError),
+}
+
+impl std::fmt::Display for ResolvedLibraryShuffleReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPlayer(player) => {
+                write!(
+                    f,
+                    "resolved library shuffle cannot find player {}",
+                    player.0
+                )
+            }
+            Self::LibraryOrderPreconditionMismatch => {
+                write!(
+                    f,
+                    "resolved library shuffle does not match its recorded predecessor order"
+                )
+            }
+            Self::RngWordPositionPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved library shuffle expected RNG high-water {expected}, found {found}"
+            ),
+            Self::RngCursorPositionPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved library shuffle expected ChaCha20 position {expected}, found {found}"
+            ),
+            Self::InvalidLibraryOrderReceipt => {
+                write!(
+                    f,
+                    "resolved library shuffle has an invalid ordered-card receipt"
+                )
+            }
+            Self::EntropyReceiptRegression { pre, post } => write!(
+                f,
+                "resolved library shuffle regresses entropy from {pre} to {post}"
+            ),
+            Self::MultiCardReceiptWithoutEntropy { cards, position } => write!(
+                f,
+                "resolved library shuffle permutes {cards} cards without advancing entropy past {position}"
+            ),
+            Self::RngHighWater(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedLibraryShuffleReplayInvariantError {}
+
+impl From<ResolvedRngReplayInvariantError> for ResolvedLibraryShuffleReplayInvariantError {
+    fn from(error: ResolvedRngReplayInvariantError) -> Self {
+        Self::RngHighWater(error)
+    }
 }
 
 /// Typed failure while applying an already-resolved mana command to a replay state.
@@ -882,6 +1003,14 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::LedgerEdit(command))
     }
 
+    /// Records one exact library order plus its already-consumed entropy span.
+    pub fn record_library_shuffle(
+        &mut self,
+        command: ResolvedLibraryShuffleCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::LibraryShuffle(command))
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -1080,7 +1209,8 @@ impl ResolvedRulesJournal {
                 ResolvedRulesCommand::PlayerEdit(_)
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
-                | ResolvedRulesCommand::LedgerEdit(_) => {}
+                | ResolvedRulesCommand::LedgerEdit(_)
+                | ResolvedRulesCommand::LibraryShuffle(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1295,6 +1425,15 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::LibraryShuffle(command) => {
+                if entry.node != command.cause || validate_library_shuffle_receipt(command).is_err()
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "library shuffle command has an invalid receipt or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1383,6 +1522,47 @@ fn ledger_edit_has_legacy_object_identity(edit: &ResolvedLedgerEdit) -> bool {
         ResolvedLedgerEdit::TriggerFired { trigger, .. }
             if trigger.source.incarnation == LEGACY_INCARNATION
     )
+}
+
+/// Validates the closed operands of a library-order entropy receipt.
+///
+/// CR 701.24a: shuffling can only permute the same exact cards. The recorded
+/// stream span can advance or remain unchanged, but never rewind.
+pub(crate) fn validate_library_shuffle_receipt(
+    command: &ResolvedLibraryShuffleCommand,
+) -> Result<(), ResolvedLibraryShuffleReplayInvariantError> {
+    if command.post_word_pos < command.pre_word_pos {
+        return Err(
+            ResolvedLibraryShuffleReplayInvariantError::EntropyReceiptRegression {
+                pre: command.pre_word_pos,
+                post: command.post_word_pos,
+            },
+        );
+    }
+    if command.precondition_order.len() != command.resulting_order.len()
+        || has_duplicate_values(&command.precondition_order)
+        || has_duplicate_values(&command.resulting_order)
+    {
+        return Err(ResolvedLibraryShuffleReplayInvariantError::InvalidLibraryOrderReceipt);
+    }
+
+    // CR 701.24a: A shuffle of two or more cards draws at least once, so its
+    // entropy span must be non-empty. A zero-span multi-card receipt is a
+    // corrupt permutation that would leave the RNG cursor unadvanced.
+    if command.resulting_order.len() >= 2 && command.post_word_pos == command.pre_word_pos {
+        return Err(
+            ResolvedLibraryShuffleReplayInvariantError::MultiCardReceiptWithoutEntropy {
+                cards: command.resulting_order.len(),
+                position: command.pre_word_pos,
+            },
+        );
+    }
+
+    let expected: HashSet<_> = command.precondition_order.iter().copied().collect();
+    let resulting: HashSet<_> = command.resulting_order.iter().copied().collect();
+    (expected == resulting)
+        .then_some(())
+        .ok_or(ResolvedLibraryShuffleReplayInvariantError::InvalidLibraryOrderReceipt)
 }
 
 #[cfg(test)]
@@ -1641,6 +1821,72 @@ mod tests {
         command.cause = RulesExecutionNodeRef::Payment(SettlementNodeOrdinal(99));
         assert!(serde_json::from_value::<ResolvedRulesJournal>(
             serde_json::to_value(unrelated_cause).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn library_shuffle_command_roundtrips_and_rejects_invalid_receipts() {
+        let mut journal = ResolvedRulesJournal::default();
+        let cause = journal.begin_proposal().unwrap();
+        journal
+            .record_library_shuffle(ResolvedLibraryShuffleCommand {
+                player: PlayerId(0),
+                precondition_order: vec![ObjectId(1), ObjectId(2), ObjectId(3)],
+                resulting_order: vec![ObjectId(3), ObjectId(1), ObjectId(2)],
+                pre_word_pos: 7,
+                post_word_pos: 11,
+                cause,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serde_json::to_value(&journal).unwrap())
+                .unwrap(),
+            journal
+        );
+
+        let mut missing_entropy = serde_json::to_value(&journal).unwrap();
+        missing_entropy["entries"][1]["command"]["LibraryShuffle"]
+            .as_object_mut()
+            .unwrap()
+            .remove("post_word_pos");
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(missing_entropy).is_err());
+
+        let mut duplicate_card = journal.clone();
+        let Some(ResolvedRulesCommand::LibraryShuffle(command)) =
+            duplicate_card.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the library shuffle");
+        };
+        command.resulting_order = vec![ObjectId(3), ObjectId(3), ObjectId(2)];
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(duplicate_card).unwrap()
+        )
+        .is_err());
+
+        let mut backwards_entropy = journal.clone();
+        let Some(ResolvedRulesCommand::LibraryShuffle(command)) =
+            backwards_entropy.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the library shuffle");
+        };
+        command.post_word_pos = 6;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(backwards_entropy).unwrap()
+        )
+        .is_err());
+
+        // CR 701.24a: a three-card permutation with an empty entropy span could
+        // not have come from a real shuffle and must be rejected.
+        let mut zero_span_multi_card = journal.clone();
+        let Some(ResolvedRulesCommand::LibraryShuffle(command)) =
+            zero_span_multi_card.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the library shuffle");
+        };
+        command.post_word_pos = command.pre_word_pos;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(zero_span_multi_card).unwrap()
         )
         .is_err());
     }
