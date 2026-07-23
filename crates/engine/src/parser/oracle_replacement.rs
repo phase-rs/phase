@@ -2284,23 +2284,15 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     )
 }
 
-/// CR 614.12a + CR 707.2c: Recognizer for an as-enters OBJECT choice phrase —
-/// the suffix after (or including) `choose `, e.g. `"a creature."` or
-/// `"choose a creature."`. Used by `LinkedChoiceKind::CopyChosenHost` detection
-/// to identify Unimplemented ability gaps that pair with a CopyChosen static —
-/// never by line-local replacement classification (that would claim Moved for
-/// every permanent-choose card).
-pub(crate) fn is_as_enters_choose_permanent_phrase(choose_text: &str) -> bool {
-    as_enters_choose_permanent_filter(choose_text).is_some()
-}
-
 /// Parse the object-filter of an as-enters permanent choice. Accepts either the
 /// suffix after `choose ` (`"a creature."`) or a full `"choose a creature."`
 /// clause. Requires full consumption and a concrete `Typed` filter.
 ///
-/// `pub(crate)` so the `CopyChosenHost` document-relation apply step can
-/// derive the filter from an Unimplemented ability's description when injecting
-/// `ChoosePermanent { CopiableSnapshot }`.
+/// Used by `LinkedChoiceKind::CopyChosenHost` to identify Unimplemented ability
+/// gaps that pair with a CopyChosen static and to derive the injected
+/// `ChoosePermanent { CopiableSnapshot }` filter — never by line-local
+/// replacement classification (that would claim Moved for every
+/// permanent-choose card).
 pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
     // Structural optional-prefix + trailing-period cleanup (not dispatch):
     // callers may pass the match-at-start slice or the post-`choose ` suffix.
