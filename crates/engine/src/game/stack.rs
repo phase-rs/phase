@@ -1228,9 +1228,17 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Alteration's ChoosePermanent CopyTargetChoice) that were stashed
                     // by `apply_single_replacement` while resolving this ZoneChange.
                     // `CallerEpilogue` skipped the DeliveryTail drain above, so this
-                    // site owns the prompt. The waiting_for MUST be applied — discarding
-                    // it silently drops mid-entry choices and lets Aura attach proceed
-                    // without the copy (spell-path Metamorphic regression).
+                    // site owns the prompt.
+                    //
+                    // Honor the returned `WaitingFor` — discarding it silently drops
+                    // mid-entry choices (spell-path Metamorphic: Aura attached with
+                    // no copy). Continue the epilogue afterward so CR 608.3c Aura
+                    // attach / cast stamps still run; the answer path then finds the
+                    // host via `attached_to` (PersistChosenAttribute) the same way
+                    // the dig/delivery path does. Do NOT early-return + push
+                    // `PendingSpellResolution` here: that buries a Tribute/Siege
+                    // AbilityContinuation under SpellResolution (`active_*` is
+                    // top-only) and breaks TributeChoice / card-name resume.
                     if state.has_post_replacement_drain() {
                         state.clear_post_replacement_source();
                         if let Some(wf) =
@@ -1243,71 +1251,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             )
                         {
                             if !matches!(wf, WaitingFor::Priority { .. }) {
-                                // CR 608.3c + CR 400.7d: stash PendingSpellResolution so
-                                // the choice-answer resume can complete Aura attachment /
-                                // cast-link stamps — mirrors the delivery NeedsChoice arm
-                                // and ReplacementResult::NeedsChoice arm above.
-                                let cast_from_zone = ability
-                                    .as_ref()
-                                    .and_then(|a| a.context.cast_from_zone)
-                                    .or_else(|| {
-                                        state.objects.get(&entry.id).and_then(|o| o.cast_from_zone)
-                                    });
-                                let kickers_paid = ability
-                                    .as_ref()
-                                    .map(|a| a.context.kickers_paid.clone())
-                                    .unwrap_or_else(|| {
-                                        state
-                                            .objects
-                                            .get(&entry.id)
-                                            .map(|o| o.kickers_paid.clone())
-                                            .unwrap_or_default()
-                                    });
-                                let additional_cost_payment_count = ability
-                                    .as_ref()
-                                    .map(|a| a.context.additional_cost_payment_count)
-                                    .unwrap_or_else(|| {
-                                        state
-                                            .objects
-                                            .get(&entry.id)
-                                            .map(|o| o.additional_cost_payment_count)
-                                            .unwrap_or_default()
-                                    });
-                                let additional_cost_payments = ability
-                                    .as_ref()
-                                    .map(|a| a.context.additional_cost_payments.clone())
-                                    .unwrap_or_else(|| {
-                                        state
-                                            .objects
-                                            .get(&entry.id)
-                                            .map(|o| o.additional_cost_payments.clone())
-                                            .unwrap_or_default()
-                                    });
-                                state.push_spell_resolution(
-                                    crate::types::game_state::PendingSpellResolution {
-                                        object_id: entry.id,
-                                        controller: entry.controller,
-                                        casting_variant,
-                                        cast_from_zone,
-                                        cast_controller: Some(entry.controller),
-                                        cast_timing_permission,
-                                        spell_targets: spell_targets.clone(),
-                                        actual_mana_spent,
-                                        kickers_paid,
-                                        additional_cost_payment_count,
-                                        additional_cost_payments,
-                                        convoked_creatures: convoked_creatures.clone(),
-                                    },
-                                );
                                 state.waiting_for = wf;
-                                events.push(GameEvent::StackResolved {
-                                    object_id: entry.id,
-                                });
-                                state.current_trigger_event = None;
-                                state.current_trigger_events.clear();
-                                state.current_trigger_match_count = None;
-                                state.die_result_this_resolution = None;
-                                return;
                             }
                         }
                     }
