@@ -20957,6 +20957,21 @@ fn static_all_creatures_are_color_composes_trailing_modifications() {
             .any(|m| matches!(m, ContinuousModification::SetColor { .. }))),
         "'are red dragons' must not parse as a color static, got {def:?}"
     );
+
+    // Mephidross Vampire: "All creatures are black and have lifelink."
+    let def = parse_static_line("All creatures are black and have lifelink.").unwrap();
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Lifelink
+            },
+        ]
+    );
 }
 
 /// CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
