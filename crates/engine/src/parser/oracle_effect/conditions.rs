@@ -4157,7 +4157,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     }
 
     let body_rest_lower = body_rest.to_lowercase();
-    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest)?;
+    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest, ctx)?;
     let ContinuationAst::DigFromAmong {
         quantity: alt_quantity,
         filter: alt_filter,

@@ -550,6 +550,7 @@ mod issue_581_mystic_remora_cumulative_upkeep;
 mod issue_5820_susan_foreman;
 mod issue_5821_psychic_paper_attach_choice;
 mod issue_583_vivi_ornitier_mana_source;
+mod issue_5900_conjurers_mantle;
 mod issue_5901_depthshaker_titan;
 mod issue_5910_kitchen_finks_persist;
 mod issue_5945_kellan_the_kid;

@@ -6160,6 +6160,22 @@ fn parse_shared_quality_reference<'a>(
         return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
     }
 
+    // CR 608.2k: a singular demonstrative back-reference ("that creature" /
+    // "that permanent" / "that card") to the trigger subject resolves to the
+    // triggering object exactly like the bare pronoun "it" above — Conjurer's
+    // Mantle ("Whenever equipped creature attacks, ... reveal a card that shares
+    // a creature type with that creature"). Route through the same ctx-aware
+    // resolver so it binds to `TriggeringSource` when a non-source trigger
+    // subject exists and stays `ParentTarget` (chosen-target anaphor) otherwise.
+    // Restricted to the singular object demonstratives so a fresh noun phrase
+    // ("a creature you control") still parses as its own filter below.
+    for demonstrative in ["that creature", "that permanent", "that card"] {
+        if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
+            let mut ctx_mut = ctx.clone();
+            return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
+        }
+    }
+
     let (filter, rest) = parse_target(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(

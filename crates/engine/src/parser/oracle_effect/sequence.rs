@@ -9,7 +9,7 @@ use nom::Parser;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, TextPair};
 use super::{apply_where_x_to_filter, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -5152,7 +5152,11 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
 /// - "put two of those cards into your hand"
-pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<ContinuationAst> {
+pub(super) fn parse_dig_from_among(
+    lower: &str,
+    original: &str,
+    ctx: &mut ParseContext,
+) -> Option<ContinuationAst> {
     // CR 202.3 + CR 107.3i: Strip a trailing "where X is <expression>" defining
     // clause before destination/count/filter parsing. `where_x_expression`
     // (when present) is applied to the parsed filter at the end.
@@ -5275,7 +5279,14 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         {
             TargetFilter::Any
         } else {
-            let (parsed_filter, _) = parse_target(filter_text);
+            // CR 608.2c + CR 608.2k: parse the "from among them" reveal/put filter
+            // with the enclosing ctx so an anaphoric reference inside it (e.g.
+            // "a card that shares a creature type with that creature") binds to
+            // the trigger subject (`TriggeringSource`) when one exists — Conjurer's
+            // Mantle's "equipped creature attacks" trigger. A ctx-free parse loses
+            // the subject and mis-binds the reference to `ParentTarget`, which has
+            // no referent here (no chosen target), so it matched no card (#5900).
+            let (parsed_filter, _) = parse_target_with_ctx(filter_text, ctx);
             parsed_filter
         };
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
@@ -5375,7 +5386,14 @@ pub(super) fn parse_dig_from_among(lower: &str, original: &str) -> Option<Contin
         {
             TargetFilter::Any
         } else {
-            let (parsed_filter, _) = parse_target(filter_text);
+            // CR 608.2c + CR 608.2k: parse the "from among them" reveal/put filter
+            // with the enclosing ctx so an anaphoric reference inside it (e.g.
+            // "a card that shares a creature type with that creature") binds to
+            // the trigger subject (`TriggeringSource`) when one exists — Conjurer's
+            // Mantle's "equipped creature attacks" trigger. A ctx-free parse loses
+            // the subject and mis-binds the reference to `ParentTarget`, which has
+            // no referent here (no chosen target), so it matched no card (#5900).
+            let (parsed_filter, _) = parse_target_with_ctx(filter_text, ctx);
             parsed_filter
         };
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
@@ -6997,7 +7015,7 @@ pub(super) fn parse_followup_continuation_ast(
                     || nom_primitives::scan_contains(&lower, "to your hand")
                     || nom_primitives::scan_contains(&lower, "to their hand")) =>
         {
-            parse_dig_from_among(&lower, text)
+            parse_dig_from_among(&lower, text, ctx)
         }
         // CR 701.33: "[You may] reveal [up to] N <filter> cards from among
         // them" after Dig — the reveal-only form where the kept cards are NOT
@@ -7018,7 +7036,7 @@ pub(super) fn parse_followup_continuation_ast(
                 && !nom_primitives::scan_contains(&lower, "into your hand")
                 && !nom_primitives::scan_contains(&lower, "into their hand") =>
         {
-            parse_dig_from_among(&lower, text)
+            parse_dig_from_among(&lower, text, ctx)
         }
         // CR 508.4 / CR 614.1: "It/The token enters tapped and attacking" (singular)
         // or "They/Those tokens enter tapped and attacking" (plural)
