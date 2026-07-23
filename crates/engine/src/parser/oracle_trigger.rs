@@ -11566,6 +11566,38 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 ///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    // CR 303.4b + CR 301.5a + CR 120.3a: Aura/Equipment self-referential
+    // damage-source subjects are article-less determiners — "enchanted creature"
+    // (the creature an Aura is attached to, CR 303.4b) and "equipped creature"
+    // (the creature an Equipment is attached to, CR 301.5a). Both name THIS
+    // permanent's attached creature as the damage source, so they resolve to
+    // `TargetFilter::AttachedTo` — a precise reference to the attached creature,
+    // not `Typed(Equipped/EnchantedBy)` (which would match any equipped/enchanted
+    // creature on the battlefield). Recognized here — before the article-anchored
+    // parse below, which would reject them for lacking an article — so
+    // "enchanted/equipped creature deals damage to a player" is classified as a
+    // DamageDone trigger. Without this, the strict subject parse fails and the
+    // pattern falls through to `condition_introduces_target_player`, mis-binding a
+    // later "that player" anaphor to `TargetPlayer` (which surfaces a phantom
+    // companion Player target slot at runtime) instead of the damaged
+    // `TriggeringPlayer` (Sigil of Sleep, the Sword cycle, Hammer of Ruin, …).
+    // Each branch consumes the trailing space so the caller can chain into
+    // `tag("deals ")`, mirroring the article path's own trailing-space consume.
+    if let Ok((rest, filter)) = alt((
+        value(
+            TargetFilter::AttachedTo,
+            tag::<_, _, OracleError<'_>>("enchanted creature "),
+        ),
+        value(
+            TargetFilter::AttachedTo,
+            tag::<_, _, OracleError<'_>>("equipped creature "),
+        ),
+    ))
+    .parse(input)
+    {
+        return Ok((rest, filter));
+    }
+
     // CR 109.4: printed damage-source phrases either use an article
     // ("a source") or the article-less determiner "another source" (Ghyrson).
     // Parse "another" on the same axis as the article so it can feed the

@@ -24976,3 +24976,66 @@ fn ketramose_exile_trigger_gated_on_source_zones_and_own_turn() {
         trigger.constraint
     );
 }
+
+/// CR 120.3 + CR 303.4 + CR 702.6 + CR 603.7c (issue: Sigil of Sleep freeze):
+/// An article-less damage-source subject — the Aura/Equipment self-referential
+/// determiners "enchanted creature" / "equipped creature" — must still be
+/// recognized as a "deals damage to a player" trigger so a later "that player"
+/// anaphor binds to the DAMAGED (triggering) player. Before the fix,
+/// `parse_damage_source_subject` required a leading article, so these subjects
+/// failed the strict `is_damage_done_trigger_pattern` check and fell through to
+/// the `condition_introduces_target_player` branch, yielding the wrong
+/// `TargetPlayer` scope (which surfaces a spurious companion Player target slot
+/// at runtime). Building-block test: assert the single-authority scope resolver
+/// itself, so every card in the class is covered — not just one.
+#[test]
+fn relative_player_scope_binds_article_less_damage_source_to_triggering_player() {
+    for cond in [
+        "enchanted creature deals damage to a player",
+        "equipped creature deals combat damage to a player",
+    ] {
+        assert!(
+            is_damage_done_trigger_pattern(cond),
+            "article-less subject must be a DamageDone pattern: {cond:?}",
+        );
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            Some(ControllerRef::TriggeringPlayer),
+            "\"that player\" in {cond:?} must bind to the damaged (triggering) player",
+        );
+    }
+}
+
+/// CR 120.3 + CR 603.7c: Sigil of Sleep's bounce must target a creature the
+/// DAMAGED player controls (`ControllerRef::TriggeringPlayer`), not a
+/// separately-chosen `TargetPlayer`. The `TargetPlayer` mis-scoping made the
+/// runtime surface a phantom Player target slot, freezing the game (the reported
+/// bug). Uses the card's verbatim Oracle text.
+#[test]
+fn parse_sigil_of_sleep_bounce_targets_triggering_player_controlled_creature() {
+    let def = parse_trigger_line(
+        "Whenever enchanted creature deals damage to a player, return target creature that player controls to its owner's hand.",
+        "Sigil of Sleep",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::Bounce { target, .. } => match target {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::TriggeringPlayer),
+                    "bounce target must be controlled by the damaged (triggering) player, got {:?}",
+                    tf.controller,
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "bounce target must be a creature, got {:?}",
+                    tf.type_filters,
+                );
+            }
+            other => panic!("bounce target must be a Typed creature filter, got {other:?}"),
+        },
+        other => panic!("Sigil of Sleep effect must be Bounce, got {other:?}"),
+    }
+}
