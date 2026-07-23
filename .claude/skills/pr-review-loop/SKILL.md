@@ -126,16 +126,30 @@ Before blocking a PR on "needs rebase", classify **why** it went stale. Causatio
 
 A PR can be stale for both reasons at once, and can also carry substantive blockers of its own. Rebasing it does not clear those — resolve the staleness, then re-review the delta on the new head.
 
-**A compile error is not proof of contributor fault — timestamp it first.** `E0004` non-exhaustive-match failures from a PR's own new enum variants look exactly like contributor sloppiness ("you added a variant and missed the match arms") and are the easiest misattribution in the whole loop. They are frequently ours: main adds a *new* match site over an existing enum after the contributor's last push, and the branch that was complete when written is now missing an arm in a file it never touched. Before writing that finding, run the check:
+**A compile error is not proof of contributor fault — check ancestry first.** `E0004` non-exhaustive-match failures from a PR's own new enum variants look exactly like contributor sloppiness ("you added a variant and missed the match arms") and are the easiest misattribution in the whole loop. They are frequently ours: main adds a *new* match site over an existing enum after the branch was written, and a PR that was complete when authored is now missing an arm in a file it never touched.
+
+The question to answer is not "which is newer" but **"did the branch ever contain the failing code?"** Ask it by ancestry, never by timestamp — commit dates are author/committer metadata, not push time, so a rebase, an amend, or a long-delayed push all skew a date comparison, and a squash-merged main commit carries a date unrelated to when its content landed:
 
 ```bash
-gh api repos/<owner>/<repo>/commits/<headOid> --jq '.commit.committer.date'   # when the author last pushed
-git log --diff-filter=A --format='%H %cI %s' -- <file-with-the-error>          # when that file first appeared
-git log -S '<missing-symbol>' --format='%H %cI %s' -- <file>                   # when that match site landed
-gh api repos/<owner>/<repo>/pulls/<PR>/files --paginate --jq '[.[].filename]'  # is the file even in the diff?
+# 1. Did the failing file even exist at the PR head? Often the whole answer.
+git cat-file -e <headOid>:<file-with-the-error> 2>/dev/null \
+  || echo "file absent at head — the branch never had it"
+
+# 2. Which commit introduced the match site, and is it in the branch's history?
+site=$(git log -S '<missing-symbol>' --format=%H -1 -- <file-with-the-error>)
+git merge-base --is-ancestor "$site" <headOid> \
+  && echo "in the branch's history — the author could have covered it" \
+  || echo "NOT in the branch's history — maintainer-caused"
+
+# 3. Is the file in the PR's own diff at all?
+gh api repos/<owner>/<repo>/pulls/<PR>/files --paginate --jq '[.[].filename]'
 ```
 
-If the failing site postdates the head, or the file is absent from the PR's own file list, the contributor could not have covered it: this is maintainer-caused staleness, **we** port it at any size, and the review must say so explicitly rather than leaving a blocker the author cannot act on. Tell them not to rebase on our account. The same check applies to a whole board of red jobs sharing one root cause — diagnose the single cause before attributing eight failures.
+If the failing site is not an ancestor of the head, or the file is absent from the head or from the PR's own file list, the contributor could not have covered it: this is maintainer-caused staleness, **we** port it at any size, and the review must say so explicitly rather than leaving a blocker the author cannot act on. Tell them not to rebase on our account.
+
+Sanity-check the probe before trusting a clean result: a commit you know *is* in the branch's history (`git merge-base origin/main <headOid>`) must report `ancestor`. A check that returns "not an ancestor" for everything is broken, not exonerating. Timestamps remain useful as human-readable colour in the review comment — label them "committed at", never "pushed at" — but they must not be the test.
+
+The same procedure applies to a whole board of red jobs sharing one root cause: diagnose the single cause before attributing eight failures to the author.
 
 **Textual vs semantic staleness.** `mergeStateStatus` is a textual check and is not evidence the branch is healthy:
 
