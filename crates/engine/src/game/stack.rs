@@ -1476,16 +1476,62 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         // (NOT CR 303.4f, which explicitly governs Auras entering "by any means
         // other than by resolving as an Aura spell.")
         if spell_in_zone(state, entry.id, Zone::Battlefield) {
+            let is_aura = state
+                .objects
+                .get(&entry.id)
+                .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
+                .unwrap_or(false);
+            if is_aura {
+                match spell_targets.first() {
+                    // CR 608.3c + CR 608.2b: Object Aura — verify the target is
+                    // still a legal host per the Aura's own zone-scoped enchant
+                    // ability (`is_valid_attachment_target`, the single legality
+                    // authority shared with `attach::resolve` and the SBA
+                    // re-check). A battlefield-only Enchant filter still requires
+                    // battlefield presence; a graveyard-scoped filter (Animate
+                    // Dead) legally accepts a graveyard host. A now-illegal target
+                    // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
+                    // at the next checkpoint.
+                    //
+                    // CR 608.3c / CR 303.4a: the host is the spell's chosen
+                    // target — never re-consult the Enchant filter (CR 303.4f
+                    // non-spell entry) when that target is missing.
+                    Some(crate::types::ability::TargetRef::Object(target_id))
+                        if crate::game::sba::is_valid_attachment_target(
+                            state, entry.id, *target_id,
+                        ) =>
+                    {
+                        effects::attach::attach_to(state, entry.id, *target_id);
+                    }
+                    Some(crate::types::ability::TargetRef::Object(_)) => {
+                        // Target is no longer a legal host — SBA cleanup follows.
+                    }
+                    // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
+                    // Fetters-class). Validity check is "player still in game"
+                    // — `attach_to_player` makes no liveness check itself, but
+                    // `check_unattached_auras` (CR 303.4c) will detach + grave
+                    // a Curse whose enchanted player has left the game.
+                    Some(crate::types::ability::TargetRef::Player(player_id)) => {
+                        effects::attach::attach_to_player(state, entry.id, *player_id);
+                    }
+                    None => {
+                        // CR 303.4g: An Aura entering the battlefield with no
+                        // legal target goes to its owner's graveyard. The SBA
+                        // path catches this on the next pass.
+                    }
+                }
+            }
+
             // CR 614.12a: Drain mandatory replacement post-effects (Siege /
             // Tribute opponent-choice, Metamorphic ChoosePermanent
             // CopyTargetChoice, …) stashed while resolving this permanent's
             // ZoneChange. `CallerEpilogue` skipped the DeliveryTail drain, so
-            // this site owns the prompt — BEFORE CR 608.3c Aura attach so a
-            // mid-entry `CopyTargetChoice` can pause with the cast target
-            // carried on `PendingSpellResolution` (CR 608.3c / CR 303.4a),
-            // matching the DeliveryTail `NeedsChoice` arm above. Do not push
-            // `PendingSpellResolution` on top of an AbilityContinuation
-            // (Tribute/Siege resume is top-only).
+            // this site owns the prompt — AFTER CR 608.3c Aura attach above so
+            // the Aura is hosted before SBAs / the copy-choice answer, while
+            // `PendingSpellResolution.spell_targets` still carries the cast
+            // target for the PersistChosenAttribute resume (CR 608.3c /
+            // CR 303.4a). Do not push SpellResolution on top of an
+            // AbilityContinuation (Tribute/Siege resume is top-only).
             if state.has_post_replacement_drain() {
                 state.clear_post_replacement_source();
                 if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
@@ -1496,12 +1542,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     events,
                 ) {
                     match wf {
-                        // CR 608.3c + CR 614.12a: Metamorphic-class mid-entry
-                        // copy choice — stash the Aura spell's chosen host and
-                        // pause before attach / cast-link stamps. The answer
-                        // path (`handle_persist_chosen_attribute_choice`)
-                        // applies `PendingSpellResolution` then installs the
-                        // host copy.
+                        // CR 608.3c + CR 614.12a: stash the Aura spell's chosen
+                        // host for the copy-choice answer path, then surface the
+                        // prompt. Continue the cast-variant epilogue (same as
+                        // Tribute NamedChoice) so resolve_top settles normally;
+                        // the answer path still prefers spell_targets.
                         WaitingFor::CopyTargetChoice { .. } => {
                             let cast_from_zone = ability
                                 .as_ref()
@@ -1565,69 +1610,14 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 },
                             );
                             state.waiting_for = wf;
-                            events.push(GameEvent::StackResolved {
-                                object_id: entry.id,
-                            });
-                            state.current_trigger_event = None;
-                            state.current_trigger_events.clear();
-                            state.current_trigger_match_count = None;
-                            state.die_result_this_resolution = None;
-                            return;
                         }
                         WaitingFor::Priority { .. } => {}
                         other => {
                             // Tribute / Siege NamedChoice — surface the prompt
-                            // and continue the caller epilogue (Aura attach +
-                            // cast-variant stamps). Do not push SpellResolution
-                            // on top of an AbilityContinuation.
+                            // and continue the caller epilogue. Do not push
+                            // SpellResolution on top of an AbilityContinuation.
                             state.waiting_for = other;
                         }
-                    }
-                }
-            }
-
-            let is_aura = state
-                .objects
-                .get(&entry.id)
-                .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
-                .unwrap_or(false);
-            if is_aura {
-                match spell_targets.first() {
-                    // CR 608.3c + CR 608.2b: Object Aura — verify the target is
-                    // still a legal host per the Aura's own zone-scoped enchant
-                    // ability (`is_valid_attachment_target`, the single legality
-                    // authority shared with `attach::resolve` and the SBA
-                    // re-check). A battlefield-only Enchant filter still requires
-                    // battlefield presence; a graveyard-scoped filter (Animate
-                    // Dead) legally accepts a graveyard host. A now-illegal target
-                    // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
-                    // at the next checkpoint.
-                    //
-                    // CR 608.3c / CR 303.4a: the host is the spell's chosen
-                    // target — never re-consult the Enchant filter (CR 303.4f
-                    // non-spell entry) when that target is missing.
-                    Some(crate::types::ability::TargetRef::Object(target_id))
-                        if crate::game::sba::is_valid_attachment_target(
-                            state, entry.id, *target_id,
-                        ) =>
-                    {
-                        effects::attach::attach_to(state, entry.id, *target_id);
-                    }
-                    Some(crate::types::ability::TargetRef::Object(_)) => {
-                        // Target is no longer a legal host — SBA cleanup follows.
-                    }
-                    // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
-                    // Fetters-class). Validity check is "player still in game"
-                    // — `attach_to_player` makes no liveness check itself, but
-                    // `check_unattached_auras` (CR 303.4c) will detach + grave
-                    // a Curse whose enchanted player has left the game.
-                    Some(crate::types::ability::TargetRef::Player(player_id)) => {
-                        effects::attach::attach_to_player(state, entry.id, *player_id);
-                    }
-                    None => {
-                        // CR 303.4g: An Aura entering the battlefield with no
-                        // legal target goes to its owner's graveyard. The SBA
-                        // path catches this on the next pass.
                     }
                 }
             }

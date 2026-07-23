@@ -451,6 +451,14 @@ fn two_auras_install_independent_copies_on_their_own_hosts() {
         .target_object(host_a)
         .copy_target(donor_a)
         .resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            engine::types::game_state::WaitingFor::Priority { .. }
+        ),
+        "first Metamorphic must fully clear CopyTargetChoice before the second cast, got {:?}",
+        runner.state().waiting_for
+    );
     runner
         .cast(aura_b)
         .target_object(host_b)

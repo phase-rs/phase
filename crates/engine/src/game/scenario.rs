@@ -3298,9 +3298,17 @@ fn drive_resolution(
                 )?;
             }
             WaitingFor::CopyTargetChoice { valid_targets, .. } => {
-                let Some(target) = policy.copy_target else {
-                    break;
-                };
+                // Fail loud: a silent `break` left Metamorphic-class casts paused
+                // on `CopyTargetChoice`, so the next `CastSpell` panicked with a
+                // misleading "ActionNotAllowed while waiting" instead of pointing
+                // at the missing `.copy_target(...)` declaration.
+                let target = policy.copy_target.unwrap_or_else(|| {
+                    panic!(
+                        "CopyTargetChoice requires ResolutionPolicy.copy_target \
+                         (call .copy_target(id) on SpellCast / AbilityActivation). \
+                         legal targets: {valid_targets:?}"
+                    )
+                });
                 assert!(
                     valid_targets.contains(&target),
                     "CopyTargetChoice target {target:?} is not in legal set {valid_targets:?}"

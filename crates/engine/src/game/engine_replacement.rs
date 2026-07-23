@@ -1376,12 +1376,13 @@ fn handle_persist_chosen_attribute_choice(
             ));
     }
 
-    // CR 608.3c + CR 614.12a: Mid-entry `CopyTargetChoice` is raised from the
-    // zone-delivery / CallerEpilogue post-replacement drain, which pauses
-    // BEFORE the spell-resolution Aura-attach epilogue in `stack.rs`. The
-    // stash pushed there (`PendingSpellResolution`) carries the Aura spell's
-    // enchant target — establish the host from those spell targets AND apply
-    // the attach now so `attached_to` is consistent before the copy installs.
+    // CR 608.3c + CR 614.12a: Spell-path mid-entry `CopyTargetChoice` is raised
+    // from the CallerEpilogue post-replacement drain AFTER CR 608.3c Aura
+    // attach — `attached_to` is already the cast host. The stash pushed there
+    // (`PendingSpellResolution`) still carries `spell_targets` so this answer
+    // path can apply cast-link stamps and prefer the CR 303.4a spell target as
+    // the copy recipient (re-attach via `apply_pending_spell_resolution` is
+    // idempotent).
     //
     // CR 303.4f: Non-spell Aura entry attaches during delivery (before this
     // choice), so `attached_to` is already set and there is no spell-resolution
@@ -1475,14 +1476,22 @@ fn handle_persist_chosen_attribute_choice(
         "the Aura must remain attached after installing the host copy"
     );
 
+    // CR 615.5 + CR 614.12a: PersistChosenAttribute's ChoosePermanent work is
+    // complete once the host copy is installed. Retire the paused post-
+    // replacement drain BEFORE replaying deferred entry events — otherwise a
+    // nested OrderTriggers / trigger-target pause can return while the same
+    // ChoosePermanent drain is still resident, and a later post-action pass
+    // re-drains it into a second `CopyTargetChoice` that the cast driver
+    // never clears (breaks sequential Metamorphic casts).
+    state.finish_active_paused_post_replacement_dispatch();
+
     // CR 614.12a + CR 603.2: replay the Aura's deferred battlefield-entry event
-    // now that the host copy is realized, so ETB observers see the final state,
-    // then retire this paused post-replacement dispatch (mirrors the BecomeCopy
-    // completion tail).
+    // now that the host copy is realized, so ETB observers see the final state
+    // (mirrors the BecomeCopy completion tail, but with the drain already
+    // retired — see above).
     if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
         return Ok(waiting_for);
     }
-    state.finish_active_paused_post_replacement_dispatch();
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return Ok(state.waiting_for.clone());
     }
