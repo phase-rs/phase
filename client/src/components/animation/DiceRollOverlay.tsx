@@ -270,10 +270,9 @@ function ContestDice({
         ? t("diceRoll.youPlayFirst")
         : t("diceRoll.playerPlaysFirst", { name: getOpponentDisplayName(winner) })
       : null;
-  const yourTurn = payload.turnOrder?.find((slot) => slot.player === getPlayerId());
   const yourTurnCaption =
-    yourTurn && yourTurn.turns_from_now > 0
-      ? t("diceRoll.youTakeTurn", { turn: yourTurn.turns_from_now + 1 })
+    payload.viewerTurnNumber && payload.viewerTurnNumber > 1
+      ? t("diceRoll.youTakeTurn", { turn: payload.viewerTurnNumber })
       : null;
 
   return (
@@ -369,24 +368,24 @@ function ContestDice({
           </span>
           <div className="flex flex-wrap justify-center gap-2">
             {payload.turnOrder.map((slot) => {
-              const isYou = slot.player === getPlayerId();
-              const isStartingPlayer = slot.player === winner && slot.turns_from_now === 0;
               return (
                 <span
                   key={slot.slot_index}
                   className="rounded-full border px-3 py-1 text-sm font-bold"
                   style={{
-                    color: isYou ? `rgb(${GOLD})` : "#cbd5e1",
+                    color: slot.is_viewer ? `rgb(${GOLD})` : "#cbd5e1",
                     borderColor:
-                      isYou || isStartingPlayer
+                      slot.is_viewer || slot.is_starting_player
                         ? `rgba(${GOLD},0.62)`
                         : "rgba(148,163,184,0.32)",
                     backgroundColor:
-                      isYou || isStartingPlayer ? `rgba(${GOLD},0.12)` : "rgba(15,23,42,0.7)",
+                      slot.is_viewer || slot.is_starting_player
+                        ? `rgba(${GOLD},0.12)`
+                        : "rgba(15,23,42,0.7)",
                   }}
                 >
                   {t("diceRoll.turnOrderItem", {
-                    turn: slot.turns_from_now + 1,
+                    turn: slot.turn_number,
                     name: playerLabel(slot.player),
                   })}
                 </span>

@@ -722,6 +722,7 @@ export function GameProvider({
       audioManager.setContext("battlefield");
       return () => {
         audioManager.setContext("menu");
+        clearPromptOverlayState();
       };
     }
 

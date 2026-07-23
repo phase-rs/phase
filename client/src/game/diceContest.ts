@@ -22,6 +22,7 @@ export function flashStartingPlayerContest(
   events: GameEvent[],
   startingPlayer: PlayerId,
   turnOrder: TurnOrderSlotView[] | undefined,
+  viewerTurnNumber?: number,
 ): void {
   const contest = events.find(
     (e): e is StartingPlayerContestEvent => e.type === "StartingPlayerContest",
@@ -40,6 +41,7 @@ export function flashStartingPlayerContest(
     context: "startingPlayer",
     winner: startingPlayer,
     turnOrder,
+    viewerTurnNumber,
   });
 }
 

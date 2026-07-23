@@ -279,6 +279,7 @@ vi.mock("../../services/serverDetection", () => ({
 
 import { GameProvider } from "../GameProvider";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { clearPromptOverlayState } from "../../game/sessionCleanup";
 
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
@@ -485,6 +486,23 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("clears prompt overlays when a draft match unmounts", () => {
+    gameStoreState.gameId = "draft-match";
+    gameStoreState.adapter = {} as never;
+    gameStoreState.gameState = {} as never;
+
+    const view = render(
+      <GameProvider gameId="draft-match" mode="draft-match">
+        <div />
+      </GameProvider>,
+    );
+
+    vi.mocked(clearPromptOverlayState).mockClear();
+    view.unmount();
+
+    expect(clearPromptOverlayState).toHaveBeenCalledOnce();
   });
 });
 

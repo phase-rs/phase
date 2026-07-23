@@ -35,12 +35,17 @@ afterEach(() => {
 describe("flashStartingPlayerContest", () => {
   it("builds a startingPlayer die payload from the engine contest event", () => {
     const turnOrder = [
-      { player: 0, slot_index: 0, turns_from_now: 0 },
-      { player: 1, slot_index: 1, turns_from_now: 1 },
-      { player: 2, slot_index: 2, turns_from_now: 2 },
-      { player: 3, slot_index: 3, turns_from_now: 3 },
+      { player: 0, slot_index: 0, turns_from_now: 0, turn_number: 1, is_starting_player: true },
+      { player: 1, slot_index: 1, turns_from_now: 1, turn_number: 2 },
+      { player: 2, slot_index: 2, turns_from_now: 2, turn_number: 3, is_viewer: true },
+      { player: 3, slot_index: 3, turns_from_now: 3, turn_number: 4 },
     ];
-    flashStartingPlayerContest([contest([[[0, 17], [1, 9]]], 0), gameStarted], 0, turnOrder);
+    flashStartingPlayerContest(
+      [contest([[[0, 17], [1, 9]]], 0), gameStarted],
+      0,
+      turnOrder,
+      3,
+    );
     const d = useUiStore.getState().diceRoll;
     expect(d).toMatchObject({ kind: "die", sides: 20, context: "startingPlayer", winner: 0 });
     expect(d?.kind === "die" && d.rounds).toEqual([
@@ -55,6 +60,7 @@ describe("flashStartingPlayerContest", () => {
       { playerId: 1, value: 9 },
     ]);
     expect(d?.kind === "die" && d.turnOrder).toEqual(turnOrder);
+    expect(d?.kind === "die" && d.viewerTurnNumber).toBe(3);
   });
 
   it("preserves the per-round structure across a tie reroll", () => {

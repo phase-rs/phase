@@ -845,6 +845,9 @@ function GamePageContent({
   // double-invoke and after the clear (the re-run sees `null`).
   const startingContest = useGameStore((s) => s.startingContest);
   const openingTurnOrder = useGameStore((s) => s.gameState?.derived?.turn_order);
+  const openingViewerTurnNumber = useGameStore(
+    (s) => s.gameState?.derived?.viewer_turn_number,
+  );
   const consumedContestRef = useRef<typeof startingContest>(null);
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
@@ -853,9 +856,10 @@ function GamePageContent({
       startingContest.events,
       startingContest.startingPlayer,
       openingTurnOrder,
+      openingViewerTurnNumber,
     );
     useGameStore.getState().clearStartingContest();
-  }, [openingTurnOrder, startingContest]);
+  }, [openingTurnOrder, openingViewerTurnNumber, startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
   // mulligan UI appears (the roll determines who's on the play, which precedes
   // drawing opening hands). True from `initGame` setting the carrier through the
