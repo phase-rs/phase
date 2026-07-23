@@ -196,7 +196,18 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
     let kathril = scenario
         .add_creature_to_hand_from_oracle(P0, "Kathril, Aspect Warper", 3, 3, KATHRIL)
         .id();
-    scenario.with_mana_pool(P0, white_pool(6));
+    // Kathril costs {2}{W}{B}{G}; use exact colored and generic mana so the
+    // cast reaches the ETB trigger under test.
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::White, ObjectId(9_996), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_997), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(9_998), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(10_000), false, vec![]),
+        ],
+    );
     let mut runner = scenario.build();
 
     let outcome = runner.cast(kathril).target_object(kathril).resolve();
