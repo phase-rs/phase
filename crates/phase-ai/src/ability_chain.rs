@@ -41,7 +41,7 @@ pub(crate) enum AbilityScope {
     /// matter which branch or mode is taken.
     Unconditional,
     /// The full tree: `Unconditional` plus the `else_ability` branch (CR
-    /// 603.4) and every entry of `mode_abilities` (CR 700.2), recursively.
+    /// 608.2c) and every entry of `mode_abilities` (CR 700.2), recursively.
     Potential,
 }
 

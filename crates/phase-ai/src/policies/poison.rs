@@ -169,7 +169,7 @@ fn pending_mode_abilities<'a>(
 ///
 /// CR 702.90b / CR 702.164c / CR 702.70a all key on combat damage dealt **to a
 /// player**, so an attack aimed at a planeswalker or a battle adds nothing on
-/// this axis (CR 506.4c). Poison is summed per defending player — several
+/// this axis. Poison is summed per defending player — several
 /// infect creatures attacking the same seat share one clock — and the seat
 /// closest to CR 104.3d's ten is the one scored.
 fn combat_contribution(
