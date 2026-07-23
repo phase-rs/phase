@@ -463,6 +463,10 @@ pub struct PolicyPenalties {
     /// scalar.)
     #[serde(default = "default_loop_shortcut_winning_declare_bonus")]
     pub loop_shortcut_winning_declare_bonus: f64,
+    /// CR 205.2a: card-equivalent weight for advancing graveyard card-type
+    /// diversity toward a delirium/descend threshold. Strong band when the
+    /// action supplies the last missing type.
+    pub graveyard_types_progress: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -527,6 +531,7 @@ impl Default for PolicyPenalties {
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
+            graveyard_types_progress: 2.5,
         }
     }
 }
@@ -724,6 +729,11 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "graveyard_types_progress",
+        "CR 205.2a delirium-threshold progress weight — awaiting a paired-seed \
+         ai-gate calibration before promotion to ACTIVE.",
+    ),
     (
         "artifact_cost_payoff_bonus",
         "new ArtifactSynergyPolicy knob; awaiting a paired-seed ai-gate calibration before joining the CMA-ES vector",
