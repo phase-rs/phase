@@ -32074,6 +32074,58 @@ fn effect_for_each_opponent_gain_control_uses_per_opponent_target_fanout() {
     }
 }
 
+/// #5994: Riptide Gearhulk's ETB — "for each opponent, put up to one target
+/// nonland permanent that player controls into its owner's library third
+/// from the top." `PutAtLibraryPosition` has no per-opponent target-fanout
+/// arm (it isn't a single-object-target shape the
+/// `parse_for_each_opponent_target_fanout_clause` gate folds into a
+/// `MultiTargetSpec` — and a triggered ability's execute body has no
+/// multi-target slot to fold into regardless), so `repeat_for` must stay
+/// intact to drive the per-opponent repetition. Previously the "that player
+/// controls" anaphor only resolved to `TargetPlayer` inside that fanout's own
+/// scoped re-parse; once the fanout declined, the plain re-parse fell back to
+/// `ControllerRef::You`, asking the caster (not each opponent) for a target.
+#[test]
+fn effect_for_each_opponent_put_at_library_position_keeps_repeat_for_and_target_player() {
+    let def = parse_effect_chain(
+        "for each opponent, put up to one target nonland permanent that player controls into its owner's library third from the top.",
+        AbilityKind::Spell,
+    );
+
+    assert_eq!(
+        def.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::Opponent,
+            },
+        }),
+        "repeat_for must stay intact — PutAtLibraryPosition has no multi-target slot to fold into"
+    );
+    assert!(def.optional_targeting);
+    assert!(def.multi_target.is_none());
+    match &*def.effect {
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Typed(tf),
+            position: LibraryPosition::NthFromTop { n },
+            ..
+        } => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::TargetPlayer),
+                "target must be scoped to the iterated opponent, not the caster"
+            );
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::Permanent)));
+            assert_eq!(*n, 3);
+        }
+        other => panic!(
+            "expected PutAtLibraryPosition TargetPlayer nonland permanent, got {other:?}"
+        ),
+    }
+}
+
 #[test]
 fn choose_two_target_creatures_controlled_by_different_players_sets_target_constraints() {
     let def = parse_effect_chain(
