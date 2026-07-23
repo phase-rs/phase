@@ -96,4 +96,16 @@ describe("clearPromptOverlayState", () => {
 
     expect(useUiStore.getState().mobileHandGesture).toBeNull();
   });
+
+  it("clears active and queued roll overlays at a game boundary", () => {
+    useUiStore.setState({
+      diceRoll: { kind: "coin", playerId: 1, won: true, context: "ability" },
+      diceRollQueue: [{ kind: "coin", playerId: 1, won: false, context: "ability" }],
+    });
+
+    clearPromptOverlayState();
+
+    expect(useUiStore.getState().diceRoll).toBeNull();
+    expect(useUiStore.getState().diceRollQueue).toEqual([]);
+  });
 });

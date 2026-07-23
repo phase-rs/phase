@@ -1036,6 +1036,7 @@ export function GameProvider({
         // sessions, clears timers, and disposes the WASM engine.
         if (p2pAdapter) p2pAdapter.dispose();
         audioManager.setContext("menu");
+        clearPromptOverlayState();
         reset();
       };
     }
@@ -1246,6 +1247,7 @@ export function GameProvider({
         useMultiplayerStore.getState().setIsSpectator(false);
         useMultiplayerStore.getState().setSpectators([]);
         audioManager.setContext("menu");
+        clearPromptOverlayState();
         reset();
       };
     }

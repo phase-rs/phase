@@ -257,7 +257,13 @@
     "youPlayFirst": "Giochi per primo",
     "playerPlaysFirst": "{{name}} gioca per primo",
     "heads": "Testa",
-    "tails": "Croce"
+    "tails": "Croce",
+    "coinFlip": "Lancio della moneta",
+    "wonCoinFlip": "{{name}} ha vinto il lancio",
+    "lostCoinFlip": "{{name}} ha perso il lancio",
+    "turnOrder": "Ordine dei turni",
+    "turnOrderItem": "Turno {{turn}}: {{name}}",
+    "youTakeTurn": "Giochi il turno {{turn}}"
   },
   "chrome": {
     "back": "Indietro",
