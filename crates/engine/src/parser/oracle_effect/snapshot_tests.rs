@@ -188,7 +188,7 @@ fn hordewing_skaab_discard_that_many_uses_previous_effect_amount() {
         &*sub.effect,
         Effect::Discard {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount { .. },
             },
             ..
         }
@@ -581,10 +581,7 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
     };
     assert_eq!(
         enter_with_counters,
-        &vec![(
-            CounterType::Generic("finality".to_string()),
-            QuantityExpr::Fixed { value: 1 },
-        )]
+        &vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
     );
 
     let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
@@ -817,8 +814,8 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
 
     assert_eq!(
         def.condition,
-        Some(AbilityCondition::CastFromZone {
-            zone: Zone::Graveyard
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
         })
     );
     assert!(matches!(
@@ -833,8 +830,8 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
     let put = def.sub_ability.as_ref().expect("expected then-put clause");
     assert_eq!(
         put.condition,
-        Some(AbilityCondition::CastFromZone {
-            zone: Zone::Graveyard
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
         })
     );
     let Effect::ChangeZone {
@@ -858,10 +855,7 @@ fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain(
     assert_eq!(*enters_under, None);
     assert_eq!(
         enter_with_counters,
-        &vec![(
-            CounterType::Generic("finality".to_string()),
-            QuantityExpr::Fixed { value: 1 },
-        )]
+        &vec![(CounterType::Finality, QuantityExpr::Fixed { value: 1 },)]
     );
 }
 
@@ -1073,10 +1067,10 @@ fn gluntch_choose_player_chain_parses_with_chosen_player_scopes() {
 }
 
 /// Issue #534 — Skullwinder's ETB trigger must decompose into the ordered
-/// chain `Bounce` (caster's graveyard) → `Choose { Opponent }` → `Bounce`
+/// chain `ChangeZone` (caster's graveyard) → `Choose { Opponent }` → `ChangeZone`
 /// whose target filter carries `FilterProp::Owned { ChosenPlayer { 0 } }`.
 /// The pre-fix parser dropped "then choose an opponent" entirely and left
-/// the dependent `Bounce` scoped to `ScopedPlayer`, which falls back to the
+/// the dependent return scoped to `ScopedPlayer`, which falls back to the
 /// caster — the agency bug. CR 608.2c (rules of English: "That player" is
 /// the just-chosen opponent) + CR 109.4 (the returned card is *owned*).
 #[test]
@@ -1102,8 +1096,15 @@ fn skullwinder_etb_parses_choose_opponent() {
 
     // Node 1: return the caster's own graveyard card.
     assert!(
-        matches!(chain.effect.as_ref(), Effect::Bounce { .. }),
-        "node 1 must be Bounce (caster's graveyard card), got {:?}",
+        matches!(
+            chain.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "node 1 must return caster's graveyard card to hand, got {:?}",
         chain.effect
     );
 
@@ -1125,16 +1126,25 @@ fn skullwinder_etb_parses_choose_opponent() {
     );
 
     // Node 3: the chosen opponent returns a card from THEIR graveyard.
-    let bounce = choose
+    let return_to_hand = choose
         .sub_ability
         .as_ref()
-        .expect("node 3 — chosen player's Bounce");
-    let Effect::Bounce { target, .. } = bounce.effect.as_ref() else {
-        panic!("node 3 must be Bounce, got {:?}", bounce.effect);
+        .expect("node 3 — chosen player's return");
+    let Effect::ChangeZone {
+        origin: Some(Zone::Graveyard),
+        destination: Zone::Hand,
+        target,
+        ..
+    } = return_to_hand.effect.as_ref()
+    else {
+        panic!(
+            "node 3 must return from graveyard to hand, got {:?}",
+            return_to_hand.effect
+        );
     };
     let TargetFilter::Typed(tf) = target else {
         panic!(
-            "node 3 Bounce target must be a Typed filter, got {0:?}",
+            "node 3 return target must be a Typed filter, got {0:?}",
             target
         );
     };
@@ -1145,7 +1155,7 @@ fn skullwinder_etb_parses_choose_opponent() {
                 controller: ControllerRef::ChosenPlayer { index: 0 }
             }
         )),
-        "node 3 Bounce filter must scope ownership to ChosenPlayer {{ index: 0 }}, \
+        "node 3 return filter must scope ownership to ChosenPlayer {{ index: 0 }}, \
              got properties {:?}",
         tf.properties
     );
@@ -1163,13 +1173,14 @@ fn skullwinder_etb_parses_choose_opponent() {
 }
 
 // -----------------------------------------------------------------------
-// Balance equalization parser arms (try_parse_balance_equalization)
+// Balance equalization parser arms (parse_balance_equalization_ir)
 // -----------------------------------------------------------------------
 
 /// Assert a `Difference { ObjectCount(Land, You), ControlledByEachPlayer }`
 /// sacrifice link with `player_scope: All`.
 fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Sacrifice { target, count, .. } = &*def.effect else {
         panic!("expected Effect::Sacrifice, got {:?}", def.effect);
     };
@@ -1223,6 +1234,7 @@ fn assert_land_sacrifice_clause(def: &AbilityDefinition) {
 /// discard link with `player_scope: All`.
 fn assert_hand_discard_clause(def: &AbilityDefinition) {
     assert_eq!(def.player_scope, Some(PlayerFilter::All));
+    assert_eq!(def.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Discard { target, count, .. } = &*def.effect else {
         panic!("expected Effect::Discard, got {:?}", def.effect);
     };
@@ -1269,6 +1281,7 @@ fn balance_parses_to_three_link_equalization_chain() {
         .as_ref()
         .expect("expected creature sacrifice clause");
     assert_eq!(link3.player_scope, Some(PlayerFilter::All));
+    assert_eq!(link3.sub_link, SubAbilityLink::SequentialSibling);
     let Effect::Sacrifice { target, .. } = &*link3.effect else {
         panic!("link 3 must be Effect::Sacrifice, got {:?}", link3.effect);
     };
@@ -1320,7 +1333,12 @@ fn balancing_act_single_continuation_clause_parses() {
 fn non_balance_text_is_not_intercepted() {
     // The interceptor must not fire on unrelated "each player" text.
     assert!(
-        try_parse_balance_equalization("Each player draws a card.", AbilityKind::Spell).is_none(),
+        parse_balance_equalization_ir(
+            "Each player draws a card.",
+            AbilityKind::Spell,
+            &ParseContext::default(),
+        )
+        .is_none(),
         "interceptor must only match the Balance equalization shape"
     );
 }
@@ -1333,9 +1351,10 @@ fn balance_arm_b_rejects_non_equalization_quantity() {
     // ref) must NOT be intercepted. Confirms Arm B verifies the structure
     // rather than discarding the parsed ref.
     assert!(
-            try_parse_balance_equalization(
+            parse_balance_equalization_ir(
                 "Each player chooses a number of lands they control equal to the number of cards in their hand, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
                 AbilityKind::Spell,
+                &ParseContext::default(),
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"

@@ -5,6 +5,13 @@ import type { EngineAdapter, SubmitResult } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 
+const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+
+vi.mock("../../services/cardData", () => ({
+  ensureWasmInit,
+  ensureCardDatabase: vi.fn().mockResolvedValue(100),
+}));
+
 // Mock EngineWorkerClient to avoid actual Worker creation in tests
 const mockWorkerClient = {
   initialize: vi.fn().mockResolvedValue(undefined),
@@ -13,6 +20,9 @@ const mockWorkerClient = {
   evaluateDeckCompatibility: vi
     .fn()
     .mockResolvedValue({ standard: { compatible: true, reasons: [] } }),
+  getCardFaceData: vi.fn().mockResolvedValue({ name: "Lightning Bolt" }),
+  getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
+  getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -75,6 +85,41 @@ describe("WasmAdapter", () => {
       expect(vi.mocked(EngineWorkerClient)).toHaveBeenCalledOnce();
       expect(mockWorkerClient.initialize).toHaveBeenCalledOnce();
     });
+
+    it("disposes a worker that fails initialization and falls back to main-thread WASM", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(
+        new Error("WASM initialization failed"),
+      );
+
+      await expect(adapter.initialize()).resolves.toBeUndefined();
+
+      expect(mockWorkerClient.dispose).toHaveBeenCalledOnce();
+      expect(ensureWasmInit).toHaveBeenCalledOnce();
+      expect(adapter.getEngineClient()).toBeNull();
+    });
+
+    it("does not reactivate after disposal while initialization is pending", async () => {
+      let finishInitialization!: () => void;
+      mockWorkerClient.initialize.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishInitialization = resolve;
+          }),
+      );
+
+      const staleInitialization = adapter.initialize();
+      adapter.dispose();
+      finishInitialization();
+      await staleInitialization;
+
+      await expect(adapter.ping()).rejects.toMatchObject({
+        code: AdapterErrorCode.NOT_INITIALIZED,
+      });
+
+      await adapter.initialize();
+      expect(vi.mocked(EngineWorkerClient)).toHaveBeenCalledTimes(2);
+      await expect(adapter.ping()).resolves.toBe("phase-rs engine ready");
+    });
   });
 
   describe("warmCardDatabase", () => {
@@ -99,6 +144,25 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.evaluateDeckCompatibility).toHaveBeenCalledWith(request);
       expect(result).toEqual({ standard: { compatible: true, reasons: [] } });
+    });
+  });
+
+  describe("card display queries", () => {
+    it("loads the DB once and routes every query through the shared worker", async () => {
+      await expect(adapter.getCardFaceData("Lightning Bolt")).resolves.toEqual({
+        name: "Lightning Bolt",
+      });
+      await expect(adapter.getCardParseDetails("Lightning Bolt")).resolves.toEqual([
+        { category: "ability" },
+      ]);
+      await expect(adapter.getCardRulings("Lightning Bolt")).resolves.toEqual([
+        { date: "2020-01-01", text: "Test" },
+      ]);
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.getCardFaceData).toHaveBeenCalledWith("Lightning Bolt");
+      expect(mockWorkerClient.getCardParseDetails).toHaveBeenCalledWith("Lightning Bolt");
+      expect(mockWorkerClient.getCardRulings).toHaveBeenCalledWith("Lightning Bolt");
     });
   });
 

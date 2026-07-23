@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// A turn consists of five phases: beginning, precombat main, combat,
 /// postcombat main, and ending. The beginning, combat, and ending phases
 /// are further broken down into steps.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub enum Phase {
     // --- Beginning phase (CR 501.1): untap, upkeep, draw ---
     /// CR 502: Untap step. No player receives priority (CR 502.4).
@@ -44,6 +46,22 @@ pub enum Phase {
     Cleanup,
 }
 
+/// CR 103.1 + CR 101.4: The direction turns and APNAP ordering proceed around
+/// the table. `Normal` is the game's default turn order, which "begins with the
+/// starting player and proceeds clockwise" (CR 103.1). `Reversed` flips turn
+/// progression, APNAP ordering (CR 101.4), and priority passing (CR 117.3d); it
+/// does NOT change physical seating, so left/right neighbor resolution
+/// (`players::neighbor`, Pramikon-style effects) is unaffected. Toggled by
+/// `Effect::ReverseTurnOrder` (Temple of Atropos, Aeon Engine, Time Distortion).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TurnDirection {
+    /// CR 103.1: the default clockwise turn order.
+    #[default]
+    Normal,
+    /// The turn order runs counterclockwise (opposite the default).
+    Reversed,
+}
+
 impl Phase {
     /// CR 506.1: The combat phase has five steps: beginning of combat, declare
     /// attackers, declare blockers, combat damage, and end of combat.
@@ -63,7 +81,9 @@ impl Phase {
 /// turns a stop fires, by comparing the stop's owner against the active player.
 ///
 /// CR 102.1: The active player is the player whose turn it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub enum PhaseStopScope {
     /// Fire on every turn (legacy behavior; the migration default).
     #[default]
@@ -79,7 +99,7 @@ pub enum PhaseStopScope {
 /// Backward compatibility: older persisted/serialized stops were a bare `Phase`
 /// string. `#[serde(from = "PhaseStopCompat")]` accepts both the legacy bare
 /// string (→ `AllTurns`) and the new `{ phase, scope }` object form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(from = "PhaseStopCompat")]
 pub struct PhaseStop {
     pub phase: Phase,
@@ -156,6 +176,15 @@ mod tests {
     #[test]
     fn phase_default_is_untap() {
         assert_eq!(Phase::default(), Phase::Untap);
+    }
+
+    #[test]
+    fn turn_direction_default_is_normal_and_roundtrips() {
+        assert_eq!(TurnDirection::default(), TurnDirection::Normal);
+        let json = serde_json::to_string(&TurnDirection::Reversed).unwrap();
+        assert_eq!(json, "\"Reversed\"");
+        let back: TurnDirection = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, TurnDirection::Reversed);
     }
 
     #[test]

@@ -357,8 +357,7 @@ For interactive replacements, you need to:
 
 | Effect | WaitingFor | Complexity |
 |--------|-----------|------------|
-| **Mulligan** | `MulliganDecision { player }` | Simple — keep/mulligan |
-| **MulliganBottom** | `MulliganBottomCards { player, count }` | Simple — cards to bottom |
+| **Mulligan** | `MulliganDecision { player }` | Simple — keep/mulligan (bottoming is a `MulliganDecisionPhase::BottomCards` sub-phase of the same variant) |
 | **Sideboard** | `BetweenGamesSideboard { player, ... }` | Medium — sideboard swaps |
 | **PlayDraw** | `BetweenGamesChoosePlayDraw { player }` | Simple — play/draw choice |
 | **GameOver** | `GameOver { winners }` | Terminal state |

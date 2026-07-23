@@ -79,7 +79,7 @@ export function TextPromptDialog({
         >
           <button
             type="button"
-            className="absolute inset-0 bg-black/68 backdrop-blur-[2px]"
+            className="absolute inset-0 bg-black/68"
             onClick={onCancel}
             aria-label={t("actions.closeNamed", { name: title })}
           />
@@ -88,7 +88,7 @@ export function TextPromptDialog({
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="relative z-10 w-full max-w-md rounded-[22px] border border-white/10 bg-[#0b1020]/96 p-6 shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-md"
+            className="relative z-10 w-full max-w-md rounded-[10px] border border-white/10 bg-[#0b1020] p-6 shadow-[0_18px_48px_rgba(0,0,0,0.48)]"
             initial={{ scale: 0.97, opacity: 0, y: 10 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.97, opacity: 0, y: 10 }}
@@ -111,7 +111,7 @@ export function TextPromptDialog({
                 maxLength={maxLength}
                 placeholder={placeholder}
                 onChange={(event) => setValue(event.target.value)}
-                className="mt-2 w-full rounded-xl border border-white/20 bg-white/8 px-3 py-2.5 text-sm text-white placeholder-white/30 outline-none backdrop-blur-sm transition-colors focus:border-cyan-300/60 focus:ring-1 focus:ring-cyan-300/30"
+                className="mt-2 w-full rounded-[8px] border border-white/20 bg-slate-950/72 px-3 py-2.5 text-sm text-white placeholder-white/30 outline-none transition-colors focus:border-cyan-300/60 focus:ring-1 focus:ring-cyan-300/30"
                 aria-labelledby={labelId}
               />
 

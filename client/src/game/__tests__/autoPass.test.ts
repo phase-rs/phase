@@ -42,7 +42,7 @@ describe("shouldAutoPass", () => {
     expect(shouldAutoPass(createState(), priority(0), false, false)).toBe(false);
   });
 
-  it("does not auto-pass in full control mode even if engine recommends it", () => {
+  it("does not auto-pass in Full Control even when low-use windows are enabled", () => {
     expect(shouldAutoPass(createState(), priority(0), true, true)).toBe(false);
   });
 
@@ -50,7 +50,7 @@ describe("shouldAutoPass", () => {
     const mulligan: WaitingFor = {
       type: "MulliganDecision",
       data: {
-        pending: [{ player: 0, mulligan_count: 0 }],
+        pending: [{ player: 0, mulligan_count: 0, phase: { type: "Declare" } }],
         free_first_mulligan: false,
       },
     };

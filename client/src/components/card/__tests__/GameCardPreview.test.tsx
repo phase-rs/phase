@@ -1,12 +1,17 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
-import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
+import {
+  buildGameObject,
+  buildObjectMap,
+  gameObjectFactory,
+} from "../../../test/factories/gameObjectFactory.ts";
+import { buildGameState, gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
+import { PlayerHand } from "../../hand/PlayerHand.tsx";
 import { GameCardPreview } from "../GameCardPreview.tsx";
 
 // CardPreview renders <img alt={cardName} …>; mocking the image hook lets us
@@ -73,6 +78,69 @@ describe("GameCardPreview", () => {
     render(<GameCardPreview />);
 
     expect(screen.getAllByAltText("Pithing Needle").length).toBeGreaterThan(0);
+  });
+
+  it("anchors the preview to the hand card hovered through PlayerHand", async () => {
+    const firstCard = gameObjectFactory
+      .withId(201)
+      .inHand()
+      .named("First Card")
+      .build();
+    const hoveredCard = gameObjectFactory
+      .withId(202)
+      .inHand()
+      .named("Hovered Card")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers({ id: 0, hand: [firstCard.id, hoveredCard.id] }, 1)
+      .withObjects(firstCard, hoveredCard)
+      .build();
+    useGameStore.setState({ gameState, spellCosts: {} });
+
+    const { container } = render(
+      <>
+        <PlayerHand />
+        <GameCardPreview />
+      </>,
+    );
+    const firstSource = container.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${firstCard.id}"]`,
+    );
+    const hoveredSource = container.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${hoveredCard.id}"]`,
+    );
+    expect(firstSource).not.toBeNull();
+    expect(hoveredSource).not.toBeNull();
+    if (!firstSource || !hoveredSource) return;
+
+    vi.spyOn(firstSource, "matches").mockReturnValue(false);
+    vi.spyOn(hoveredSource, "matches").mockImplementation(
+      (selector) => selector === ":hover",
+    );
+    vi.spyOn(hoveredSource, "getBoundingClientRect").mockReturnValue({
+      bottom: 700,
+      height: 140,
+      left: 400,
+      right: 500,
+      top: 560,
+      width: 100,
+      x: 400,
+      y: 560,
+      toJSON: () => ({}),
+    });
+    Object.defineProperty(hoveredSource, "offsetWidth", {
+      configurable: true,
+      value: 100,
+    });
+
+    fireEvent.mouseEnter(hoveredSource);
+
+    await waitFor(() => {
+      const preview = container.querySelector<HTMLElement>("[data-card-preview]");
+      expect(preview).not.toBeNull();
+      expect(preview).toHaveStyle({ bottom: "0px" });
+      expect(within(preview!).getByAltText("Hovered Card")).toBeInTheDocument();
+    });
   });
 
   it("renders no preview while a card is being dragged", () => {

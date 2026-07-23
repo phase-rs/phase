@@ -74,10 +74,15 @@ impl TacticalPolicy for DownsideAwarenessPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        PolicyVerdict::Score {
-            delta: self.score(ctx),
-            reason: PolicyReason::new("downside_awareness_score"),
-        }
+        // Range check (issue #5473): the largest gift penalty is `gift_card`
+        // (-3.0), doubled to -6.0 for pure-downside removal — so `score()` never
+        // leaves [-6.0, 0.0], comfortably inside the critical band. No rescale is
+        // needed; PolicyVerdict::score is identity here and simply upholds the
+        // band contract uniformly (no raw Score literal).
+        PolicyVerdict::score(
+            self.score(ctx),
+            PolicyReason::new("downside_awareness_score"),
+        )
     }
 }
 
@@ -167,10 +172,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Spell),
         };
         (decision, candidate)
     }
@@ -316,10 +318,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(engine::types::ability::TargetRef::Object(ObjectId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,

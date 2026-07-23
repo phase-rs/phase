@@ -16,7 +16,8 @@ use crate::types::zones::Zone;
 use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
-use crate::game::functioning_abilities::static_kind_present;
+use crate::game::functioning_abilities::{active_static_definitions, static_kind_present};
+use crate::types::events::GameEvent;
 use crate::types::identifiers::ObjectId;
 
 /// CR 602.5b / CR 602.5d: loop-invariant existence gates for rare static modes
@@ -212,25 +213,29 @@ pub fn record_spell_cast(
     );
 }
 
-pub fn record_spell_cast_from_zone(
-    state: &mut crate::types::game_state::GameState,
-    player: PlayerId,
+/// The single fuse-aware authority for spell-cast record projection. `fused_hint` is the caller's
+/// pre-payment determination that the projected spell is a fused split spell
+/// (CR 702.102b), for seams that know the `CastingVariant::Fuse` intent before the
+/// `fused_split_spell` marker is set. The effective fused-ness is `fused_hint` OR
+/// the persisted marker, so a post-payment caller that passes `false` still gets
+/// the COMBINED projection once the marker is set — the OR-gate lives HERE (the
+/// single record authority) so every `_for` boundary is marker-safe and
+/// byte-identical for the pre-fix callers.
+pub(crate) fn spell_cast_record_for(
     obj: &GameObject,
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
-) {
-    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
-    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
-    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = SpellCastRecord {
+    fused_hint: bool,
+) -> SpellCastRecord {
+    let fused = fused_hint || obj.fused_split_spell;
+    SpellCastRecord {
         name: obj.name.clone(),
         core_types: obj.card_types.core_types.clone(),
         supertypes: obj.card_types.supertypes.clone(),
         subtypes: obj.card_types.subtypes.clone(),
         keywords: obj.keywords.clone(),
-        colors: obj.color.clone(),
-        // CR 202.3e: While on the stack, X equals the announced value, not 0.
-        mana_value: obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid),
+        colors: obj.spell_colors_for(fused),
+        mana_value: obj.spell_mana_value_for(fused),
         // CR 107.3 + CR 601.2b: Capture X-in-cost at record time so later
         // trigger-filter evaluation (e.g. "your first spell with {X} in its
         // mana cost each turn") does not need to re-examine the spell object.
@@ -242,20 +247,24 @@ pub fn record_spell_cast_from_zone(
         cast_variant,
         // CR 702.33d: Kicker-paid state captured at cast time.
         was_kicked: !obj.kickers_paid.is_empty(),
-    };
-    state
-        .spells_cast_this_turn_by_player
-        .entry(player)
-        .or_default()
-        .push_back(record.clone());
-    // CR 117.1: Game-scope history mirror — not cleared between turns so
-    // "named {LITERAL} this game" conditions (Approach of the Second Sun)
-    // can see all prior casts.
-    state
-        .spells_cast_this_game_by_player
-        .entry(player)
-        .or_default()
-        .push_back(record);
+        // CR 400.7: stable storage id of the cast object — the canonical
+        // history record carries provenance so own-cast exclusion (CR 601.2i)
+        // can identify a permanent's own pending cast positionally.
+        spell_object_id: Some(obj.id),
+    }
+}
+
+pub fn record_spell_cast_from_zone(
+    state: &mut crate::types::game_state::GameState,
+    player: PlayerId,
+    obj: &GameObject,
+    from_zone: Zone,
+    cast_variant: crate::types::game_state::CastingVariant,
+) {
+    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
+    let record = spell_cast_record_for(obj, from_zone, cast_variant, false);
+    crate::game::ledger::record_spell_cast(state, player, record)
+        .expect("finalized spell cast must have a valid ledger prefix");
 }
 
 /// CR 702.185c: True when any player cast a spell using `variant` this turn.
@@ -329,7 +338,7 @@ pub fn record_token_created(state: &mut crate::types::game_state::GameState, obj
             .insert(obj.controller);
         state
             .created_tokens_this_turn
-            .push(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+            .push_back(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
     }
 }
 
@@ -343,7 +352,11 @@ pub fn record_sacrifice(
     };
     state
         .sacrificed_permanents_this_turn
-        .push(obj.snapshot_for_zone_change(object_id, Some(Zone::Battlefield), Zone::Graveyard));
+        .push_back(obj.snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        ));
     if obj.card_types.core_types.contains(&CoreType::Artifact) {
         state
             .players_who_sacrificed_artifact_this_turn
@@ -391,7 +404,11 @@ fn entry_controller_matches(
     }
 }
 
-fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &TypeFilter) -> bool {
+fn entry_type_filter_matches(
+    record: &BattlefieldEntryRecord,
+    type_filter: &TypeFilter,
+    all_creature_types: &[String],
+) -> bool {
     match type_filter {
         TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => record.core_types.contains(&CoreType::Land),
@@ -411,17 +428,32 @@ fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &Type
             )
         }),
         TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !entry_type_filter_matches(record, inner),
-        TypeFilter::Subtype(subtype) => record
-            .subtypes
-            .iter()
-            .any(|record_subtype| record_subtype.eq_ignore_ascii_case(subtype)),
+        TypeFilter::Non(inner) => !entry_type_filter_matches(record, inner, all_creature_types),
+        // CR 702.73a + CR 205.3m: a Changeling entrant is every creature type. The entry
+        // snapshot is taken pre-layer (`record_zone_change`, `:616`), so `record.subtypes`
+        // is NOT layer-expanded — but `record.keywords` carries Changeling, which is all the
+        // single authority needs. Mirrors `zone_change_record_matches_type_filter`
+        // (`game/filter.rs:2871-2878`), the same helper over the sibling snapshot type.
+        TypeFilter::Subtype(subtype) => {
+            crate::game::filter::subtype_matches_with_changeling(
+                subtype,
+                &record.subtypes,
+                &record.keywords,
+                all_creature_types,
+            ) || crate::game::filter::subtype_matches_host_supertype(subtype, &record.supertypes)
+        }
         TypeFilter::AnyOf(filters) => filters
             .iter()
-            .any(|inner| entry_type_filter_matches(record, inner)),
+            .any(|inner| entry_type_filter_matches(record, inner, all_creature_types)),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
-        _ => false,
+        // CR 403.3: permanents exist only on the battlefield, so a battlefield-entry
+        // record is never an instant or a sorcery. `false` is the correct verdict here,
+        // not a fail-closed one, and `Non(Instant)` correctly inverts to `true`.
+        // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
+        // than silently join this arm while `ledger_filter_is_evaluable` (`:570-572`)
+        // keeps reporting type filters evaluable.
+        TypeFilter::Instant | TypeFilter::Sorcery => false,
     }
 }
 
@@ -433,6 +465,9 @@ pub(crate) fn battlefield_entry_matches_filter(
     record: &BattlefieldEntryRecord,
     filter: &TargetFilter,
     player: PlayerId,
+    // CR 702.73a: runtime creature-type catalog, for Changeling subtype expansion
+    // against the pre-layer entry snapshot.
+    all_creature_types: &[String],
     // CR 109.1: the ability source for the "another" exclusion. `None` on the
     // player-attribute count paths that carry no ability source — there
     // `FilterProp::Another` excludes nothing it could match (stays `false`),
@@ -447,11 +482,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                     return false;
                 }
             }
-            if !typed
-                .type_filters
-                .iter()
-                .all(|type_filter| entry_type_filter_matches(record, type_filter))
-            {
+            if !typed.type_filters.iter().all(|type_filter| {
+                entry_type_filter_matches(record, type_filter, all_creature_types)
+            }) {
                 return false;
             }
             typed.properties.iter().all(|prop| match prop {
@@ -471,6 +504,85 @@ pub(crate) fn battlefield_entry_matches_filter(
                 _ => false,
             })
         }
+        // CR 608.2i: the entry ledger is a look-back-in-time read, so a permanent that has
+        // since left still counts. The connective recursion below is engine plumbing, not a
+        // rules construct — only the MONOTONE connectives are supported. `any`/`all` are monotone
+        // in the leaf verdict, so an unsupported leaf's fail-closed `false` can
+        // only make the result more `false` — never a false positive.
+        //
+        // KNOWN COST of that monotonicity: under `Or`, an unsupported leaf turns
+        // what is today a LOUD constant 0 into a SILENT PARTIAL COUNT — the
+        // supported leaves still match and the dropped leaf is invisible.
+        // Measured: `Or[Typed(Mount), Typed(Vehicle+Tapped)]` reads 0 today and
+        // would read 1 post-change with one leaf silently dropped. Accepted here
+        // because 0/5 migrating cards carry an unsupported `FilterProp` in a leaf
+        // (`Another` IS supported), so there is no live undercount; a future card
+        // that does needs the tri-state refactor below, not another connective.
+        //
+        // `TargetFilter::Not` is ANTI-monotone: it would invert an unsupported
+        // leaf's fail-closed `false` into a false POSITIVE, so it stays in the
+        // fail-closed arm until this matcher becomes tri-state (`Option<bool>`
+        // with the callers failing closed on `None`). No printed card in the
+        // class uses a top-level `Not` (measured: 0/34).
+        TargetFilter::Or { filters } => filters.iter().any(|inner| {
+            battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|inner| {
+            battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
+        }),
+        _ => false,
+    }
+}
+
+/// CR 403.3 + CR 608.2h: can [`battlefield_entry_matches_filter`] actually answer this filter
+/// against a `BattlefieldEntryRecord`?
+///
+/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
+/// supertypes / colors / keywords / controller` (`types/game_state.rs:1586-1606`). Every other
+/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
+/// matcher fails closed at `:517` and the whole tally reads a silent constant 0. Measured: 98
+/// `FilterProp` variants exist (`types/ability.rs:3609-4251`); the matcher answers 4.
+///
+/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
+/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
+/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
+/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
+/// The list must name exactly the props the matcher answers at `:504-516`; the binder is
+/// `ledger_guard_agrees_with_matcher` (test, below).
+///
+/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
+/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
+/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+///
+/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
+/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
+/// `true` for every permanent.
+pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => {
+            // CR 109.5: `entry_controller_matches` (`:408-418`) answers only these two.
+            typed
+                .controller
+                .as_ref()
+                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
+                && typed.properties.iter().all(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::HasColor { .. }
+                            | FilterProp::InZone { .. }
+                            | FilterProp::WithKeyword { .. }
+                            | FilterProp::Another
+                    )
+                })
+        }
+        // CR 608.2i: mirrors the matcher's monotone connectives (`:540-545`); every leaf must be
+        // answerable, otherwise the composite silently drops one.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(ledger_filter_is_evaluable)
+        }
+        // Everything else is the matcher's `_ => false` at `:546`, including the anti-monotone
+        // `TargetFilter::Not`.
         _ => false,
     }
 }
@@ -485,7 +597,7 @@ pub fn record_zone_change(
     let to_zone = record.to_zone;
     let turn_zone_change_index = state.zone_changes_this_turn.len();
     record.turn_zone_change_index = turn_zone_change_index;
-    state.zone_changes_this_turn.push(record);
+    state.zone_changes_this_turn.push_back(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
@@ -582,6 +694,15 @@ pub(crate) fn check_summoning_sickness_for_cost(
     if !cost_contains_tap_or_untap(cost) {
         return Ok(());
     }
+    // CR 701.26a + CR 508.1f: a permanent with a "can't become tapped" restriction
+    // can't pay a {T} activation cost (the restriction is lifted only by attacker
+    // declaration, which is not an activation cost). A {Q} untap cost is unaffected
+    // — untapping is governed by `StaticMode::CantUntap`, not CantTap.
+    if cost_contains_tap(cost) && object_cant_tap(state, source.id) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent can't become tapped: its {T} ability can't be activated".to_string(),
+        ));
+    }
     if summoning_sick_for_tap_ability(state, source) {
         return Err(EngineError::ActionNotAllowed(
             "Creature has summoning sickness: activated abilities with {T} or {Q} \
@@ -633,6 +754,88 @@ fn cost_contains_tap_or_untap(cost: &AbilityCost) -> bool {
     }
 }
 
+/// Recursively inspects an `AbilityCost` for a `Tap` component only ({T}, not
+/// {Q}). A `StaticMode::CantTap` restriction forbids *becoming tapped*, so it
+/// gates a {T} cost but not a {Q} untap cost (that is `StaticMode::CantUntap`).
+fn cost_contains_tap(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::Tap => true,
+        AbilityCost::Composite { costs } => costs.iter().any(cost_contains_tap),
+        AbilityCost::OneOf { costs } => !costs.is_empty() && costs.iter().all(cost_contains_tap),
+        _ => false,
+    }
+}
+
+/// CR 701.26a + CR 508.1f: does `id` currently carry a "can't become tapped"
+/// restriction (`StaticMode::CantTap`)? Single authority for the predicate,
+/// consulted by every tap chokepoint (cost-driven taps via
+/// [`tap_permanent_for_cost`], effect-driven taps via
+/// `effects::tap_untap::process_one_tap`, {T}-ability activation legality, mana
+/// -source readiness, and the AI/MP legal-action offers).
+///
+/// A restricted creature can still tap by attacking: CR 508.1f says tapping a
+/// creature as it's declared an attacker isn't a cost, so the declare-attackers
+/// path deliberately never consults this predicate.
+pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: ObjectId) -> bool {
+    // Fast path: with no CantTap static anywhere on the board, nothing can be
+    // restricted — skip the per-object layered-static scan entirely. This keeps
+    // every routed tap chokepoint a zero-cost no-op in the common case.
+    if !static_kind_present(state, StaticModeKind::CantTap) {
+        return false;
+    }
+    let Some(obj) = state.objects.get(&id) else {
+        return false;
+    };
+    // Intrinsic path: Ood Sphere's Red-Eye grants CantTap onto the goaded
+    // creature's OWN `static_definitions` (a layer-6 `GrantStaticAbility`, the
+    // same mechanism `AttackOnlyNeighbor` relies on), so
+    // `active_static_definitions` yields it directly. A REMOTE CantTap (an
+    // `affected` filter naming another permanent) is out of scope for every
+    // current card; if one is ever printed, add the `check_static_ability(CantTap,
+    // ctx{ target_id: Some(id) })` OR-branch here exactly as `CantAttack` does —
+    // no call-site changes required.
+    active_static_definitions(state, obj).any(|sd| matches!(sd.mode, StaticMode::CantTap))
+}
+
+/// CR 701.26a: Tap `id` to pay a cost, honoring any `StaticMode::CantTap`
+/// ("can't become tapped") restriction. Single authority for every cost-driven
+/// creature/permanent tap ({T} activation costs, convoke, crew, station, saddle,
+/// harmonize, tap-N additional costs, {T} mana abilities) so the restriction is
+/// enforced in exactly one place instead of being re-checked at each scattered
+/// call site.
+///
+/// CR 508.1f attacker declaration is NOT a cost and never routes here, so a
+/// restricted creature still taps by attacking. The rules-correct PRIMARY gate is
+/// the choice/legal-action layer (a can't-tap creature is never offered to
+/// crew/convoke/tap-for-cost); this error is the defensive backstop, mirroring
+/// how `CantAttack` filters at declaration time yet still errors on an illegal
+/// commit.
+pub(crate) fn tap_permanent_for_cost(
+    state: &mut crate::types::game_state::GameState,
+    id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    if object_cant_tap(state, id) {
+        return Err(EngineError::ActionNotAllowed(
+            "This permanent can't become tapped".to_string(),
+        ));
+    }
+    if crate::game::object_state::resolve_and_apply_object_edit(
+        state,
+        id,
+        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+        true,
+    )
+    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        events.push(GameEvent::PermanentTapped {
+            object_id: id,
+            caused_by: None,
+        });
+    }
+    Ok(())
+}
+
 /// CR 602.5b: If an activated ability has a restriction on its use (e.g., "Activate only once
 /// each turn"), the restriction continues to apply even if its controller changes.
 pub fn record_ability_activation(
@@ -640,9 +843,8 @@ pub fn record_ability_activation(
     source_id: ObjectId,
     ability_index: usize,
 ) {
-    let key = (source_id, ability_index);
-    *state.activated_abilities_this_turn.entry(key).or_insert(0) += 1;
-    *state.activated_abilities_this_game.entry(key).or_insert(0) += 1;
+    crate::game::ledger::record_ability_activation(state, source_id, ability_index)
+        .expect("activated ability must have a valid ledger prefix");
 }
 
 /// CR 702.142b: Compute the effective per-turn activation limit for an ability.
@@ -970,6 +1172,16 @@ fn casting_restriction_applies(
         CastingRestriction::BeforeBlockersDeclared => {
             matches!(state.phase, Phase::BeginCombat | Phase::DeclareAttackers)
         }
+        // CR 509.1 + CR 510.1 + CR 511.1: "after blockers are declared" opens
+        // once the declare-blockers turn-based action has placed blockers and
+        // stays open through combat damage and end of combat — the exact
+        // complement of BeforeBlockersDeclared within the combat phase (CR 506.1).
+        // ANDed with the separately-emitted DuringCombat, the effective
+        // legal window is exactly these three steps.
+        CastingRestriction::AfterBlockersDeclared => matches!(
+            state.phase,
+            Phase::DeclareBlockers | Phase::CombatDamage | Phase::EndCombat
+        ),
         CastingRestriction::BeforeCombatDamage => is_before_combat_damage(state.phase),
         CastingRestriction::AfterCombat => matches!(
             state.phase,
@@ -978,6 +1190,9 @@ fn casting_restriction_applies(
         CastingRestriction::RequiresCondition { condition } => condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // Not a timing gate: "can't spend mana" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::CantSpendMana => true,
     }
 }
 
@@ -1360,7 +1575,13 @@ pub(crate) fn evaluate_condition(
                 .battlefield_entries_this_turn
                 .iter()
                 .filter(|record| {
-                    battlefield_entry_matches_filter(record, filter, player, Some(source_id))
+                    battlefield_entry_matches_filter(
+                        record,
+                        filter,
+                        player,
+                        &state.all_creature_types,
+                        Some(source_id),
+                    )
                 })
                 .count() as u32
                 >= *count
@@ -1375,7 +1596,18 @@ pub(crate) fn evaluate_condition(
         }
         // CR 602.5b: "Activate only if [player condition]" — count matching non-eliminated players.
         ParsedCondition::PlayerCountAtLeast { filter, minimum } => {
-            crate::game::quantity::resolve_player_count(state, filter, player, source_id) as usize
+            crate::game::quantity::resolve_player_count(
+                state,
+                filter,
+                player,
+                crate::game::quantity::QuantityContext {
+                    entering: None,
+                    source: source_id,
+                    trigger_source: None,
+                    recipient: None,
+                    scoped_player: None,
+                },
+            ) as usize
                 >= *minimum
         }
         // CR 702.131c: The city's blessing is a player designation that effects
@@ -1491,24 +1723,21 @@ fn target_filter_accepts_player(filter: &crate::types::ability::TargetFilter) ->
 
 fn target_ref_matches_spell_targets_filter(
     state: &crate::types::game_state::GameState,
-    context_source_id: crate::types::identifiers::ObjectId,
     target: &crate::types::ability::TargetRef,
     filter: &crate::types::ability::TargetFilter,
+    context: &super::filter::FilterContext,
 ) -> bool {
     use crate::types::ability::{TargetFilter, TargetRef};
     match target {
         TargetRef::Player(_) => target_filter_accepts_player(filter),
-        TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source(state, context_source_id);
-            match filter {
+        TargetRef::Object(object_id) => match filter {
+            TargetFilter::Player => false,
+            TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
                 TargetFilter::Player => false,
-                TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
-                    TargetFilter::Player => false,
-                    branch => super::filter::matches_target_filter(state, *object_id, branch, &ctx),
-                }),
-                _ => super::filter::matches_target_filter(state, *object_id, filter, &ctx),
-            }
-        }
+                branch => super::filter::matches_target_filter(state, *object_id, branch, context),
+            }),
+            _ => super::filter::matches_target_filter(state, *object_id, filter, context),
+        },
     }
 }
 
@@ -1566,21 +1795,21 @@ pub(crate) fn triggering_spell_targets(
 /// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
 /// triggering spell's committed targets at resolution time.
 ///
-/// `context_source_id` scopes filter-relative terms like `FilterProp::Another`:
-/// use the triggering spell id for `AbilityCondition`, and the trigger source id
-/// for `TriggerCondition` (Orvar — "other permanents you control").
+/// `context` scopes filter-relative terms like `FilterProp::Another`: an
+/// `AbilityCondition` uses its triggering spell, while a `TriggerCondition`
+/// carries the exact trigger source (Orvar — "other permanents you control").
 pub(crate) fn triggering_spell_targets_filter(
     state: &crate::types::game_state::GameState,
     spell_id: crate::types::identifiers::ObjectId,
     filter: &crate::types::ability::TargetFilter,
-    context_source_id: crate::types::identifiers::ObjectId,
+    context: &super::filter::FilterContext,
 ) -> bool {
     let Some(targets) = spell_cast_targets(state, spell_id) else {
         return false;
     };
-    targets.iter().any(|target| {
-        target_ref_matches_spell_targets_filter(state, context_source_id, target, filter)
-    })
+    targets
+        .iter()
+        .any(|target| target_ref_matches_spell_targets_filter(state, target, filter, context))
 }
 
 /// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent
@@ -1595,11 +1824,19 @@ pub(crate) fn triggering_spell_targets_filter(
 /// `cast_timing_permission == AsThoughHadFlash`) AND no flash permission's
 /// condition currently passes, the cast is illegal under CR 601.3d and must be
 /// aborted.
+/// `fused` projects the COMBINED characteristics of a pre-payment fused split
+/// spell (CR 702.102b) into the `has_real_flash` short-circuit so a value-keyed
+/// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell. This
+/// re-validation runs before the `fused_split_spell` marker is set at
+/// `finalize_cast_with_phyrexian_choices`, so pre-payment fused callers pass
+/// `casting_variant == CastingVariant::Fuse`; all non-fused / single-face callers
+/// pass `false` (byte-identical to the pre-fix behavior).
 pub(crate) fn target_dependent_flash_permission_satisfied(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     object_id: ObjectId,
     ability: &crate::types::ability::ResolvedAbility,
+    fused: bool,
 ) -> bool {
     use crate::types::ability::{ParsedCondition, SpellCastingOptionKind, TargetRef};
     let Some(obj) = state.objects.get(&object_id) else {
@@ -1609,8 +1846,9 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
     // authorizes instant-speed casting independent of any conditional flash
     // option. If the spell has Flash, the cast is legal regardless of any
     // `AsThoughHadFlash` option's condition.
-    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
-        .contains(&crate::types::keywords::KeywordKind::Flash);
+    let has_real_flash =
+        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
+            .contains(&crate::types::keywords::KeywordKind::Flash);
     if has_real_flash {
         return true;
     }
@@ -1658,18 +1896,25 @@ pub(crate) fn target_dependent_flash_permission_satisfied(
 /// FEASIBILITY check — distinct from the post-target SATISFACTION gate
 /// `target_dependent_flash_permission_satisfied`, which tests the player's
 /// already-chosen targets. CR 702.8a: a real Flash keyword bypasses entirely.
+/// `fused` projects a pre-payment fused split spell's COMBINED characteristics
+/// (CR 702.102b) into the `has_real_flash` short-circuit so a value-keyed
+/// `CastWithKeyword{Flash}` grant (CR 702.8a) is seen for the fused spell during
+/// candidate generation, before the `fused_split_spell` marker is set. Non-fused /
+/// single-face callers pass `false` (byte-identical to the pre-fix behavior).
 pub(crate) fn target_dependent_flash_permission_feasible(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     object_id: ObjectId,
+    fused: bool,
 ) -> bool {
     use crate::types::ability::{SpellCastingOptionKind, TargetRef};
 
     // CR 702.8a: A real Flash keyword (printed or granted via continuous
     // effect) authorizes instant-speed casting independent of any conditional
     // flash option — short-circuit before any feasibility analysis.
-    let has_real_flash = super::casting::effective_spell_keyword_kinds(state, player, object_id)
-        .contains(&crate::types::keywords::KeywordKind::Flash);
+    let has_real_flash =
+        super::casting::effective_spell_keyword_kinds_for(state, player, object_id, fused)
+            .contains(&crate::types::keywords::KeywordKind::Flash);
     if has_real_flash {
         return true;
     }
@@ -1770,13 +2015,17 @@ pub(crate) fn is_sorcery_speed_window(
 }
 
 fn is_before_attackers_declared(state: &crate::types::game_state::GameState) -> bool {
-    // CR 723: compare the active player against the semantic priority *seat*, not
-    // `priority_player` (the authorized submitter). Under turn-control these
-    // diverge, so the raw field would never equal `active_player` during a
-    // controlled turn and wrongly close this window. Behavior is identical
-    // without turn-control, where the seat and submitter are the same player.
-    super::turn_control::priority_seat(state) == state.active_player
-        && matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
+    // CR 508.1 + CR 508.2: attackers are declared as the first turn-based action
+    // of the declare-attackers step, BEFORE any player receives priority. So
+    // "before attackers are declared" is a pure PHASE property — we are strictly
+    // before that step — independent of which player currently holds priority.
+    // This is deliberately not priority-gated: a non-active player casting an
+    // instant during the active player's pre-combat (Siren's Call, Master
+    // Warcraft) is correctly inside the window, and turn-control (CR 723) can't
+    // affect a check that never reads priority. Turn-qualified cards (the
+    // `DuringYourTurn` activations) remain pinned to the active player by their
+    // own restriction, which is AND-composed with this one.
+    matches!(state.phase, Phase::PreCombatMain | Phase::BeginCombat)
 }
 
 fn is_before_combat_damage(phase: Phase) -> bool {
@@ -2290,6 +2539,242 @@ mod tests {
         assert!(!evaluate_condition(&state, player, source_id, &condition));
     }
 
+    /// T24 (Step 8). CR 702.73a: a Changeling entrant is every creature type, so an
+    /// entry-ledger `TypeFilter::Subtype` read must route through the single authority
+    /// `subtype_matches_with_changeling` (`game/filter.rs:2719`) rather than a bare
+    /// `eq_ignore_ascii_case` over the pre-layer snapshot. Mirrors the sibling
+    /// `zone_change_record_matches_type_filter` (`game/filter.rs:2871-2878`). Drives the
+    /// production `evaluate_condition` → `battlefield_entry_matches_filter` seam.
+    ///
+    /// REVERT-PROBE: restoring the bare `eq_ignore_ascii_case` Subtype arm flips (a)
+    /// `true→false`. Cases (b)/(c)/(d)/(g) pass in BOTH builds and are the vacuity
+    /// controls — (a) and (b) differ ONLY in the subtype string, so the type/controller/
+    /// prop conjuncts are held constant and no discriminator is dominated by an upstream
+    /// conjunct. (e) flips if the host disjunct is dropped; (f) flips if `Another` is
+    /// bypassed, and its paired reach-guard proves the Changeling leg really matched.
+    #[test]
+    fn changeling_entry_ledger_matches_expanded_subtype() {
+        use crate::types::ability::TypedFilter;
+        use crate::types::card_type::Supertype;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+        // CR 205.3m: the runtime creature-type namespace Changeling expands into.
+        // "Equipment" is an artifact type and is deliberately absent.
+        state.all_creature_types = vec![
+            "Goblin".to_string(),
+            "Human".to_string(),
+            "Shapeshifter".to_string(),
+        ];
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Bbfu10 Ledger Reader".to_string(),
+            Zone::Battlefield,
+        );
+
+        let enter_creature = |state: &mut crate::types::game_state::GameState,
+                              card: u64,
+                              controller: PlayerId,
+                              subtypes: &[&str],
+                              supertypes: &[Supertype],
+                              keywords: &[Keyword]| {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                "Bbfu10 Entrant".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes = subtypes.iter().map(|s| (*s).to_string()).collect();
+            obj.card_types.supertypes = supertypes.to_vec();
+            obj.keywords = keywords.to_vec();
+            record_battlefield_entry(state, id);
+            id
+        };
+
+        let condition = |subtype: &str, ctrl: ControllerRef, properties: Vec<FilterProp>| {
+            ParsedCondition::BattlefieldEntriesThisTurn {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype(subtype.to_string())
+                        .controller(ctrl)
+                        .properties(properties),
+                ),
+                count: 1,
+            }
+        };
+
+        // Changeling entrant, printed subtype Shapeshifter only.
+        enter_creature(
+            &mut state,
+            2,
+            player,
+            &["Shapeshifter"],
+            &[],
+            &[Keyword::Changeling],
+        );
+
+        // (a) THE CLAIM — CR 702.73a expands the entry snapshot to every creature type.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(a) a Changeling entrant is a Goblin for the entry ledger (CR 702.73a)"
+        );
+        // (b) VACUITY CONTROL — differs from (a) only in the subtype string.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Shapeshifter", ControllerRef::You, vec![])
+            ),
+            "(b) the printed subtype must still match in both builds"
+        );
+        // (c) CR 205.3m gate — Changeling confers creature types only.
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Equipment", ControllerRef::You, vec![])
+            ),
+            "(c) Equipment is not in the creature-type catalog (CR 205.3m)"
+        );
+
+        // (d) negative sibling — no Changeling keyword, no expansion.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 3, player, &["Human"], &[], &[]);
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(d) a non-Changeling Human entrant is not a Goblin"
+        );
+
+        // (e) pins the `subtype_matches_host_supertype` disjunct: "Host" is a supertype,
+        // absent from both the record subtypes and the creature-type catalog.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 4, player, &[], &[Supertype::Host], &[]);
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Host", ControllerRef::You, vec![])
+            ),
+            "(e) Supertype::Host answers the `Host` subtype filter"
+        );
+
+        // (f) multi-authority: the new Subtype arm must compose with `FilterProp::Another`
+        // (CR 109.1), not short-circuit it. The Changeling entrant IS the source.
+        state.battlefield_entries_this_turn.clear();
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes = vec!["Shapeshifter".to_string()];
+            obj.keywords = vec![Keyword::Changeling];
+        }
+        record_battlefield_entry(&mut state, source_id);
+        enter_creature(&mut state, 5, player, &["Human"], &[], &[]);
+        // Reach-guard: without `Another`, the Changeling source DOES satisfy the Goblin leg,
+        // so the negative below is the `Another` exclusion firing, not a dead fixture.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(f-guard) the Changeling source itself matches Goblin when `Another` is absent"
+        );
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![FilterProp::Another])
+            ),
+            "(f) `Another` excludes the source, and the Human entrant is not a Goblin"
+        );
+
+        // (g) multi-authority: the controller gate (CR 109.5) still applies.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(
+            &mut state,
+            6,
+            opponent,
+            &["Shapeshifter"],
+            &[],
+            &[Keyword::Changeling],
+        );
+        // Reach-guard: the same record DOES match under `Opponent`.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::Opponent, vec![])
+            ),
+            "(g-guard) the opponent's Changeling entrant matches under ControllerRef::Opponent"
+        );
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(g) `ControllerRef::You` rejects an opponent-controlled entrant"
+        );
+    }
+
+    /// T25 (Step 8c). CR 403.3: permanents exist only on the battlefield, so a
+    /// battlefield-entry record is never an instant or a sorcery — `false` is the
+    /// CORRECT verdict there, not a fail-closed one, and `Non(Instant)` correctly
+    /// inverts to `true`. `entry_type_filter_matches` is now exhaustive, so the
+    /// compiler is the drift gate; this pins the semantics that justify the arm and
+    /// the doc claim at `ledger_filter_is_evaluable`.
+    ///
+    /// REVERT-PROBE: changing the arm to `true` flips both assertions.
+    #[test]
+    fn entry_type_filter_answers_instant_false_per_cr_403_3() {
+        let record = BattlefieldEntryRecord {
+            object_id: ObjectId(10),
+            name: "Bbfu10 Permanent".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+            controller: PlayerId(0),
+        };
+
+        assert!(
+            !entry_type_filter_matches(&record, &TypeFilter::Instant, &[]),
+            "CR 403.3: a battlefield-entry record is never an instant"
+        );
+        assert!(
+            entry_type_filter_matches(
+                &record,
+                &TypeFilter::Non(Box::new(TypeFilter::Instant)),
+                &[]
+            ),
+            "CR 403.3: `Non(Instant)` is correctly true for every permanent"
+        );
+    }
+
     /// MSH Wave 2 (Fixer, Techno Terror): the elided "[type] entered under your
     /// control this turn" templating (no "the battlefield") must parse and gate
     /// the activation restriction. Drives the production
@@ -2565,6 +3050,96 @@ mod tests {
         ));
     }
 
+    /// P02-U3b RUNTIME WITNESS (CR 102.2 + CR 102.3 + CR 608.2h) — Whiplash Trap.
+    ///
+    /// "If **an opponent** had **two or more** creatures enter the battlefield under
+    /// **their** control this turn …". "An opponent" binds ONE player, and "their
+    /// control" binds the count to that same player. So the threshold is PER OPPONENT,
+    /// never a sum across opponents.
+    ///
+    /// This is the red-first witness for the multiplayer correction. BEFORE the port the
+    /// restriction fallback encoded the opponent INSIDE the TargetFilter
+    /// (`controller: Opponent`), so `evaluate_condition` counted every entry under ANY
+    /// opponent's control and compared the SUM — two DIFFERENT opponents with one creature
+    /// each wrongly satisfied "two or more". This test FAILS on that code. After the port
+    /// the phrase is a `QuantityComparison` over
+    /// `BattlefieldEntriesThisTurn { player: Opponent { aggregate: Max } }`, which counts
+    /// per opponent and takes the largest tally: max(1, 1) = 1 < 2 → correctly FALSE.
+    ///
+    /// The two readings coincide at two players, which is why this needs THREE seats.
+    ///
+    /// Placement note: this is a condition-SEMANTICS witness, and `evaluate_condition` is
+    /// `pub(crate)`. It lives beside the other runtime condition tests rather than in
+    /// `tests/integration/` because reaching it from an integration test would mean
+    /// widening the evaluator's visibility purely for a test. It still drives the real
+    /// runtime path — a real 3-player `GameState` through `game::quantity`'s
+    /// `resolve_per_player_scalar`, not a parse-tree assertion.
+    #[test]
+    fn opponent_entry_threshold_is_per_opponent_not_summed_across_opponents() {
+        const WHIPLASH_TRAP: &str = "an opponent had two or more creatures enter the battlefield under their control this turn";
+
+        fn state_with_entries(entries: &[(PlayerId, u32)]) -> crate::types::game_state::GameState {
+            // free-for-all, THREE seats: P1 and P2 are both genuine opponents of P0 (a
+            // team format would make one of them a teammate and defeat the point).
+            let mut state = crate::types::game_state::GameState::new(
+                crate::types::format::FormatConfig::free_for_all(),
+                3,
+                42,
+            );
+            let mut next_id = 100u64;
+            for (controller, count) in entries {
+                for _ in 0..*count {
+                    state
+                        .battlefield_entries_this_turn
+                        .push(BattlefieldEntryRecord {
+                            object_id: ObjectId(next_id),
+                            name: "Bear".to_string(),
+                            core_types: vec![CoreType::Creature],
+                            subtypes: vec![],
+                            supertypes: vec![],
+                            colors: vec![],
+                            keywords: vec![],
+                            controller: *controller,
+                        });
+                    next_id += 1;
+                }
+            }
+            state
+        }
+
+        // THE BUG: two DIFFERENT opponents, ONE creature each. No single opponent had two,
+        // so the condition must be FALSE. The pre-port fallback summed 1 + 1 = 2 and
+        // returned TRUE.
+        let split = state_with_entries(&[(PlayerId(1), 1), (PlayerId(2), 1)]);
+        assert!(
+            !parse_and_evaluate_condition(&split, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "two DIFFERENT opponents with one creature each must NOT satisfy \"an opponent \
+             had two or more creatures enter\" — no single opponent had two (CR 102.2/102.3: \
+             \"an opponent\" binds one player; \"their control\" binds the count to that same \
+             player). Summing across opponents is the pre-port bug this test exists to catch."
+        );
+
+        // POSITIVE CONTROL (nonvacuity): ONE opponent with TWO creatures MUST satisfy it.
+        // Without this, the assertion above would also pass if the condition were broken to
+        // always-false — or if the parse silently stopped producing anything at all.
+        let concentrated = state_with_entries(&[(PlayerId(1), 2)]);
+        assert!(
+            parse_and_evaluate_condition(&concentrated, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "a SINGLE opponent with two creatures entering MUST satisfy the condition — if \
+             this fails the per-opponent tally is broken (or the phrase stopped parsing), and \
+             the negative assertion above is vacuous"
+        );
+
+        // CONTROL: the controller's OWN entries are not an opponent's. Two creatures under
+        // the ability controller's control must not satisfy an opponent-scoped threshold.
+        let mine = state_with_entries(&[(PlayerId(0), 2)]);
+        assert!(
+            !parse_and_evaluate_condition(&mine, PlayerId(0), ObjectId(10), WHIPLASH_TRAP),
+            "the controller's own battlefield entries must not satisfy an OPPONENT-scoped \
+             entry threshold"
+        );
+    }
+
     #[test]
     fn evaluates_you_control_creature_with_flying_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2698,9 +3273,16 @@ mod tests {
     #[test]
     fn evaluates_opponent_searched_library_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
+        // Production (`effects::search_library`) records the search in BOTH the
+        // legacy set and the `PlayerPerformedAction` ledger; the shared grammar
+        // now counts the latter, so this test must simulate both halves.
         state
             .players_who_searched_library_this_turn
             .insert(PlayerId(1));
+        state.player_actions_this_turn.push((
+            PlayerId(1),
+            crate::types::events::PlayerActionKind::SearchedLibrary,
+        ));
 
         assert!(parse_and_evaluate_condition(
             &state,
@@ -2713,8 +3295,34 @@ mod tests {
     #[test]
     fn evaluates_you_attacked_with_two_or_more_creatures_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        state.players_attacked_this_turn.insert(PlayerId(0));
-        state.attacking_creatures_this_turn.insert(PlayerId(0), 2);
+        state.active_player = PlayerId(0);
+        // The shared grammar counts `attacker_declarations_this_turn` snapshots;
+        // production `combat::declare_attackers` records those AND the summary
+        // counters, so this test must simulate both halves (see
+        // `zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn`).
+        for card_id in [2, 3] {
+            let attacker = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(card_id),
+                PlayerId(0),
+                format!("Attacker {card_id}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            let record = state
+                .objects
+                .get(&attacker)
+                .unwrap()
+                .snapshot_for_attack_declaration(attacker);
+            state.attacker_declarations_this_turn.push(record);
+        }
+        record_attackers_declared(&mut state, 2);
 
         assert!(parse_and_evaluate_condition(
             &state,
@@ -2724,6 +3332,15 @@ mod tests {
         ));
     }
 
+    /// CR 508.1a: "you attacked this turn" is satisfied only by a declaration that
+    /// actually named an attacker.
+    ///
+    /// The condition is now read by the shared static-condition grammar as a count over
+    /// `attacker_declarations_this_turn` — the same per-attacker records that carry the
+    /// LKI a filtered variant ("you attacked with a Spacecraft") needs. Production
+    /// `combat::declare_attackers` populates those records AND calls
+    /// `record_attackers_declared`; this test must therefore simulate both halves, not
+    /// just the summary counters.
     #[test]
     fn zero_attacker_declaration_does_not_satisfy_you_attacked_this_turn() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
@@ -2738,6 +3355,26 @@ mod tests {
             "you attacked this turn"
         ));
 
+        let attacker = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        let record = state
+            .objects
+            .get(&attacker)
+            .unwrap()
+            .snapshot_for_attack_declaration(attacker);
+        state.attacker_declarations_this_turn.push(record);
         record_attackers_declared(&mut state, 1);
 
         assert!(parse_and_evaluate_condition(
@@ -2887,7 +3524,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Grizzly Bears".to_string(),
                 core_types: vec![CoreType::Creature],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -2922,6 +3559,7 @@ mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }]),
         );
 
@@ -2957,6 +3595,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -2970,6 +3609,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -2983,6 +3623,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -3006,7 +3647,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Skeleton".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Skeleton".to_string()],
@@ -3027,7 +3668,7 @@ mod tests {
 
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Vampire".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Vampire".to_string()],
@@ -3081,7 +3722,7 @@ mod tests {
         for i in 0..3 {
             state
                 .zone_changes_this_turn
-                .push(crate::types::game_state::ZoneChangeRecord {
+                .push_back(crate::types::game_state::ZoneChangeRecord {
                     name: format!("Card {}", i),
                     ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                         ObjectId(100 + i),
@@ -3252,7 +3893,8 @@ mod tests {
                 &state,
                 caster,
                 ObjectId(10),
-                &ability_with_commander
+                &ability_with_commander,
+                false
             ),
             "casting at instant speed targeting a commander must satisfy the flash condition"
         );
@@ -3261,7 +3903,8 @@ mod tests {
                 &state,
                 caster,
                 ObjectId(10),
-                &ability_with_plain
+                &ability_with_plain,
+                false
             ),
             "casting at instant speed targeting a non-commander must FAIL the flash condition"
         );
@@ -3333,7 +3976,13 @@ mod tests {
             caster,
         );
         assert!(
-            target_dependent_flash_permission_satisfied(&state, caster, ObjectId(10), &ability),
+            target_dependent_flash_permission_satisfied(
+                &state,
+                caster,
+                ObjectId(10),
+                &ability,
+                false
+            ),
             "printed Flash keyword must short-circuit the target-dependent flash check"
         );
     }
@@ -3402,7 +4051,7 @@ mod tests {
             .push(CoreType::Creature);
 
         assert!(
-            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "no commander on the battlefield ⇒ the conditional flash cast is infeasible"
         );
 
@@ -3420,7 +4069,7 @@ mod tests {
             obj.is_commander = true;
         }
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "a commander creature on the battlefield ⇒ the conditional flash cast is feasible"
         );
     }
@@ -3486,7 +4135,7 @@ mod tests {
             .push(CoreType::Creature);
 
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "printed Flash must bypass the pre-target feasibility check (CR 702.8a)"
         );
     }
@@ -3532,7 +4181,7 @@ mod tests {
 
         // No commander, no targets at all — but the modal branch defers.
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "modal cards defer the feasibility verdict to the finalize-time gate"
         );
     }
@@ -3593,7 +4242,7 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
         assert!(
-            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            !target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "Aura with only a non-commander enchantable target ⇒ infeasible"
         );
 
@@ -3612,7 +4261,7 @@ mod tests {
             obj.is_commander = true;
         }
         assert!(
-            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10)),
+            target_dependent_flash_permission_feasible(&state, caster, ObjectId(10), false),
             "Aura with a commander enchantable target ⇒ feasible"
         );
     }
@@ -3870,5 +4519,469 @@ mod tests {
         // proving the assertion above is not vacuous.
         assert!(place_blocking(&mut state, blocker, normally_blocked));
         assert!(is_source_blocked(&state, normally_blocked));
+    }
+
+    // ── Ood Sphere: "can't become tapped" (StaticMode::CantTap) enforcement ──
+
+    /// Build a battlefield creature carrying a printed `CantTap` static and run a
+    /// layers pass so `static_mode_presence` + `static_definitions` reflect it.
+    fn creature_with_cant_tap(state: &mut crate::types::game_state::GameState) -> ObjectId {
+        use crate::types::statics::StaticMode;
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Goaded Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.summoning_sick = false;
+            let def = crate::types::ability::StaticDefinition::new(StaticMode::CantTap)
+                .affected(crate::types::ability::TargetFilter::SelfRef);
+            obj.static_definitions.push(def.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+        }
+        crate::game::layers::evaluate_layers(state);
+        id
+    }
+
+    #[test]
+    fn object_cant_tap_reflects_printed_cant_tap_static() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        assert!(object_cant_tap(&state, restricted));
+
+        // A plain creature (no CantTap) is never restricted.
+        let plain = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(!object_cant_tap(&state, plain));
+    }
+
+    #[test]
+    fn tap_permanent_for_cost_refuses_cant_tap_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let mut events = Vec::new();
+        let result = tap_permanent_for_cost(&mut state, restricted, &mut events);
+        assert!(
+            result.is_err(),
+            "a can't-become-tapped creature can't pay a tap cost"
+        );
+        assert!(
+            !state.objects.get(&restricted).unwrap().tapped,
+            "the creature must remain untapped after a refused cost tap"
+        );
+        assert!(
+            events.is_empty(),
+            "no PermanentTapped event on a refused tap"
+        );
+    }
+
+    #[test]
+    fn tap_permanent_for_cost_taps_unrestricted_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let plain = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Plain Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut events = Vec::new();
+        assert!(tap_permanent_for_cost(&mut state, plain, &mut events).is_ok());
+        assert!(state.objects.get(&plain).unwrap().tapped);
+        assert_eq!(events.len(), 1, "unrestricted tap emits PermanentTapped");
+    }
+
+    #[test]
+    fn effect_tap_is_a_no_op_on_cant_tap_creature() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let mut events = Vec::new();
+        // CR 701.26a: an effect can't tap the creature — process_one_tap no-ops.
+        crate::game::effects::tap_untap::process_one_tap(
+            &mut state,
+            restricted,
+            restricted,
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.objects.get(&restricted).unwrap().tapped,
+            "an effect-driven tap must not tap a can't-become-tapped creature"
+        );
+    }
+
+    #[test]
+    fn tap_ability_activation_refused_but_untap_ability_allowed() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let restricted = creature_with_cant_tap(&mut state);
+        let source = state.objects.get(&restricted).unwrap();
+        // {T} cost → refused (would become tapped).
+        assert!(
+            check_summoning_sickness_for_cost(&state, source, &AbilityCost::Tap).is_err(),
+            "a {{T}} ability of a can't-become-tapped creature can't be activated"
+        );
+        // {Q} untap cost → NOT gated by CantTap (that is CantUntap's domain).
+        assert!(
+            check_summoning_sickness_for_cost(&state, source, &AbilityCost::Untap).is_ok(),
+            "a {{Q}} untap ability is unaffected by CantTap"
+        );
+    }
+
+    // CR 508.1 + CR 508.2: "before attackers are declared" is a phase property,
+    // independent of which player holds priority — so a NON-active player casting
+    // an instant during the active player's pre-combat (Master Warcraft, Siren's
+    // Call) is inside the window. Fails on revert of the phase-only fix (the old
+    // `priority_seat == active_player` clause rejected the non-active seat).
+    #[test]
+    fn before_attackers_window_admits_non_active_caster() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let active = PlayerId(0);
+        let non_active = PlayerId(1);
+        let src = ObjectId(10);
+        let restr = [CastingRestriction::BeforeAttackersDeclared];
+
+        for phase in [Phase::PreCombatMain, Phase::BeginCombat] {
+            state.active_player = active;
+            state.phase = phase;
+            // The non-active player holds priority to cast the instant — exactly
+            // the state the old priority_seat clause wrongly rejected.
+            state.priority_player = non_active;
+            state.waiting_for = WaitingFor::Priority { player: non_active };
+
+            assert!(
+                check_casting_restrictions(&state, non_active, src, &restr).is_ok(),
+                "non-active player must be inside the before-attackers window in {phase:?}"
+            );
+            // Reach-guard: the active player is also inside the window, so the
+            // assertion above is not vacuously true.
+            assert!(
+                check_casting_restrictions(&state, active, src, &restr).is_ok(),
+                "active player must also be inside the window in {phase:?}"
+            );
+        }
+    }
+
+    // CR 508.1/508.2: the window is strictly before the declare-attackers step;
+    // it must be closed once attackers are (or could have been) declared.
+    #[test]
+    fn before_attackers_window_closes_at_and_after_declaration() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p = PlayerId(0);
+        let src = ObjectId(10);
+        let restr = [CastingRestriction::BeforeAttackersDeclared];
+        state.active_player = p;
+        state.priority_player = p;
+        state.waiting_for = WaitingFor::Priority { player: p };
+
+        for phase in [
+            Phase::DeclareAttackers,
+            Phase::DeclareBlockers,
+            Phase::PostCombatMain,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &restr).is_err(),
+                "the window must be closed in {phase:?} (attackers already declared)"
+            );
+        }
+        // Reach-guard: open before declaration.
+        state.phase = Phase::BeginCombat;
+        assert!(check_casting_restrictions(&state, p, src, &restr).is_ok());
+    }
+
+    // CR 509.1 + CR 510.1 + CR 511.1: "cast only during combat after blockers are
+    // declared" opens once the declare-blockers turn-based action has placed
+    // blockers and stays open through combat damage and end of combat — the exact
+    // complement of the BeforeBlockersDeclared window. Drives the real CR 601.3
+    // enforcement (`check_casting_restrictions`), not just parser shape: the spell
+    // must be REJECTED before blockers are declared (Begin Combat / Declare
+    // Attackers, and outside combat) and ALLOWED from the declare-blockers step
+    // onward. Backs Aleatory, Chaotic Strike, Curtain of Light, Flash Foliage.
+    #[test]
+    fn after_blockers_declared_window_rejects_pre_blockers_and_admits_post_blockers() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let p = PlayerId(0);
+        let src = ObjectId(10);
+        state.active_player = p;
+        state.priority_player = p;
+        state.waiting_for = WaitingFor::Priority { player: p };
+
+        // The lone new restriction: closed before blockers are declared (and
+        // outside combat entirely), open from the declare-blockers step onward.
+        let after = [CastingRestriction::AfterBlockersDeclared];
+        for phase in [
+            Phase::PreCombatMain,
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &after).is_err(),
+                "the after-blockers window must be closed in {phase:?} (blockers not yet declared)"
+            );
+        }
+        for phase in [
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+            Phase::EndCombat,
+        ] {
+            state.phase = phase;
+            assert!(
+                check_casting_restrictions(&state, p, src, &after).is_ok(),
+                "the after-blockers window must be open in {phase:?} (blockers declared)"
+            );
+        }
+
+        // The full restriction set the parser emits for these cards
+        // (`DuringCombat` AND `AfterBlockersDeclared`): the effective legal window
+        // is exactly the declare-blockers, combat-damage, and end-of-combat steps.
+        let combined = [
+            CastingRestriction::DuringCombat,
+            CastingRestriction::AfterBlockersDeclared,
+        ];
+        for (phase, allowed) in [
+            (Phase::PreCombatMain, false),
+            (Phase::BeginCombat, false),
+            (Phase::DeclareAttackers, false),
+            (Phase::DeclareBlockers, true),
+            (Phase::CombatDamage, true),
+            (Phase::EndCombat, true),
+            (Phase::PostCombatMain, false),
+        ] {
+            state.phase = phase;
+            assert_eq!(
+                check_casting_restrictions(&state, p, src, &combined).is_ok(),
+                allowed,
+                "combined DuringCombat+AfterBlockersDeclared legality wrong in {phase:?}"
+            );
+        }
+    }
+
+    // Non-regression: `[DuringYourTurn, BeforeAttackersDeclared]` cards (King's
+    // Assassin and the Portal Three Kingdoms tap-ability cycle) must stay pinned
+    // to the active player. Widening the before-attackers window to phase-only
+    // must NOT let a non-active player activate them — DuringYourTurn (AND-composed)
+    // still gates, across the whole widened window (both PreCombatMain and BeginCombat).
+    #[test]
+    fn during_your_turn_before_attackers_stays_active_player_gated() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+        let src = ObjectId(10);
+        let restr = [
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::BeforeAttackersDeclared,
+        ];
+
+        for phase in [Phase::PreCombatMain, Phase::BeginCombat] {
+            // Controller's OWN turn: legal.
+            state.active_player = controller;
+            state.phase = phase;
+            state.priority_player = controller;
+            state.waiting_for = WaitingFor::Priority { player: controller };
+            assert!(
+                check_activation_restrictions(&state, controller, src, 0, &restr).is_ok(),
+                "own turn {phase:?} must be legal"
+            );
+            // Opponent's turn: illegal (DuringYourTurn fails) — proves phase-only
+            // did not widen these cards to opponents' turns.
+            state.active_player = opponent;
+            assert!(
+                check_activation_restrictions(&state, controller, src, 0, &restr).is_err(),
+                "opponent's turn {phase:?} must be illegal (DuringYourTurn gate)"
+            );
+        }
+    }
+
+    #[test]
+    fn parsed_combat_window_activation_gates_reach_production_enforcement() {
+        let check_window = |oracle: &str,
+                            expected: &[ActivationRestriction],
+                            legal_phase: Phase,
+                            illegal_phase: Phase| {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                "Combat Window Test",
+                &[],
+                &["Artifact".to_string()],
+                &[],
+            );
+            let restrictions = &parsed.abilities[0].activation_restrictions;
+            assert_eq!(
+                restrictions, expected,
+                "parser must expose the enforced gate"
+            );
+
+            let mut state = crate::types::game_state::GameState::new_two_player(42);
+            let player = PlayerId(0);
+            state.active_player = player;
+            state.priority_player = player;
+            state.waiting_for = WaitingFor::Priority { player };
+
+            state.phase = legal_phase;
+            assert!(
+                check_activation_restrictions(&state, player, ObjectId(10), 0, restrictions)
+                    .is_ok(),
+                "activation must be legal in {legal_phase:?}"
+            );
+
+            state.phase = illegal_phase;
+            assert!(
+                check_activation_restrictions(&state, player, ObjectId(10), 0, restrictions)
+                    .is_err(),
+                "activation must be illegal in {illegal_phase:?}"
+            );
+        };
+
+        check_window(
+            "{T}: Draw a card. Activate only before attackers are declared.",
+            &[ActivationRestriction::BeforeAttackersDeclared],
+            Phase::BeginCombat,
+            Phase::DeclareAttackers,
+        );
+        check_window(
+            "{T}: Draw a card. Activate only before combat damage has been dealt.",
+            &[ActivationRestriction::BeforeCombatDamage],
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+        );
+        check_window(
+            "{T}: Draw a card. Activate only during combat before combat damage has been dealt.",
+            &[
+                ActivationRestriction::DuringCombat,
+                ActivationRestriction::BeforeCombatDamage,
+            ],
+            Phase::DeclareBlockers,
+            Phase::CombatDamage,
+        );
+    }
+
+    /// T23 — the ANTI-DRIFT BINDER for [`ledger_filter_is_evaluable`]'s allow-list.
+    /// It replaces a 98-arm exhaustive `match`: the two functions are driven AS A
+    /// PAIR against one record that positively satisfies every allowed prop, so a
+    /// prop in the allow-list that the matcher does not actually answer fails here.
+    ///
+    /// REVERT-PROBES, both measured:
+    /// - add `FilterProp::NonToken` to the allow-list → the paired matcher drive
+    ///   returns `false` while the guard says `true` → FAIL.
+    /// - delete an allowed prop from the list → its paired row FAILS on the guard side.
+    #[test]
+    fn ledger_guard_agrees_with_matcher() {
+        let player = PlayerId(0);
+        let source_id = ObjectId(99);
+        // Positively satisfies all four answerable props: green, on the
+        // battlefield, flying, and not the ability source. Also legendary and
+        // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
+        let record = BattlefieldEntryRecord {
+            object_id: ObjectId(10),
+            name: "Bbfu10 Binder Entrant".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![Supertype::Legendary],
+            colors: vec![ManaColor::Green],
+            keywords: vec![Keyword::Flying],
+            controller: player,
+        };
+        let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
+            TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller,
+                properties,
+            })
+        };
+
+        // ALLOWED — the guard says yes AND the matcher really answers yes.
+        for prop in [
+            FilterProp::HasColor {
+                color: ManaColor::Green,
+            },
+            FilterProp::InZone {
+                zone: Zone::Battlefield,
+            },
+            FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            },
+            FilterProp::Another,
+        ] {
+            let filter = typed(vec![prop.clone()], None);
+            assert!(
+                ledger_filter_is_evaluable(&filter),
+                "{prop:?} is answered by the matcher, so the allow-list must name it"
+            );
+            assert!(
+                battlefield_entry_matches_filter(&record, &filter, player, &[], Some(source_id)),
+                "{prop:?} must MATCH this record — otherwise the allow-list claims an \
+                 evaluability the matcher does not have"
+            );
+        }
+
+        // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
+        // refuse. (The record IS legendary and nontoken, so the matcher's `false`
+        // for those is the fail-closed arm, not a genuine mismatch.)
+        for prop in [
+            FilterProp::NonToken,
+            FilterProp::Token,
+            FilterProp::Tapped,
+            FilterProp::FaceDown,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ] {
+            assert!(
+                !ledger_filter_is_evaluable(&typed(vec![prop.clone()], None)),
+                "{prop:?} is not answerable from a BattlefieldEntryRecord"
+            );
+        }
+
+        // Structure: monotone connectives recurse; every leaf must be answerable.
+        let bare = typed(vec![], None);
+        let green = typed(
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+            None,
+        );
+        let nontoken = typed(vec![FilterProp::NonToken], None);
+        let tapped = typed(vec![FilterProp::Tapped], None);
+        assert!(ledger_filter_is_evaluable(&TargetFilter::Any));
+        assert!(ledger_filter_is_evaluable(&TargetFilter::Or {
+            filters: vec![bare.clone(), green]
+        }));
+        assert!(!ledger_filter_is_evaluable(&TargetFilter::Or {
+            filters: vec![bare.clone(), nontoken]
+        }));
+        assert!(!ledger_filter_is_evaluable(&TargetFilter::And {
+            filters: vec![bare.clone(), tapped]
+        }));
+        // CR 608.2i: `Not` is anti-monotone and stays fail-closed at the matcher.
+        assert!(!ledger_filter_is_evaluable(&TargetFilter::Not {
+            filter: Box::new(bare)
+        }));
+
+        // Controller: `entry_controller_matches` answers exactly You / Opponent.
+        assert!(ledger_filter_is_evaluable(&typed(
+            vec![],
+            Some(ControllerRef::You)
+        )));
+        assert!(ledger_filter_is_evaluable(&typed(
+            vec![],
+            Some(ControllerRef::Opponent)
+        )));
     }
 }

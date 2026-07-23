@@ -145,6 +145,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Suspect,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -190,6 +191,7 @@ pub fn resolve_unsuspect(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Unsuspect,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())

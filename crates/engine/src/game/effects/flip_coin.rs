@@ -5,13 +5,14 @@ use rand::Rng;
 use crate::game::quantity::resolve_quantity;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityDefinition, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    AbilityDefinition, CoinFlipResult, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingCoinFlip, PendingCoinFlipKind, WaitingFor};
+use crate::types::game_state::{GameState, ResolutionCoinFlip, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
 
 use super::resolve_ability_chain;
 
@@ -78,6 +79,13 @@ fn flip_through_replacement(
         events.push(GameEvent::CoinFlipped {
             player_id: player,
             won,
+        });
+        // CR 705.2: record the flipper's result so a `WhileCondition` loop gate
+        // ("if you lose the flip, repeat this process") can read it after the
+        // resolution's tail runs. Overwrite-on-produce, mirroring reveal tracking.
+        state.resolution_coin_flip = Some(ResolutionCoinFlip {
+            flipper: player,
+            result: CoinFlipResult::from_won(won),
         });
         CoinFlipOutcome::Resolved(won)
     } else {
@@ -150,6 +158,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::FlipCoin,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -158,7 +167,7 @@ pub fn resolve(
             // `resume_after_keep` can run the kept flip's branch. `EffectResolved`
             // is deferred until the keep choice resolves. CR 705.2: the kept flip's
             // `CoinFlipped` is recorded for the `flipper`, not the controller.
-            state.pending_coin_flip = Some(PendingCoinFlip {
+            state.push_coin_flip_frame(PendingCoinFlip {
                 source_id: ability.source_id,
                 controller: ability.controller,
                 flipper,
@@ -195,6 +204,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoin,
             source_id: ability.source_id,
+            subject: None,
         });
     }
 
@@ -239,7 +249,6 @@ pub fn resolve_flip_coins(
     // CR 705.1 + CR 614.1a: Flip each coin through the replacement pipeline (so
     // Krark's Thumb can double it), routing each outcome through the appropriate
     // branch exactly as the single-flip resolver does.
-    let prior_waiting_for = state.waiting_for.clone();
     for i in 0..n {
         let won = match flip_through_replacement(state, flipper, events) {
             CoinFlipOutcome::Resolved(won) => won,
@@ -248,7 +257,7 @@ pub fn resolve_flip_coins(
             CoinFlipOutcome::Suspended => {
                 // CR 614.1a: doubled flip — stash loop position and resume after
                 // the keep choice. `remaining` excludes the paused flip itself.
-                state.pending_coin_flip = Some(PendingCoinFlip {
+                state.push_coin_flip_frame(PendingCoinFlip {
                     source_id: ability.source_id,
                     controller: ability.controller,
                     flipper,
@@ -271,18 +280,20 @@ pub fn resolve_flip_coins(
             &ability.targets,
             events,
         )?;
-        // CR 608.2c: a branch may suspend for an optional choice; stop flipping
-        // until the player resolves it.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only for an interactive resolution choice. A token
+        // branch hands priority back without suspending, and must not truncate
+        // the remaining coin flips.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if a branch suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only when the branch suspended.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoins,
             source_id: ability.source_id,
+            subject: None,
         });
     }
 
@@ -331,7 +342,7 @@ pub fn resolve_until_lose(
 
 /// CR 705 + CR 614.1a: Flip-until-lose loop body, returning `Some(win_count)`
 /// when the losing flip was reached, or `None` if a flip suspended for a keep
-/// choice (in which case `pending_coin_flip` is stashed). `wins_so_far` seeds
+/// choice (in which case the coin-flip frame is parked). `wins_so_far` seeds
 /// the win count when re-entered from `resume_after_keep`.
 fn flip_until_lose_loop(
     state: &mut GameState,
@@ -352,7 +363,7 @@ fn flip_until_lose_loop(
             // CR 614.6: a prevented flip is neither a win nor the losing flip.
             CoinFlipOutcome::Prevented => continue,
             CoinFlipOutcome::Suspended => {
-                state.pending_coin_flip = Some(PendingCoinFlip {
+                state.push_coin_flip_frame(PendingCoinFlip {
                     source_id,
                     controller,
                     // CR 705: "flip a coin until you lose" is always the controller.
@@ -382,7 +393,6 @@ fn finish_until_lose(
     controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let prior_waiting_for = state.waiting_for.clone();
     for _ in 0..win_count {
         run_flip_branch(
             state,
@@ -392,17 +402,25 @@ fn finish_until_lose(
             targets,
             events,
         )?;
-        // CR 608.2c: a win effect may suspend for an optional choice.
-        if state.waiting_for != prior_waiting_for {
+        // CR 608.2c: stop only if the win effect suspended for an INTERACTIVE
+        // player choice (an optional "you may", scry, etc.). A win effect that
+        // merely creates permanents hands priority back to the active player
+        // (Priority{opponent} -> Priority{controller}), which is NOT a
+        // suspension — gating on `waits_for_resolution_choice` rather than any
+        // `waiting_for` change lets a multi-win token creator (Mirror March,
+        // #5966) run the win effect for every win instead of stopping after one.
+        if super::waits_for_resolution_choice(&state.waiting_for) {
             break;
         }
     }
 
-    // CR 608.2c: defer `EffectResolved` if the win effect suspended for a player choice.
-    if state.waiting_for == prior_waiting_for {
+    // CR 608.2c: defer `EffectResolved` only if the win effect actually
+    // suspended for a player choice; otherwise the effect has fully resolved.
+    if !super::waits_for_resolution_choice(&state.waiting_for) {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::FlipCoinUntilLose,
             source_id,
+            subject: None,
         });
     }
 
@@ -415,7 +433,7 @@ fn finish_until_lose(
 /// Emits EXACTLY ONE `CoinFlipped` for the kept flip (the ignored flips never
 /// "happen", CR 614.6), runs that flip's branch, then continues the resolver's
 /// loop from the stashed position. Each re-entered flip may itself re-suspend and
-/// re-stash `pending_coin_flip`.
+/// re-park the coin-flip frame.
 ///
 /// Returns `Ok(Some(wf))` when the resolver re-suspended for another interactive
 /// choice (`wf` is the new `WaitingFor` — a fresh `CoinFlipKeepChoice` or an
@@ -450,6 +468,12 @@ pub fn resume_after_keep(
         player_id: flipper,
         won,
     });
+    // CR 705.2: record the kept flip's result for the flipper (not the source's
+    // controller) so a `WhileCondition` loop gate reads the surviving flip.
+    state.resolution_coin_flip = Some(ResolutionCoinFlip {
+        flipper,
+        result: CoinFlipResult::from_won(won),
+    });
 
     let effect_kind = match kind {
         PendingCoinFlipKind::Single => EffectKind::FlipCoin,
@@ -476,6 +500,7 @@ pub fn resume_after_keep(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
             Ok(None)
         }
@@ -507,7 +532,7 @@ pub fn resume_after_keep(
                     }
                     CoinFlipOutcome::Prevented => continue,
                     CoinFlipOutcome::Suspended => {
-                        state.pending_coin_flip = Some(PendingCoinFlip {
+                        state.push_coin_flip_frame(PendingCoinFlip {
                             source_id,
                             controller,
                             flipper,
@@ -525,6 +550,7 @@ pub fn resume_after_keep(
             events.push(GameEvent::EffectResolved {
                 kind: effect_kind,
                 source_id,
+                subject: None,
             });
             Ok(None)
         }
@@ -791,6 +817,53 @@ mod tests {
         assert_eq!(state.players[0].life - initial_life, heads);
     }
 
+    #[test]
+    fn flip_coins_continues_after_token_branch_returns_priority() {
+        let mut state = GameState::new_two_player(42);
+        let win_effect = Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Coin Token".to_string(),
+                power: crate::types::ability::PtValue::Fixed(1),
+                toughness: crate::types::ability::PtValue::Fixed(1),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: crate::types::ability::TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        ));
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoins {
+                count: QuantityExpr::Fixed { value: 8 },
+                win_effect: Some(win_effect),
+                lose_effect: None,
+                flipper: crate::types::ability::TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve_flip_coins(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::CoinFlipped { .. }))
+                .count(),
+            8,
+            "a token branch returns priority but must not stop the flip loop"
+        );
+    }
+
     // --- Issue #432: Ral, Monsoon Mage coin-flip transform ---------------------
     //
     // Ral's trigger is `FlipCoin { win_effect, lose_effect }` carried on an
@@ -965,6 +1038,11 @@ mod tests {
             )),
             "FlipCoin EffectResolved fired before the optional choice was made"
         );
+        assert!(state.active_optional_effect_frame().is_some());
+        assert!(matches!(
+            state.resolution_stack.active_predecessor(),
+            Some(crate::types::resolution::ResolutionFrame::AbilityContinuation(_))
+        ));
 
         // Accept the optional exile through the real `apply` pipeline.
         let result = apply(
@@ -1557,6 +1635,315 @@ mod tests {
                 }
             ),
             "missing FlipCoins flipper must default to Controller, got {legacy_n:?}"
+        );
+    }
+
+    /// CR 705.2: resolving a single flip records the flipper's result in
+    /// `state.resolution_coin_flip` so a downstream `WhileCondition` loop gate
+    /// can read it. The recorded result must agree with the emitted `CoinFlipped`.
+    #[test]
+    fn flip_records_resolution_coin_flip() {
+        use crate::types::ability::TargetFilter;
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let recorded = state
+            .resolution_coin_flip
+            .expect("flip must record resolution_coin_flip");
+        assert_eq!(recorded.flipper, PlayerId(0), "flipper is the controller");
+        let event_won = events.iter().find_map(|e| match e {
+            GameEvent::CoinFlipped { won, .. } => Some(*won),
+            _ => None,
+        });
+        assert_eq!(
+            Some(recorded.result),
+            event_won.map(CoinFlipResult::from_won),
+            "recorded result must match the CoinFlipped event"
+        );
+    }
+
+    /// CR 705.2 + CR 608.2c: end-to-end runtime proof of the new primitive — a
+    /// bare-flip body under `WhileCondition { CoinFlipOutcome{Lost} }` re-follows
+    /// the process while the controller keeps losing and STOPS the instant a flip
+    /// is won. Deterministic regardless of seed: the loop only continues on a
+    /// loss, so it must terminate on a win and the final flip is a win. Mirrors
+    /// the `flip_coin_until_lose` termination assertion (inverted polarity).
+    #[test]
+    fn while_condition_lost_flip_loops_until_win() {
+        use crate::types::ability::{
+            AbilityCondition, CoinFlipResult, RepeatContinuation, TargetFilter,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::FlipCoin {
+                win_effect: None,
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::CoinFlipOutcome {
+                result: CoinFlipResult::Lost,
+            }),
+            max_iterations: None,
+        });
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let flips: Vec<bool> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::CoinFlipped { won, .. } => Some(*won),
+                _ => None,
+            })
+            .collect();
+        assert!(!flips.is_empty(), "at least one flip must occur");
+        // Every flip before the last must be a loss (the loop's continue gate).
+        assert!(
+            flips[..flips.len() - 1].iter().all(|won| !won),
+            "all non-final flips must be losses, got {flips:?}"
+        );
+        // The loop only stops on a win, so the final flip is a win.
+        assert_eq!(
+            flips.last(),
+            Some(&true),
+            "the loop must terminate on a won flip, got {flips:?}"
+        );
+        assert_eq!(
+            state.resolution_coin_flip,
+            Some(ResolutionCoinFlip {
+                flipper: PlayerId(0),
+                result: CoinFlipResult::Won,
+            }),
+            "final resolution flip is the winning flip for the controller"
+        );
+    }
+
+    /// CR 705.2 + CR 608.2c (matt's blocker on #5682): the resolution-scoped flip
+    /// result must NOT outlive its resolution. A stale winning flip left over
+    /// from a prior resolution must be cleared at the authoritative
+    /// resolution-lifetime boundary (top-level `resolve_ability_chain` entry), so
+    /// a later resolution whose own `CoinFlipOutcome` gate never flips a coin
+    /// reads `false` and does not run the gated effect.
+    #[test]
+    fn stale_flip_does_not_leak_into_next_resolution() {
+        use crate::types::ability::{AbilityCondition, CoinFlipResult, QuantityExpr, TargetFilter};
+
+        let mut state = GameState::new_two_player(42);
+        // Simulate a prior resolution that ended having WON a flip.
+        state.resolution_coin_flip = Some(ResolutionCoinFlip {
+            flipper: PlayerId(0),
+            result: CoinFlipResult::Won,
+        });
+
+        // A fresh, unrelated resolution that performs NO coin flip but is gated on
+        // "if you win the flip". Pre-fix, the stale Won would satisfy this gate and
+        // the draw would wrongly fire.
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.condition = Some(AbilityCondition::CoinFlipOutcome {
+            result: CoinFlipResult::Won,
+        });
+
+        let hand_before = state.players[0].hand.len();
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // The top-level boundary clear wiped the stale flip before any instruction
+        // ran, so the gate is false and no card was drawn.
+        assert!(
+            state.resolution_coin_flip.is_none(),
+            "stale flip must be cleared at the resolution-lifetime boundary, got {:?}",
+            state.resolution_coin_flip
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::CardDrawn { .. })),
+            "gated draw must not fire off a stale flip, events: {events:?}"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            hand_before,
+            "no card should have been drawn"
+        );
+    }
+
+    /// CR 705.2 + CR 608.2c (matt's required runtime scenario for #5682): drive
+    /// the real Unleash the Flux process end-to-end through the action pipeline.
+    /// Each player sacrifices a nonland permanent of their choice, then the
+    /// controller flips a coin, and "if you lose the flip, repeat this process."
+    /// Proves at runtime that an actual LOSS re-follows the whole process (a fresh
+    /// each-player sacrifice prompt appears) and an actual WIN stops it — driving
+    /// the each-player sacrifice choices (`SelectCards`), the flip continuation
+    /// resume, and the `WhileCondition` repeat decision.
+    #[test]
+    fn unleash_the_flux_runtime_loss_repeats_win_stops() {
+        use crate::game::ability_utils::build_resolved_from_def_with_targets;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::parser::parse_oracle_text;
+        use crate::types::ability::CoinFlipResult;
+        use crate::types::actions::GameAction;
+        use crate::types::phase::Phase;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha20Rng;
+
+        // Parse the real card and lift its encounter-trigger execute body: the
+        // each-player-sacrifice root (`player_scope`), the flip sub-ability, and
+        // the `WhileCondition { CoinFlipOutcome{Lost} }` repeat.
+        let parsed = parse_oracle_text(
+            "When you encounter Unleash the Flux, each player sacrifices a nonland permanent of their choice, then you flip a coin. If you lose the flip, repeat this process. (Then planeswalk away from this phenomenon.)",
+            "Unleash the Flux",
+            &[],
+            &["Phenomenon".to_string()],
+            &[],
+        );
+        let execute = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_ref())
+            .expect("Unleash the Flux must have an encounter trigger with an execute body");
+
+        // Two players, three nonland permanents each: enough for two PROMPTED
+        // iterations. With count == 1, a step is auto-resolved (no prompt) once a
+        // player has a single eligible permanent; keeping >= 2 candidates in both
+        // iterations keeps each flip on its own action so the test can prime the
+        // RNG per flip. (3 → prompt in iter 1, then 2 → prompt in iter 2.)
+        let mut scenario = GameScenario::new_n_player(2, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..3 {
+            scenario.add_vanilla(P0, 2, 2);
+            scenario.add_vanilla(P1, 2, 2);
+        }
+        // Off-battlefield stand-in for the phenomenon as the ability source; a
+        // hand card is never a "nonland permanent" sacrifice candidate.
+        let source = scenario.add_card_to_hand(P0, "Unleash the Flux");
+        let mut runner = scenario.build();
+
+        let ability = build_resolved_from_def_with_targets(execute, source, P0, vec![]);
+
+        // Prime iteration 1's flip as a LOSS (seed 1 → first flip loses). Nothing
+        // else draws the RNG before the flip, so this survives to the flip.
+        runner.state_mut().rng = ChaCha20Rng::seed_from_u64(1);
+        let mut events = Vec::new();
+        resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0)
+            .expect("initial resolution must set up the first sacrifice choice");
+
+        // Submit the first eligible card from the current each-player sacrifice
+        // prompt (asserting the process actually paused on an interactive choice),
+        // returning any coin-flip results the resulting drain produced.
+        let sacrifice_first = |runner: &mut GameRunner| -> Vec<bool> {
+            let cards = match runner.state().waiting_for.clone() {
+                WaitingFor::EffectZoneChoice { cards, .. } => cards,
+                other => panic!("expected an each-player sacrifice prompt, got {other:?}"),
+            };
+            let result = runner
+                .act(GameAction::SelectCards {
+                    cards: vec![cards[0]],
+                })
+                .expect("submitting a sacrifice choice must be accepted");
+            result
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    GameEvent::CoinFlipped { won, .. } => Some(*won),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // ── Iteration 1: both players sacrifice, controller LOSES the flip ──
+        // The flip only happens once every player has chosen, so the first
+        // choice produces no flip and the second produces the LOSS.
+        assert!(
+            sacrifice_first(&mut runner).is_empty(),
+            "no coin is flipped until every player has sacrificed"
+        );
+        assert_eq!(
+            sacrifice_first(&mut runner),
+            vec![false],
+            "iteration 1 must flip exactly once and the controller must LOSE it"
+        );
+
+        assert_eq!(
+            runner.state().players[0].graveyard.len() + runner.state().players[1].graveyard.len(),
+            2,
+            "one nonland permanent per player must be sacrificed in iteration 1"
+        );
+        // The LOST flip re-follows the process: a fresh each-player sacrifice
+        // prompt is open again (the stored flip was already cleared by the next
+        // iteration's intra-loop reset, which is why the repeat itself is the
+        // observable proof of the loss).
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ),
+            "a LOST flip must repeat the process — a fresh sacrifice prompt is expected, got {:?}",
+            runner.state().waiting_for
+        );
+
+        // ── Iteration 2: both players sacrifice, controller WINS the flip ──
+        assert!(
+            sacrifice_first(&mut runner).is_empty(),
+            "no coin is flipped until every player has sacrificed (iteration 2)"
+        );
+        // Prime iteration 2's flip as a WIN (seed 0 → first flip wins) just before
+        // the action that performs the sacrifices and resumes into the flip.
+        runner.state_mut().rng = ChaCha20Rng::seed_from_u64(0);
+        assert_eq!(
+            sacrifice_first(&mut runner),
+            vec![true],
+            "iteration 2 must flip exactly once and the controller must WIN it"
+        );
+
+        assert_eq!(
+            runner.state().players[0].graveyard.len() + runner.state().players[1].graveyard.len(),
+            4,
+            "a second nonland permanent per player is sacrificed in iteration 2"
+        );
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::EffectZoneChoice { .. }
+            ),
+            "a WON flip must STOP the process — no further sacrifice prompt, got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            runner.state().resolution_coin_flip,
+            Some(ResolutionCoinFlip {
+                flipper: P0,
+                result: CoinFlipResult::Won,
+            }),
+            "the process stops on the controller's winning flip"
+        );
+        assert!(
+            runner.state().active_repeat_until().is_none(),
+            "the repeat loop must be fully drained after the winning flip"
         );
     }
 }

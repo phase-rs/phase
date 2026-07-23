@@ -547,7 +547,7 @@ fn is_useful_removal_target(ctx: &PolicyContext<'_>, id: ObjectId, effects: &[&E
     if let Some(object) = ctx.state.objects.get(&id) {
         for keyword in &object.keywords {
             if let Keyword::Ward(ward) = keyword {
-                if !can_pay_ward_cost(ctx, ward) {
+                if !can_pay_ward_cost(ctx, ward, object) {
                     return false;
                 }
                 break;
@@ -778,12 +778,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             // layer never double-scores that case.
             for keyword in &object.keywords {
                 if let Keyword::Ward(ward_cost) = keyword {
-                    if !can_pay_ward_cost(ctx, ward_cost) {
+                    if !can_pay_ward_cost(ctx, ward_cost, object) {
                         break;
                     }
                     let severity = match ward_cost {
                         WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                         WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                        WardCost::PayLifeEqualToPower => {
+                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                        }
                         WardCost::DiscardCard => 1.5,
                         WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                         WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
@@ -793,6 +796,9 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             .map(|c| match c {
                                 WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                                 WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                                WardCost::PayLifeEqualToPower => {
+                                    (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                                }
                                 WardCost::DiscardCard => 1.5,
                                 WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                                 WardCost::Waterbend(cost) => {
@@ -1117,6 +1123,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets,
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1127,10 +1134,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: candidate_target,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         (decision, candidate)
     }
@@ -1220,10 +1224,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         (decision, candidate)
     }
@@ -1764,6 +1765,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: legal_targets.clone(),
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1774,10 +1776,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let self_ctx = PolicyContext {
             state: &state,
@@ -1793,10 +1792,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let opp_ctx = PolicyContext {
             state: &state,
@@ -1855,6 +1851,7 @@ mod tests {
                         TargetRef::Player(PlayerId(1)),
                     ],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -1865,10 +1862,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(0))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let self_ctx = PolicyContext {
             state: &state,
@@ -1884,10 +1878,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let opp_ctx = PolicyContext {
             state: &state,
@@ -2070,10 +2061,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2133,10 +2121,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2232,10 +2217,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2296,10 +2278,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2359,10 +2338,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2422,10 +2398,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2487,10 +2460,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2551,10 +2521,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2615,10 +2582,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2756,6 +2720,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: true,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -2766,10 +2731,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target_id)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state,
@@ -2834,10 +2796,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -2965,10 +2924,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -3032,6 +2988,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets,
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3042,10 +2999,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: candidate_target,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         (decision, candidate)
     }
@@ -3124,10 +3078,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -3228,10 +3179,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -3381,6 +3329,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: legal_targets.clone(),
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 target_constraints: Vec::new(),
@@ -3396,10 +3345,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let creature_ctx = PolicyContext {
             state: &state,
@@ -3418,10 +3364,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(token)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let token_ctx = PolicyContext {
             state: &state,
@@ -3504,10 +3447,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -3574,6 +3514,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets,
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -3586,10 +3527,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(fanatic_id)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx_self = PolicyContext {
             state: &state,
@@ -3608,10 +3546,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(opp_creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx_opp = PolicyContext {
             state: &state,
@@ -3630,10 +3565,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Player(PlayerId(1))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx_player = PolicyContext {
             state: &state,
@@ -4352,10 +4284,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::DecideOptionalEffect { accept: true },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Replacement,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Replacement),
         };
         let context = crate::context::AiContext::empty(&config.weights);
         let ctx = PolicyContext {
@@ -4397,10 +4326,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::DecideOptionalEffect { accept: true },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Replacement,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Replacement),
         };
         let context = crate::context::AiContext::empty(&config.weights);
         let ctx = PolicyContext {

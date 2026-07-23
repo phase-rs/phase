@@ -48,6 +48,8 @@ pub(crate) fn translate_static(
             // CR 605.1a: Legacy Forge mode strings predate the exemption suffix —
             // default to no exemption.
             exemption: crate::types::statics::ActivationExemption::None,
+            // CR 606.2: Legacy Forge form is not kind-narrowed.
+            kind: None,
         })),
 
         // Can't be targeted.

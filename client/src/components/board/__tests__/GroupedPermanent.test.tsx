@@ -57,12 +57,13 @@ function makeState(waitingFor: WaitingFor): GameState {
   });
 }
 
-function makeGroup(): GroupedPermanentType {
+function makeGroup(ids = [1, 2, 3, 4, 5]): GroupedPermanentType {
   return {
     name: "Saproling",
-    ids: [1, 2, 3, 4, 5],
-    count: 5,
+    ids,
+    count: ids.length,
     representative: toCardProps(makeObject(1)),
+    isUnboundedPile: false,
   };
 }
 
@@ -71,6 +72,7 @@ function renderGroup(options: {
   validAttackerIds?: Set<number>;
   validTargetObjectIds?: Set<number>;
   committedAttackerIds?: Set<number>;
+  group?: GroupedPermanentType;
 } = {}) {
   return render(
     <BoardInteractionContext.Provider
@@ -88,7 +90,7 @@ function renderGroup(options: {
       }}
     >
       <GroupedPermanentDisplay
-        group={makeGroup()}
+        group={options.group ?? makeGroup()}
         rowType="creatures"
         manualExpanded={false}
         onExpand={vi.fn()}
@@ -129,6 +131,7 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
       waitingFor,
       legalActions: [],
       legalActionsByObject: {},
+      manaPaymentPreviewSourceIds: [],
       spellCosts: {},
     });
     useUiStore.setState({
@@ -161,6 +164,31 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     expect(screen.getByRole("button", { name: "Expand Saproling group" })).toHaveTextContent("×5");
   });
 
+  // DESIGN STEP 4 (∞-pile): an accepted object-growth loop's pile renders ∞, not ×N.
+  it("renders ∞ instead of ×N for a collapsed unbounded-pile group", () => {
+    renderGroup({ group: { ...makeGroup([1, 2, 3, 4, 5]), isUnboundedPile: true } });
+
+    expect(
+      screen.getByRole("button", { name: "Expand Saproling group" }),
+    ).toHaveTextContent("∞");
+  });
+
+  // SHOULD-FIX #1 (singleton trap): count <= 1 → "single" mode renders no count
+  // badge, but ∞ is COUNT-INDEPENDENT, so a 1-member pile must still show ∞.
+  it("renders ∞ for a single-member unbounded-pile group", () => {
+    renderGroup({ group: { ...makeGroup([1]), isUnboundedPile: true } });
+
+    expect(screen.getByText("∞")).toBeInTheDocument();
+  });
+
+  it("renders ×N (not ∞) when a group is not an unbounded pile", () => {
+    renderGroup({ group: makeGroup([1, 2, 3, 4, 5]) });
+
+    const badge = screen.getByRole("button", { name: "Expand Saproling group" });
+    expect(badge).toHaveTextContent("×5");
+    expect(badge).not.toHaveTextContent("∞");
+  });
+
   it("regroups manually expanded duplicate creature groups from a stable row control", () => {
     const { container } = renderCreatureRow();
 
@@ -171,6 +199,18 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     fireEvent.click(screen.getByRole("button", { name: "Regroup duplicate creature groups" }));
 
     expect(container.querySelectorAll("[data-object-id]")).toHaveLength(1);
+  });
+
+  it("lifts an engine-selected mana source above the other cards in a staggered group", () => {
+    useGameStore.setState({ manaPaymentPreviewSourceIds: [1] });
+
+    const { container } = renderGroup({ group: makeGroup([1, 2]) });
+
+    const selectedSource = container.querySelector('[data-object-id="1"]') as HTMLElement;
+    const coveredCard = container.querySelector('[data-object-id="2"]') as HTMLElement;
+
+    expect(selectedSource.parentElement?.style.zIndex).toBe("2");
+    expect(coveredCard.parentElement?.style.zIndex).toBe("1");
   });
 
   it("opens an attacker picker that replaces only this group's selected attackers", () => {

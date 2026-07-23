@@ -42,7 +42,11 @@ pub(crate) fn spell_object_references_x(state: &GameState, object_id: ObjectId) 
         return false;
     };
     // Spell-cast triggers / dies / etc. on the stack object.
-    for trigger in obj.trigger_definitions.iter_unchecked() {
+    for trigger in obj
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+    {
         if let Some(exec) = &trigger.execute {
             if ability_definition_references_x(exec) {
                 return true;
@@ -179,6 +183,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
             expr_references_chosen_x(value)
         }
         ContinuousModification::SetName { .. }
+        | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }
         | ContinuousModification::SetPower { .. }
@@ -198,7 +203,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddAllBasicLandTypes
         | ContinuousModification::AddAllLandTypes
         | ContinuousModification::AddChosenSubtype { .. }
-        | ContinuousModification::AddChosenColor
+        | ContinuousModification::AddChosenColor { .. }
         | ContinuousModification::RemoveChosenKeyword
         | ContinuousModification::AddChosenKeyword
         | ContinuousModification::SetColor { .. }
@@ -214,6 +219,7 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::SetChosenName
         | ContinuousModification::RetainPrintedTriggerFromSource { .. }
         | ContinuousModification::RetainPrintedAbilityFromSource { .. }
+        | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
         | ContinuousModification::SetStartingLoyalty { .. }
@@ -343,7 +349,10 @@ fn is_cost_x_paid(qty: &QuantityRef) -> bool {
 }
 
 fn is_previous_amount(qty: &QuantityRef) -> bool {
-    matches!(qty, QuantityRef::PreviousEffectAmount)
+    // CR 120.6 / CR 120.10: both channels (total and excess) are amounts left by
+    // the preceding effect, so the AI's X-reference detection treats them alike —
+    // it cares that the value is chain-derived, not which tally it came from.
+    matches!(qty, QuantityRef::PreviousEffectAmount { .. })
 }
 
 /// Structural recursion over a `QuantityExpr` tree, returning true if any leaf

@@ -1,16 +1,18 @@
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
+import { CardArtFallback } from "../card/CardArtFallback.tsx";
+import { UnimplementedMechanicsBadge } from "../card/UnimplementedMechanicsBadge.tsx";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import { cardImageLookup } from "../../services/cardImageLookup.ts";
+import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
@@ -77,13 +79,21 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const imageLookup = sourceObj
     ? cardImageLookup(sourceObj)
     : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
+  const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
+  const sourceTokenImageRef =
+    sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
 
-  const { src, isLoading } = useCardImage(imageLookup.name, {
+  const { src, isLoading } = useCardImage(sourceObj ? imageLookup.name : sourceName, {
     size: "normal",
     faceIndex: imageLookup.faceIndex,
+    isToken: sourceIsToken,
+    tokenFilters: sourceObj?.display_source === "Token" ? tokenFiltersForObject(sourceObj) : undefined,
+    tokenImageRef: sourceTokenImageRef,
     oracleId: imageLookup.oracleId,
     faceName: imageLookup.faceName,
   });
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [src]);
 
   const isSpell = entry.kind.type === "Spell";
   const displayManaCost =
@@ -101,11 +111,21 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   // CR 117.3d: a stored yield the viewer already holds for this entry, so the
   // menu can surface a Revoke that echoes the exact engine-owned YieldTarget
   // (the frontend never constructs an incarnation or card_id itself).
-  const matchingYield = priorityYields?.find((y) =>
-    "ThisObject" in y.target
-      ? y.target.ThisObject.source_id === entry.source_id
-      : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId,
-  );
+  // The per-trigger `description` this entry carries — the G5 discriminator.
+  const entryDescription =
+    entry.kind.type === "TriggeredAbility" ? entry.kind.data.description ?? undefined : undefined;
+  const matchingYield = priorityYields?.find((y) => {
+    // Mirror the engine's None-wildcard rule (game_state.rs `is_priority_yielded`):
+    // an absent/null `trigger_description` matches ANY entry description (coarse/
+    // legacy yields), while a value matches only that exact trigger. A strict-only
+    // compare would wrongly hide the Revoke pill for legacy yields still held.
+    const stored = "ThisObject" in y.target ? y.target.ThisObject : y.target.AllCopies;
+    const descMatches =
+      stored.trigger_description == null || stored.trigger_description === entryDescription;
+    return "ThisObject" in y.target
+      ? y.target.ThisObject.source_id === entry.source_id && descMatches
+      : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
+  });
   // Triggered abilities show "Triggered — From <source>" so the player can
   // tell which permanent owns the trigger without hovering the card image.
   // Activated abilities don't carry a pre-resolved source name (different
@@ -122,6 +142,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ? entry.kind.data.description && renderDescription(entry.kind.data.description, sourceName)
         : undefined;
   const targetLabels = details?.targets?.map((target) => target.label) ?? [];
+  const selectedModeLabels = isSpell ? details?.selected_mode_labels ?? [] : [];
   // The chosen {X} is a resolved value (like a chosen color), not just a cost —
   // pull it out for a dedicated, always-visible badge and drop it from the
   // capped paid-chip row so it isn't shown twice.
@@ -203,10 +224,20 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         style={{ width: cardSize.width, height: cardSize.height }}
         className={`overflow-hidden rounded-lg shadow-lg ${ringClass}`}
       >
-        {isLoading || !src ? (
+        {isLoading ? (
           <div
             className="animate-pulse rounded-lg bg-gray-700 border border-gray-600"
             style={{ width: cardSize.width, height: cardSize.height }}
+          />
+        ) : !src || artError ? (
+          // Issue #6156 on the stack: this path is explicitly token-aware
+          // (`sourceIsToken` / `sourceTokenImageRef` above), so an artless
+          // token's triggered or activated ability landed here and pulsed
+          // forever — worse than a blank square, since it implies the art is
+          // still coming. Name the source instead.
+          <CardArtFallback
+            name={sourceName}
+            className="h-full w-full rounded-lg border border-gray-600"
           />
         ) : (
           <img
@@ -214,12 +245,26 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             alt={sourceName}
             className="h-full w-full object-cover"
             draggable={false}
+            onError={() => setArtError(true)}
           />
         )}
-        {isSpell && displayManaCost && (
-          <ManaCostPips cost={displayManaCost} size="xs" className="absolute right-[5%] top-[2.5%]" />
-        )}
       </div>
+      {/* @container overlay sized to the card (sibling of the overflow-hidden
+          image wrapper, so the pip backdrop isn't clipped at the card edge).
+          absolute inset-0 takes its width from the relative outer wrapper, so
+          container-type can't collapse it; pips scale in cqi with the stack
+          card's width instead of a fixed px size. */}
+      {isSpell && displayManaCost && (
+        <div className="pointer-events-none absolute inset-0 @container">
+          <ManaCostPips cost={displayManaCost} size="fluid" className="absolute right-[5%] top-[2.5%]" />
+        </div>
+      )}
+
+      {/* Badge: unimplemented-mechanics warning (issue #4711). Hand and
+          battlefield cards already surface this through CardImage; a spell is
+          most consequential while it is on the stack about to resolve, so the
+          same badge is shown here from the same engine-provided projection. */}
+      <UnimplementedMechanicsBadge mechanics={sourceObj?.unimplemented_mechanics} variant="corner" />
 
       {/* Badge: ×N coalesce count for engine-grouped mass triggers. */}
       {groupCount > 1 && (
@@ -270,6 +315,22 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
             />
           )}
         </div>
+      )}
+
+      {selectedModeLabels.length > 0 && (
+        <section
+          aria-label={t("stack.selectedModes")}
+          className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm"
+        >
+          <span className="block text-[9px] font-semibold uppercase tracking-wide text-purple-300">
+            {t("stack.selectedModes")}
+          </span>
+          <ul className="mt-0.5 list-inside list-disc text-[8px] leading-tight text-gray-300">
+            {selectedModeLabels.map((label, index) => (
+              <li key={`${index}-${label}`}>{renderDescription(label, sourceName)}</li>
+            ))}
+          </ul>
+        </section>
       )}
 
       {(targetLabels.length > 0 || paidLabels.length > 0 || contextLabels.length > 0) && (

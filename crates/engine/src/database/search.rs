@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::card_db::CardDatabase;
 use super::legality::LegalityFormat;
-use crate::types::card::CardFace;
+use crate::types::card::{CardFace, LayoutKind};
 use crate::types::card_type::CardType;
 use crate::types::mana::{ManaColor, ManaCost};
 
@@ -102,14 +102,19 @@ impl CardDatabase {
         // (relevance rank, lowercased name for tiebreak, result)
         let mut matched: Vec<(u8, String, CardSearchResult)> = Vec::new();
 
-        for (key, face) in self.face_index.iter() {
+        for key in &self.search_face_keys {
+            let Some(face) = self.face_index.get(key) else {
+                continue;
+            };
             let name_lower = face.name.to_lowercase();
 
             if !words.is_empty() && !self.text_matches(&name_lower, face, &words) {
                 continue;
             }
             if !requested_colors.is_empty() {
-                let colors = face_colors(face);
+                // CR 105.2 + CR 202.3d + CR 709.4b: off-stack a split card's colors
+                // are the combined colors of both halves.
+                let colors = self.off_stack_colors_for_face(face);
                 if !requested_colors.iter().all(|c| colors.contains(c)) {
                     continue;
                 }
@@ -118,7 +123,9 @@ impl CardDatabase {
                 continue;
             }
             if let Some(max) = query.cmc_max {
-                if face.mana_cost.mana_value() > max {
+                // CR 202.3d + CR 709.4b: off-stack a split card's mana value is the
+                // combined value of both halves.
+                if self.off_stack_mana_value_for_face(face) > max {
                     continue;
                 }
             }
@@ -142,9 +149,10 @@ impl CardDatabase {
                 }
             }
 
-            // Deduplicate multi-face cards: keep the first matching face per
-            // oracle id. The frontend re-derives the combined display name from
-            // the image map, so which face won here doesn't affect display.
+            // CR 712.8a: Outside the game or in a zone other than the
+            // battlefield or stack, a double-faced card has only its front-face
+            // characteristics. Deduplicate multi-face cards by oracle id while
+            // scanning the precomputed front-face order.
             if let Some(oracle_id) = face.scryfall_oracle_id.as_deref() {
                 if !seen_oracle.insert(oracle_id) {
                     continue;
@@ -156,7 +164,7 @@ impl CardDatabase {
             } else {
                 1
             };
-            matched.push((rank, name_lower, self.build_result(key, face)));
+            matched.push((rank, name_lower, self.build_result(key.as_str(), face)));
         }
 
         let total = matched.len();
@@ -191,11 +199,12 @@ impl CardDatabase {
         CardSearchResult {
             name: face.name.clone(),
             oracle_id: face.scryfall_oracle_id.clone(),
-            mana_value: face.mana_cost.mana_value(),
-            color_identity: face
-                .color_identity
-                .iter()
-                .copied()
+            // CR 202.3d + CR 709.4b + CR 903.4: off the stack a split card reports
+            // the COMBINED mana value and color identity of both halves.
+            mana_value: self.off_stack_mana_value_for_face(face),
+            color_identity: self
+                .off_stack_color_identity_for_face(face)
+                .into_iter()
                 .map(color_letter)
                 .collect(),
             legalities,
@@ -228,6 +237,76 @@ impl CardDatabase {
             haystack.push_str(&text.to_lowercase());
         }
         words.iter().all(|w| haystack.contains(w))
+    }
+}
+
+impl CardDatabase {
+    /// CR 202.3d + CR 709.4b: The faces to combine for an OFF-STACK characteristic
+    /// of the whole card `face` belongs to. In every zone except the stack a SPLIT
+    /// card's mana value and colors are the COMBINED value of both halves, so this
+    /// returns BOTH halves for a split card; every other layout (single-face, DFC,
+    /// MDFC, Adventure, Flip, …) keeps its per-face value, so it returns just
+    /// `face`. Siblings are enumerated via `scryfall_oracle_id` (`oracle_id_index`
+    /// → `face_index`); Split-ness is read from `layout_index`. This is the single
+    /// authority routed through by deck-builder search, `CardSearchResult`, and
+    /// off-stack deck-legality checks.
+    fn off_stack_faces<'a>(&'a self, face: &'a CardFace) -> Vec<&'a CardFace> {
+        let is_split = face
+            .scryfall_oracle_id
+            .as_deref()
+            .and_then(|oid| self.layout_index.get(oid))
+            .is_some_and(|kind| *kind == LayoutKind::Split);
+        if !is_split {
+            return vec![face];
+        }
+        let siblings: Vec<&CardFace> = face
+            .scryfall_oracle_id
+            .as_deref()
+            .and_then(|oid| self.oracle_id_index.get(oid))
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(|key| self.face_index.get(key))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Defensive: if the sibling index is somehow empty, fall back to the single
+        // face rather than reporting a zero mana value / no colors.
+        if siblings.is_empty() {
+            vec![face]
+        } else {
+            siblings
+        }
+    }
+
+    /// CR 202.3d + CR 709.4b: off-stack mana value of the whole card — the combined
+    /// mana value of both halves for a split card, else the face's own mana value.
+    pub(crate) fn off_stack_mana_value_for_face(&self, face: &CardFace) -> u32 {
+        self.off_stack_faces(face)
+            .iter()
+            .map(|f| f.mana_cost.mana_value())
+            .sum()
+    }
+
+    /// CR 105.2 + CR 202.3d + CR 709.4b: off-stack colors (mana-symbol + color
+    /// indicator colors) — the union across both halves for a split card, else the
+    /// face's colors. Returned in canonical WUBRG order.
+    pub(crate) fn off_stack_colors_for_face(&self, face: &CardFace) -> Vec<ManaColor> {
+        let faces = self.off_stack_faces(face);
+        ManaColor::ALL
+            .into_iter()
+            .filter(|color| faces.iter().any(|f| face_colors(f).contains(color)))
+            .collect()
+    }
+
+    /// CR 903.4 + CR 202.3d + CR 709.4b: off-stack color identity — the union
+    /// across both halves for a split card, else the face's color identity.
+    /// Returned in canonical WUBRG order.
+    pub(crate) fn off_stack_color_identity_for_face(&self, face: &CardFace) -> Vec<ManaColor> {
+        let faces = self.off_stack_faces(face);
+        ManaColor::ALL
+            .into_iter()
+            .filter(|color| faces.iter().any(|f| f.color_identity.contains(color)))
+            .collect()
     }
 }
 
@@ -528,6 +607,55 @@ mod tests {
         });
         assert_eq!(res.results.len(), 1, "both faces share an oracle id");
         assert_eq!(res.total, 1);
+    }
+
+    #[test]
+    fn transform_dfc_search_dedupes_to_exported_front_face() {
+        let mut front = card(
+            "The Legend of Kyoshi",
+            "o-kyoshi",
+            &["Green", "Green"],
+            4,
+            "Enchantment",
+            &["Green"],
+            "Exile this Saga, then return it to the battlefield transformed under your control.",
+            json!({ "standard": "legal" }),
+            &["TLA"],
+        );
+        front["layout"] = json!("transform");
+        front["face_index"] = json!(0);
+        let mut back = card(
+            "Avatar Kyoshi",
+            "o-kyoshi",
+            &[],
+            0,
+            "Creature",
+            &["Green"],
+            "Lands you control have trample and hexproof.",
+            json!({ "standard": "legal" }),
+            &["TLA"],
+        );
+        back["mana_cost"] = json!({ "type": "NoCost" });
+        back["layout"] = json!("transform");
+        back["face_index"] = json!(1);
+
+        let db = db_from(&[("avatar kyoshi", back), ("the legend of kyoshi", front)]);
+
+        let res = db.search(&CardSearchQuery {
+            text: "avatar kyoshi".into(),
+            ..Default::default()
+        });
+        assert_eq!(res.results.len(), 1);
+        assert_eq!(
+            result_names(&res),
+            vec!["The Legend of Kyoshi"],
+            "CR 712.8a: transform DFCs are represented by their front face outside the battlefield"
+        );
+        assert_eq!(
+            db.get_face_by_oracle_id("o-kyoshi")
+                .map(|face| face.name.as_str()),
+            Some("The Legend of Kyoshi")
+        );
     }
 
     #[test]

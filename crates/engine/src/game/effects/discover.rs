@@ -1,9 +1,9 @@
-use crate::game::zone_pipeline::{self, ZoneMoveRequest};
-use crate::game::{quantity, zones};
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::game::quantity;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
+use crate::types::ability::{Effect, EffectError, LibraryPosition, ResolvedAbility};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastOfferKind, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, CastOfferKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -33,6 +33,11 @@ pub fn resolve(
         }
         _ => return Err(EffectError::InvalidParam("Expected Discover".to_string())),
     };
+
+    // CR 701.57a: record this discover's mana-value limit so a "whenever you
+    // discover" trigger's effect can reference "the same value" (Curator of
+    // Sun's Creation). Set before the trigger fires on the EffectResolved event.
+    state.last_discover_value = Some(limit as i32);
 
     let player = state
         .players
@@ -67,7 +72,9 @@ pub fn resolve(
         // Check if this is a nonland card with MV ≤ limit
         let is_hit = state.objects.get(&card_id).is_some_and(|obj| {
             let is_land = obj.card_types.core_types.contains(&CoreType::Land);
-            let mv = obj.mana_cost.mana_value();
+            // CR 202.3d + CR 709.4b: the exiled card is off the stack; a split
+            // card's mana value is its combined halves for the ≤ limit hit test.
+            let mv = obj.effective_mana_value();
             !is_land && mv <= limit
         });
 
@@ -79,48 +86,61 @@ pub fn resolve(
         }
     }
 
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-    });
-
     match hit_card {
         Some(hit) => {
             // CR 701.57a: the discovering player chooses to cast without paying
-            // or put the hit card into their hand.
+            // or put the hit card into their hand. The Discover completion event
+            // waits for the bottom-placement batch after that decision.
             state.waiting_for = WaitingFor::CastOffer {
                 player: discovering_player,
                 kind: CastOfferKind::Discover {
                     hit_card: hit,
                     exiled_misses,
+                    source_id: ability.source_id,
                     discover_value: limit,
                 },
             };
         }
         None => {
-            // CR 701.57a: No hit — put all exiled misses on bottom in random order
-            shuffle_to_bottom(state, &exiled_misses, discovering_player, events);
+            // CR 701.57a + CR 616.1: No hit — the completion rides the randomized
+            // bottom batch so Discover's resolution event cannot run early.
+            shuffle_to_bottom(
+                state,
+                &exiled_misses,
+                ability.source_id,
+                Some(BatchCompletion::DiscoverBottomComplete {
+                    source_id: ability.source_id,
+                }),
+                events,
+            );
         }
     }
 
     Ok(())
 }
 
-/// Put cards on the bottom of the player's library in random order.
-fn shuffle_to_bottom(
+/// CR 701.57a + CR 401.4: Put cards on the bottom of the player's library in
+/// random order through the replacement-aware library-placement pipeline.
+pub(crate) fn shuffle_to_bottom(
     state: &mut GameState,
     cards: &[ObjectId],
-    _player_id: crate::types::player::PlayerId,
+    source_id: ObjectId,
+    completion: Option<BatchCompletion>,
     events: &mut Vec<GameEvent>,
-) {
+) -> BatchMoveResult {
     use rand::seq::SliceRandom;
 
     let mut shuffled = cards.to_vec();
     shuffled.shuffle(&mut state.rng);
 
-    for &card_id in &shuffled {
-        zones::move_to_library_position(state, card_id, false, events);
-    }
+    let requests = shuffled
+        .into_iter()
+        .map(|card_id| {
+            ZoneMoveRequest::effect(card_id, Zone::Library, source_id)
+                .at_library_position(LibraryPosition::Bottom)
+        })
+        .collect();
+    zone_pipeline::move_objects_simultaneously_then(state, requests, completion, events)
 }
 
 #[cfg(test)]

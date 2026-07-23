@@ -3,6 +3,8 @@
 
 declare const __APP_VERSION__: string;
 declare const __BUILD_HASH__: string;
+declare const __ENGINE_FINGERPRINT__: string | undefined;
+declare const __ENGINE_WASM_URL__: string | undefined;
 declare const __DEFAULT_MULTIPLAYER_SERVER_URL__: string;
 declare const __CARD_DATA_URL__: string;
 declare const __CARD_DATA_LOCALE_URL_TEMPLATE__: string;
@@ -21,6 +23,7 @@ declare const __SCRYFALL_PRINTINGS_URL__: string;
 declare const __SCRYFALL_SETS_URL__: string;
 declare const __GIT_REPO_URL__: string;
 declare const __PREVIEW_SITE_URL__: string;
+declare const __RELEASE_SITE_URL__: string;
 declare const __IS_RELEASE_BUILD__: boolean;
 declare const __SUPABASE_URL__: string;
 declare const __SUPABASE_ANON_KEY__: string;

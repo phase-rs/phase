@@ -1,4 +1,4 @@
-import type { Phase, PhaseStopScope } from "../../adapter/types";
+import type { Phase, PhaseStop, PhaseStopScope } from "../../adapter/types";
 import { useId, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -6,8 +6,10 @@ import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 
-// MTGA-style phase icons as inline SVGs (14x14)
-const PHASE_ICONS: Record<Phase, ReactNode> = {
+// MTGA-style phase icons as inline SVGs (14x14). Shared with the mobile
+// phase chip/sheet (MobilePhaseChip.tsx), which renders the same glyphs at
+// touch-friendly sizes.
+export const PHASE_ICONS: Record<Phase, ReactNode> = {
   // Sun — untap
   Untap: (
     <svg viewBox="0 0 14 14" className="h-2.5 w-2.5 lg:h-3.5 lg:w-3.5" fill="currentColor">
@@ -100,7 +102,7 @@ const COMBAT_PHASES: Phase[] = [
 
 // i18n key suffix per phase, used to look up the localized label/description
 // from the `phaseStop` group in game.json (e.g. `phaseStop.untapLabel`).
-const PHASE_KEY: Record<Phase, string> = {
+export const PHASE_KEY: Record<Phase, string> = {
   Untap: "untap",
   Upkeep: "upkeep",
   Draw: "draw",
@@ -123,6 +125,18 @@ const SCOPE_TOOLTIP_KEY: Record<PhaseStopScope, string> = {
   OpponentsTurns: "phaseStop.scopeOpponentsTurns",
 };
 
+// Scope hue, shared with the mobile sheet's scope pills (MobilePhaseChip.tsx —
+// keep the two maps' hues in sync): amber = all turns (the established "stop
+// armed" color), emerald = own turns (TurnStatusLine's "you act" tone), rose =
+// opponents' turns. Deliberately NOT seat colors: a scope is a standing
+// preference over many games and (in multiplayer) many opponents, so it must
+// not borrow any one seat's identity color.
+export const SCOPE_DOT_CLASS: Record<PhaseStopScope, string> = {
+  AllTurns: "bg-amber-400",
+  OwnTurn: "bg-emerald-400",
+  OpponentsTurns: "bg-rose-400",
+};
+
 function getPhaseTooltip(
   t: PhaseTranslate,
   phase: Phase,
@@ -138,22 +152,23 @@ function getPhaseTooltip(
   });
 }
 
-function PhaseDot({ phase }: { phase: Phase }) {
-  const { t } = useTranslation("game");
-  const tooltipId = useId();
-  const currentPhase = useGameStore((s) => s.gameState?.phase);
+/**
+ * Single authority for reading and cycling one phase's stop:
+ * off → AllTurns → OwnTurn → OpponentsTurns → off. Shared by the desktop
+ * PhaseDot buttons and the mobile phase-stop sheet rows.
+ *
+ * Updates in place so array order is preserved — `useGameplayPreferencesSync`
+ * dedupes by positional comparison, so appending would reorder and force a
+ * redundant engine dispatch even when the set of stops is unchanged.
+ */
+export function usePhaseStopCycle(phase: Phase): {
+  stop: PhaseStop | undefined;
+  cyclePhase: () => void;
+} {
   const phaseStops = usePreferencesStore((s) => s.phaseStops);
   const setPhaseStops = usePreferencesStore((s) => s.setPhaseStops);
-
-  const isActive = phase === currentPhase;
   const stop = phaseStops.find((s) => s.phase === phase);
-  const hasStop = stop !== undefined;
-  const tooltip = getPhaseTooltip(t, phase, stop?.scope, isActive);
 
-  // Cycle the stop for this phase: off → AllTurns → OwnTurn → OpponentsTurns → off.
-  // Update in place so array order is preserved — `usePhaseStopsSync` dedupes by
-  // positional comparison, so appending would reorder and force a redundant
-  // engine dispatch even when the set of stops is unchanged.
   const cyclePhase = () => {
     if (stop === undefined) {
       setPhaseStops([...phaseStops, { phase, scope: "AllTurns" }]);
@@ -172,6 +187,19 @@ function PhaseDot({ phase }: { phase: Phase }) {
     );
   };
 
+  return { stop, cyclePhase };
+}
+
+function PhaseDot({ phase }: { phase: Phase }) {
+  const { t } = useTranslation("game");
+  const tooltipId = useId();
+  const currentPhase = useGameStore((s) => s.gameState?.phase);
+  const { stop, cyclePhase } = usePhaseStopCycle(phase);
+
+  const isActive = phase === currentPhase;
+  const hasStop = stop !== undefined;
+  const tooltip = getPhaseTooltip(t, phase, stop?.scope, isActive);
+
   return (
     <button
       type="button"
@@ -179,20 +207,22 @@ function PhaseDot({ phase }: { phase: Phase }) {
       aria-label={tooltip}
       aria-describedby={tooltipId}
       aria-pressed={hasStop}
-      className={`group relative flex h-6 w-6 items-center justify-center rounded-full border transition-all duration-200 lg:h-8 lg:w-8 lg:p-1 ${
+      className={`group relative flex h-6 w-6 items-center justify-center rounded-[7px] border transition-colors duration-150 lg:h-8 lg:w-8 lg:p-1 ${
         isActive
-          ? "border-cyan-300/45 bg-cyan-400/18 text-white shadow-[0_10px_22px_rgba(34,211,238,0.22)]"
+          ? "border-cyan-300/45 bg-cyan-950/82 text-white"
           : hasStop
             ? "border-white/12 bg-white/8 text-slate-200 hover:border-white/20 hover:text-white"
             : "border-transparent bg-transparent text-slate-500 hover:border-white/10 hover:bg-white/5 hover:text-slate-200"
       }`}
     >
       {isActive && (
-        <span className="absolute -top-1 left-1/2 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.9)]" />
+        <span className="absolute -top-1 left-1/2 h-1 w-3 -translate-x-1/2 rounded-[2px] bg-amber-300" />
       )}
       {PHASE_ICONS[phase]}
-      {hasStop && (
-        <span className="absolute -bottom-0.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full bg-amber-400" />
+      {stop && (
+        <span
+          className={`absolute -bottom-0.5 left-1/2 h-1 w-1 -translate-x-1/2 rounded-full ${SCOPE_DOT_CLASS[stop.scope]}`}
+        />
       )}
       <GameplayTooltip id={tooltipId}>
         {tooltip}
@@ -205,7 +235,7 @@ function PhaseDot({ phase }: { phase: Phase }) {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -217,7 +247,7 @@ export function PhaseIndicatorLeft() {
  *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorRight() {
   return (
-    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:flex lg:px-1.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -229,12 +259,12 @@ export function PhaseIndicatorRight() {
 export function CombatPhaseIndicator() {
   const isCompactHeight = useIsCompactHeight();
   // Hide on landscape phones — non-essential and eats horizontal real estate
-  // next to the ActionButton. The phase pills along the top still convey phase.
+  // next to the ActionButton. MobilePhaseChip conveys the current phase there.
   if (isCompactHeight) return null;
   return (
     <div
       data-combat-phase-indicator
-      className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/64 px-1 py-1 backdrop-blur-xl lg:px-1.5"
+      className="flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-slate-950/88 px-1 py-1 lg:px-1.5"
     >
       {COMBAT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />

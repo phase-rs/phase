@@ -398,7 +398,9 @@ mod tests {
         });
         ability.sub_ability = Some(Box::new(spell(Effect::GainLife {
             amount: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: engine::types::ability::DamageChannel::Total,
+                },
             },
             player: TargetFilter::Controller,
         })));
@@ -524,10 +526,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         verdict_for(state, candidate, SearchDepth::Root)
     }
@@ -540,10 +539,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         verdict_for(state, candidate, SearchDepth::Root)
     }
@@ -566,10 +562,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
@@ -603,10 +596,7 @@ mod tests {
                 source_id,
                 ability_index: 0,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Ability,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
         verdict_for(state, candidate, search_depth)
     }
@@ -776,7 +766,9 @@ mod tests {
         });
         let mut draw = spell(Effect::Draw {
             count: QuantityExpr::Ref {
-                qty: QuantityRef::PreviousEffectAmount,
+                qty: QuantityRef::PreviousEffectAmount {
+                    channel: engine::types::ability::DamageChannel::Total,
+                },
             },
             target: TargetFilter::Controller,
         });

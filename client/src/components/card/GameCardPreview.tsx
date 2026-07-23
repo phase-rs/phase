@@ -59,6 +59,7 @@ export function GameCardPreview() {
       cardName={previewSuppressed ? null : inspectedCardName}
       backFaceName={previewSuppressed ? null : inspectedOtherFaceName}
       dockSide={cardPreviewMode === "side"}
+      handSourceObjectId={inspectedObj?.zone === "Hand" ? inspectedObj.id : null}
     />
   );
 }

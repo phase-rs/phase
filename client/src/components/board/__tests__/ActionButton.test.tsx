@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameState, WaitingFor } from "../../../adapter/types";
@@ -116,7 +116,7 @@ describe("ActionButton", () => {
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeInTheDocument();
   });
 
   it("disables resolve controls while Resolve All is draining", () => {
@@ -136,9 +136,9 @@ describe("ActionButton", () => {
 
     render(<ActionButton />);
 
-    expect(screen.getByRole("button", { name: /^Resolve Pass priority/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /^Resolve All Keep passing priority/ })).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Resolve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Resolve All" })).toHaveAttribute("aria-busy", "true");
   });
 
   it("passes an empty AI-seat list in local hotseat so Resolve All auto-yields instead of AI-driving human seats (#4978)", () => {
@@ -242,6 +242,81 @@ describe("ActionButton", () => {
     expect(cancel).toBeEnabled();
     fireEvent.click(cancel);
     expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({ type: "CancelAutoPass" });
+  });
+
+  it("no longer client-gates Confirm/Skip on a must-attack creature (engine is the authority)", () => {
+    const target = { type: "Player", data: 1 } as const;
+    const wf: WaitingFor = {
+      type: "DeclareAttackers",
+      data: {
+        player: 0,
+        valid_attacker_ids: [100],
+        valid_attack_targets: [target],
+        valid_attack_targets_by_attacker: { "100": [target] },
+        attacker_constraints: { "100": { kind: "MustAttack", players: [] } },
+      },
+    };
+    useGameStore.setState({
+      gameState: { ...createGameState(wf), phase: "DeclareAttackers", active_player: 0, auto_pass: {} },
+      waitingFor: wf,
+      legalActions: [],
+    });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+
+    render(<ActionButton />);
+    // Discriminating: the old build DISABLED "Attack with None" whenever a
+    // must-attack creature was unselected. The engine now rejects illegal
+    // submissions, so the client must NOT veto — the button stays enabled.
+    expect(screen.getByRole("button", { name: "Attack with None" })).toBeEnabled();
+
+    // Selecting the creature enables Confirm, which dispatches the exact engine
+    // action shape with the engine-provided target (no client default target).
+    act(() => {
+      useUiStore.setState({ selectedAttackers: [100] });
+    });
+    const confirm = screen.getByRole("button", { name: "Confirm Attackers (1)" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({
+      type: "DeclareAttackers",
+      data: { attacks: [[100, target]] },
+    });
+  });
+
+  it("gates Block with None on an unassigned must-block creature, independent of menace", () => {
+    // No block_requirements (menace) present, so incompleteBlockCount is 0 — the
+    // gate here is purely the engine-provided must-block constraint.
+    const wf: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200] },
+        blocker_constraints: { "100": { kind: "MustBlock" } },
+      },
+    };
+    useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+
+    render(<ActionButton />);
+    expect(screen.getByRole("button", { name: "Block with None" })).toBeDisabled();
+  });
+
+  it("enables Confirm Blockers once the must-block creature is assigned", () => {
+    const wf: WaitingFor = {
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200] },
+        blocker_constraints: { "100": { kind: "MustBlock" } },
+      },
+    };
+    useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map([[100, 200]]) });
+
+    render(<ActionButton />);
+    expect(screen.getByRole("button", { name: "Confirm Blockers (1)" })).toBeEnabled();
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

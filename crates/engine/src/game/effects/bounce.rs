@@ -159,6 +159,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -238,6 +239,7 @@ pub fn resolve(
                     library_position: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -246,6 +248,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -331,6 +334,7 @@ pub fn resolve(
                     library_position: None,
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -339,6 +343,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -391,6 +396,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -478,6 +484,7 @@ pub fn resolve_all(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -507,6 +514,7 @@ pub fn resolve_all(
                 library_position: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
+                duration: None,
             };
             return Ok(());
         }
@@ -528,7 +536,7 @@ pub fn resolve_all(
     //
     // CR 616.1: two simultaneous destination-redirects on one bounced permanent
     // surface an ordering choice. `move_objects_simultaneously` parks it and the
-    // undelivered tail in `state.pending_batch_deliveries`; the
+    // undelivered tail in the active `BatchDelivery` frame; the
     // replacement-choice resume path drains it. A single applicable redirect
     // never prompts (the realistic path), so the common mass bounce never
     // pauses. `state.last_effect_count` is set up front from the matched pool so
@@ -550,6 +558,7 @@ pub fn resolve_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -558,6 +567,7 @@ pub fn resolve_all(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::change_zone;
     use crate::game::zones::create_object;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{CastingVariant, StackEntry};
@@ -1522,7 +1532,9 @@ mod tests {
     #[test]
     fn targeted_up_to_two_graveyard_bounce_moves_chosen_creature() {
         use crate::parser::oracle_effect::parse_effect_chain;
-        use crate::types::ability::{AbilityKind, FilterProp, TypeFilter};
+        use crate::types::ability::{
+            AbilityKind, FilterProp, MultiTargetSpec, QuantityExpr, TypeFilter,
+        };
         use crate::types::card_type::CoreType;
 
         let mut state = GameState::new_two_player(42);
@@ -1547,11 +1559,23 @@ mod tests {
             "Return up to two target creature cards from your graveyard to your hand, then discard a card.",
             AbilityKind::Spell,
         );
-        let Effect::Bounce { target, .. } = def.effect.as_ref() else {
-            panic!("expected bounce head");
+        let Effect::ChangeZone {
+            origin,
+            destination,
+            target,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("expected ChangeZone head");
         };
+        assert_eq!(*origin, Some(Zone::Graveyard));
+        assert_eq!(*destination, Zone::Hand);
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 }))
+        );
         let TargetFilter::Typed(tf) = target else {
-            panic!("expected typed bounce filter");
+            panic!("expected typed ChangeZone filter");
         };
         assert!(tf.type_filters.contains(&TypeFilter::Creature));
         assert!(tf.properties.contains(&FilterProp::InZone {
@@ -1566,7 +1590,7 @@ mod tests {
         );
         ability.multi_target = def.multi_target.clone();
         let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
+        change_zone::resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(
             state.objects.get(&bear).map(|o| o.zone),

@@ -12,7 +12,7 @@ use crate::types::game_state::{CombatDamageAssignmentMode, DamageSlot, GameState
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
 
 /// CR 510.1a + CR 613.11: Returns the amount of combat damage a creature assigns.
 /// Normally equal to power, but if `assigns_damage_from_toughness` is set (e.g. Doran),
@@ -110,19 +110,16 @@ pub fn resolve_combat_damage(
         return None;
     }
 
-    let has_first_or_double = combat.attackers.iter().any(|a| {
-        state
-            .objects
-            .get(&a.object_id)
-            .map(|o| o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike))
-            .unwrap_or(false)
-    }) || combat.blocker_to_attacker.keys().any(|blocker_id| {
-        state
-            .objects
-            .get(blocker_id)
-            .map(|o| o.has_keyword(&Keyword::FirstStrike) || o.has_keyword(&Keyword::DoubleStrike))
-            .unwrap_or(false)
-    });
+    let first_strike_participants = combat
+        .first_strike_participants
+        .clone()
+        .unwrap_or_else(|| combat_first_strike_participants(state, &combat));
+    if combat.first_strike_participants.is_none() {
+        if let Some(current) = state.combat.as_mut() {
+            current.first_strike_participants = Some(first_strike_participants.clone());
+        }
+    }
+    let has_first_or_double = !first_strike_participants.is_empty();
 
     // --- First strike sub-step ---
     if has_first_or_double && !combat.first_strike_done {
@@ -155,8 +152,8 @@ pub fn resolve_combat_damage(
         // combat-damage sub-step is resumed by the priority-pass completeness gate
         // in priority.rs, which re-enters this function once the order is submitted
         // and the resulting triggers resolve.
-        if matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }) {
-            return Some(state.waiting_for.clone());
+        if let Some(waiting_for) = pending_combat_damage_waiting(state) {
+            return Some(waiting_for);
         }
 
         // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
@@ -202,7 +199,24 @@ pub fn resolve_combat_damage(
         events,
         !combat.first_strike_done && !has_first_or_double,
     );
+    if let Some(waiting_for) = pending_combat_damage_waiting(state) {
+        return Some(waiting_for);
+    }
     None
+}
+
+/// Returns a terminal or trigger-ordering state produced while combat damage resolves.
+///
+/// CR 603.3b / CR 704.3: trigger ordering and game-over results are completion
+/// states of the combat-damage resolver, so callers must receive them rather than
+/// replacing them with a fresh priority window.
+fn pending_combat_damage_waiting(state: &GameState) -> Option<WaitingFor> {
+    match &state.waiting_for {
+        WaitingFor::OrderTriggers { .. } | WaitingFor::GameOver { .. } => {
+            Some(state.waiting_for.clone())
+        }
+        _ => None,
+    }
 }
 
 /// Which sub-step of combat damage we're collecting assignments for.
@@ -210,6 +224,80 @@ pub fn resolve_combat_damage(
 enum SubStep {
     FirstStrike,
     Regular,
+}
+
+fn combat_first_strike_participants(
+    state: &GameState,
+    combat: &CombatState,
+) -> std::collections::HashSet<ObjectId> {
+    combat
+        .attackers
+        .iter()
+        .map(|attacker| attacker.object_id)
+        .chain(combat.blocker_to_attacker.keys().copied())
+        .filter(|object_id| {
+            state.objects.get(object_id).is_some_and(|object| {
+                object.has_keyword(&Keyword::FirstStrike)
+                    || object.has_keyword(&Keyword::DoubleStrike)
+            })
+        })
+        .collect()
+}
+
+fn deals_in_substep(
+    obj: &GameObject,
+    sub_step: SubStep,
+    first_strike_participants: &std::collections::HashSet<ObjectId>,
+) -> bool {
+    match sub_step {
+        SubStep::FirstStrike => first_strike_participants.contains(&obj.id),
+        SubStep::Regular => {
+            !first_strike_participants.contains(&obj.id) || obj.has_keyword(&Keyword::DoubleStrike)
+        }
+    }
+}
+
+/// Whether a combatant will assign nonzero damage in the pending combat-damage
+/// substep under the engine's current first/double-strike state.
+///
+/// CR 510.4 + CR 702.7b: after the first-strike substep, first-strike-only
+/// creatures do not participate in the regular substep, while double-strike
+/// creatures do. This is the shared query for consumers that must reason about
+/// the next damage event without duplicating combat-substep selection.
+pub fn participates_in_pending_combat_damage_substep(
+    state: &GameState,
+    object_id: ObjectId,
+) -> bool {
+    let Some(combat) = state.combat.as_ref() else {
+        return false;
+    };
+    if combat.regular_damage_done
+        || (!combat
+            .attackers
+            .iter()
+            .any(|attacker| attacker.object_id == object_id)
+            && !combat.blocker_to_attacker.contains_key(&object_id))
+    {
+        return false;
+    }
+    let Some(object) = state
+        .objects
+        .get(&object_id)
+        .filter(|object| object.zone == crate::types::zones::Zone::Battlefield)
+    else {
+        return false;
+    };
+    let first_strike_participants = combat
+        .first_strike_participants
+        .clone()
+        .unwrap_or_else(|| combat_first_strike_participants(state, combat));
+    let sub_step = if !first_strike_participants.is_empty() && !combat.first_strike_done {
+        SubStep::FirstStrike
+    } else {
+        SubStep::Regular
+    };
+    deals_in_substep(object, sub_step, &first_strike_participants)
+        && combat_damage_amount(object) > 0
 }
 
 /// Drain pending_damage from CombatState, resetting it to empty.
@@ -227,7 +315,10 @@ fn take_pending_damage(state: &mut GameState) -> Vec<(ObjectId, DamageAssignment
 fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Option<WaitingFor> {
     let combat = state.combat.as_ref()?.clone();
     let start_index = combat.damage_step_index.unwrap_or(0);
-    let first_strike_was_done = combat.first_strike_done;
+    let first_strike_participants = combat
+        .first_strike_participants
+        .as_ref()
+        .expect("combat damage participant snapshot is initialized before assignment");
 
     // --- Attackers ---
     for (i, attacker_info) in combat.attackers.iter().enumerate().skip(start_index) {
@@ -236,24 +327,8 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             _ => continue,
         };
 
-        // Sub-step filter
-        match sub_step {
-            SubStep::FirstStrike => {
-                if !obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
-            SubStep::Regular => {
-                // Skip FirstStrike-only creatures that already dealt in first-strike step
-                if first_strike_was_done
-                    && obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
+        if !deals_in_substep(obj, sub_step, first_strike_participants) {
+            continue;
         }
 
         let power = combat_damage_amount(obj);
@@ -422,22 +497,8 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             _ => continue,
         };
 
-        match sub_step {
-            SubStep::FirstStrike => {
-                if !obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
-            SubStep::Regular => {
-                if first_strike_was_done
-                    && obj.has_keyword(&Keyword::FirstStrike)
-                    && !obj.has_keyword(&Keyword::DoubleStrike)
-                {
-                    continue;
-                }
-            }
+        if !deals_in_substep(obj, sub_step, first_strike_participants) {
+            continue;
         }
 
         let power = combat_damage_amount(obj);
@@ -1058,15 +1119,16 @@ pub(crate) fn apply_combat_damage(
 /// the whole batch total.
 fn fire_combat_prevention_riders(
     state: &mut GameState,
-    prevention_tally: &std::collections::HashMap<crate::types::proposed_event::ReplacementId, i32>,
+    prevention_tally: &std::collections::HashMap<AppliedReplacementKey, i32>,
     events: &mut Vec<GameEvent>,
 ) {
-    for (rid, &total_prevented) in prevention_tally {
+    for (key, &total_prevented) in prevention_tally {
+        let rid = key.as_replacement_id();
         if total_prevented <= 0 {
             continue;
         }
 
-        if replacement::is_shield_counter_damage_replacement(*rid) {
+        if replacement::is_shield_counter_damage_replacement(rid) {
             replacement::consume_shield_counter(state, rid.source, events);
             events.push(GameEvent::DamagePrevented {
                 source_id: rid.source,
@@ -1108,16 +1170,55 @@ fn fire_combat_prevention_riders(
         // damage prevented this way, create a token"). Stamp the aggregate
         // prevented amount so `EventContextAmount` resolves against the batch
         // total, then run the rider continuation exactly once.
+        //
+        // CR 615.5 + CR 609.7: A rider referencing the prevented damage's source
+        // ("that source's controller" — New Way Forward) resolves
+        // `PostReplacementSourceController` against the drain's event source. The
+        // per-event `execute` path receives it from the Prevented-arm stash; the
+        // aggregate path derives it here from the shield's resolved single-object
+        // source filter (the chosen damage source).
+        let event_source = repl_def
+            .damage_source_filter
+            .as_ref()
+            .and_then(shield_specific_source);
         let Some(runtime) = repl_def.runtime_execute.clone() else {
             continue;
         };
         state.last_effect_count = Some(total_prevented);
-        state.post_replacement_applied.clear();
-        state.post_replacement_continuation =
-            Some(crate::types::ability::PostReplacementContinuation::Resolved(runtime));
+        // Policy is `Replace`: this path has always overwritten a resident
+        // continuation rather than deferring to it. The rider inherits no applied
+        // set (it is the batch's own aggregate follow-up) — the fresh drain says
+        // that by construction, where the old code had to remember to clear a
+        // parallel field.
+        state.install_ready_continuation(
+            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+        );
+        if let Some(source) = event_source {
+            if let Some(drain) = state
+                .active_post_replacement_drains_mut()
+                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            {
+                drain.event_source = Some(source);
+            }
+        }
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             state, None, None, None, events,
         );
+    }
+}
+
+/// CR 615.5 + CR 609.7: Extract the single damaging object a prevention shield is
+/// scoped to, when its resolved `damage_source_filter` pins one specific object.
+/// New Way Forward's chosen source resolves to `SpecificObject` (possibly ANDed
+/// with a typed recheck), so the aggregate rider can populate the drain's event
+/// source and resolve `PostReplacementSourceController` ("that source's
+/// controller") against the prevented damage's dealer.
+fn shield_specific_source(filter: &crate::types::ability::TargetFilter) -> Option<ObjectId> {
+    use crate::types::ability::TargetFilter;
+    match filter {
+        TargetFilter::SpecificObject { id } => Some(*id),
+        TargetFilter::And { filters } => filters.iter().find_map(shield_specific_source),
+        _ => None,
     }
 }
 
@@ -1581,6 +1682,43 @@ mod tests {
 
         // 3 + 3 = 6 damage to player
         assert_eq!(state.players[1].life, 14);
+    }
+
+    #[test]
+    fn regular_substep_uses_first_step_keyword_snapshot() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Knight", 3, 3);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 3);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        let snapshot = combat_first_strike_participants(&state, state.combat.as_ref().unwrap());
+        assert!(snapshot.contains(&attacker));
+        assert!(!snapshot.contains(&blocker));
+
+        let combat = state.combat.as_mut().unwrap();
+        combat.first_strike_participants = Some(snapshot);
+        combat.first_strike_done = true;
+        state.objects.get_mut(&attacker).unwrap().keywords.clear();
+        state
+            .objects
+            .get_mut(&blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+
+        assert!(
+            !participates_in_pending_combat_damage_substep(&state, attacker),
+            "losing first strike does not grant a second damage assignment"
+        );
+        assert!(
+            participates_in_pending_combat_damage_substep(&state, blocker),
+            "gaining first strike does not remove a normal combatant from regular damage"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 pub fn add_player_counter_with_replacement(
     state: &mut GameState,
@@ -67,8 +68,15 @@ pub fn apply_player_counter_addition(
     if amount == 0 {
         return;
     }
-    let player = &mut state.players[player_id.0 as usize];
-    player.add_player_counters(&counter_kind, amount);
+    state
+        .resolve_and_apply_player_edit(
+            player_id,
+            ResolvedPlayerEdit::Counter {
+                kind: counter_kind,
+                delta: amount as i32,
+            },
+        )
+        .expect("post-replacement player counter gain must target a live player");
 
     // CR 122.1: Emit event for counter change.
     events.push(GameEvent::PlayerCounterChanged {
@@ -170,6 +178,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GivePlayerCounter,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -224,6 +233,7 @@ pub fn resolve_lose_all(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::LoseAllPlayerCounters,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -239,11 +249,23 @@ fn clear_all_player_counters(
     player_id: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    let player = &mut state.players[player_id.0 as usize];
-
-    if player.poison_counters > 0 {
-        let delta = -(player.poison_counters as i32);
-        player.poison_counters = 0;
+    let poison = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .expect("counter target must be a live player")
+        .poison_counters;
+    if poison > 0 {
+        let delta = -(poison as i32);
+        state
+            .resolve_and_apply_player_edit(
+                player_id,
+                ResolvedPlayerEdit::Counter {
+                    kind: PlayerCounterKind::Poison,
+                    delta,
+                },
+            )
+            .expect("live player counter removal must apply");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind: PlayerCounterKind::Poison,
@@ -253,12 +275,26 @@ fn clear_all_player_counters(
 
     // Drain the generic map — collect kinds first to release the borrow before
     // mutating/emitting events.
-    let drained: Vec<(PlayerCounterKind, u32)> = player
+    let drained: Vec<(PlayerCounterKind, u32)> = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .expect("counter target must be a live player")
         .player_counters
-        .drain()
+        .iter()
+        .map(|(kind, count)| (*kind, *count))
         .filter(|(_, count)| *count > 0)
         .collect();
     for (counter_kind, count) in drained {
+        state
+            .resolve_and_apply_player_edit(
+                player_id,
+                ResolvedPlayerEdit::Counter {
+                    kind: counter_kind,
+                    delta: -(count as i32),
+                },
+            )
+            .expect("live player counter removal must apply");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind,
@@ -298,7 +334,8 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -313,16 +350,19 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             player_scope: None,
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
@@ -335,7 +375,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 
@@ -486,7 +526,8 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(1),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -501,16 +542,19 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             player_scope: None,
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
             may_trigger_origin: None,
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
@@ -523,7 +567,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 

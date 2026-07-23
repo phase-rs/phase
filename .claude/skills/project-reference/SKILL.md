@@ -38,7 +38,11 @@ tilt logs check-frontend --tail 30 --since 2m  # TS type-check + lint
 ./scripts/tilt-wait.sh --interval 10 clippy                # poll faster for a single fast resource
 ./scripts/tilt-wait.sh --timeout 600 clippy test-engine    # bound the wait
 ```
-Exit codes: `0` all ok, `1` a resource is in terminal error (`updateStatus=error` with no in-flight build), `124` timeout (only when `--timeout` is set). The script prints one `<resource> status=… current=… last=…` line per tick so you can see why a wait is taking time without paying for log payloads. After exit 1, fetch details with `tilt logs <resource> --tail 50 --since 2m`.
+Exit codes: `0` all ok, `1` a resource is in terminal error (`updateStatus=error` with no in-flight build), `2` usage error, **`3` cannot answer the question**, `124` timeout (only when `--timeout` is set). The script prints one `<resource> status=… current=… last=…` line per tick so you can see why a wait is taking time without paying for log payloads. After exit 1, fetch details with `tilt logs <resource> --tail 50 --since 2m`.
+
+**`1` vs `3` is load-bearing — do not collapse them.** `1` means *your code is broken*. `3` means *I could not find out*: Tilt is not reachable, or Tilt is watching a **different checkout** than the one you are in. The second case is the common one — `repo_root` is derived from the script's own path, so **running a worktree's own copy of `tilt-wait.sh` while Tilt watches the main checkout yields `3`**, because no build over there can describe your edits here. Call the **main checkout's** script from a worktree (`/path/to/forge.rs/scripts/tilt-wait.sh`) and it resolves correctly. Treating a `3` as a build failure is how the gate gets distrusted, and a distrusted freshness gate gets bypassed — which restores the false green it exists to prevent.
+
+**A resource must be both TERMINAL and FRESH before its status is believed.** Freshness is derived from the resource's Tilt `deps`, so `deps` must stay a superset of whatever actually changes the build (for the engine: `src` + `data` + `build.rs` + `Cargo.toml` — the same set `scripts/engine-source-hash.sh` hashes). Anything built-from but unwatched is doubly invisible: Tilt will not rebuild it, **and** the freshness scan will not look there — so the script answers "fresh + ok" for a change that was never compiled.
 
 **Rules:**
 - After saving files, wait ~10-30s for Tilt to detect changes and rebuild, then check logs.
@@ -138,6 +142,21 @@ Requires `wasm-bindgen-cli` (v0.2.121) and optionally `wasm-opt` (binaryen). Out
 cargo run --bin oracle-gen -- data --filter "card name"             # single card (debug)
 cargo run --bin oracle-gen -- data --filter "name1|name2|name3"     # multiple cards (pipe-separated, substring match)
 ```
+
+#### Measurement hazards — read before you export, diff, or commit
+
+The export **writes to tracked files** and is **not fully deterministic**. Three consequences,
+all of which have burned real measurement campaigns:
+
+| Hazard | What you'll see | What to do |
+|---|---|---|
+| **`cargo export-cards` rewrites `crates/engine/data/oracle-subtypes.json`** — a tracked *parser input*, and the rewrite is non-idempotent (it can drop subtypes) | An unexplained diff in a file you never edited | **Never commit it as a side effect.** `git checkout -- crates/engine/data/oracle-subtypes.json` after the export unless changing the vocabulary is your actual intent. It is a parser input: a lossy rewrite silently changes how *every* card parses |
+| **`gen-card-data.sh` dirties `crates/engine/data/known-tokens.toml`** (also tracked) | Same — a diff you didn't author | Same: leave it out of the commit. Commit by explicit pathspec, never `git add -A` |
+| **The export is nondeterministic on ~20 faces** | Two exports of the same tree differ | **That is the noise floor of any whole-pool ledger.** A delta of ≲20 faces between two full-pool runs is not signal. Re-run, or diff against a snapshot taken from the *same* binary — never claim a sub-noise-floor coverage win |
+
+Corollary for coverage work: **snapshot `card-data.json` BEFORE you touch the parser**, and
+diff generated-vs-generated. Diffing a fresh export against a stale committed artifact
+attributes the artifact's own drift to your change.
 
 ### Card Data Lookup
 ```bash

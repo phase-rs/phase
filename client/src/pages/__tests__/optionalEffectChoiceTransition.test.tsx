@@ -32,12 +32,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   EngineAdapter,
+  EngineSnapshot,
   GameAction,
   GameState,
   LegalActionsResult,
   SubmitResult,
   WaitingFor,
 } from "../../adapter/types";
+import { nextSnapshotSeq } from "../../adapter/types";
 import { OptionalEffectModalContent } from "../../components/modal/OptionalEffectModal.tsx";
 import { DialogHost } from "../../components/modal/DialogHost.tsx";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -132,6 +134,11 @@ function scriptedAdapter(): {
     ),
     getState: vi.fn(async () => sequence[step]),
     getLegalActions: vi.fn(async () => EMPTY_LEGAL),
+    getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
+      state: sequence[step],
+      legalResult: EMPTY_LEGAL,
+      seq: nextSnapshotSeq(),
+    })),
     restoreState: vi.fn(),
     getAiAction: vi.fn().mockReturnValue(null),
     estimateBracket: vi.fn().mockResolvedValue(null),

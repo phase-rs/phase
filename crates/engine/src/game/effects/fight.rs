@@ -150,6 +150,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::Fight,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -160,6 +161,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -204,6 +206,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -281,6 +284,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -691,8 +695,7 @@ mod tests {
         // A continuation was stashed for the second direction — previously this
         // branch silently returned Ok(()) and the second direction was dropped.
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("expected pending_continuation for second-direction fight damage");
         // Continuation is a single-target DealDamage from wolf to bear.
         match &cont.chain.effect {
@@ -801,7 +804,7 @@ mod tests {
             "second direction (wolf → bear, 2 damage) must apply via pending_continuation + accept"
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "continuation must be consumed"
         );
 

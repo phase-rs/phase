@@ -118,6 +118,7 @@ fn resolve_double_counters(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -168,6 +169,7 @@ fn resolve_double_life(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -220,7 +222,7 @@ fn resolve_double_mana(
     for (mana_type, count) in mana_to_add {
         for _ in 0..count {
             // CR 118.3a: stamp a pip id on pool entry so the unit can be pinned.
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 player_id,
                 ManaUnit {
                     color: mana_type,
@@ -246,6 +248,7 @@ fn resolve_double_mana(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Double,
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -317,7 +320,8 @@ mod tests {
             target_chooser: None,
             source_id: ObjectId(100),
             source_incarnation: None,
-            source_card_id: None,
+            trigger_source: None,
+            trigger_definition_ref: None,
             targets,
             kind: AbilityKind::Spell,
             sub_ability: None,
@@ -329,6 +333,7 @@ mod tests {
             starting_with: None,
             chosen_x: None,
             cost_paid_object: None,
+            cost_paid_object_ids: Vec::new(),
             effect_context_object: None,
             amassed_army_object: None,
             ability_index: None,
@@ -340,8 +345,10 @@ mod tests {
             target_constraints: Vec::new(),
             target_choice_timing: crate::types::ability::TargetChoiceTiming::Stack,
             description: None,
+            selected_mode_labels: Vec::new(),
             repeat_for: None,
             min_x_value: 0,
+            announced_x: None,
             cant_be_copied: false,
             copy_count_status: crate::types::ability::CopyCountStatus::Pending,
             forward_result: false,
@@ -354,7 +361,7 @@ mod tests {
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             modal: None,
             mode_abilities: vec![],
-            dig_found_nothing_for_parent_target: false,
+            parent_target_missing_reason: None,
         }
     }
 
@@ -450,8 +457,7 @@ mod tests {
             crate::types::game_state::WaitingFor::ReplacementChoice { .. }
         ));
         let pending = state
-            .pending_counter_additions
-            .as_ref()
+            .active_counter_additions()
             .expect("remaining double-counter additions should be queued");
         assert_eq!(pending.remaining.len(), 1);
         assert!(matches!(
@@ -706,7 +712,7 @@ mod tests {
         // Add 3 red mana to player 0's pool
         let p0 = state.players[0].id;
         for _ in 0..3 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 p0,
                 ManaUnit {
                     color: ManaType::Red,

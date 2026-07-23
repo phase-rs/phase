@@ -22,6 +22,7 @@
     "updatePending": "aggiornamento in attesa al termine della partita",
     "cards": "carte {{age}} ({{commit}})",
     "cardDataTitle": "Dati carte generati il {{date}} da {{commit}}",
+    "desktopAppVersion": "App desktop v{{version}}",
     "checkForUpdates": "Controlla aggiornamenti",
     "updaterDebugInfo": "Info di debug dell'aggiornatore",
     "updaterIssue": "Problema dell'aggiornatore: {{error}}",
@@ -32,9 +33,15 @@
     "label": "Rilevatore di combo",
     "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
     "on": "Attivo",
-    "off": "Disattivato"
+    "off": "Disattivato",
+    "interactive": "Interattivo"
   },
   "gameMenu": {
+    "sections": {
+      "view": "Vista",
+      "tools": "Strumenti",
+      "game": "Partita"
+    },
     "reportCard": "Segnala una carta",
     "menu": "Menu di gioco",
     "sandboxTools": "Strumenti Sandbox",
@@ -110,6 +117,7 @@
     "recoveryDescription": "Se una carta non funziona correttamente, esporta prima lo stato. Il pannello di debug avanzato è disponibile quando devi ispezionare o regolare la partita.",
     "copyState": "Copia stato",
     "exportState": "Esporta stato",
+    "exportReplay": "Esporta replay",
     "openAdvancedDebug": "Apri debug avanzato",
     "sections": {
       "Flow": "Flusso",
@@ -120,7 +128,10 @@
       "copied": "Stato della partita copiato negli appunti.",
       "copyFailed": "Impossibile copiare lo stato della partita.",
       "exported": "Esportato {{filename}}.",
-      "exportFailed": "Impossibile esportare lo stato della partita."
+      "exportFailed": "Impossibile esportare lo stato della partita.",
+      "replayExported": "Replay salvato come {{filename}}.",
+      "replayExportUnavailable": "Nessuna registrazione di replay disponibile per questa partita.",
+      "replayExportFailed": "Impossibile esportare il replay."
     },
     "prompt": {
       "starting": "La partita sta iniziando o ripristinando lo stato.",

@@ -1,49 +1,70 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 260
 expression: "&ir"
 ---
 {
   "items": [
     {
-      "PreLoweredSpell": {
-        "kind": "Spell",
-        "effect": {
-          "type": "Unimplemented",
-          "name": "unknown",
-          "description": "Flying"
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
         },
-        "cost": null,
-        "sub_ability": null,
-        "duration": null,
-        "description": "Flying",
-        "target_prompt": null,
-        "condition": null,
-        "optional_targeting": false,
-        "optional": false,
-        "forward_result": false
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 6,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Flying"
+      },
+      "node": {
+        "PreLoweredSpell": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Unimplemented",
+            "name": "unknown",
+            "description": "Flying"
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": "Flying",
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        }
       }
     },
     {
-      "PreLoweredTrigger": {
-        "mode": "AttacksOrBlocks",
-        "execute": {
-          "kind": "Spell",
-          "effect": {
-            "type": "Draw",
-            "count": {
-              "type": "Fixed",
-              "value": 1
-            },
-            "target": {
-              "type": "Controller"
-            }
-          },
-          "cost": null,
-          "sub_ability": {
+      "id": 1,
+      "source": {
+        "id": {
+          "item": 1,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 1,
+          "last_line": 1,
+          "start_byte": 7,
+          "end_byte": 84,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Whenever ~ attacks or blocks, you may draw a card. If you do, discard a card."
+      },
+      "node": {
+        "PreLoweredTrigger": {
+          "mode": "AttacksOrBlocks",
+          "execute": {
             "kind": "Spell",
             "effect": {
-              "type": "Discard",
+              "type": "Draw",
               "count": {
                 "type": "Fixed",
                 "value": 1
@@ -53,52 +74,84 @@ expression: "&ir"
               }
             },
             "cost": null,
-            "sub_ability": null,
+            "sub_ability": {
+              "kind": "Spell",
+              "effect": {
+                "type": "Discard",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "target": {
+                  "type": "Controller"
+                }
+              },
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": {
+                "type": "EffectOutcome",
+                "signal": "OptionalEffectPerformed"
+              },
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false,
+              "sub_link": "SequentialSibling"
+            },
             "duration": null,
             "description": null,
             "target_prompt": null,
-            "condition": {
-              "type": "EffectOutcome",
-              "signal": "OptionalEffectPerformed"
-            },
+            "condition": null,
             "optional_targeting": false,
-            "optional": false,
-            "forward_result": false,
-            "sub_link": "SequentialSibling"
+            "optional": true,
+            "forward_result": false
           },
-          "duration": null,
-          "description": null,
-          "target_prompt": null,
-          "condition": null,
-          "optional_targeting": false,
+          "valid_card": {
+            "type": "SelfRef"
+          },
+          "origin": null,
+          "destination": null,
+          "trigger_zones": [
+            "Battlefield"
+          ],
+          "phase": null,
           "optional": true,
-          "forward_result": false
-        },
-        "valid_card": {
-          "type": "SelfRef"
-        },
-        "origin": null,
-        "destination": null,
-        "trigger_zones": [
-          "Battlefield"
-        ],
-        "phase": null,
-        "optional": true,
-        "damage_kind": "Any",
-        "secondary": false,
-        "valid_target": null,
-        "valid_source": null,
-        "description": "Whenever ~ attacks or blocks, you may draw a card. If you do, discard a card.",
-        "constraint": null,
-        "condition": null,
-        "batched": false
+          "damage_kind": "Any",
+          "secondary": false,
+          "valid_target": null,
+          "valid_source": null,
+          "description": "Whenever ~ attacks or blocks, you may draw a card. If you do, discard a card.",
+          "constraint": null,
+          "condition": null,
+          "batched": false
+        }
       }
     },
     {
-      "Keyword": {
-        "Crew": {
-          "power": 1,
-          "once_per_turn": null
+      "id": 2,
+      "source": {
+        "id": {
+          "item": 2,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 2,
+          "last_line": 2,
+          "start_byte": 85,
+          "end_byte": 211,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Crew 1 (Tap any number of creatures you control with total power 1 or more: ~ becomes an artifact creature until end of turn.)"
+      },
+      "node": {
+        "Keyword": {
+          "Crew": {
+            "power": 1,
+            "once_per_turn": null
+          }
         }
       }
     }

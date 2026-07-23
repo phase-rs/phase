@@ -77,10 +77,7 @@ fn cast_candidate(object_id: ObjectId) -> CandidateAction {
             targets: Vec::new(),
             payment_mode: CastPaymentMode::default(),
         },
-        metadata: ActionMetadata {
-            actor: Some(AI),
-            tactical_class: TacticalClass::Spell,
-        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
     }
 }
 

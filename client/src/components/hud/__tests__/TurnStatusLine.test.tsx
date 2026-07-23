@@ -57,7 +57,13 @@ describe("TurnStatusLine", () => {
     setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } }, state: { active_player: 0 } });
     render(<TurnStatusLine />);
     const region = screen.getByRole("status");
-    expect(region).toHaveTextContent("Your priority — main phase");
+    expect(region).toHaveTextContent("Your priority");
+    // The reason sentence lives in the GameplayTooltip, which now portals to
+    // document.body (escaping the card/overlay stacking context), so assert it
+    // on the tooltip element rather than as inline text of the status region.
+    expect(screen.getByRole("tooltip", { hidden: true })).toHaveTextContent(
+      "Your priority — main phase",
+    );
     expect(region).toHaveAttribute("aria-live", "polite");
   });
 
@@ -68,7 +74,10 @@ describe("TurnStatusLine", () => {
       state: { active_player: 0, stack: ONE_STACK_ENTRY },
     });
     render(<TurnStatusLine />);
-    expect(screen.getByRole("status")).toHaveTextContent("Waiting for Sorin — responding to the stack");
+    expect(screen.getByRole("status")).toHaveTextContent("Waiting for Sorin");
+    expect(screen.getByRole("tooltip", { hidden: true })).toHaveTextContent(
+      "Waiting for Sorin — responding to the stack",
+    );
   });
 
   it("never frames the decision as the spectator's own", () => {

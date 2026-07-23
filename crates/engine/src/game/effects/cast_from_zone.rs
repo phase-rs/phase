@@ -1,13 +1,203 @@
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    AbilityCost, CastingPermission, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    SpellStackToGraveyardReplacement, TargetFilter, TargetRef,
+    AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
+    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
+
+/// CR 400.1/400.2: Recursively extract a filter's own `controller` axis,
+/// looking through the composed forms (`Not`/`And`/`Or`) a real card's target
+/// filter may be built from rather than only matching a bare `Typed`. `And`/
+/// `Or` return the first branch that carries a controller axis — composed
+/// filters in this codebase don't mix two different explicit player axes on
+/// the same object filter, so first-found is unambiguous.
+fn extract_controller_ref(filter: &TargetFilter) -> Option<&crate::types::ability::ControllerRef> {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller.as_ref(),
+        TargetFilter::Not { filter } => extract_controller_ref(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().find_map(extract_controller_ref)
+        }
+        _ => None,
+    }
+}
+
+/// CR 701.20e + CR 400.2: A private self-library peek keeps its looked-at
+/// cards in the controller-owned library while publishing their identities only
+/// through the resolving effect's `last_revealed_ids` window.
+pub(crate) fn looked_at_controller_library_cards(
+    state: &GameState,
+    controller: crate::types::player::PlayerId,
+) -> Vec<ObjectId> {
+    state
+        .last_revealed_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|object| object.zone == Zone::Library && object.owner == controller)
+        })
+        .collect()
+}
+
+/// CR 400.1/400.2 + CR 109.4: Eligible hand-pick pool for a private-zone
+/// `CastFromZone` — the cards in `source_zone` belonging to the filter-scoped
+/// player (Buster-Sword-class "your hand" filters keep the caster; Silent-Blade
+/// Oni's `ControllerRef::TriggeringPlayer` scopes a different hand, issue #5240)
+/// that satisfy the cast filter. Single authority shared by the selection opener
+/// (`open_private_zone_cast_selection`) and the feasibility predicate
+/// (`hand_pick_eligible_is_empty`) so the "which cards can be cast" logic never
+/// diverges between "open the prompt" and "is the prompt possible". Recurses
+/// through `Not`/`And`/`Or` (`extract_controller_ref`) so a composed filter isn't
+/// silently treated as caster-scoped. A missing scoped player yields an empty
+/// pool (the opener's empty branch and the predicate both handle that).
+fn compute_hand_pick_eligible(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    source_zone: Zone,
+) -> Vec<ObjectId> {
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let hand_owner = extract_controller_ref(target_filter)
+        .and_then(|cref| {
+            crate::game::filter::controller_ref_player(
+                state,
+                ability.source_id,
+                Some(ability.controller),
+                Some(ability),
+                cref,
+            )
+        })
+        .unwrap_or(ability.controller);
+    let Some(player) = state.players.iter().find(|p| p.id == hand_owner) else {
+        return Vec::new();
+    };
+    let cards: Vec<ObjectId> = match source_zone {
+        Zone::Hand => player.hand.iter().copied().collect(),
+        Zone::Library => looked_at_controller_library_cards(state, ability.controller),
+        _ => unreachable!("private CastFromZone selection supports only hand and library"),
+    };
+    let remapped_library_filter = (source_zone == Zone::Library)
+        .then(|| crate::game::filter::remap_exiled_by_source_for_looked_cards(target_filter));
+    let target_filter = remapped_library_filter.as_ref().unwrap_or(target_filter);
+    let constraint = match &ability.effect {
+        Effect::CastFromZone {
+            constraint: Some(constraint),
+            ..
+        } => Some(constraint.clone()),
+        _ => effective_cast_from_zone_constraint(ability),
+    };
+    // CR 601.2 vs CR 305.1: a land is never *cast* — it is played. A "cast a
+    // permanent spell from your hand" pick (Kellan, the Kid) carries a broad
+    // `Permanent` type filter that a land in hand would otherwise satisfy, so the
+    // Cast-mode pool must exclude lands. `Play` mode (a "play a card" grant) keeps
+    // them, since a land played that way is legal.
+    let cast_mode_excludes_lands = matches!(
+        &ability.effect,
+        Effect::CastFromZone {
+            mode: crate::types::ability::CardPlayMode::Cast,
+            ..
+        }
+    );
+    cards
+        .into_iter()
+        .filter(|id| {
+            if cast_mode_excludes_lands
+                && state.objects.get(id).is_some_and(|obj| {
+                    obj.card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                })
+            {
+                return false;
+            }
+            crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
+                && state.objects.get(id).is_some_and(|object| {
+                    crate::game::casting::cast_permission_constraint_allows_cast(
+                        state,
+                        object,
+                        &constraint,
+                        None,
+                    )
+                })
+        })
+        .collect()
+}
+
+/// CR 608.2d: A player can't choose an impossible option. When an optional
+/// hand-pick `CastFromZone` ("you may cast a permanent spell … from your hand")
+/// has no eligible card, the cast can't happen, so the outer optional must be
+/// treated as declined — routing any `Not(OptionalEffectPerformed)` fallback
+/// (Kellan, the Kid's "If you don't, put a land") through the decline authority
+/// with the performed flag false — rather than prompting for a choice that can
+/// select nothing. Returns `Some(is_empty)` for a hand-scoped pick with no
+/// pre-bound object targets; `None` when this ability is not such a pick (the
+/// caller keeps its existing whole-ability dry-run for graveyard/exile/
+/// `LastRevealed` classes).
+pub(crate) fn hand_pick_eligible_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<bool> {
+    let Effect::CastFromZone { target, .. } = &ability.effect else {
+        return None;
+    };
+    if ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Object(_)))
+    {
+        return None;
+    }
+    let source_zone = target.extract_in_zone().filter(|z| *z == Zone::Hand)?;
+    Some(compute_hand_pick_eligible(state, ability, target, source_zone).is_empty())
+}
+
+/// CR 608.2c: An empty selection at a hand-pick `CastFromZone`'s
+/// `EffectZoneChoice` means the player did not cast ("If you don't, …"). Re-stash
+/// the granting ability's decline-branch `sub_ability` as the pending
+/// continuation so the resume tail's `set_priority` +
+/// `resume_with_error_propagation` drains it, and reset `optional_effect_performed`
+/// to false so its `Not(OptionalEffectPerformed)` gate evaluates against *this*
+/// (declined) decision — the outer `Accept` had latched the flag true via
+/// `set_optional_effect_performed_recursive(true)`. Returns true when a fallback
+/// was stashed. Riders (graveyard-redirect / enters-with-counter — `condition:
+/// None`) are excluded by the shared decline-branch authority
+/// (`should_resolve_subability_on_optional_decline`), so a subless or
+/// rider-only hand cast falls through to the caller's consume-and-no-op path.
+/// (issue #5945)
+pub(crate) fn stash_declined_cast_fallback(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    let Some(sub) = ability.sub_ability.as_deref() else {
+        return false;
+    };
+    if !super::should_resolve_subability_on_optional_decline(sub) {
+        return false;
+    }
+    let mut fallback = sub.clone();
+    if fallback.targets.is_empty() && !ability.targets.is_empty() {
+        fallback.targets = ability.targets.clone();
+    }
+    super::apply_parent_chain_context(&mut fallback, ability, None, state);
+    // Reset AFTER apply_parent_chain_context (which copies the parent's context,
+    // carrying the Accept-latched `optional_effect_performed = true`).
+    fallback.set_optional_effect_performed_recursive(false);
+    // CR 608.2c: The land-drop's `Not(OptionalEffectPerformed)` gate has served
+    // its purpose (we only reach here because the cast was declined). It is
+    // itself optional ("you may put a land"); leaving the gate on would make its
+    // own accept latch the flag and re-trip the gate, dropping the land drop.
+    super::strip_consumed_decline_performed_gate(&mut fallback);
+    crate::game::effects::append_to_pending_continuation(state, Some(Box::new(fallback)));
+    true
+}
 
 /// CR 115.1 + CR 601.2c: "You may cast a spell ... from your hand without paying
 /// its mana cost" (Electrodominance, Baral's Expertise) has no "target" word —
@@ -20,29 +210,40 @@ fn open_private_zone_cast_selection(
     source_zone: Zone,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let Some(player) = state.players.iter().find(|p| p.id == ability.controller) else {
-        return Err(EffectError::PlayerNotFound);
-    };
-    let cards_iter = match source_zone {
-        Zone::Hand => player.hand.iter(),
-        _ => unreachable!("private CastFromZone selection is currently hand-only"),
-    };
-    let eligible: Vec<_> = cards_iter
-        .copied()
-        .filter(|id| crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx))
-        .collect();
+    let mut stash = ability.clone();
+    // CR 202.3 + CR 608.2h: Freeze before filtering so the private prompt's
+    // eligibility test and its later cast consume the same concrete ceiling.
+    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
+    stash.targets.clear();
+    let eligible = compute_hand_pick_eligible(state, &stash, target_filter, source_zone);
 
     if eligible.is_empty() {
+        if source_zone == Zone::Library {
+            let looked_at = looked_at_controller_library_cards(state, ability.controller);
+            let _ = crate::game::effects::cascade::shuffle_to_bottom(
+                state,
+                &looked_at,
+                ability.source_id,
+                None,
+                events,
+            );
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
 
-    let mut stash = ability.clone();
-    stash.targets.clear();
+    // CR 202.3 + CR 608.2h: The "equal or lesser mana value" gate (Kellan, the
+    // Kid) references the triggering spell's mana value via a dynamic
+    // `QuantityExpr` whose referent (the trigger-event source) is only in scope
+    // WHILE THIS ABILITY RESOLVES. The pick is completed at a later
+    // `EffectZoneChoice` resume, by which point `current_trigger_event` is
+    // cleared and the reference would read 0 and reject every cast. Freeze the
+    // gate to a `Fixed` on the stashed ability now, while the trigger context is
+    // live, so the resume's finalize-time re-evaluation is correct.
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
         player: ability.controller,
@@ -68,6 +269,7 @@ fn open_private_zone_cast_selection(
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
     Ok(())
 }
@@ -142,11 +344,33 @@ pub fn resolve(
     // Bring to Light, Urza) must NOT be re-filtered through that remap, which
     // would drop every target not in `last_revealed_ids`. The remap therefore
     // only applies on the empty-target fallback below.
+    let mut used_last_revealed_library_fallback = false;
     if target_ids.is_empty() && target_filter.references_exiled_by_source() {
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        target_ids = crate::game::players::linked_exile_cards_for_source(state, ability.source_id)
+        let linked = crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+        let current_linked_ids: Vec<_> = state
+            .last_zone_changed_ids
             .iter()
-            .map(|link| link.exiled_id)
+            .copied()
+            .filter(|id| linked.iter().any(|link| link.exiled_id == *id))
+            .collect();
+        let candidate_ids: Vec<_> = if current_linked_ids.is_empty() {
+            linked.iter().map(|link| link.exiled_id).collect()
+        } else {
+            current_linked_ids
+        };
+        // CR 607.2a + CR 608.2c: For an immediately chained "exiled this way"
+        // cast grant, bind the filter's object-scope reads to the current
+        // resolution's linked cards, not the source's lifetime exile pile.
+        let mut scoped_ability = ability.clone();
+        scoped_ability.targets = candidate_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+        let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+        target_ids = candidate_ids
+            .iter()
+            .copied()
             .filter(|id| {
                 state
                     .objects
@@ -160,9 +384,45 @@ pub fn resolve(
         // 0 }` publishes them via `last_revealed_ids`, not exile links, but the
         // parser still binds the cast step to `ExiledBySource`.
         if target_ids.is_empty() && !state.last_revealed_ids.is_empty() {
+            used_last_revealed_library_fallback = true;
             target_ids =
                 crate::game::filter::last_revealed_library_ids_matching(state, target_filter, &ctx);
         }
+    }
+
+    // The usual no-target fallback above observes the raw chain shape. Optional
+    // look-cast frames may instead arrive with the same looked-at cards already
+    // injected as resolved targets; both forms carry exactly the private-library
+    // candidate set and must use the same one-shot choice.
+    let library_candidates_from_last_revealed = used_last_revealed_library_fallback
+        || (target_filter.references_exiled_by_source()
+            && !state.last_revealed_ids.is_empty()
+            && !target_ids.is_empty()
+            && target_ids.iter().all(|id| {
+                state.last_revealed_ids.contains(id)
+                    && state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Library)
+            }));
+
+    // CR 608.2g: a self-library peek's "may cast one from among them" choice
+    // is made during the resolving ability, from the exact private look window.
+    // The library route snapshots the constraint while trigger context is live,
+    // then uses the typed one-shot resolution-cast cleanup rather than granting
+    // an exile permission.
+    if driver.is_during_resolution()
+        && without_paying
+        && alt_ability_cost.is_none()
+        && library_candidates_from_last_revealed
+    {
+        return open_private_zone_cast_selection(
+            state,
+            ability,
+            target_filter,
+            Zone::Library,
+            events,
+        );
     }
 
     // CR 310.11b + CR 608.2c: "exile it, then you may cast it transformed" —
@@ -173,7 +433,7 @@ pub fn resolve(
     // staying in exile.
     if target_ids.is_empty()
         && matches!(target_filter, TargetFilter::SelfRef)
-        && ability.source_is_current(state)
+        && ability.self_ref_is_current(state)
     {
         target_ids = vec![ability.source_id];
     }
@@ -214,6 +474,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -324,6 +585,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CastFromZone,
             source_id: ability.source_id,
+            subject: None,
         });
         state.waiting_for = WaitingFor::CastOffer {
             player: ability.controller,
@@ -356,12 +618,23 @@ pub fn resolve(
         );
     }
 
-    grant_lingering_permissions(state, ability, &target_ids, events)?;
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::CastFromZone,
-        source_id: ability.source_id,
-    });
+    match grant_lingering_permissions(state, ability, &target_ids, events)? {
+        LingeringPermissionGrantResult::Immediate => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::CastFromZone,
+                source_id: ability.source_id,
+                subject: None,
+            });
+        }
+        LingeringPermissionGrantResult::ExileDeliveryComplete => {}
+        // CR 614.1 + CR 616.1: A current-zone-to-Exile delivery may park for
+        // replacement ordering. Its typed batch completion records the
+        // permission and emits `EffectResolved` only after the delivery settles,
+        // so this resolver must not run either tail early.
+        LingeringPermissionGrantResult::NeedsChoice => {
+            return Ok(());
+        }
+    }
 
     Ok(())
 }
@@ -424,6 +697,7 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::CastFromZone,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(false);
                 };
@@ -431,11 +705,18 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
             }
             _ => None,
         };
+        // CR 202.3 + CR 608.2h: The mana-value gate was frozen to a `Fixed` on
+        // this ability's `CastFromZone` effect when the hand pick was opened
+        // (`snapshot_cast_from_zone_constraint_into_effect`), while the trigger
+        // event was still live. Read it back here (via the effect's `constraint`
+        // field, falling back to the target-filter Cmc form for direct-target
+        // during-resolution casts that never opened a hand pick).
+        let constraint = constraint.or_else(|| effective_cast_from_zone_constraint(ability));
         cast_single_target_during_resolution(
             state,
             ability,
             card,
-            constraint.or_else(|| effective_cast_from_zone_constraint(ability)),
+            constraint,
             cast_transformed,
             alt_mana_cost,
             events,
@@ -443,8 +724,66 @@ pub(crate) fn complete_hand_pick_cast_from_zone(
         return Ok(true);
     }
 
-    grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?;
-    Ok(false)
+    Ok(matches!(
+        grant_lingering_permissions(state, ability, std::slice::from_ref(&card), events)?,
+        LingeringPermissionGrantResult::NeedsChoice
+    ))
+}
+
+/// CR 608.2h: Freeze the effective mana-value gate of a hand-pick `CastFromZone`
+/// to a concrete `Fixed` on the stashed ability's effect, resolving any dynamic
+/// `QuantityExpr` (the triggering spell's mana value for Kellan, the Kid) against
+/// the still-live trigger context. The gate lives either on the effect's own
+/// `constraint` field or on the target-filter Cmc form; whichever is present is
+/// resolved and written back to `stash`'s `Effect::CastFromZone.constraint` so
+/// the later `EffectZoneChoice` resume — where `current_trigger_event` is gone —
+/// reads a value that no longer needs the trigger context. A constraint already
+/// `Fixed`, or absent, leaves the stash untouched.
+fn snapshot_cast_from_zone_constraint_into_effect(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    stash: &mut ResolvedAbility,
+) {
+    let effective = match &ability.effect {
+        Effect::CastFromZone {
+            constraint: Some(c),
+            ..
+        } => Some(c.clone()),
+        _ => effective_cast_from_zone_constraint(ability),
+    };
+    let frozen = freeze_cast_permission_constraint(state, ability, effective.clone());
+    if frozen == effective {
+        return;
+    }
+    if let Effect::CastFromZone { constraint, .. } = &mut stash.effect {
+        *constraint = frozen;
+    }
+}
+
+// CR 608.2h: information a resolving effect requires is determined once, when
+// the effect is applied. A cast-permission MV constraint whose value is a
+// dynamic Ref (for example Variable("X") or a board aggregate) must be resolved
+// to a concrete value at application time and stored as Fixed — never re-read
+// when the permission is exercised.
+fn freeze_cast_permission_constraint(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    constraint: Option<CastPermissionConstraint>,
+) -> Option<CastPermissionConstraint> {
+    let (comparator, value) = match constraint {
+        Some(CastPermissionConstraint::ManaValue { comparator, value }) => (comparator, value),
+        other => return other,
+    };
+    if matches!(value, QuantityExpr::Fixed { .. }) {
+        return Some(CastPermissionConstraint::ManaValue { comparator, value });
+    }
+    let resolved = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
+    Some(CastPermissionConstraint::ManaValue {
+        comparator,
+        value: QuantityExpr::Fixed {
+            value: resolved.max(0),
+        },
+    })
 }
 
 fn effective_cast_from_zone_constraint(
@@ -490,6 +829,7 @@ fn cast_stack_spell_copy_during_resolution(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
 
     let Some(obj) = state.objects.get(&copy_id).cloned() else {
@@ -501,6 +841,17 @@ fn cast_stack_spell_copy_during_resolution(
         return Err(EffectError::InvalidParam(format!(
             "ParentTarget {copy_id:?} is not a stack spell copy"
         )));
+    }
+
+    // CR 113.2c + CR 601.2i + CR 608.2g: this copy is now being CAST, so
+    // snapshot its effective spell keywords before recording SpellCast. This
+    // mirrors `casting_costs::finalize_cast_with_phyrexian_choices_inner` and
+    // preserves the selected static-grant instances/provenance for cast-trigger
+    // synthesis (notably multiple Ripple grants) after the event is recorded.
+    let cast_spell_keywords =
+        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
+    if let Some(copy) = state.objects.get_mut(&copy_id) {
+        copy.cast_spell_keywords = cast_spell_keywords;
     }
 
     let origin = obj.cast_from_zone.unwrap_or(Zone::Exile);
@@ -558,13 +909,32 @@ fn cast_single_target_during_resolution(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CastFromZone,
         source_id: ability.source_id,
+        subject: None,
     });
     // CR 702.62a's "if you don't, it remains exiled" disposition is `RemainExiled`
-    // (only reached if a future free-cast adds an MV gate; these carry none).
-    // There are no dig misses for a targeted single-card free-cast.
+    // for targeted single-card free casts. A library-peek pick instead bottoms
+    // its declined hit with all unchosen looked-at cards (CR 401.4).
+    let exiled_misses = if state
+        .objects
+        .get(&card)
+        .is_some_and(|object| object.zone == Zone::Library)
+    {
+        looked_at_controller_library_cards(state, ability.controller)
+            .into_iter()
+            .filter(|id| *id != card)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let reject_action = if exiled_misses.is_empty() {
+        crate::types::ability::ResolutionMvRejectAction::RemainExiled
+    } else {
+        crate::types::ability::ResolutionMvRejectAction::BottomWithMisses
+    };
     let cleanup = crate::types::ability::ResolutionCastCleanup {
-        exiled_misses: Vec::new(),
-        reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+        source_id: ability.source_id,
+        exiled_misses,
+        reject_action,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
     };
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
@@ -692,6 +1062,20 @@ fn cast_from_zone_enters_with_modifications(
     Vec::new()
 }
 
+/// Result of a lingering cast permission grant. An exile-delivery batch owns
+/// `EffectResolved` so its tail cannot run before a parked replacement choice.
+pub(crate) enum LingeringPermissionGrantResult {
+    /// Every resolved target already occupies an in-place supported zone.
+    Immediate,
+    /// One batch delivered every current-zone-to-Exile target through the
+    /// replacement pipeline synchronously; its completion recorded only
+    /// settled exile cards and emitted the resolution tail.
+    ExileDeliveryComplete,
+    /// The replacement pipeline parked at CR 616.1; its completion owns the
+    /// permission and resolution tail once the choice settles.
+    NeedsChoice,
+}
+
 /// CR 118.9: Stamp `ExileWithAltCost` / `ExileWithAltAbilityCost` on resolved
 /// targets. Shared by the direct resolve path and the `EffectZoneChoice` resume
 /// path (Electrodominance hand pick).
@@ -700,6 +1084,55 @@ pub(crate) fn grant_lingering_permissions(
     ability: &ResolvedAbility,
     target_ids: &[ObjectId],
     events: &mut Vec<GameEvent>,
+) -> Result<LingeringPermissionGrantResult, EffectError> {
+    let mut in_place_ids = Vec::new();
+    let mut exile_delivery_ids = Vec::new();
+    for &obj_id in target_ids {
+        let Some(current_zone) = state.objects.get(&obj_id).map(|object| object.zone) else {
+            continue;
+        };
+        if matches!(current_zone, Zone::Exile | Zone::Graveyard | Zone::Hand) {
+            in_place_ids.push(obj_id);
+        } else {
+            exile_delivery_ids.push(obj_id);
+        }
+    }
+
+    if exile_delivery_ids.is_empty() {
+        record_lingering_permissions(state, ability, &in_place_ids)?;
+        return Ok(LingeringPermissionGrantResult::Immediate);
+    }
+
+    // CR 614.1 + CR 616.1: The impulse-draw-class current-zone-to-Exile
+    // instruction is a replaceable effect-owned event. Keep the permission
+    // recording and resolution event in the typed completion so a replacement
+    // choice cannot expose either tail before the whole batch settles.
+    let requests = exile_delivery_ids
+        .iter()
+        .map(|&obj_id| ZoneMoveRequest::effect(obj_id, Zone::Exile, ability.source_id))
+        .collect();
+    let result = zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(BatchCompletion::CastFromZoneExileDeliveryComplete {
+            ability: Box::new(ability.clone()),
+            in_place_ids,
+            exile_delivery_ids,
+        }),
+        events,
+    );
+    Ok(match result {
+        BatchMoveResult::Done => LingeringPermissionGrantResult::ExileDeliveryComplete,
+        BatchMoveResult::NeedsChoice => LingeringPermissionGrantResult::NeedsChoice,
+    })
+}
+
+/// CR 118.9: Construct the object-local casting permissions after the caller
+/// established that each target is in a zone the permission can authorize.
+fn record_lingering_permissions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_ids: &[ObjectId],
 ) -> Result<(), EffectError> {
     let (
         without_paying,
@@ -727,6 +1160,7 @@ pub(crate) fn grant_lingering_permissions(
         ),
         _ => return Err(EffectError::MissingParam("CastFromZone".to_string())),
     };
+    let constraint = freeze_cast_permission_constraint(state, ability, constraint);
     let graveyard_replacement = cast_from_zone_graveyard_destination(ability);
     // CR 614.1c + CR 122.1: "the creature cast this way enters with a [counter]
     // counter on it" — recorded on the granted permission so the cast
@@ -740,17 +1174,12 @@ pub(crate) fn grant_lingering_permissions(
     let enters_with_modifications = cast_from_zone_enters_with_modifications(ability);
 
     for &obj_id in target_ids {
-        // CR 601.2a: Impulse-draw and similar grants move non-exile cards to
-        // exile before attaching `ExileWithAltCost`. Targeted graveyard grants
-        // (Emry, Lurker in the Loch) and resolution-time hand picks
-        // (Electrodominance) keep the card in its source zone and grant a
-        // permission the casting pipeline consumes in place.
+        // CR 601.2a: Targeted graveyard grants (Emry, Lurker in the Loch) and
+        // resolution-time hand picks (Electrodominance) keep the card in its
+        // source zone and grant a permission the casting pipeline consumes in
+        // place. Current-zone-to-Exile targets arrive here only after their
+        // replacement-safe delivery settled in exile.
         let current_zone = state.objects.get(&obj_id).map(|o| o.zone);
-        if current_zone.is_some_and(|z| z != Zone::Exile && z != Zone::Graveyard && z != Zone::Hand)
-        {
-            zones::move_to_zone(state, obj_id, Zone::Exile, events);
-        }
-
         // CR 118.9: Grant casting permission. Three cases:
         //   - `alt_ability_cost: Some(_)` → `ExileWithAltAbilityCost` (Nashi:
         //     "pay life equal to its mana value rather than paying its mana
@@ -829,10 +1258,39 @@ pub(crate) fn grant_lingering_permissions(
     Ok(())
 }
 
+/// CR 614.1 + CR 616.1 + CR 611.2a: Complete an impulse-draw-class exile
+/// delivery only after every proposed move settles. A redirected card receives
+/// no exile permission; existing Hand/Graveyard/Exile targets retain their
+/// established in-place grant behavior.
+pub(crate) fn complete_lingering_permissions_after_exile_delivery(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    in_place_ids: &[ObjectId],
+    exile_delivery_ids: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    let mut permission_ids = in_place_ids.to_vec();
+    permission_ids.extend(exile_delivery_ids.iter().copied().filter(|obj_id| {
+        state
+            .objects
+            .get(obj_id)
+            .is_some_and(|object| object.zone == Zone::Exile)
+    }));
+    record_lingering_permissions(state, ability, &permission_ids)
+        .expect("CastFromZone batch completion carries a CastFromZone ability");
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+        subject: None,
+    });
+    BatchMoveResult::Done
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::zones;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
@@ -1330,14 +1788,38 @@ mod tests {
             siege_id,
             PlayerId(0),
         );
-        ability.set_source_incarnation_recursive(Some(captured_incarnation));
+        ability.set_test_trigger_source_recursive(
+            captured_incarnation,
+            state.objects[&siege_id].card_id,
+        );
+
+        // CR 400.7j: mirror `resolve_top` — during resolution the resolving entry is
+        // stashed in `state.resolving_stack_entry`, and the self-move re-latch reads
+        // it to record that the resolving ability moved its OWN source. Without this
+        // (as in production) the relatch cannot fire.
+        state.resolving_stack_entry = Some(crate::types::game_state::StackEntry {
+            id: siege_id,
+            source_id: siege_id,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
+                source_id: siege_id,
+                ability: ability.clone(),
+            },
+        });
 
         let mut events = Vec::new();
         zones::move_to_zone(&mut state, siege_id, Zone::Exile, &mut events);
-        assert_eq!(
-            state.objects[&siege_id].incarnation, captured_incarnation,
-            "the engine's self-reference epoch guard is bumped on battlefield entry, so the \
-             Siege defeat zone exit must not make its same-resolution self-cast stale"
+        // CR 400.7: under all-zone incarnation semantics the BF→Exile self-move now
+        // bumps the epoch (it no longer stays stable). CR 400.7j: the re-latch record
+        // captures the from→to incarnation so the same-resolution self-cast still
+        // finds the moved source instead of going stale.
+        assert!(
+            state.objects[&siege_id].incarnation > captured_incarnation,
+            "CR 400.7: the BF→Exile self-move bumps the Siege's incarnation"
+        );
+        assert!(
+            ability.source_is_current(&state),
+            "CR 400.7j: the re-latch keeps the self-cast source current after the move"
         );
         events.clear();
 
@@ -1666,7 +2148,7 @@ mod tests {
             &state.waiting_for,
             WaitingFor::EffectZoneChoice { .. }
         ));
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert!(events.iter().any(|e| matches!(
             e,
             GameEvent::EffectResolved {
@@ -1686,7 +2168,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
 
-        assert!(state.pending_continuation.is_none());
+        assert!(state.active_ability_continuation().is_none());
         assert_eq!(state.objects[&cheap].zone, Zone::Hand);
         assert!(state.objects[&cheap].casting_permissions.is_empty());
     }
@@ -1702,7 +2184,26 @@ mod tests {
         apply_as_current(&mut state, GameAction::SelectCards { cards: vec![cheap] }).unwrap();
 
         assert_eq!(state.objects[&cheap].zone, Zone::Stack);
-        assert!(state.objects[&cheap].casting_permissions.is_empty());
+        assert!(
+            matches!(
+                state.objects[&cheap].casting_permissions.as_slice(),
+                [CastingPermission::ExileWithAltCost {
+                    resolution_cleanup: None,
+                    mana_spend_permission: None,
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications,
+                    ..
+                }] if enters_with_modifications.is_empty()
+            ),
+            "the consumed hand-cast permission must remain only as a neutral stable slot"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        assert!(
+            state.objects[&cheap].casting_permissions.is_empty(),
+            "normal Stack exit cleanup must remove the neutral consumed slot"
+        );
     }
 
     /// CR 118.9 + CR 702.62a + CR 608.2g: The Face of Boe RUNTIME proof. Picking a
@@ -1747,7 +2248,7 @@ mod tests {
         // {1} generic. (If the override leaked the printed {5}, this could not pay
         // and the spell would not reach the stack.)
         for _ in 0..2 {
-            state.add_mana_to_pool(
+            let _ = state.add_mana_to_pool(
                 PlayerId(0),
                 ManaUnit::new(ManaType::Blue, suspended, false, Vec::new()),
             );

@@ -13,6 +13,14 @@ on:
 permissions:
   contents: write
 
+# Serialize per release tag, so a tag-push and a recovery dispatch for the same tag can
+# never build and publish it concurrently. Both triggers resolve to the same group: a push
+# has no `tag` input and carries the tag in ref_name; a dispatch passes it explicitly.
+# Never cancel-in-progress — a half-cancelled release is what leaves a tag stuck.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   resolve-release-ref:
     name: Resolve Release Ref
@@ -24,7 +32,6 @@ jobs:
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       release_sha: ${{ steps.resolve.outputs.release_sha }}
-      is_calver: ${{ steps.resolve.outputs.is_calver }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -52,114 +59,23 @@ jobs:
           git fetch --force --tags origin "refs/tags/$TAG:refs/tags/$TAG"
           SHA=$(git rev-list -n 1 "$TAG")
 
-          if [[ "$TAG" =~ ^v[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}$ ]]; then
-            IS_CALVER=true
-          else
-            IS_CALVER=false
-          fi
-
           echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "is_calver=$IS_CALVER" >> "$GITHUB_OUTPUT"
-
-  tauri-preflight:
-    name: Tauri Preflight
-    needs: [resolve-release-ref]
-    # Fast-fail sanity check before paying for the full release matrix. Catches
-    # the structural class of failures that historically only surfaced 30-45
-    # minutes into the build-tauri job: malformed JSON, version drift between
-    # workspace Cargo.toml / tauri.conf.json / package.json (which
-    # cargo-release-local should keep in sync but won't if the release commit
-    # was hand-edited), and Rust-side compile errors in phase-tauri (excluded
-    # from regular CI's clippy/test runs in ci.yml). Linux-only — caught
-    # 99% of failures historically come from cross-platform-agnostic config or
-    # generic Rust mistakes, not from platform-specific Tauri internals.
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
-      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-
-      - name: Verify tag matches workspace + Tauri + package versions
-        run: |
-          set -euo pipefail
-          TAG="$RELEASE_TAG"
-          EXPECTED="${TAG#v}"
-
-          WORKSPACE_VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
-          TAURI_CONF_VERSION=$(jq -r '.version' client/src-tauri/tauri.conf.json)
-          PACKAGE_JSON_VERSION=$(jq -r '.version' client/package.json)
-
-          fail=0
-          if [ "$WORKSPACE_VERSION" != "$EXPECTED" ]; then
-            echo "::error::Workspace Cargo.toml version $WORKSPACE_VERSION does not match tag $TAG"; fail=1
-          fi
-          if [ "$TAURI_CONF_VERSION" != "$EXPECTED" ]; then
-            echo "::error::tauri.conf.json version $TAURI_CONF_VERSION does not match tag $TAG"; fail=1
-          fi
-          if [ "$PACKAGE_JSON_VERSION" != "$EXPECTED" ]; then
-            echo "::error::client/package.json version $PACKAGE_JSON_VERSION does not match tag $TAG"; fail=1
-          fi
-          [ "$fail" = "0" ]
-
-      - name: Validate Tauri JSON configs
-        run: |
-          set -euo pipefail
-          jq empty client/src-tauri/tauri.conf.json
-          for f in client/src-tauri/capabilities/*.json; do
-            jq empty "$f"
-          done
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache-shared-key: rust-tauri-preflight
-
-      - name: Install Linux Tauri build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
-
-      - name: Stub frontend dist for tauri::generate_context!
-        # `cargo check -p phase-tauri` runs `tauri::generate_context!()` which
-        # needs `frontendDist` (../dist per tauri.conf.json) to exist. We don't
-        # need the real frontend bundle for type-checking — a stub is enough.
-        run: |
-          mkdir -p client/dist
-          echo '<!doctype html><html></html>' > client/dist/index.html
-
-      - name: Stub phase-server sidecar + bundled resources for tauri-build
-        # tauri.conf.json declares `externalBin: ["binaries/phase-server"]`
-        # and bundled data resources, so tauri-build's resource resolver
-        # requires those paths to exist
-        # at check time. The real sidecar / card-data are produced by the
-        # build-tauri matrix; for the preflight we only need the paths to
-        # exist (tauri-build validates existence, not content). Empty
-        # placeholders are sufficient.
-        run: |
-          mkdir -p client/src-tauri/binaries client/public
-          touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
-          touch client/public/card-data.json
-          touch client/public/draft-pools.json
-
-      - name: cargo check phase-tauri
-        # phase-tauri is excluded from the root workspace (client/src-tauri),
-        # so `-p phase-tauri` from the repo root cannot resolve it. Drive the
-        # check via the crate's own manifest instead.
-        run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
 
   build-wasm:
     name: Build WASM + Frontend
-    needs: [resolve-release-ref, tauri-preflight]
+    needs: [resolve-release-ref]
     runs-on: ubuntu-latest
     # Card-data generation grows with the card/deck corpus: this job hit 28m for
     # v0.4.0 and crossed the prior 30m ceiling for v0.5.0 (killed mid-frontend
     # build, stranding the release). Raised to 60m for headroom — the ceiling
     # only bills the failure case, so a normal ~30m run still ends at ~30m.
     timeout-minutes: 60
+    outputs:
+      card_data_sha256: ${{ steps.card-data-hash.outputs.card_data_sha256 }}
+      card_data_hash16: ${{ steps.card-data-hash.outputs.hash }}
+      draft_pools_sha256: ${{ steps.card-data-hash.outputs.draft_pools_sha256 }}
+      draft_pools_hash16: ${{ steps.card-data-hash.outputs.draft_pools_hash16 }}
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
     steps:
@@ -171,6 +87,11 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # Keep .cargo/config.toml's [target.wasm32-unknown-unknown] 16 MiB
+          # shadow-stack rustflags authoritative: an env RUSTFLAGS (this
+          # action's default "-D warnings") would override them and trip
+          # build-wasm.sh's assert_wasm_stack guard.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         with:
@@ -203,8 +124,11 @@ jobs:
       - name: Set cache keys
         id: cache-keys
         run: |
-          echo "week=$(date +%Y-W%V)" >> "$GITHUB_OUTPUT"
           echo "day=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Derive MTGJSON cache key
+        id: mtgjson-key
+        uses: ./.github/actions/mtgjson-cache-key
 
       - name: Cache MTGJSON data
         # Full data/mtgjson dir under the `mtgjson-full-` namespace (shared with
@@ -212,14 +136,16 @@ jobs:
         # distinct from ci.yml's partial `mtgjson-atomic-`/`mtgjson-sets-`
         # caches; all stay under the `mtgjson-` prefix clear-caches.yml deletes.
         #
-        # Exact weekly key, NO restore-keys: a new week misses so gen-card-data.sh
-        # re-fetches fresh MTGJSON data; a restore-keys fallback would pin the
-        # file-existence-gated fetches to last week's data forever.
+        # Exact published-version key (week-based fallback when the probe
+        # fails — see the mtgjson-cache-key action), NO restore-keys: the key
+        # misses exactly when MTGJSON publishes, so gen-card-data.sh re-fetches
+        # fresh data; a restore-keys fallback would pin the file-existence-gated
+        # fetches to stale data forever.
         id: mtgjson-cache
         uses: actions/cache@v4
         with:
           path: data/mtgjson
-          key: mtgjson-full-${{ steps.cache-keys.outputs.week }}
+          key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
 
       # Daily key with NO restore-keys: the gen-scryfall-*.sh scripts skip the
       # download when the file already exists, so a stale restore-key hit would
@@ -285,10 +211,18 @@ jobs:
         # `card-data-<hash>.json` URL baked into the JS bundle. Old browser
         # caches keep resolving their old hash even after a new release.
         run: |
-          HASH=$(sha256sum client/public/card-data.json | awk '{print substr($1, 1, 16)}')
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "filename=card-data-$HASH.json" >> "$GITHUB_OUTPUT"
-          cp client/public/card-data.json "client/public/card-data-$HASH.json"
+          CARD_DATA_SHA256=$(sha256sum client/public/card-data.json | awk '{print $1}')
+          CARD_DATA_HASH16=${CARD_DATA_SHA256:0:16}
+          DRAFT_POOLS_SHA256=$(sha256sum client/public/draft-pools.json | awk '{print $1}')
+          DRAFT_POOLS_HASH16=${DRAFT_POOLS_SHA256:0:16}
+          echo "card_data_sha256=$CARD_DATA_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$CARD_DATA_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=card-data-$CARD_DATA_HASH16.json" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_sha256=$DRAFT_POOLS_SHA256" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_hash16=$DRAFT_POOLS_HASH16" >> "$GITHUB_OUTPUT"
+          echo "draft_pools_filename=draft-pools-$DRAFT_POOLS_HASH16.json" >> "$GITHUB_OUTPUT"
+          cp client/public/card-data.json "client/public/card-data-$CARD_DATA_HASH16.json"
+          echo "Content-addressed data: card-data-$CARD_DATA_HASH16.json, draft-pools-$DRAFT_POOLS_HASH16.json"
 
       - name: Generate Scryfall data
         run: |
@@ -318,28 +252,32 @@ jobs:
           jq --arg h "$CARD_DATA_HASH" '. + {card_data_hash: $h}' client/public/coverage-data.json > client/public/coverage-data.json.tmp
           mv client/public/coverage-data.json.tmp client/public/coverage-data.json
 
-      - name: Stage frontend data files artifact
-        run: |
-          rm -rf release-data
-          mkdir -p release-data
-          while IFS= read -r f; do
-            if [ ! -f "client/public/$f" ]; then
-              echo "::error::Expected data file client/public/$f was not generated"
-              exit 1
-            fi
-            cp "client/public/$f" "release-data/$f"
-          done < <(jq -r '.[]' data-files.json)
-
-      - name: Upload frontend data files artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-data-files
-          path: release-data/*
-          if-no-files-found: error
-          retention-days: 1
-
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
+
+      - name: Compute content-addressed engine WASM filename
+        id: engine-wasm-hash
+        run: |
+          ENGINE_WASM_SHA256=$(sha256sum client/src/wasm/engine_wasm_bg.wasm | awk '{print $1}')
+          ENGINE_WASM_HASH16=${ENGINE_WASM_SHA256:0:16}
+          echo "sha256=$ENGINE_WASM_SHA256" >> "$GITHUB_OUTPUT"
+          echo "hash=$ENGINE_WASM_HASH16" >> "$GITHUB_OUTPUT"
+          echo "filename=engine_wasm_bg-$ENGINE_WASM_HASH16.wasm" >> "$GITHUB_OUTPUT"
+
+      - name: Upload engine WASM to R2
+        # The engine WASM is intentionally uncompressed: wasm-bindgen's
+        # cross-origin streaming initialization needs application/wasm, and the
+        # immutable content-addressed URL below is its cache key.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
+        run: |
+          npx wrangler r2 object put "phase-rs-data/wasm/$ENGINE_WASM_FILENAME" \
+            --file client/src/wasm/engine_wasm_bg.wasm \
+            --remote \
+            --content-type application/wasm \
+            --cache-control "public, max-age=31536000, immutable"
 
       - name: Build frontend
         env:
@@ -348,6 +286,7 @@ jobs:
           # WASM bundle to its content-addressed card-data forever.
           DATA_BASE_URL: "https://data.phase-rs.dev"
           CARD_DATA_URL: "https://data.phase-rs.dev/${{ steps.card-data-hash.outputs.filename }}"
+          ENGINE_WASM_URL: "https://data.phase-rs.dev/wasm/${{ steps.engine-wasm-hash.outputs.filename }}"
           AUDIO_BASE_URL: "https://data.phase-rs.dev/audio"
           # Tagged production release: surfaces the "try the preview build" CTA
           # on the menu (see __IS_RELEASE_BUILD__ in vite.config.ts). The staging
@@ -373,6 +312,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+          DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
         run: |
           # The r2.dev public endpoint does NOT compress on the fly, so these
           # JSONs were served raw. Pre-compress with brotli and store
@@ -380,9 +320,8 @@ jobs:
           # fetch(), which decodes br transparently. q9: ~90% reduction at a
           # fraction of q11's CPU.
           #
-          # Compress into a temp dir, never client/public: card-data.json /
-          # draft-pools.json are re-read after this step and baked UNCOMPRESSED
-          # into the server image (loaded from disk).
+          # Compress into a temp dir, never client/public: content hashes and
+          # release data manifests are over the original uncompressed bytes.
           command -v brotli >/dev/null || { sudo apt-get update && sudo apt-get install -y brotli; }
           BRDIR="$(mktemp -d)"
 
@@ -390,6 +329,11 @@ jobs:
           # over the uncompressed file, so the URL stays a valid content key.
           brotli -q 9 -c "client/public/$CARD_DATA_FILENAME" > "$BRDIR/card-data.br"
           npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "$BRDIR/card-data.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
+
+          # Native/server manifests must pin draft pools to immutable content,
+          # while the mutable draft-pools.json remains in the shared-file loop.
+          brotli -q 9 -c client/public/draft-pools.json > "$BRDIR/draft-pools.br"
+          npx wrangler r2 object put "phase-rs-data/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
           while IFS= read -r f; do
@@ -404,6 +348,8 @@ jobs:
       - name: Verify R2 uploads landed
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+          DRAFT_POOLS_FILENAME: draft-pools-${{ steps.card-data-hash.outputs.draft_pools_hash16 }}.json
+          ENGINE_WASM_FILENAME: ${{ steps.engine-wasm-hash.outputs.filename }}
         run: |
           BASE="https://data.phase-rs.dev"
           fail=0
@@ -424,6 +370,8 @@ jobs:
             fi
           }
           check "$CARD_DATA_FILENAME"
+          check "$DRAFT_POOLS_FILENAME"
+          check "wasm/$ENGINE_WASM_FILENAME"
           while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON.
@@ -438,8 +386,8 @@ jobs:
         # now one line in data-files.json and nothing else.
         #
         # Separately handled:
-        #   - card-data.json (non-manifest; kept in public/ for Tauri + server
-        #     bundles + local dev, but never deployed to Pages)
+        #   - card-data.json (non-manifest; kept in public/ for server bundles
+        #     + local dev, but never deployed to Pages)
         #   - card-data-<16hex>.json[.br] (content-addressed, lives on R2;
         #     glob matches only 16-hex suffixes, cannot match the 4-char
         #     `meta` suffix). This replaces the previous `find -regex` which
@@ -463,24 +411,10 @@ jobs:
           path: client/dist
           retention-days: 90
 
-      - name: Upload card data artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: card-data
-          path: client/public/card-data.json
-          retention-days: 1
-
-      - name: Upload draft pools artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: draft-pools
-          path: client/public/draft-pools.json
-          retention-days: 1
-
   # ── Server binary compile (linux musl, shared) ──────────────────────────────
   # Compiles the static musl binary ONCE per release run. Consumed by both
   # build-server-image (prebuilt Docker image) and build-server's linux leg
-  # (release archive), so neither pays a redundant ~10min compile. Needs nothing
+  # (slim server asset), so neither pays a redundant ~10min compile. Needs nothing
   # the data pipeline produces, so it starts immediately.
   build-server-binary:
     name: Build Server Binary (linux)
@@ -491,6 +425,7 @@ jobs:
       contents: read
     env:
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      PHASE_CHANNEL: release
     steps:
       - uses: actions/checkout@v4
         with:
@@ -508,9 +443,12 @@ jobs:
 
       - name: Build phase-server (static musl)
         # No chmod here: upload-artifact strips the executable bit anyway; both
-        # consumers (image build, archive packaging) re-apply it.
+        # consumers (image build, slim-asset packaging) re-apply it.
         run: |
-          cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
+          # -p scopes feature unification to phase-server's own graph — an
+          # unscoped workspace build unifies feed-scraper's native-tls reqwest
+          # features in, dragging openssl-sys into the musl cross-compile.
+          cargo build -p phase-server --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
           cp target/x86_64-unknown-linux-musl/server-release/phase-server ./phase-server
 
       - name: Upload server binary artifact
@@ -523,7 +461,7 @@ jobs:
 
   build-server-image:
     name: Build Server Image
-    needs: [resolve-release-ref, build-wasm, build-server-binary]
+    needs: [resolve-release-ref, build-server-binary]
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -538,18 +476,6 @@ jobs:
         with:
           ref: ${{ env.RELEASE_SHA }}
 
-      - name: Download card data
-        uses: actions/download-artifact@v4
-        with:
-          name: card-data
-          path: data
-
-      - name: Download draft pools
-        uses: actions/download-artifact@v4
-        with:
-          name: draft-pools
-          path: data
-
       - name: Download server binary
         uses: actions/download-artifact@v4
         with:
@@ -560,8 +486,6 @@ jobs:
         run: |
           test -s phase-server
           chmod +x phase-server
-          test -s data/card-data.json
-          test -s data/draft-pools.json
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -607,6 +531,16 @@ jobs:
       - name: Inject Cloudflare Pages _headers
         run: cp client/deploy/cloudflare-pages/_headers dist/_headers
 
+      - name: Guard Cloudflare Pages asset size limit
+        shell: bash
+        run: |
+          oversized=$(find dist -type f -size +25M -print -quit)
+          if [ -n "$oversized" ]; then
+            size=$(du -h "$oversized" | awk '{print $1}')
+            echo "::error::Cloudflare Pages 25 MiB file limit exceeded: $oversized ($size)"
+            exit 1
+          fi
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
         with:
@@ -645,6 +579,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           cache-shared-key: rust-wasm
+          # Same as the wasm job: broker-wasm needs the config.toml
+          # [target.wasm32-unknown-unknown] shadow-stack rustflags, which an
+          # env RUSTFLAGS would override.
+          rustflags: ""
 
       - uses: taiki-e/install-action@v2
         if: steps.lobby-worker.outputs.exists == 'true'
@@ -678,18 +616,24 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: "4.94.0"
+          wranglerVersion: "4.113.0"
           workingDirectory: lobby-worker
           command: deploy
 
   build-server:
     name: Build Server (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm, build-server-binary]
+    needs: [resolve-release-ref, build-server-binary]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 35
+    # The Windows leg ran ~33-34 min warm against a 35-min ceiling, so any cache
+    # miss tripped the timeout and cancelled the release (a timed-out job reports
+    # as `cancelled`, which fails the publish job's `build-server == success`
+    # gate). The server-release profile change cuts this well below 35; the
+    # headroom here guards against a cold cache or a slow runner.
+    timeout-minutes: 55
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
+      PHASE_CHANNEL: release
     strategy:
       fail-fast: false
       matrix:
@@ -697,18 +641,15 @@ jobs:
           - os: linux
             runner: ubuntu-latest
             triple: x86_64-unknown-linux-musl
-            artifact: phase-server-linux-x86_64
-            archive_ext: tar.gz
+            extension: ""
           - os: macos
             runner: macos-latest
             triple: aarch64-apple-darwin
-            artifact: phase-server-macos-arm64
-            archive_ext: tar.gz
+            extension: ""
           - os: windows
             runner: windows-latest
             triple: x86_64-pc-windows-msvc
-            artifact: phase-server-windows-x86_64
-            archive_ext: zip
+            extension: .exe
     steps:
       - uses: actions/checkout@v4
         with:
@@ -722,7 +663,8 @@ jobs:
         # Linux musl is compiled once in build-server-binary and reused below;
         # only the non-musl targets compile here.
         if: matrix.triple != 'x86_64-unknown-linux-musl'
-        run: cargo build --profile server-release --bin phase-server --target ${{ matrix.triple }}
+        # -p scopes feature unification (see the Linux leg's note).
+        run: cargo build -p phase-server --profile server-release --bin phase-server --target ${{ matrix.triple }}
 
       - name: Download prebuilt linux binary
         # Reuse the single musl build from build-server-binary, placed at the
@@ -733,268 +675,25 @@ jobs:
           name: server-binary-linux
           path: target/x86_64-unknown-linux-musl/server-release
 
-      - name: Download card data
-        uses: actions/download-artifact@v4
-        with:
-          name: card-data
-          path: staging/data
-
-      - name: Download draft pools
-        uses: actions/download-artifact@v4
-        with:
-          name: draft-pools
-          path: staging/data
-
-      - name: Package server archive (Unix)
+      - name: Prepare slim server binary (Unix)
         if: matrix.os != 'windows'
         run: |
-          TAG="$RELEASE_TAG"
-          mkdir -p staging
-          cp "target/${{ matrix.triple }}/server-release/phase-server" staging/
-          chmod +x staging/phase-server
-          cd staging
-          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json data/draft-pools.json
+          cp "target/${{ matrix.triple }}/server-release/phase-server" "phase-server-slim-${{ matrix.triple }}"
+          chmod +x "phase-server-slim-${{ matrix.triple }}"
         shell: bash
 
-      - name: Package server archive (Windows)
+      - name: Prepare slim server binary (Windows)
         if: matrix.os == 'windows'
         run: |
-          $Tag = $env:RELEASE_TAG
-          Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "staging/"
-          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json","staging/data/draft-pools.json" -DestinationPath "${{ matrix.artifact }}.zip"
+          Copy-Item "target/${{ matrix.triple }}/server-release/phase-server.exe" "phase-server-slim-${{ matrix.triple }}.exe"
         shell: pwsh
 
-      - name: Generate checksum (Unix)
-        if: matrix.os != 'windows'
-        run: shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
-
-      - name: Generate checksum (Windows)
-        if: matrix.os == 'windows'
-        run: |
-          $hash = (Get-FileHash "${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding utf8 "${{ matrix.artifact }}.zip.sha256"
-        shell: pwsh
-
-      - name: Upload server archive
+      - name: Upload slim server binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.artifact }}.${{ matrix.archive_ext }}
-            ${{ matrix.artifact }}.${{ matrix.archive_ext }}.sha256
-          retention-days: 90
-
-  build-tauri:
-    name: Build Tauri (${{ matrix.os }})
-    needs: [resolve-release-ref, tauri-preflight, build-wasm]
-    runs-on: ${{ matrix.runner }}
-    env:
-      RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: linux
-            runner: ubuntu-latest
-            artifact: phase-tauri-linux
-            sidecar_triple: x86_64-unknown-linux-gnu
-          - os: macos
-            runner: macos-latest
-            artifact: phase-tauri-macos
-            sidecar_triple: aarch64-apple-darwin
-          - os: windows
-            runner: windows-latest
-            artifact: phase-tauri-windows
-            sidecar_triple: x86_64-pc-windows-msvc
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.RELEASE_SHA }}
-
-      - name: Check macOS signing secrets
-        id: macos-signing
-        if: matrix.os == 'macos'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-            if [ -z "${!name:-}" ]; then
-              echo "::warning::Missing macOS signing secret: ${name}"
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            echo "::warning::Skipping macOS Tauri build — Apple signing secrets not configured. The .dmg requires notarization to avoid Gatekeeper errors."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-        shell: bash
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        if: steps.macos-signing.outputs.skip != 'true'
-        with:
-          target: wasm32-unknown-unknown
-          cache-shared-key: rust-tauri-${{ matrix.os }}
-
-      - uses: taiki-e/install-action@v2
-        if: steps.macos-signing.outputs.skip != 'true'
-        with:
-          tool: wasm-bindgen-cli@0.2.121
-
-      - name: Install binaryen (Linux)
-        if: matrix.os == 'linux'
-        run: |
-          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
-          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
-
-      - name: Install binaryen (macOS)
-        if: matrix.os == 'macos' && steps.macos-signing.outputs.skip != 'true'
-        run: brew install binaryen
-
-      - name: Install binaryen (Windows)
-        if: matrix.os == 'windows'
-        run: |
-          curl -L -o binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-windows.tar.gz
-          tar xzf binaryen.tar.gz
-          echo "$PWD\binaryen-version_123\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-        shell: pwsh
-
-      - uses: pnpm/action-setup@v4
-        if: steps.macos-signing.outputs.skip != 'true'
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        if: steps.macos-signing.outputs.skip != 'true'
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: client/pnpm-lock.yaml
-
-      - name: Install system dependencies (Linux)
-        if: matrix.os == 'linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf musl-tools
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Download card data
-        if: steps.macos-signing.outputs.skip != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: card-data
-          path: client/public
-
-      - name: Download frontend data files
-        if: steps.macos-signing.outputs.skip != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-data-files
-          path: client/public
-
-      - name: Verify Tauri bundled data files
-        if: steps.macos-signing.outputs.skip != 'true'
-        run: |
-          test -s client/public/card-data.json
-          node - <<'NODE'
-          const fs = require("fs");
-          const files = JSON.parse(fs.readFileSync("data-files.json", "utf8"));
-          for (const file of files) {
-            const path = `client/public/${file}`;
-            const stat = fs.statSync(path);
-            if (stat.size === 0) throw new Error(`${path} is empty`);
-          }
-          NODE
-        shell: bash
-
-      - name: Build phase-server sidecar
-        if: steps.macos-signing.outputs.skip != 'true'
-        run: |
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            cargo build --profile server-release --bin phase-server --target x86_64-unknown-linux-musl
-          else
-            cargo build --profile server-release --bin phase-server
-          fi
-          mkdir -p client/src-tauri/binaries
-        shell: bash
-
-      - name: Place sidecar binary (Unix)
-        if: matrix.os != 'windows' && steps.macos-signing.outputs.skip != 'true'
-        run: |
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            cp target/x86_64-unknown-linux-musl/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
-          else
-            cp target/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
-          fi
-
-      - name: Place sidecar binary (Windows)
-        if: matrix.os == 'windows'
-        run: Copy-Item "target/server-release/phase-server.exe" "client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}.exe"
-        shell: pwsh
-
-      - name: Build WASM for Tauri
-        if: steps.macos-signing.outputs.skip != 'true'
-        run: ./scripts/build-wasm.sh release
-        shell: bash
-
-      - name: Install frontend dependencies
-        if: steps.macos-signing.outputs.skip != 'true'
-        run: cd client && pnpm install --frozen-lockfile
-
-      - name: Build Tauri
-        if: steps.macos-signing.outputs.skip != 'true'
-        uses: tauri-apps/tauri-action@v0
-        env:
-          # tauri-action runs beforeBuildCommand (pnpm build) as a child process,
-          # so this reaches vite.config.ts. Surfaces the preview-build CTA in the
-          # desktop app too (it routes through openExternal → shell open).
-          RELEASE_BUILD: "true"
-          # Cloud-sync config reaches vite.config.ts via the same beforeBuildCommand
-          # path; without these the desktop build ships with cloud sync disabled.
-          # Anon key is client-safe (RLS gates access).
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          # Telemetry ingest define reaches vite.config.ts via the same
-          # beforeBuildCommand path as the Supabase vars above.
-          TELEMETRY_URL: "https://lobby.phase-rs.dev/telemetry"
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        with:
-          projectPath: client
-
-      - name: Stage Tauri artifacts
-        if: steps.macos-signing.outputs.skip != 'true'
-        run: |
-          mkdir -p staging
-          find client/src-tauri/target/release/bundle \
-            -maxdepth 2 \
-            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.AppImage.sig' \
-               -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \
-               -o -name '*.exe' -o -name '*.exe.sig' \) \
-            -exec cp {} staging/ \;
-          ls -la staging/
-        shell: bash
-
-      - name: Upload Tauri artifact
-        if: steps.macos-signing.outputs.skip != 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: staging/*
+          name: phase-server-slim-${{ matrix.triple }}
+          path: phase-server-slim-${{ matrix.triple }}${{ matrix.extension }}
+          if-no-files-found: error
           retention-days: 90
 
   deploy-server:
@@ -1061,25 +760,24 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [resolve-release-ref, build-wasm, build-server, build-server-image, build-tauri]
-    # CalVer production releases require full Tauri updater output so the
-    # stable desktop updater never points at a partial nightly. Legacy v0.*
-    # releases keep the older permissive behavior.
+    needs: [resolve-release-ref, build-wasm, build-server, build-server-image]
     if: >-
       always() &&
       needs.build-wasm.result == 'success' &&
       needs.build-server.result == 'success' &&
-      needs.build-server-image.result == 'success' &&
-      (
-        needs.build-tauri.result == 'success' ||
-        (needs.resolve-release-ref.outputs.is_calver != 'true' && needs.build-tauri.result == 'failure')
-      )
+      needs.build-server-image.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       RELEASE_TAG: ${{ needs.resolve-release-ref.outputs.release_tag }}
       RELEASE_SHA: ${{ needs.resolve-release-ref.outputs.release_sha }}
-      IS_CALVER: ${{ needs.resolve-release-ref.outputs.is_calver }}
+      CARD_DATA_SHA256: ${{ needs.build-wasm.outputs.card_data_sha256 }}
+      CARD_DATA_HASH16: ${{ needs.build-wasm.outputs.card_data_hash16 }}
+      DRAFT_POOLS_SHA256: ${{ needs.build-wasm.outputs.draft_pools_sha256 }}
+      DRAFT_POOLS_HASH16: ${{ needs.build-wasm.outputs.draft_pools_hash16 }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1091,84 +789,96 @@ jobs:
         with:
           path: artifacts
 
-      - name: Generate updater manifest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Sign slim server artifacts and publish release data manifest
+        # Sign in this Ubuntu finisher so all three OS binaries use one trusted
+        # signing path. The versioned manifest is immutable; its final PUT is
+        # performed after its detached signature exists.
         run: |
           set -euo pipefail
 
-          TAG="$RELEASE_TAG"
-          REPO="${GITHUB_REPOSITORY}"
-          shopt -s nullglob
+          sudo apt-get update
+          sudo apt-get install -y minisign
 
-          first_match() {
-            local pattern="$1"
-            local match
-            match=$(compgen -G "$pattern" | sort | head -1 || true)
-            printf '%s' "$match"
+          WORKSPACE_VERSION=$(awk '
+            /^\[workspace\.package\]/ { in_workspace_package = 1; next }
+            /^\[/ { in_workspace_package = 0 }
+            in_workspace_package && /^version = "/ {
+              gsub(/version = "|"/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          test -n "$WORKSPACE_VERSION"
+          test "$RELEASE_TAG" = "v$WORKSPACE_VERSION"
+
+          umask 077
+          key_file=$(mktemp)
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s' "$SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY" > "$key_file"
+
+          sign() {
+            printf '\n' | minisign -S -s "$key_file" -m "$1" -x "$1.minisig"
           }
 
-          artifact_url() {
-            local path="$1"
-            local name
-            name=$(basename "$path")
-            printf 'https://github.com/%s/releases/download/%s/%s' \
-              "$REPO" "$TAG" "$(jq -rn --arg value "$name" '$value | @uri')"
-          }
+          for triple in \
+            x86_64-unknown-linux-musl \
+            aarch64-apple-darwin \
+            x86_64-pc-windows-msvc; do
+            binary="artifacts/phase-server-slim-$triple/phase-server-slim-$triple"
+            if [ "$triple" = x86_64-pc-windows-msvc ]; then
+              binary="$binary.exe"
+            fi
+            test -s "$binary"
+            sign "$binary"
+          done
 
-          # Read signatures for available platforms (skip missing ones).
-          # Tauri v2 v3-compatible updater format: the raw installer is the
-          # updater payload (`.AppImage`, `-setup.exe`, `.app.tar.gz`); each
-          # has a sibling `.sig`. Set in tauri.conf.json: createUpdaterArtifacts: true.
-          LINUX_PAYLOAD=$(first_match "artifacts/phase-tauri-linux/*.AppImage")
-          MACOS_PAYLOAD=$(first_match "artifacts/phase-tauri-macos/*.app.tar.gz")
-          WINDOWS_PAYLOAD=$(first_match "artifacts/phase-tauri-windows/*-setup.exe")
+          manifest="release-server-v$WORKSPACE_VERSION.json"
+          generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # sha256 is over UNCOMPRESSED bytes; R2 serves these objects with Content-Encoding: br unconditionally — consumers MUST brotli-decode before hashing.
+          jq -n \
+            --arg version "$WORKSPACE_VERSION" \
+            --arg generated_at "$generated_at" \
+            --arg card_data_sha256 "$CARD_DATA_SHA256" \
+            --arg card_data_url "https://data.phase-rs.dev/card-data-$CARD_DATA_HASH16.json" \
+            --arg draft_pools_sha256 "$DRAFT_POOLS_SHA256" \
+            --arg draft_pools_url "https://data.phase-rs.dev/draft-pools-$DRAFT_POOLS_HASH16.json" \
+            '{
+              schema: 1,
+              channel: "release",
+              version: $version,
+              generated_at: $generated_at,
+              data: [
+                {name: "card-data.json", sha256: $card_data_sha256, url: $card_data_url},
+                {name: "draft-pools.json", sha256: $draft_pools_sha256, url: $draft_pools_url}
+              ]
+            }' > "$manifest"
+          sign "$manifest"
 
-          LINUX_SIG=""
-          MACOS_SIG=""
-          WINDOWS_SIG=""
-          if [ -n "$LINUX_PAYLOAD" ] && [ -f "$LINUX_PAYLOAD.sig" ]; then LINUX_SIG=$(cat "$LINUX_PAYLOAD.sig"); fi
-          if [ -n "$MACOS_PAYLOAD" ] && [ -f "$MACOS_PAYLOAD.sig" ]; then MACOS_SIG=$(cat "$MACOS_PAYLOAD.sig"); fi
-          if [ -n "$WINDOWS_PAYLOAD" ] && [ -f "$WINDOWS_PAYLOAD.sig" ]; then WINDOWS_SIG=$(cat "$WINDOWS_PAYLOAD.sig"); fi
+          npx wrangler r2 object put "phase-rs-data/desktop/$manifest.minisig" --file "$manifest.minisig" --remote --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+          npx wrangler r2 object put "phase-rs-data/desktop/$manifest" --file "$manifest" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
 
-          if [ "$IS_CALVER" = "true" ]; then
-            missing=0
-            if [ -z "$LINUX_PAYLOAD" ] || [ -z "$LINUX_SIG" ]; then echo "::error::Missing Linux updater payload/signature for CalVer release"; missing=1; fi
-            if [ -z "$MACOS_PAYLOAD" ] || [ -z "$MACOS_SIG" ]; then echo "::error::Missing macOS updater payload/signature for CalVer release"; missing=1; fi
-            if [ -z "$WINDOWS_PAYLOAD" ] || [ -z "$WINDOWS_SIG" ]; then echo "::error::Missing Windows updater payload/signature for CalVer release"; missing=1; fi
-            [ "$missing" = "0" ]
-          fi
+      - name: Download shell updater migration bridge
+        id: shell-updater-bridge
+        run: |
+          set -euo pipefail
 
-          # Build platforms object with only available platforms
-          PLATFORMS="{"
-          SEP=""
-          if [ -n "$LINUX_PAYLOAD" ] && [ -n "$LINUX_SIG" ]; then
-            LINUX_URL=$(artifact_url "$LINUX_PAYLOAD")
-            PLATFORMS="${PLATFORMS}${SEP}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"${LINUX_URL}\"}"
-            SEP=","
-          fi
-          if [ -n "$MACOS_PAYLOAD" ] && [ -n "$MACOS_SIG" ]; then
-            MACOS_URL=$(artifact_url "$MACOS_PAYLOAD")
-            PLATFORMS="${PLATFORMS}${SEP}\"darwin-aarch64\":{\"signature\":\"${MACOS_SIG}\",\"url\":\"${MACOS_URL}\"}"
-            SEP=","
-          fi
-          if [ -n "$WINDOWS_PAYLOAD" ] && [ -n "$WINDOWS_SIG" ]; then
-            WINDOWS_URL=$(artifact_url "$WINDOWS_PAYLOAD")
-            PLATFORMS="${PLATFORMS}${SEP}\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"${WINDOWS_URL}\"}"
-          fi
-          PLATFORMS="${PLATFORMS}}"
-
-          if [ "$PLATFORMS" = "{}" ]; then
-            echo "::warning::No signed updater artifacts found — skipping update.json"
+          bridge=$(mktemp)
+          status=$(curl -sS -L -o "$bridge" -w '%{http_code}' \
+            --connect-timeout 5 \
+            --max-time 30 \
+            https://data.phase-rs.dev/desktop/update.json || true)
+          if [ "$status" = "200" ]; then
+            mv "$bridge" artifacts/update.json
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Attached the current shell updater manifest for legacy desktop clients."
           else
-            # Tauri's plugin-updater parses `version` through Rust's `semver`
-            # crate, which rejects a leading `v`. Strip it (URL paths above
-            # already do this with `${TAG#v}`).
-            VERSION="${TAG#v}"
-            echo "{\"version\":\"${VERSION}\",\"notes\":\"Release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
-              | jq . > artifacts/update.json
-          fi
-
-          if [ "$IS_CALVER" = "true" ]; then
-            test -s artifacts/update.json
+            rm -f "$bridge"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Shell updater manifest unavailable (HTTP ${status:-curl failure}); publishing without the migration bridge."
           fi
 
       - name: Generate changelog
@@ -1206,17 +916,21 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
-          fail_on_unmatched_files: ${{ env.IS_CALVER == 'true' }}
+          fail_on_unmatched_files: true
           files: |
-            artifacts/phase-server-linux-x86_64/*.tar.gz
-            artifacts/phase-server-linux-x86_64/*.sha256
-            artifacts/phase-server-macos-arm64/*.tar.gz
-            artifacts/phase-server-macos-arm64/*.sha256
-            artifacts/phase-server-windows-x86_64/*.zip
-            artifacts/phase-server-windows-x86_64/*.sha256
-            artifacts/phase-tauri-linux/*.deb
-            artifacts/phase-tauri-linux/*.AppImage
-            artifacts/phase-tauri-macos/*.dmg
-            artifacts/phase-tauri-macos/*.app.tar.gz
-            artifacts/phase-tauri-windows/*.exe
-            artifacts/update.json
+            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
+            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
+            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
+            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
+            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
+            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
+            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
+
+      - name: Attach shell updater migration bridge
+        if: steps.shell-updater-bridge.outputs.available == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          fail_on_unmatched_files: true
+          files: artifacts/update.json

@@ -202,6 +202,7 @@ pub fn resolve_open(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::OpenAttractions,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }
@@ -215,6 +216,7 @@ pub fn resolve_roll_to_visit(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::RollToVisitAttractions,
         source_id: ability.source_id,
+        subject: None,
     });
     Ok(())
 }

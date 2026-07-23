@@ -147,9 +147,13 @@ pub fn handle_priority_pass_with_limit(
 /// bookkeeping team-level, ordered by each team's representative.
 fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
     let canonical_current = super::topology::priority_pass_representative(state, current);
+    // CR 101.4 + CR 117.3d: `participants` is APNAP order, which already honors
+    // `turn_direction`, so the main walk below inherits the reversal. The two
+    // fallbacks (passer not in `participants`, or all have passed) resolve "the
+    // next player in turn order" (CR 117.3d) and so must also honor direction.
     let participants = super::topology::priority_pass_participants(state);
     let Some(current_idx) = participants.iter().position(|&id| id == canonical_current) else {
-        return players::next_player(state, canonical_current);
+        return players::next_player_in_turn_order(state, canonical_current);
     };
     for offset in 1..=participants.len() {
         let idx = (current_idx + offset) % participants.len();
@@ -158,7 +162,7 @@ fn next_priority_player(state: &GameState, current: PlayerId) -> PlayerId {
             return candidate;
         }
     }
-    players::next_player(state, canonical_current)
+    players::next_player_in_turn_order(state, canonical_current)
 }
 
 /// CR 117.4: Clear consecutive priority pass bookkeeping without changing who holds priority.

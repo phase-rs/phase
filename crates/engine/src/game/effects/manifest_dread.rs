@@ -26,6 +26,7 @@ pub fn resolve(
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
+            subject: None,
         });
         return Ok(());
     }
@@ -68,6 +69,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
+        subject: None,
     });
 
     Ok(())
@@ -278,7 +280,7 @@ mod tests {
             "Expected ManifestDreadChoice, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
 
         // Submit selection
         use crate::game::engine::apply_as_current;

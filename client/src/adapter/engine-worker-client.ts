@@ -11,6 +11,7 @@ import type {
   GameState,
   LegalActionsResult,
   MatchConfig,
+  ReplayHeader,
   SubmitResult,
   ViewerSnapshot,
 } from "./types";
@@ -20,7 +21,6 @@ import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
 type EngineResponse =
-  | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
   | { type: "error"; id: number; message: string; bracketViolation?: true };
 
@@ -34,6 +34,15 @@ type EngineResponse =
  * load, game init, batch resolve, restore).
  */
 const ENGINE_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Hard deadline for the initial WASM worker handshake. Unlike gameplay
+ * watchdogs, initialization has no useful late-response path: rejecting lets
+ * WasmAdapter dispose the stalled worker and activate its main-thread fallback.
+ */
+const ENGINE_INITIALIZATION_TIMEOUT_MS = 30_000;
+
+type RequestTimeoutBehavior = "notify" | "reject";
 
 /**
  * Watchdog timeout for AI search round-trips (getAiAction /
@@ -60,25 +69,15 @@ export class EngineWorkerClient {
       slowNotified?: boolean;
     }
   >();
-  private readyPromise: Promise<void>;
-  private readyResolve!: () => void;
-
   constructor() {
     this.worker = new Worker(
       new URL("./engine-worker.ts", import.meta.url),
       { type: "module" },
     );
 
-    this.readyPromise = new Promise<void>((resolve) => {
-      this.readyResolve = resolve;
-    });
-
     this.worker.onmessage = (e: MessageEvent<EngineResponse>) => {
       const msg = e.data;
       switch (msg.type) {
-        case "ready":
-          this.readyResolve();
-          break;
         case "result": {
           const entry = this.pending.get(msg.id);
           if (entry) {
@@ -120,21 +119,32 @@ export class EngineWorkerClient {
   /**
    * Post a typed message to the worker and resolve when it replies.
    *
-   * `timeoutMs` arms a watchdog: if the worker doesn't reply within the
-   * window, the pending entry stays alive and the UI is notified that the
-   * request is slow. This is applied ONLY to gameplay round-trips (see call
-   * sites below) — never to bulk/long setup calls (card-DB load, game init,
-   * batch resolve, restore), where a long runtime is expected. A late worker
-   * reply still resolves the original promise and clears the dispatch mutex.
+   * `timeoutMs` arms a watchdog. The default `notify` behavior keeps a slow
+   * gameplay request alive and informs the UI, allowing a late reply to resolve
+   * normally. The initialization-only `reject` behavior removes and rejects a
+   * stalled request so the adapter can fall back. Bulk setup calls (card-DB
+   * load, game init, batch resolve, restore) deliberately have no timeout.
    */
-  private request<T>(message: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  private request<T>(
+    message: Record<string, unknown>,
+    timeoutMs?: number,
+    timeoutBehavior: RequestTimeoutBehavior = "notify",
+  ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       const timer =
         timeoutMs !== undefined
           ? setTimeout(() => {
               const entry = this.pending.get(id);
-              if (entry && !entry.slowNotified) {
+              if (!entry) return;
+              if (timeoutBehavior === "reject") {
+                this.pending.delete(id);
+                entry.reject(
+                  new Error(
+                    `Engine worker ${String(message.type)} timed out after ${timeoutMs}ms`,
+                  ),
+                );
+              } else if (!entry.slowNotified) {
                 entry.slowNotified = true;
                 notifyEngineSlow(`${String(message.type)}-timeout`);
               }
@@ -150,8 +160,11 @@ export class EngineWorkerClient {
   }
 
   async initialize(): Promise<void> {
-    this.worker.postMessage({ type: "init" });
-    await this.readyPromise;
+    await this.request<null>(
+      { type: "init" },
+      ENGINE_INITIALIZATION_TIMEOUT_MS,
+      "reject",
+    );
   }
 
   async loadCardDb(text: string): Promise<number> {
@@ -164,6 +177,18 @@ export class EngineWorkerClient {
 
   async evaluateDeckCompatibility(request: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
+  }
+
+  async getCardFaceData(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardFaceData", cardName });
+  }
+
+  async getCardParseDetails(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardParseDetails", cardName });
+  }
+
+  async getCardRulings(cardName: string): Promise<unknown> {
+    return this.request<unknown>({ type: "getCardRulings", cardName });
   }
 
   /**
@@ -213,6 +238,13 @@ export class EngineWorkerClient {
     );
   }
 
+  async previewManaPayment(actor: number, action: GameAction): Promise<number[]> {
+    return this.request<number[]>(
+      { type: "previewManaPayment", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
   async getState(): Promise<GameState> {
     return this.request<GameState>({ type: "getState" }, ENGINE_REQUEST_TIMEOUT_MS);
   }
@@ -227,6 +259,19 @@ export class EngineWorkerClient {
   async getLegalActions(): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>(
       { type: "getLegalActions" },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  /**
+   * Atomic state + legal-actions read. The worker services this as one
+   * synchronous block, so the pair can never straddle an engine advance.
+   * Same timeout class as `getState`. The caller (`WasmAdapter.getSnapshot`)
+   * stamps the `seq` on arrival.
+   */
+  async getSnapshot(): Promise<{ state: GameState; legalResult: LegalActionsResult }> {
+    return this.request<{ state: GameState; legalResult: LegalActionsResult }>(
+      { type: "getSnapshot" },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -376,6 +421,50 @@ export class EngineWorkerClient {
 
   async estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
     return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", deck });
+  }
+
+  // ── Replay system ──────────────────────────────────────────────────────
+  // Recording (hasReplayRecording / exportReplayLog) reads the in-progress
+  // recording WASM auto-starts alongside the live game. Playback
+  // (loadReplayForPlayback / replaySeek / replayLength / replayHeader /
+  // clearReplayPlayback) is independent of the live game entirely — a
+  // `ReplayAdapter` typically owns its own `EngineWorkerClient` instance so
+  // viewing a replay never touches an in-progress game's worker.
+
+  async hasReplayRecording(): Promise<boolean> {
+    return this.request<boolean>({ type: "hasReplayRecording" });
+  }
+
+  /** Serialize the current game's replay recording, suitable for downloading. */
+  async exportReplayLog(): Promise<string> {
+    return this.request<string>({ type: "exportReplayLog" });
+  }
+
+  /** Load a replay (the JSON `exportReplayLog` produced) for scrubbing. Returns the recorded action count. */
+  async loadReplayForPlayback(replayJson: string): Promise<number> {
+    return this.request<number>({ type: "loadReplayForPlayback", replayJson });
+  }
+
+  async replayLength(): Promise<number> {
+    return this.request<number>({ type: "replayLength" });
+  }
+
+  async replayHeader(): Promise<ReplayHeader | null> {
+    return this.request<ReplayHeader | null>({ type: "replayHeader" });
+  }
+
+  /**
+   * Seek the loaded replay to `target` (clamped to its length). Returns the
+   * raw `{ state, derived }` wire envelope (or `null`) — same shape
+   * `get_game_state` returns — so callers unwrap it the same way
+   * `wasm-adapter.ts`'s `unwrapClientGameState` does for live games.
+   */
+  async replaySeek(target: number): Promise<unknown> {
+    return this.request<unknown>({ type: "replaySeek", target });
+  }
+
+  async clearReplayPlayback(): Promise<void> {
+    await this.request<null>({ type: "clearReplayPlayback" });
   }
 
   dispose(): void {

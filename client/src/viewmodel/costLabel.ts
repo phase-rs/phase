@@ -45,6 +45,37 @@ export function manaCostToShards(cost: ManaCost): string[] {
   return shards;
 }
 
+/**
+ * Decide which mana cost to overlay on a castable card and whether to flag it
+ * as cost-reduced. The engine is the sole authority on the effective cost
+ * (`spellCosts[id]`, from `display_spell_cost`); this only chooses the DISPLAY
+ * value and its styling.
+ *
+ * A card with no printed mana cost (token, Ancestral Vision) is naturally free
+ * and is never flagged reduced. A real printed `Cost` that the engine lowered —
+ * to a smaller `Cost`, or all the way to `NoCost` via a "cast without paying its
+ * mana cost" permission (Omniscience, CR 118.9) — IS reduced, so `ManaCostPips`
+ * forces a green-ringed {0} rather than rendering nothing.
+ */
+export function spellCostDisplay(
+  effectiveCost: ManaCost | undefined,
+  printedCost: ManaCost,
+): { displayCost: ManaCost; isReduced: boolean } {
+  const displayCost = effectiveCost ?? printedCost;
+  const printedIsRealCost = printedCost.type === "Cost";
+  const reducedToSmaller =
+    effectiveCost?.type === "Cost" &&
+    printedIsRealCost &&
+    (effectiveCost.generic < printedCost.generic ||
+      effectiveCost.shards.length < printedCost.shards.length);
+  // CR 118.9: "cast without paying its mana cost" (Omniscience) is an
+  // alternative cost, reported here as NoCost. CR 118.9c: it doesn't change the
+  // printed mana cost, so against a real printed cost this is a reduction to
+  // {0}, not a naturally-free card.
+  const reducedToFree = effectiveCost?.type === "NoCost" && printedIsRealCost;
+  return { displayCost, isReduced: reducedToSmaller || reducedToFree };
+}
+
 /** Extract the mana component of an activation/additional ability cost for payment UI. */
 export function abilityCostToManaShards(cost: SerializedAbilityCost | undefined): string[] | null {
   if (!cost) return null;
@@ -177,12 +208,53 @@ function quantityIsPlural(q: QuantityExpr | number | undefined): boolean {
   return q.type === "Fixed" ? q.value > 1 : true;
 }
 
+// mana-font ships loyalty numerals only for these magnitudes (0–20 and 25);
+// any other value has no glyph and must fall back to plain text.
+const LOYALTY_NUMERALS: ReadonlySet<number> = new Set([
+  ...Array.from({ length: 21 }, (_, i) => i),
+  25,
+]);
+
+// Single source of truth for a loyalty amount's sign → mana-font direction
+// segment + magnitude, shared by the text label (formatCost) and the icon
+// helpers so the two can never drift on how they classify +/−/0.
+function loyaltyDirection(amount: number): {
+  dir: "up" | "down" | "zero";
+  magnitude: number;
+} {
+  if (amount > 0) return { dir: "up", magnitude: amount };
+  if (amount < 0) return { dir: "down", magnitude: -amount };
+  return { dir: "zero", magnitude: 0 };
+}
+
+/**
+ * mana-font classes for a planeswalker ability's loyalty COST (e.g. `+2`, `−7`,
+ * `0`) — an up/down/zero arrow plus the numeral. Returns null when the
+ * magnitude has no shipped numeral glyph (caller falls back to text).
+ */
+export function loyaltyIconClasses(amount: number): string | null {
+  const { dir, magnitude } = loyaltyDirection(amount);
+  if (!LOYALTY_NUMERALS.has(magnitude)) return null;
+  return `ms-loyalty-${dir} ms-loyalty-${magnitude}`;
+}
+
+/**
+ * mana-font classes for a planeswalker's current loyalty TOTAL rendered in the
+ * shield glyph (`ms-loyalty-start` + numeral). Returns null when the total has
+ * no shipped numeral glyph (caller keeps the plain amber badge).
+ */
+export function loyaltyStartIconClasses(amount: number): string | null {
+  if (!LOYALTY_NUMERALS.has(amount)) return null;
+  return `ms-loyalty-start ms-loyalty-${amount}`;
+}
+
 export function formatCost(cost: SerializedCost): string {
   switch (cost.type) {
     case "Loyalty": {
       // CR 606.1: Loyalty cost is always a literal `i32` on the Rust side.
       const amt = (typeof cost.amount === "number" ? cost.amount : 0);
-      return amt > 0 ? `+${amt}` : `${amt}`;
+      const { dir, magnitude } = loyaltyDirection(amt);
+      return dir === "up" ? `+${magnitude}` : dir === "down" ? `-${magnitude}` : "0";
     }
     case "Tap": return "{T}";
     case "Untap": return "{Q}";
@@ -217,6 +289,32 @@ export function formatCost(cost: SerializedCost): string {
     default:
       return "Activate";
   }
+}
+
+/**
+ * Loyalty badge descriptor for a planeswalker ability cost, or null when the
+ * cost isn't a Loyalty cost. Reads the structured `{ type: "Loyalty", amount
+ * }` cost — never parses "+N" strings. `text` is the plain fallback when the
+ * mana font has no matching numeral glyph ("+2" / "-7" / "0").
+ */
+export function loyaltyBadge(
+  cost: SerializedAbilityCost | undefined,
+): { amount: number; iconClasses: string | null; text: string } | null {
+  const c = cost as SerializedCost | undefined;
+  if (!c || c.type !== "Loyalty") return null;
+  const amount = typeof c.amount === "number" ? c.amount : 0;
+  const iconClasses = loyaltyIconClasses(amount);
+  return { amount, iconClasses, text: formatCost(c) };
+}
+
+/**
+ * Strip a leading bracket/bare loyalty-cost prefix ("[+2]:", "[−1]", "+2:",
+ * "0") from a label so it isn't shown twice alongside a loyalty badge. Only
+ * applied to options that already resolved to a loyalty badge, so it can't
+ * over-strip a non-loyalty label.
+ */
+export function stripLoyaltyCostPrefix(label: string): string {
+  return label.replace(/^\[?\s*[+\-−–]?\d+\s*\]?:?\s*/, "");
 }
 
 export function abilityLabel(ability: SerializedAbility | null | undefined): string {

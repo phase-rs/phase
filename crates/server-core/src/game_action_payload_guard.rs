@@ -12,7 +12,8 @@
 //! it only blocks payloads engineered to force large allocations/clones.
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::counter::CounterType;
-use engine::types::game_state::ManaChoice;
+use engine::types::game_state::{ManaChoice, ProductionOverride};
+use engine::types::mana::{ManaRestriction, ManaSourceSelection, SpellCostCriterion};
 use engine::types::proposed_event::TokenCharacteristics;
 use serde::Serialize;
 
@@ -33,6 +34,11 @@ pub const MAX_CHOICE_LEN: usize = 256;
 /// engine reducers.
 pub const MAX_DEBUG_AST_JSON_LEN: usize = 16 * 1024;
 
+/// Max cumulative bytes accepted across all free-form strings in one semantic
+/// mana-source selection. Individual strings remain subject to
+/// [`MAX_CHOICE_LEN`].
+pub const MAX_MANA_SELECTION_STRING_BYTES: usize = 16 * 1024;
+
 fn bound_list(field: &str, len: usize) -> Result<(), String> {
     if len > MAX_ACTION_LIST_LEN {
         return Err(format!(
@@ -52,6 +58,169 @@ fn bound_string(field: &str, value: &str) -> Result<(), String> {
             "{field} is {} bytes; at most {MAX_CHOICE_LEN} allowed",
             value.len()
         ));
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct ManaSelectionPayloadBudget {
+    entries: usize,
+    string_bytes: usize,
+}
+
+impl ManaSelectionPayloadBudget {
+    fn consume_list(&mut self, field: &str, len: usize) -> Result<(), String> {
+        bound_list(field, len)?;
+        self.entries = self
+            .entries
+            .checked_add(len)
+            .ok_or_else(|| format!("{field} makes the cumulative entry count overflow"))?;
+        if self.entries > MAX_ACTION_LIST_LEN {
+            return Err(format!(
+                "{field} makes the cumulative entry count {}; at most {MAX_ACTION_LIST_LEN} allowed",
+                self.entries
+            ));
+        }
+        Ok(())
+    }
+
+    fn consume_string(&mut self, field: &str, value: &str) -> Result<(), String> {
+        bound_string(field, value)?;
+        self.string_bytes = self
+            .string_bytes
+            .checked_add(value.len())
+            .ok_or_else(|| format!("{field} makes the cumulative string byte count overflow"))?;
+        if self.string_bytes > MAX_MANA_SELECTION_STRING_BYTES {
+            return Err(format!(
+                "{field} makes the cumulative string byte count {}; at most {MAX_MANA_SELECTION_STRING_BYTES} allowed",
+                self.string_bytes
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn guard_production_override_payload(
+    field: &str,
+    production_override: &ProductionOverride,
+    budget: &mut ManaSelectionPayloadBudget,
+) -> Result<(), String> {
+    match production_override {
+        ProductionOverride::SingleColor(_) => {}
+        ProductionOverride::Combination(mana) => {
+            budget.consume_list(&format!("{field}.Combination"), mana.len())?;
+        }
+    }
+    Ok(())
+}
+
+fn guard_mana_restrictions_payload(
+    field: &str,
+    restrictions: &[ManaRestriction],
+    budget: &mut ManaSelectionPayloadBudget,
+) -> Result<(), String> {
+    budget.consume_list(field, restrictions.len())?;
+    let mut pending: Vec<_> = restrictions.iter().collect();
+    while let Some(restriction) = pending.pop() {
+        match restriction {
+            ManaRestriction::OnlyForSpellType(spell_type) => {
+                budget.consume_string(
+                    "TapLandForMana.selection.restrictions.spell_type",
+                    spell_type,
+                )?;
+            }
+            ManaRestriction::OnlyForCreatureType(creature_type) => {
+                budget.consume_string(
+                    "TapLandForMana.selection.restrictions.creature_type",
+                    creature_type,
+                )?;
+            }
+            ManaRestriction::OnlyForTypeSpellsOrAbilities {
+                spell_type,
+                ability: _,
+            } => {
+                budget.consume_string(
+                    "TapLandForMana.selection.restrictions.spell_type",
+                    spell_type,
+                )?;
+            }
+            ManaRestriction::OnlyForSpellMatchingCostCriteria {
+                spell_type,
+                criteria,
+            } => {
+                if let Some(spell_type) = spell_type {
+                    budget.consume_string(
+                        "TapLandForMana.selection.restrictions.spell_type",
+                        spell_type,
+                    )?;
+                }
+                budget.consume_list(
+                    "TapLandForMana.selection.restrictions.criteria",
+                    criteria.len(),
+                )?;
+                for criterion in criteria {
+                    match criterion {
+                        SpellCostCriterion::ManaValue {
+                            comparator: _,
+                            value: _,
+                        }
+                        | SpellCostCriterion::HasXInCost => {}
+                    }
+                }
+            }
+            ManaRestriction::OnlyForAny(children) => {
+                budget.consume_list(
+                    "TapLandForMana.selection.restrictions.OnlyForAny",
+                    children.len(),
+                )?;
+                pending.extend(children);
+            }
+            ManaRestriction::OnlyForSpell
+            | ManaRestriction::OnlyForActivation
+            | ManaRestriction::OnlyForTaggedActivation(_)
+            | ManaRestriction::OnlyForXCosts
+            | ManaRestriction::OnlyForSpellWithKeywordKind(_)
+            | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _)
+            | ManaRestriction::OnlyForSpellWithManaValue {
+                comparator: _,
+                value: _,
+            }
+            | ManaRestriction::OnlyForSpellWithColorCount {
+                comparator: _,
+                count: _,
+            }
+            | ManaRestriction::OnlyForSpellFromZone(_)
+            | ManaRestriction::OnlyForFaceDownSpell
+            | ManaRestriction::OnlyForSpecialAction(_)
+            | ManaRestriction::ConvokePayment => {}
+        }
+    }
+    Ok(())
+}
+
+fn guard_mana_source_selection_payload(selection: &ManaSourceSelection) -> Result<(), String> {
+    let mut budget = ManaSelectionPayloadBudget::default();
+    if let Some(atomic_combination) = &selection.atomic_combination {
+        budget.consume_list(
+            "TapLandForMana.selection.atomic_combination",
+            atomic_combination.len(),
+        )?;
+    }
+    guard_mana_restrictions_payload(
+        "TapLandForMana.selection.restrictions",
+        &selection.restrictions,
+        &mut budget,
+    )?;
+    budget.consume_list(
+        "TapLandForMana.selection.taps_for_mana",
+        selection.taps_for_mana.len(),
+    )?;
+    for (index, tap) in selection.taps_for_mana.iter().enumerate() {
+        guard_production_override_payload(
+            &format!("TapLandForMana.selection.taps_for_mana[{index}].production_override"),
+            &tap.production_override,
+            &mut budget,
+        )?;
     }
     Ok(())
 }
@@ -103,6 +272,7 @@ fn guard_counter_type_payload(field: &str, counter_type: &CounterType) -> Result
         | CounterType::Fade
         | CounterType::Age
         | CounterType::Shield
+        | CounterType::Finality
         | CounterType::Keyword(_) => {}
     }
     Ok(())
@@ -280,6 +450,58 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::SelectModes { indices } => {
             bound_list("SelectModes.indices", indices.len())?;
         }
+        // CR 732.2a: a client-supplied loop-shortcut declaration. The prior comment here
+        // ("`count` is a small enum — nothing unbounded") was FALSE: `IterationCount::Fixed`
+        // wraps an unbounded `u32` and IS the real DoS vector — bounded here as a coarse
+        // WS-level belt (mirrors `ChooseManaColor.count`; the engine's MAX_SHORTCUT_CYCLES is
+        // the authoritative cap). The nested template vecs (a `Targets` pin's `Vec<TargetPin>`
+        // and each `Scheduled` pin's schedule `Vec`) are bounded as DEFENSE-IN-DEPTH: the
+        // 8 KB inbound WS frame cap (phase-server/src/main.rs:409/1420) already keeps a remote
+        // nested payload to a few hundred structs, and this guard runs POST-deserialize
+        // (client_message_wire_guard.rs:50), so it bounds downstream compute/clone work — not
+        // the transient serde allocation — for in-process callers that bypass the frame cap.
+        // Exhaustive matches (no wildcard) force a future variant to be classified here.
+        GameAction::DeclareShortcut { count, template } => {
+            use engine::analysis::decision_template::{
+                IterationCount, PinnedDecision, TargetPin, TargetSchedule,
+            };
+            // Exhaustive (no wildcard): a future `IterationCount` count variant build-breaks
+            // here so its wire bound is a conscious decision, not a silent gap.
+            match count {
+                IterationCount::Fixed(n) => bound_batch_count("DeclareShortcut.count", *n)?,
+                IterationCount::UntilLethal => {}
+            }
+            if let Some(template) = template {
+                bound_list("DeclareShortcut.template.decisions", template.decisions.len())?;
+                for decision in &template.decisions {
+                    match decision {
+                        PinnedDecision::Targets { targets, .. } => {
+                            bound_list("DeclareShortcut.template.targets", targets.len())?;
+                            for target in targets {
+                                match target {
+                                    TargetPin::Scheduled(TargetSchedule::RoundRobin(v)) => {
+                                        bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                    }
+                                    TargetPin::Scheduled(TargetSchedule::Piecewise(v)) => {
+                                        bound_list("DeclareShortcut.template.schedule", v.len())?;
+                                    }
+                                    TargetPin::Scheduled(TargetSchedule::Constant(_))
+                                    | TargetPin::ByIdentity(_)
+                                    | TargetPin::Player(_) => {}
+                                }
+                            }
+                        }
+                        PinnedDecision::Order { .. }
+                        | PinnedDecision::Mode { .. }
+                        | PinnedDecision::MayChoice { .. }
+                        | PinnedDecision::UnlessBreak { .. }
+                        // CR 608.2d: a mana-color pin carries a fixed enum, no unbounded payload.
+                        | PinnedDecision::ManaColor { .. }
+                        | PinnedDecision::ConvokeTaps { .. } => {}
+                    }
+                }
+            }
+        }
         GameAction::ChooseOutsideGameCards { selections } => {
             bound_list("ChooseOutsideGameCards.selections", selections.len())?;
         }
@@ -324,6 +546,9 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         GameAction::ChooseKeptCreatures { kept } => {
             bound_list("ChooseKeptCreatures.kept", kept.len())?;
         }
+        GameAction::ChooseKeptPermanents { kept } => {
+            bound_list("ChooseKeptPermanents.kept", kept.len())?;
+        }
         GameAction::SubmitPhyrexianChoices { choices } => {
             bound_list("SubmitPhyrexianChoices.choices", choices.len())?;
         }
@@ -336,6 +561,10 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         }
         GameAction::SetPhaseStops { stops } => {
             bound_list("SetPhaseStops.stops", stops.len())?;
+        }
+        GameAction::SetPriorityPassingMode { .. } => {}
+        GameAction::TapLandForMana { selection } => {
+            guard_mana_source_selection_payload(selection)?;
         }
         GameAction::DistributeAmong { distribution, .. } => {
             bound_list("DistributeAmong.distribution", distribution.len())?;
@@ -372,10 +601,12 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChooseExert { .. }
         | GameAction::ChooseEnlist { .. }
         | GameAction::ChooseClashOpponent { .. }
+        | GameAction::ChooseZoneOpponentChooser { .. }
+        | GameAction::ChoosePileOpponent { .. }
+        | GameAction::ChooseAnnouncingOpponent { .. }
         | GameAction::ChooseAssistPlayer { .. }
         | GameAction::CommitAssistPayment { .. }
         | GameAction::MulliganDecision { .. }
-        | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
         | GameAction::SpendPoolMana { .. }
         | GameAction::UnspendPoolMana { .. }
@@ -391,6 +622,7 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::ChoosePile { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::ChooseBranch { .. }
+        | GameAction::SubmitLifeRedistribution { .. }
         | GameAction::ChooseDamageSource { .. }
         | GameAction::DecideOptionalCost { .. }
         | GameAction::RespondToSpliceOffer { .. }
@@ -429,6 +661,8 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::RippleChoice { .. }
         | GameAction::FreeCastWindowChoice { .. }
         | GameAction::ChooseTopOrBottom { .. }
+        | GameAction::ChooseMeldPair { .. }
+        | GameAction::ChooseEntryAttackTarget { .. }
         // CR 702.140c: mutate merge side carries a single typed enum — nothing
         // client-controlled to bound.
         | GameAction::ChooseMutateMergeSide { .. }
@@ -449,7 +683,38 @@ pub fn guard_game_action_payload(action: &GameAction) -> Result<(), String> {
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
         | GameAction::SetPriorityYield { .. }
+        | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetTriggerOrderTemplate { .. }
+        // CR 732.2b/c: a typed enum + a single `u32` — nothing unbounded.
+        | GameAction::RespondToShortcut { .. }
+        // CR 732.2a-c: opaque epoch/route/breakpoint ids and a typed response
+        // carry only bounded scalars.
+        | GameAction::PrecastCopyShortcut { .. }
+        // CR 732.2a: the decline is payloadless — nothing to bound.
+        | GameAction::DeclineShortcut
         | GameAction::Concede { .. } => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::game::combat::AttackTarget;
+    use engine::types::identifiers::ObjectId;
+
+    #[test]
+    fn bounded_meld_actions_are_accepted() {
+        for action in [
+            GameAction::ChooseMeldPair {
+                source_id: ObjectId(1),
+                partner_id: ObjectId(2),
+            },
+            GameAction::ChooseEntryAttackTarget {
+                target: AttackTarget::Planeswalker(ObjectId(3)),
+            },
+        ] {
+            assert_eq!(guard_game_action_payload(&action), Ok(()));
+        }
+    }
 }

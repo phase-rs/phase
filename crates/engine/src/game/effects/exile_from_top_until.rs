@@ -32,7 +32,11 @@ use crate::types::zones::Zone;
 ///
 /// * If the library is exhausted without satisfying the predicate, every card
 ///   in the library is exiled and the loop terminates naturally. For
-///   `NextMatches`, the sub_ability chain is skipped (no hit to inject). For
+///   `NextMatches`, the "cast that card" link is skipped (no hit to inject) —
+///   but any exile-cleanup link that references `ExiledBySource` (Jodah, the
+///   Unifier's "put the rest on the bottom") STILL runs, so the exiled pile is
+///   never stranded (CR 608.2c + CR 701.13a; Jodah ruling: with no hit, all
+///   exiled cards are put on the bottom in a random order). For
 ///   `CumulativeThreshold`, the sub_ability chain still runs because the
 ///   per-resolution exile links are independently meaningful.
 ///
@@ -104,6 +108,7 @@ pub fn resolve(
             None,
             track_exiled_by_source,
             None,
+            None,
             events,
         ) {
             super::change_zone::ZoneMoveResult::Done => {}
@@ -145,6 +150,7 @@ pub fn resolve(
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ExileFromTopUntil,
         source_id: ability.source_id,
+        subject: None,
     });
 
     // CR 400.7: An object that moves from one zone to another becomes a new
@@ -152,7 +158,10 @@ pub fn resolve(
     //
     // * NextMatches: inject the hit card as the sub-ability's target so
     //   "cast that card" / "you may put it onto the battlefield" address the
-    //   right object. If no hit was found, the sub_ability is skipped.
+    //   right object. If no hit was found, the "cast that card" link is
+    //   skipped, but any downstream exile-cleanup link that references
+    //   `ExiledBySource` (Jodah's "put the rest on the bottom") still runs so
+    //   the exiled pile is not stranded (CR 608.2c + CR 701.13a).
     //
     // * CumulativeThreshold: there is no single hit card. The sub_ability
     //   chain (if any) reads from `TargetFilter::ExiledBySource` to address
@@ -186,6 +195,25 @@ pub fn resolve(
                     }
                     sub_clone.context = ability.context.clone();
                     super::resolve_ability_chain(state, &sub_clone, events, 1)?;
+                } else if let Some(cleanup) = first_exiled_by_source_link(sub.as_ref()) {
+                    // CR 608.2c + CR 701.13a: Library exhausted with no hit
+                    // (Jodah, the Unifier — no legendary nonland with lesser
+                    // mana value). The "cast that card" link has nothing to
+                    // address and is skipped, but the exile-cleanup link that
+                    // references `ExiledBySource` ("put the rest on the bottom
+                    // of your library in a random order") MUST still run — its
+                    // pool is every card this ability exiled. Without this the
+                    // whole exiled pile is stranded in exile and the acting
+                    // player is decked out by the engine (issue #5277).
+                    //
+                    // Jodah ruling: with no hit, all exiled cards return. The
+                    // cleanup's `DistinctFrom { ParentTarget }` leg fails open
+                    // when there are no object targets, so clearing `targets`
+                    // here lets every exiled card be swept to the bottom.
+                    let mut cleanup_clone = cleanup.clone();
+                    cleanup_clone.targets = vec![];
+                    cleanup_clone.context = ability.context.clone();
+                    super::resolve_ability_chain(state, &cleanup_clone, events, 1)?;
                 }
             }
             UntilCondition::CumulativeThreshold { .. } => {
@@ -210,6 +238,42 @@ fn sub_effect_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
         .unwrap_or(false)
 }
 
+/// CR 608.2c + CR 701.13a: True when an effect's RAW target filter references
+/// `ExiledBySource`. Distinct from [`sub_effect_references_exiled_by_source`],
+/// which routes through `extract_target_filter_from_effect` — that accessor
+/// strips context refs (and `ExiledBySource` IS a context ref via
+/// `is_context_ref`), so it returns `None` for the very cleanup this walk is
+/// looking for. Read the un-stripped `Effect::target_filter` instead.
+fn effect_target_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
+    sub.effect
+        .target_filter()
+        .is_some_and(crate::types::ability::TargetFilter::references_exiled_by_source)
+}
+
+/// CR 608.2c + CR 701.13a: Walk a `NextMatches` sub-chain for the FIRST link
+/// whose effect references `ExiledBySource` — the exile-cleanup ("put the rest
+/// on the bottom") that must still run when the library was exhausted with no
+/// hit. The cast link (Jodah's "cast that card" via `ParentTarget`) is skipped
+/// because it references no exiled-set channel; its cleanup lives one link
+/// deeper as its `sub_ability` (mainline chain) or `else_ability` (the declined
+/// path the parser also wires). Descends both edges so either wiring is found.
+fn first_exiled_by_source_link(sub: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    if effect_target_references_exiled_by_source(sub) {
+        return Some(sub);
+    }
+    if let Some(next) = sub.sub_ability.as_deref() {
+        if let Some(found) = first_exiled_by_source_link(next) {
+            return Some(found);
+        }
+    }
+    if let Some(alt) = sub.else_ability.as_deref() {
+        if let Some(found) = first_exiled_by_source_link(alt) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// CR 202.3 / CR 208 / CR 209: Look up the requested measurable property of an
 /// exiled object. Mirrors the per-property dispatch used by
 /// `quantity::resolve_quantity`'s aggregate-of-objects branch so both
@@ -220,8 +284,9 @@ fn extract_property(state: &GameState, obj_id: ObjectId, property: ObjectPropert
     };
     match property {
         ObjectProperty::Power => obj.power.unwrap_or(0),
-        // CR 202.3e: `mana_value()` excludes X (treats X as 0 outside the stack).
-        ObjectProperty::ManaValue => i32::try_from(obj.mana_cost.mana_value()).unwrap_or(i32::MAX),
+        // CR 202.3d + CR 202.3e + CR 709.4b: combined MV for a split card off the
+        // stack (X treated as 0 off the stack, chosen half on the stack).
+        ObjectProperty::ManaValue => i32::try_from(obj.effective_mana_value()).unwrap_or(i32::MAX),
         ObjectProperty::Toughness => obj.toughness.unwrap_or(0),
         // CR 107.4a + CR 202.1: colored mana symbols of `color` in the cost.
         ObjectProperty::ManaSymbolCount(color) => i32::try_from(
@@ -237,12 +302,13 @@ mod tests {
     use crate::game::engine::apply;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, Comparator, ControllerRef,
-        LibraryPosition, PlayerFilter, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-        TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        AbilityDefinition, AbilityKind, CardPlayMode, CastFromZoneDriver, CastingPermission,
+        Comparator, ControllerRef, FilterProp, LibraryPosition, PlayerFilter, QuantityExpr,
+        ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetFilter, TargetRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::format::FormatConfig;
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
@@ -871,6 +937,509 @@ mod tests {
         }
     }
 
+    /// CR 607.2a + CR 608.2d + CR 101.4: Plargg and Nassari — `player_scope: All`
+    /// exile-until with a DETACHED opponent-chooser continuation. In a
+    /// four-player game the tail runs once and pauses THREE times in order:
+    /// (1) `ChooseFromZoneOpponentChooser` — the CONTROLLER picks which of the
+    /// three live opponents makes the choice (Plargg's release notes: "you
+    /// choose which opponent gets to choose one of the exiled nonland cards");
+    /// (2) `ChooseFromZoneChoice` — the picked opponent chooses over exactly
+    /// the linked nonland hits (never the lands); (3) `CastOffer` with a
+    /// `FreeCastWindow` capped at TWO casts ("up to two spells") whose
+    /// candidate pool is the UNCHOSEN hits only — the opponent's pick is
+    /// excluded by `Not(InTrackedSet 0)` over the freshly-published chosen
+    /// set, and lands are excluded by the cast-mode land guard (CR 305.1).
+    #[test]
+    fn plargg_opponent_chooses_nonland_hit_then_cast_pool_is_the_other_hits() {
+        use crate::types::ability::{CardSelectionMode, Chooser, ZoneOwner};
+        use crate::types::game_state::{CastOfferKind, WaitingFor};
+        let mut state = GameState::new(FormatConfig::standard(), 4, 42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plargg and Nassari".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Each player's library: one Land then one Creature (the nonland hit).
+        let p0_land = add_library_card(&mut state, PlayerId(0), "P0 Forest", true);
+        let p0_hit = add_library_card(&mut state, PlayerId(0), "P0 Beast", false);
+        state.players[0].library = crate::im::vector![p0_land, p0_hit];
+
+        let p1_land = add_library_card(&mut state, PlayerId(1), "P1 Mountain", true);
+        let p1_hit = add_library_card(&mut state, PlayerId(1), "P1 Goblin", false);
+        state.players[1].library = crate::im::vector![p1_land, p1_hit];
+
+        let p2_land = add_library_card(&mut state, PlayerId(2), "P2 Plains", true);
+        let p2_hit = add_library_card(&mut state, PlayerId(2), "P2 Soldier", false);
+        state.players[2].library = crate::im::vector![p2_land, p2_hit];
+
+        let p3_land = add_library_card(&mut state, PlayerId(3), "P3 Island", true);
+        let p3_hit = add_library_card(&mut state, PlayerId(3), "P3 Merfolk", false);
+        state.players[3].library = crate::im::vector![p3_land, p3_hit];
+
+        // Sentence 3: "You may cast up to two spells from among the OTHER cards
+        // exiled this way without paying their mana costs" — the parser lowers
+        // this to a during-resolution free-cast window (ruling 2021-04-16: the
+        // spells are cast during the ability's resolution) capped at two casts,
+        // with "other" rewritten to `Not(InTrackedSet 0)` over the chosen set.
+        let cast_sub = ResolvedAbility::new(
+            Effect::FreeCastFromZones {
+                count: 2,
+                max_total_mv: None,
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::ExiledBySource,
+                        TargetFilter::Typed(
+                            TypedFilter::default()
+                                .with_type(TypeFilter::Card)
+                                .properties(vec![
+                                    FilterProp::Not {
+                                        prop: Box::new(FilterProp::InTrackedSet {
+                                            id: crate::types::identifiers::TrackedSetId(0),
+                                        }),
+                                    },
+                                    FilterProp::InZone { zone: Zone::Exile },
+                                ]),
+                        ),
+                    ],
+                },
+                zones: vec![Zone::Exile],
+                exile_instead_of_graveyard: false,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        // Sentence 2: "An opponent chooses a nonland card exiled this way" — the
+        // new typed exiled-this-way anaphor shape.
+        let mut choose_sub = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: vec![],
+                zone_owner: ZoneOwner::AllOwners,
+                filter: Some(TargetFilter::And {
+                    filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
+                }),
+                chooser: Chooser::Opponent,
+                up_to: false,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        choose_sub.sub_ability = Some(Box::new(cast_sub));
+
+        let mut wrapped = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        wrapped.player_scope = Some(PlayerFilter::All);
+        wrapped.sub_ability = Some(Box::new(choose_sub));
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &wrapped, &mut events, 0).unwrap();
+
+        // All eight cards are exiled and linked before the detached choose parks.
+        for id in &[
+            p0_land, p0_hit, p1_land, p1_hit, p2_land, p2_hit, p3_land, p3_hit,
+        ] {
+            assert_eq!(state.objects[id].zone, Zone::Exile, "{id:?} must be exiled");
+        }
+
+        // Pause 1 — CR 608.2d: with three live opponents, the CONTROLLER must
+        // first be asked which opponent makes the choice.
+        let picker_candidates = match &state.waiting_for {
+            WaitingFor::ChooseFromZoneOpponentChooser {
+                player, candidates, ..
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(0),
+                    "the CONTROLLER picks which opponent chooses"
+                );
+                candidates.clone()
+            }
+            other => panic!("expected ChooseFromZoneOpponentChooser pause, got {other:?}"),
+        };
+        let mut sorted_candidates = picker_candidates.clone();
+        sorted_candidates.sort();
+        assert_eq!(
+            sorted_candidates,
+            vec![PlayerId(1), PlayerId(2), PlayerId(3)],
+            "every live opponent must be offered as the chooser"
+        );
+
+        // The controller picks PlayerId(2) as the chooser.
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseZoneOpponentChooser {
+                opponent: PlayerId(2),
+            },
+        )
+        .unwrap();
+
+        // Pause 2 — CR 608.2d: the zone choice must belong to the PICKED
+        // opponent, offering exactly the four nonland hits (lands filtered).
+        let offered = match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => {
+                assert_eq!(*count, 1, "exactly one card is chosen");
+                assert_eq!(
+                    *player,
+                    PlayerId(2),
+                    "the zone choice must go to the opponent the controller picked"
+                );
+                cards.clone()
+            }
+            other => panic!("expected ChooseFromZoneChoice pause, got {other:?}"),
+        };
+        let mut offered_sorted = offered.clone();
+        offered_sorted.sort();
+        let mut expected_hits = vec![p0_hit, p1_hit, p2_hit, p3_hit];
+        expected_hits.sort();
+        assert_eq!(
+            offered_sorted, expected_hits,
+            "choice pool must be the nonland hits exiled this way (no lands)"
+        );
+
+        // The picked opponent chooses P1's Goblin.
+        apply(
+            &mut state,
+            PlayerId(2),
+            GameAction::SelectCards {
+                cards: vec![p1_hit],
+            },
+        )
+        .unwrap();
+
+        // Pause 3 — CR 607.2a + ruling 2021-04-16: the free-cast window opens
+        // for the CONTROLLER, capped at TWO casts, over "the OTHER cards exiled
+        // this way" — the three unchosen hits. The chosen Goblin is excluded by
+        // `Not(InTrackedSet 0)` over the freshly-published chosen set, and the
+        // lands are excluded by the cast-mode land guard (CR 305.1).
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                player,
+                kind:
+                    CastOfferKind::FreeCastWindow {
+                        candidates,
+                        remaining_casts,
+                        ..
+                    },
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(0),
+                    "the free-cast window belongs to Plargg's controller"
+                );
+                assert_eq!(
+                    *remaining_casts, 2,
+                    "'up to two spells' — the window is capped at two casts"
+                );
+                let mut pool = candidates.clone();
+                pool.sort();
+                let mut expected_pool = vec![p0_hit, p2_hit, p3_hit];
+                expected_pool.sort();
+                assert_eq!(
+                    pool, expected_pool,
+                    "cast pool must be the UNCHOSEN hits only (no chosen card, no lands)"
+                );
+            }
+            other => panic!("expected FreeCastWindow cast offer, got {other:?}"),
+        }
+    }
+
+    /// CR 607.2a two-upkeep regression: "exiled this way" is scoped to THIS
+    /// trigger resolution, not the source's lifetime linked-exile ledger. A
+    /// linked nonland card left in exile by a PREVIOUS resolution (declined
+    /// free cast) must appear in NEITHER the next resolution's opponent choice
+    /// pool NOR its free-cast window — `ExiledBySource` alone is the source's
+    /// complete live ledger, so without the resolution-scoped member pool the
+    /// second window would wrongly offer the first upkeep's leftover.
+    #[test]
+    fn plargg_second_resolution_excludes_previous_resolutions_leftovers() {
+        use crate::types::ability::{CardSelectionMode, Chooser, ZoneOwner};
+        use crate::types::game_state::{CastOfferKind, WaitingFor};
+        let mut state = GameState::new_two_player(11);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plargg and Nassari".to_string(),
+            Zone::Battlefield,
+        );
+
+        // The full sentence-2 + sentence-3 chain, rebuilt per resolution the
+        // way the trigger system re-instantiates the ability each upkeep.
+        let build_chain = |source: ObjectId| -> ResolvedAbility {
+            let cast_sub = ResolvedAbility::new(
+                Effect::FreeCastFromZones {
+                    count: 2,
+                    max_total_mv: None,
+                    filter: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::ExiledBySource,
+                            TargetFilter::Typed(
+                                TypedFilter::default()
+                                    .with_type(TypeFilter::Card)
+                                    .properties(vec![
+                                        FilterProp::Not {
+                                            prop: Box::new(FilterProp::InTrackedSet {
+                                                id: crate::types::identifiers::TrackedSetId(0),
+                                            }),
+                                        },
+                                        FilterProp::InZone { zone: Zone::Exile },
+                                    ]),
+                            ),
+                        ],
+                    },
+                    zones: vec![Zone::Exile],
+                    exile_instead_of_graveyard: false,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            let mut choose_sub = ResolvedAbility::new(
+                Effect::ChooseFromZone {
+                    count: 1,
+                    zone: Zone::Exile,
+                    additional_zones: vec![],
+                    zone_owner: ZoneOwner::AllOwners,
+                    filter: Some(TargetFilter::And {
+                        filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
+                    }),
+                    chooser: Chooser::Opponent,
+                    up_to: false,
+                    selection: CardSelectionMode::Chosen,
+                    constraint: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            choose_sub.sub_ability = Some(Box::new(cast_sub));
+            let mut wrapped = ResolvedAbility::new(
+                Effect::ExileFromTopUntil {
+                    player: TargetFilter::Controller,
+                    until: UntilCondition::NextMatches {
+                        filter: nonland_filter(),
+                    },
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            wrapped.player_scope = Some(PlayerFilter::All);
+            wrapped.sub_ability = Some(Box::new(choose_sub));
+            wrapped
+        };
+
+        // UPKEEP 1 — each library holds one nonland hit.
+        let p0_old = add_library_card(&mut state, PlayerId(0), "P0 Old Beast", false);
+        state.players[0].library = crate::im::vector![p0_old];
+        let p1_old = add_library_card(&mut state, PlayerId(1), "P1 Old Goblin", false);
+        state.players[1].library = crate::im::vector![p1_old];
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &build_chain(source), &mut events, 0)
+            .unwrap();
+
+        // The lone opponent chooses P1's old Goblin; the window then offers
+        // ONLY P0's old Beast (the other card exiled this way).
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_old],
+            },
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { candidates, .. },
+                ..
+            } => assert_eq!(
+                candidates,
+                &vec![p0_old],
+                "upkeep 1 window offers the other card exiled this way"
+            ),
+            other => panic!("expected upkeep-1 FreeCastWindow, got {other:?}"),
+        }
+        // The controller DECLINES — the linked, uncast Beast stays in exile
+        // ("If you don't, it remains exiled" has no cleanup for this shape),
+        // so the source's live exile-link ledger still carries it.
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::FreeCastWindowChoice { selection: None },
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&p0_old].zone,
+            Zone::Exile,
+            "the declined card must remain exiled (and linked) after upkeep 1"
+        );
+        assert!(
+            state
+                .exile_links
+                .iter()
+                .any(|link| link.source_id == source && link.exiled_id == p0_old),
+            "the declined card must remain linked to the source after upkeep 1 \u{2014} \
+             upkeep 2's exclusion is only meaningful if the stale link still exists"
+        );
+
+        // UPKEEP 2 — fresh libraries, fresh hits, the same source re-resolves.
+        let p0_new = add_library_card(&mut state, PlayerId(0), "P0 New Wurm", false);
+        state.players[0].library = crate::im::vector![p0_new];
+        let p1_new = add_library_card(&mut state, PlayerId(1), "P1 New Orc", false);
+        state.players[1].library = crate::im::vector![p1_new];
+
+        let mut events2 = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &build_chain(source), &mut events2, 0)
+            .unwrap();
+
+        // The opponent's choice pool is THIS resolution's batch only — the
+        // first upkeep's leftovers are linked to the source but were not
+        // "exiled this way" now.
+        let offered = match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                cards.clone()
+            }
+            other => panic!("expected upkeep-2 ChooseFromZoneChoice, got {other:?}"),
+        };
+        let mut offered_sorted = offered;
+        offered_sorted.sort();
+        let mut expected = vec![p0_new, p1_new];
+        expected.sort();
+        assert_eq!(
+            offered_sorted, expected,
+            "upkeep-2 choice pool must exclude upkeep-1 leftovers"
+        );
+
+        // The opponent chooses P1's new Orc; the window must offer ONLY P0's
+        // new Wurm. Without the resolution-scoped member pool, the stale
+        // still-linked Beast from upkeep 1 would pass `ExiledBySource` +
+        // `Not(InTrackedSet)` and be wrongly offered here.
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_new],
+            },
+        )
+        .unwrap();
+        match &state.waiting_for {
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { candidates, .. },
+                ..
+            } => {
+                assert!(
+                    !candidates.contains(&p0_old),
+                    "upkeep-2 window must NOT offer upkeep 1's leftover (stale ledger)"
+                );
+                assert_eq!(
+                    candidates,
+                    &vec![p0_new],
+                    "upkeep-2 window offers exactly this resolution's other hit"
+                );
+            }
+            other => panic!("expected upkeep-2 FreeCastWindow, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2d two-player regression: with exactly ONE live opponent there is
+    /// nothing for the controller to decide, so the opponent-picker pause must
+    /// be skipped and the zone choice presented directly to that opponent.
+    #[test]
+    fn plargg_two_player_skips_the_opponent_picker_pause() {
+        use crate::types::ability::{CardSelectionMode, Chooser, ZoneOwner};
+        use crate::types::game_state::WaitingFor;
+        let mut state = GameState::new_two_player(7);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Plargg and Nassari".to_string(),
+            Zone::Battlefield,
+        );
+
+        let p0_hit = add_library_card(&mut state, PlayerId(0), "P0 Beast", false);
+        state.players[0].library = crate::im::vector![p0_hit];
+        let p1_hit = add_library_card(&mut state, PlayerId(1), "P1 Goblin", false);
+        state.players[1].library = crate::im::vector![p1_hit];
+
+        let mut choose_sub = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Exile,
+                additional_zones: vec![],
+                zone_owner: ZoneOwner::AllOwners,
+                filter: Some(TargetFilter::And {
+                    filters: vec![nonland_filter(), TargetFilter::ExiledBySource],
+                }),
+                chooser: Chooser::Opponent,
+                up_to: false,
+                selection: CardSelectionMode::Chosen,
+                constraint: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        choose_sub.sub_ability = None;
+
+        let mut wrapped = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    filter: nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        wrapped.player_scope = Some(PlayerFilter::All);
+        wrapped.sub_ability = Some(Box::new(choose_sub));
+
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &wrapped, &mut events, 0).unwrap();
+
+        // No picker pause — the single opponent gets the zone choice directly.
+        match &state.waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "the lone opponent must be the chooser without a picker pause"
+                );
+            }
+            other => {
+                panic!("expected a direct ChooseFromZoneChoice with one opponent, got {other:?}")
+            }
+        }
+    }
+
     /// CR 608.2 + CR 111.2: Akroan Horse-shape — `Effect::Token` with
     /// `owner: TargetFilter::Controller` under `player_scope: Opponent`
     /// rebinds Controller per-iteration so each opponent owns the token they
@@ -1210,6 +1779,367 @@ mod tests {
         assert!(
             sub_kinds.contains(&EffectKind::Scry),
             "sub_ability (Scry) must run for CumulativeThreshold even though no hit card was injected; got events kinds {sub_kinds:?}"
+        );
+    }
+
+    // --- Jodah, the Unifier (#5277 + #5292) ---------------------------------
+
+    /// A legendary-supertype nonland filter — the simplified `NextMatches`
+    /// predicate the hand-built Jodah fixtures use (the real card additionally
+    /// requires `mana value < CostPaidObject`, threaded only through the full
+    /// trigger; the shape assertion in `jodah_parse_lowers_the_rest_cleanup`
+    /// pins the verbatim parse so these fixtures cannot drift).
+    fn legendary_nonland_filter() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                nonland_filter(),
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    },
+                ])),
+            ],
+        }
+    }
+
+    /// The normalized "put the rest on the bottom" cleanup target: every card
+    /// this ability exiled EXCEPT the ParentTarget hit (declined hit stays in
+    /// exile). Mirrors `normalize_exile_until_cast_bottom_cleanup`.
+    fn jodah_rest_cleanup_target() -> TargetFilter {
+        TargetFilter::And {
+            filters: vec![
+                TargetFilter::ExiledBySource,
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::DistinctFrom {
+                        reference: Box::new(TargetFilter::ParentTarget),
+                    },
+                ])),
+            ],
+        }
+    }
+
+    /// Build a Jodah trigger chain in the NORMALIZED parser shape:
+    /// `ExileFromTopUntil { NextMatches(legendary nonland) }`
+    ///   → optional `CastFromZone { ParentTarget, DuringResolution }`
+    ///       sub = cleanup, else = cleanup (both "put the rest on the bottom").
+    fn jodah_chain(source: ObjectId) -> ResolvedAbility {
+        let cleanup = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: jodah_rest_cleanup_target(),
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Bottom,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut cast = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        cast.optional = true;
+        cast.sub_link = SubAbilityLink::SequentialSibling;
+        cast.sub_ability = Some(Box::new(cleanup.clone()));
+        cast.else_ability = Some(Box::new(cleanup));
+
+        let mut head = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                player: TargetFilter::Controller,
+                until: UntilCondition::NextMatches {
+                    filter: legendary_nonland_filter(),
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        head.sub_ability = Some(Box::new(cast));
+        head
+    }
+
+    fn add_legendary_library_card(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let id = add_library_card(state, owner, name, false);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+        id
+    }
+
+    /// (a) #5277 — no hit: the library holds only nonmatching cards. The loop
+    /// exhausts the library, no legendary is exiled, and the "cast that card"
+    /// link is skipped — but the "put the rest on the bottom" cleanup MUST still
+    /// run so every exiled card returns to the library. Pre-fix the whole pile
+    /// was stranded in exile and the player decked out.
+    ///
+    /// Discriminating assertion: `library.len() == N` after resolution. Revert
+    /// the runtime no-hit branch and all N cards stay in `Zone::Exile`.
+    #[test]
+    fn jodah_no_hit_returns_all_exiled_cards_to_library() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Jodah, the Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Four nonlegendary creatures — none satisfy the legendary predicate.
+        let c1 = add_library_card(&mut state, PlayerId(0), "Bear One", false);
+        let c2 = add_library_card(&mut state, PlayerId(0), "Bear Two", false);
+        let c3 = add_library_card(&mut state, PlayerId(0), "Bear Three", false);
+        let c4 = add_library_card(&mut state, PlayerId(0), "Bear Four", false);
+        let all = [c1, c2, c3, c4];
+        state.players[0].library = crate::im::vector![c1, c2, c3, c4];
+
+        let ability = jodah_chain(source);
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Reach-guard: the exile-until loop genuinely ran (no early
+        // short-circuit) — every card left the library at least momentarily and
+        // no legendary hit was recorded.
+        assert!(
+            state.stack.is_empty(),
+            "no hit means nothing should be cast onto the stack"
+        );
+
+        // Discriminating: every exiled card is back in the library, none stranded.
+        for &id in &all {
+            assert_eq!(
+                state.objects.get(&id).unwrap().zone,
+                Zone::Library,
+                "no-hit cleanup must return {id:?} to the library, not strand it in exile"
+            );
+        }
+        assert_eq!(
+            state.players[0].library.len(),
+            all.len(),
+            "the entire library must be reconstituted (bottom-in-random-order into empty library)"
+        );
+        for &id in &all {
+            assert!(
+                state.players[0].library.contains(&id),
+                "library membership must include {id:?}"
+            );
+        }
+        assert!(
+            !state.exile.contains(&c1) && !state.exile.contains(&c4),
+            "no exiled card may remain stranded in the exile zone"
+        );
+    }
+
+    /// (b) Hit + accept: library = [miss, miss, legendary hit, unreached]. The
+    /// loop stops at the legendary hit. Accepting casts it during resolution;
+    /// the misses go to the bottom and the unreached card is untouched.
+    #[test]
+    fn jodah_hit_accept_casts_hit_and_returns_misses() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Jodah, the Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let miss_a = add_library_card(&mut state, PlayerId(0), "Bear A", false);
+        let miss_b = add_library_card(&mut state, PlayerId(0), "Bear B", false);
+        let hit = add_legendary_library_card(&mut state, PlayerId(0), "Legendary Hit");
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached", false);
+        state.players[0].library = crate::im::vector![miss_a, miss_b, hit, unreached];
+
+        let ability = jodah_chain(source);
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        assert!(
+            matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "the hit must offer an optional cast prompt; got {:?}",
+            state.waiting_for
+        );
+
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .unwrap();
+
+        // The accepted hit is cast during resolution — it is on the stack.
+        assert_eq!(
+            state.objects[&hit].zone,
+            Zone::Stack,
+            "accepting the free cast must put the legendary hit on the stack; zone={:?}",
+            state.objects[&hit].zone
+        );
+        // Misses returned to the library bottom.
+        assert_eq!(state.objects[&miss_a].zone, Zone::Library);
+        assert_eq!(state.objects[&miss_b].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&miss_a));
+        assert!(state.players[0].library.contains(&miss_b));
+        // Unreached card never left the library.
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&unreached));
+    }
+
+    /// (c) Hit + decline (the discriminating Jodah-vs-Chaos-Wand case): the
+    /// declined legendary hit REMAINS IN EXILE (Scryfall ruling), while the
+    /// misses are put on the bottom. The `DistinctFrom { ParentTarget }` leg of
+    /// the cleanup excludes the declined hit from the sweep.
+    ///
+    /// Discriminating assertion: `hit.zone == Zone::Exile` after decline. Revert
+    /// the `filter_refs_parent_target` extension (so the decline branch stops
+    /// inheriting the hit target) and the hit is swept back to the library.
+    #[test]
+    fn jodah_hit_decline_leaves_hit_in_exile_returns_misses() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Jodah, the Unifier".to_string(),
+            Zone::Battlefield,
+        );
+
+        let miss = add_library_card(&mut state, PlayerId(0), "Bear Miss", false);
+        let hit = add_legendary_library_card(&mut state, PlayerId(0), "Legendary Hit");
+        let unreached = add_library_card(&mut state, PlayerId(0), "Unreached", false);
+        state.players[0].library = crate::im::vector![miss, hit, unreached];
+
+        let ability = jodah_chain(source);
+        let mut events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: false },
+        )
+        .unwrap();
+
+        // Discriminating: the declined hit stays in exile.
+        assert_eq!(
+            state.objects[&hit].zone,
+            Zone::Exile,
+            "a declined Jodah hit must REMAIN in exile (ruling), not return to the library"
+        );
+        assert!(
+            !state.players[0].library.contains(&hit),
+            "the declined hit must not be swept to the library bottom"
+        );
+        // The miss is returned to the library bottom.
+        assert_eq!(state.objects[&miss].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&miss));
+        // Unreached card untouched.
+        assert_eq!(state.objects[&unreached].zone, Zone::Library);
+        assert!(state.players[0].library.contains(&unreached));
+    }
+
+    /// (d) Parser shape: Jodah's verbatim Oracle text lowers to the normalized
+    /// chain — the cast's cleanup (both `sub_ability` and `else_ability`)
+    /// targets `And { ExiledBySource, DistinctFrom { ParentTarget } }` with
+    /// position Bottom. Positive reach-guard: zero `Unimplemented` effects in the
+    /// parsed trigger chain. Pins the hand-built fixtures above against drift.
+    #[test]
+    fn jodah_parse_lowers_the_rest_cleanup() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Legendary creatures you control get +X/+X, where X is the number of legendary creatures you control.\n\
+             Whenever you cast a legendary spell from your hand, exile cards from the top of your library until you exile a legendary nonland card with lesser mana value. You may cast that card without paying its mana cost. Put the rest on the bottom of your library in a random order.",
+            "Jodah, the Unifier",
+            &[],
+            &["Legendary".to_string(), "Creature".to_string()],
+            &[],
+        );
+
+        let exec = parsed
+            .triggers
+            .iter()
+            .find_map(|t| t.execute.as_ref())
+            .filter(|e| matches!(&*e.effect, Effect::ExileFromTopUntil { .. }))
+            .expect("Jodah exile-from-top-until trigger must parse");
+
+        // head → cast → cleanup.
+        assert!(
+            matches!(
+                &*exec.effect,
+                Effect::ExileFromTopUntil {
+                    until: UntilCondition::NextMatches { .. },
+                    ..
+                }
+            ),
+            "head must be ExileFromTopUntil {{ NextMatches }}"
+        );
+        let cast = exec.sub_ability.as_deref().expect("cast sub-ability");
+        assert!(cast.optional, "the cast must be optional (you MAY cast)");
+        assert!(
+            matches!(
+                &*cast.effect,
+                Effect::CastFromZone {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "cast must target the ParentTarget hit, got {:?}",
+            cast.effect
+        );
+
+        // Both the mainline cleanup and the decline else must be the normalized
+        // "put the rest on the bottom" form.
+        let expect_rest_cleanup = |ab: &AbilityDefinition, label: &str| {
+            let Effect::PutAtLibraryPosition {
+                target, position, ..
+            } = &*ab.effect
+            else {
+                panic!("{label} must be PutAtLibraryPosition, got {:?}", ab.effect);
+            };
+            assert!(
+                matches!(position, LibraryPosition::Bottom),
+                "{label} must place on the bottom"
+            );
+            assert_eq!(
+                target,
+                &jodah_rest_cleanup_target(),
+                "{label} target must be And {{ ExiledBySource, DistinctFrom {{ ParentTarget }} }}"
+            );
+        };
+        expect_rest_cleanup(
+            cast.sub_ability.as_deref().expect("cleanup sub-ability"),
+            "cleanup sub_ability",
+        );
+        expect_rest_cleanup(
+            cast.else_ability
+                .as_deref()
+                .expect("cleanup wired as else_ability for the decline path"),
+            "cleanup else_ability",
+        );
+
+        // Positive reach-guard: no Unimplemented anywhere in the trigger chain.
+        fn has_unimplemented(ab: &AbilityDefinition) -> bool {
+            matches!(&*ab.effect, Effect::Unimplemented { .. })
+                || ab.sub_ability.as_deref().is_some_and(has_unimplemented)
+                || ab.else_ability.as_deref().is_some_and(has_unimplemented)
+        }
+        assert!(
+            !has_unimplemented(exec),
+            "the Jodah trigger chain must contain no Unimplemented effects"
         );
     }
 }

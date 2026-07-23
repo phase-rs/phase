@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { WebSocketAdapter } from "../ws-adapter";
+import {
+  NativeEngineVersionMismatchError,
+  PROTOCOL_VERSION,
+  WebSocketAdapter,
+} from "../ws-adapter";
+import { AdapterError } from "../types";
 import type { GameState } from "../types";
+import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 
 // Minimal mock WebSocket. Latest-constructed instance is exposed via
 // `MockWebSocket.last` so tests can grab it synchronously — the adapter
@@ -43,7 +49,7 @@ const SERVER_HELLO = JSON.stringify({
   data: {
     server_version: "0.0.0-test",
     build_commit: "testhash",
-    protocol_version: 12,
+    protocol_version: PROTOCOL_VERSION,
     mode: "Full",
   },
 });
@@ -122,6 +128,336 @@ describe("WebSocketAdapter", () => {
     await initPromise;
   });
 
+  describe("native AI transport", () => {
+    const nativeAiOptions = (socketFactory: () => PhaseSocketTransport) => ({
+      nativeAi: {
+        socketFactory,
+        aiSeats: [{
+          seatIndex: 1,
+          difficulty: "Hard",
+          deck: { main_deck: ["Lightning Bolt"], sideboard: [] },
+        }],
+        playerCount: 2,
+      },
+    });
+
+    it("uses the bridge factory with the full camelCase AI seat wire shape", async () => {
+      MockWebSocket.last = null;
+      const socketFactory = vi.fn(
+        () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+      );
+      const nativeAdapter = new WebSocketAdapter(
+        "not-a-websocket-url",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(socketFactory),
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      expect(socketFactory).toHaveBeenCalledWith("not-a-websocket-url");
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        JSON.stringify({
+          type: "CreateGameWithSettings",
+          data: {
+            deck: { main_deck: [], sideboard: [] },
+            display_name: "Player",
+            public: false,
+            password: null,
+            timer_seconds: null,
+            player_count: 2,
+            match_config: { match_type: "Bo1" },
+            ai_seats: [{
+              seatIndex: 1,
+              difficulty: "Hard",
+              deckName: null,
+              deck: {
+                type: "DeckList",
+                data: { main_deck: ["Lightning Bolt"], sideboard: [] },
+              },
+            }],
+            format_config: null,
+            room_name: null,
+            start_when_full: true,
+            ranked: false,
+          },
+        }),
+      );
+      const calls = nativeSocket.send.mock.calls;
+      const sentFrame = calls[calls.length - 1]?.[0];
+      expect(sentFrame).toContain('"seatIndex"');
+      expect(sentFrame).toContain('"deckName"');
+      expect(sentFrame).not.toContain('"seat_index"');
+      expect(sentFrame).not.toContain('"deck_name"');
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+    });
+
+    it("rejects a release version mismatch before creating a game", async () => {
+      MockWebSocket.last = null;
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        {
+          nativeAi: {
+            ...nativeAiOptions(
+              () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            ).nativeAi,
+            expectedServerVersion: "1.2.3",
+          },
+        },
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      await Promise.resolve();
+      const nativeSocket = MockWebSocket.last!;
+      nativeSocket.dispatchSynthetic("message", SERVER_HELLO);
+
+      await expect(initPromise).rejects.toBeInstanceOf(NativeEngineVersionMismatchError);
+      expect(nativeSocket.close).toHaveBeenCalledOnce();
+      expect(nativeSocket.send).not.toHaveBeenCalledWith(
+        expect.stringContaining("CreateGameWithSettings"),
+      );
+    });
+  });
+
+  describe("native P2P pregame transport", () => {
+    it("waits for the server-issued seat attachment and slot confirmation", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        expect.stringContaining('"start_when_full":false'),
+      );
+
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: { game_code: "NATIVE", player_id: 0, player_token: "host-token" },
+        }),
+      );
+      await expect(attached).resolves.toEqual({
+        gameCode: "NATIVE",
+        playerId: 0,
+        playerToken: "host-token",
+      });
+
+      const confirmed = nativeAdapter.sendSeatMutation({ type: "Start" });
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        JSON.stringify({ type: "SeatMutate", data: { mutation: { type: "Start" } } }),
+      );
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "PlayerSlotsUpdate", data: { slots: [] } }),
+      );
+      await expect(confirmed).resolves.toBeUndefined();
+    });
+
+    it("reconnects a persisted native viewer with its expected seat", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "join",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Guest",
+        {
+          nativePregame: {
+            kind: "reconnect",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            gameCode: "NATIVE",
+            playerId: 1,
+            playerToken: "guest-token",
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      expect(nativeSocket.send).toHaveBeenLastCalledWith(
+        JSON.stringify({
+          type: "Reconnect",
+          data: { game_code: "NATIVE", player_token: "guest-token" },
+        }),
+      );
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state_revision: 7, state: createMockState(), your_player: 1 },
+        }),
+      );
+      await expect(attached).resolves.toEqual({
+        gameCode: "NATIVE",
+        playerId: 1,
+        playerToken: "guest-token",
+      });
+    });
+
+    it("rejects native pregame attachment when the server returns an error", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "Error", data: { message: "Native setup failed" } }),
+      );
+
+      await expect(attached).rejects.toThrow("Native setup failed");
+    });
+
+    it("rejects native lifecycle waiters when disposed before the socket is attached", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const gameStarted = nativeAdapter.waitForGameStarted();
+      nativeAdapter.dispose();
+
+      await expect(attached).rejects.toMatchObject({
+        code: "WS_CLOSED",
+        recoverable: true,
+      } satisfies Partial<AdapterError>);
+      await expect(gameStarted).rejects.toMatchObject({
+        code: "WS_CLOSED",
+        recoverable: true,
+      } satisfies Partial<AdapterError>);
+    });
+
+    it("preserves the typed non-recoverable deck rejection code", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "Error",
+          data: { message: "Deck not legal for this format", code: "deck_rejected" },
+        }),
+      );
+
+      await expect(attached).rejects.toMatchObject({
+        code: "DECK_REJECTED",
+        recoverable: false,
+      } satisfies Partial<AdapterError>);
+    });
+
+    it("does not infer deck rejection from matching error text without a code", async () => {
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = nativeAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(nativeAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({ type: "Error", data: { message: "Deck not legal for this format" } }),
+      );
+
+      await expect(attached).rejects.toMatchObject({
+        code: "ACTION_REJECTED",
+        recoverable: true,
+      } satisfies Partial<AdapterError>);
+    });
+  });
+
   describe("Bug C: stateChanged emission", () => {
     it("emits stateChanged event when StateUpdate arrives without pendingResolve", () => {
       const listener = vi.fn();
@@ -146,10 +482,14 @@ describe("WebSocketAdapter", () => {
         }),
       );
 
+      // The engine pair now travels as one seq-stamped `EngineSnapshot`.
       expect(listener).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "stateChanged",
-          state: mockState,
+          snapshot: expect.objectContaining({
+            state: expect.objectContaining(mockState),
+            seq: expect.any(Number),
+          }),
           events: mockEvents,
           logEntries: mockLogEntries,
         }),
@@ -265,6 +605,44 @@ describe("WebSocketAdapter", () => {
       await expect(initPromise).rejects.toThrow("Failed to send setup frame");
     });
 
+    // Issue #5913: the engine's stale-ReorderHand verdict must classify the same
+    // way no matter which transport delivered it. Before the shared classifier
+    // this path built a generic ACTION_REJECTED, so `dispatchAction` — which
+    // suppresses only STALE_ACTION — still showed a server-hosted player the red
+    // error the local-WASM seat no longer sees.
+    it("classifies a stale ReorderHand rejection from the server as STALE_ACTION", async () => {
+      const pending = adapter.submitAction(
+        { type: "ReorderHand", data: { order: [1, 2, 3] } },
+        0,
+      );
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: ReorderHand: expected 6 ids, got 5" },
+        }),
+      );
+      await expect(pending).rejects.toMatchObject({
+        code: "STALE_ACTION",
+        recoverable: false,
+      });
+    });
+
+    it("still surfaces a non-stale server rejection as a recoverable ACTION_REJECTED", async () => {
+      const pending = adapter.submitAction({ type: "PassPriority" }, 0);
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ActionRejected",
+          data: { reason: "Engine error: Something genuinely wrong" },
+        }),
+      );
+      await expect(pending).rejects.toMatchObject({
+        code: "ACTION_REJECTED",
+        recoverable: true,
+      });
+    });
+
     it("sends the action frame and keeps the promise pending on a healthy socket", () => {
       ws.send.mockClear();
       void adapter.submitAction({ type: "PassPriority" }, 0);
@@ -274,6 +652,27 @@ describe("WebSocketAdapter", () => {
           data: { action: { type: "PassPriority" } },
         }),
       );
+    });
+
+    it("resolves a mana-payment preview only for its matching request", async () => {
+      ws.send.mockClear();
+      const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
+      expect(ws.send).toHaveBeenCalledWith(
+        JSON.stringify({
+          type: "PreviewManaPayment",
+          data: { request_id: 1, action: { type: "PassPriority" } },
+        }),
+      );
+
+      ws.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "ManaPaymentPreview",
+          data: { request_id: 1, source_ids: [12] },
+        }),
+      );
+
+      await expect(preview).resolves.toEqual([12]);
     });
 
     it("rejects submitAction and clears pending state when the socket throws on send", async () => {

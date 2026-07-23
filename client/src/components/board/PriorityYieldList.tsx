@@ -63,10 +63,12 @@ export function PriorityYieldList() {
           <div className="mx-2 mb-1 border-t border-white/10" />
           <ul className="flex flex-col">
             {yields.map((y) => {
+              // Include trigger_description so two per-trigger yields on the same
+              // source/card (same id + incarnation) don't collide on the React key.
               const key =
                 "ThisObject" in y.target
-                  ? `${y.player}-obj-${y.target.ThisObject.source_id}-${y.target.ThisObject.incarnation}`
-                  : `${y.player}-all-${y.target.AllCopies.card_id}`;
+                  ? `${y.player}-obj-${y.target.ThisObject.source_id}-${y.target.ThisObject.incarnation}-${y.target.ThisObject.trigger_description ?? ""}`
+                  : `${y.player}-all-${y.target.AllCopies.card_id}-${y.target.AllCopies.trigger_description ?? ""}`;
               const label =
                 "ThisObject" in y.target
                   ? objects?.[y.target.ThisObject.source_id]?.name ?? t("priorityYield.yieldThis")

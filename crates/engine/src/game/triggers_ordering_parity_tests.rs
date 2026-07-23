@@ -139,6 +139,13 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // the conservative prompt is fail-closed = rules-correct). ----
     // end-step ZoneChangeCountThisTurn read × self-Sacrifice — self-limiting.
     "chorale of the void",
+    // Upkeep ObjectCount(Creature, Battlefield) >= 4 intervening-if × DestroyAll +
+    // self-Sacrifice (AST measured). The first copy's board sweep drives the census
+    // to 0, so the sibling's CR 603.4 re-check is false: it is removed from the stack,
+    // does nothing, and is NOT sacrificed. The write is monotone (the census only
+    // falls) and self-limiting, so identical siblings commute up to relabeling — either
+    // order sweeps the board and sacrifices exactly one of the two copies.
+    "planar collapse",
     // Mill membership write × ZoneCardCount(gy, Creature) self-transform threshold —
     // monotone graveyard growth.
     "deathbonnet sprout",
@@ -158,6 +165,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     "mirror-sigil sergeant",
     // GraveyardSize read × self-return-from-graveyard — self-limiting threshold.
     "persistent marshstalker",
+    // ObjectCount(creature card in your graveyard) == 1 intervening-if read ×
+    // optional self-return-from-graveyard — self-limiting (second copy breaks the
+    // gate; issue #5983 fixture regen surfaced this card in the sweep corpus).
+    "nether spirit",
     // Control(another nonland) read × self-Sacrifice — self-limiting.
     "reclusive wight",
     // Not(SourceIsTapped) read × untap-ALL write — idempotent.
@@ -213,6 +224,18 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // final state differs by order (CR 603.3b intended prompt). Runtime pin:
     // b2_dotd_member_bound_pin (reads_member_bound refuses batch-T1).
     "day of the dragons",
+    // LTB (self_ref): Discard{count: HandSize{Controller}} → sub Draw{count:
+    // Intensity{Source}} gated on EffectOutcome(OptionalEffectPerformed) (AST
+    // measured). Each co-departing Hellion draws off ITS OWN intensity but discards
+    // the SHARED hand, so the second trigger discards the cards the first one just
+    // drew: with intensities a != b the final hand (b vs a cards), the graveyard, and
+    // the library differ by order — the members are not identical functions (intensity
+    // is per-source mutable state), so the commutation proof genuinely fails. The new
+    // prompt is the CR 603.3b choice the legacy serde walk wrongly auto-ordered
+    // (CR 603.5: each copy's "may" is chosen on resolution). Only visible post-#5721/
+    // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
+    // and the sweep skips Unimplemented-bearing triggers.
+    "great desert hellion",
 ];
 
 /// R3 HIGH-1 (PR #5072 review): SAME-EVENT GENUINE member-bound order-dependence —
@@ -1390,6 +1413,28 @@ fn ctx_c(
     })
 }
 
+/// Mirrors a collected trigger: ordering inputs own the exact source observed
+/// when it fired, rather than consulting the storage slot again at ordering.
+fn ctx_c_from_observed_source(
+    state: &GameState,
+    source: u64,
+    controller: u8,
+    mut ability: ResolvedAbility,
+    condition: Option<TriggerCondition>,
+    event: Option<GameEvent>,
+) -> PendingTriggerContext {
+    let source_id = ObjectId(source);
+    let source_context = trigger_source_context_for_latch(
+        state,
+        state
+            .objects
+            .get(&source_id)
+            .expect("ordering fixture installs its source"),
+    );
+    ability.set_trigger_source_recursive(source_context);
+    ctx_c(source, controller, ability, condition, event)
+}
+
 fn creatures_of(cr: ControllerRef) -> TargetFilter {
     let mut tf = TypedFilter::creature();
     tf.controller = Some(cr);
@@ -1497,8 +1542,22 @@ fn s1_defense_membership_ctrl_span() {
 
     let pos_cond = || obj_count_cmp(creatures_of(ControllerRef::Opponent), Comparator::GE, 3);
     let pos = vec![
-        ctx_c(10, 0, defense_ability(), Some(pos_cond()), ev.clone()),
-        ctx_c(11, 0, defense_ability(), Some(pos_cond()), ev.clone()),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            defense_ability(),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(
+            &state,
+            11,
+            0,
+            defense_ability(),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
     ];
     assert!(
         group_is_order_independent(&state, &pos),
@@ -1507,8 +1566,15 @@ fn s1_defense_membership_ctrl_span() {
 
     let neg_cond = || obj_count_cmp(creatures_of(ControllerRef::You), Comparator::GE, 3);
     let neg = vec![
-        ctx_c(10, 0, defense_ability(), Some(neg_cond()), ev.clone()),
-        ctx_c(11, 0, defense_ability(), Some(neg_cond()), ev),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            defense_ability(),
+            Some(neg_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(&state, 11, 0, defense_ability(), Some(neg_cond()), ev),
     ];
     assert!(
         !group_is_order_independent(&state, &neg),
@@ -1537,8 +1603,22 @@ fn s2_rekindled_player_hand_span() {
         )
     };
     let pos = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(pos_cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(pos_cond()), ev.clone()),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            ra(bounce_self()),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(
+            &state,
+            11,
+            0,
+            ra(bounce_self()),
+            Some(pos_cond()),
+            ev.clone(),
+        ),
     ];
     assert!(
         group_is_order_independent(&state, &pos),
@@ -1547,8 +1627,15 @@ fn s2_rekindled_player_hand_span() {
 
     let neg_cond = || handsize_cmp(PlayerScope::Controller, Comparator::EQ, 0);
     let neg = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(neg_cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(neg_cond()), ev),
+        ctx_c_from_observed_source(
+            &state,
+            10,
+            0,
+            ra(bounce_self()),
+            Some(neg_cond()),
+            ev.clone(),
+        ),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(neg_cond()), ev),
     ];
     assert!(
         !group_is_order_independent(&state, &neg),
@@ -1583,14 +1670,22 @@ fn s3_brink_fused_discard_span() {
         player: PlayerScope::ScopedPlayer,
     });
     let pos = vec![
-        ctx_c(
+        ctx_c_from_observed_source(
+            &state,
             10,
             0,
             brink_ability(fused.clone()),
             Some(cond()),
             ev.clone(),
         ),
-        ctx_c(11, 0, brink_ability(fused), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(
+            &state,
+            11,
+            0,
+            brink_ability(fused),
+            Some(cond()),
+            ev.clone(),
+        ),
     ];
     assert!(
         group_is_order_independent(&state, &pos),
@@ -1603,14 +1698,15 @@ fn s3_brink_fused_discard_span() {
         },
     });
     let neg = vec![
-        ctx_c(
+        ctx_c_from_observed_source(
+            &state,
             10,
             0,
             brink_ability(unfused.clone()),
             Some(cond()),
             ev.clone(),
         ),
-        ctx_c(11, 0, brink_ability(unfused), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 11, 0, brink_ability(unfused), Some(cond()), ev),
     ];
     assert!(
         !group_is_order_independent(&state, &neg),
@@ -1642,8 +1738,8 @@ fn s4_gate_is_load_bearing() {
     };
 
     let mixed = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
     ];
     assert!(
         !group_is_order_independent(&state, &mixed),
@@ -1654,8 +1750,8 @@ fn s4_gate_is_load_bearing() {
     // controller — the sole change that makes the group controller-private.
     install_source(&mut state, 11, 0, 0);
     let uniform = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(cond()), ev),
     ];
     assert!(
         group_is_order_independent(&state, &uniform),
@@ -1686,8 +1782,8 @@ fn s5_multiplayer_three_players() {
     };
 
     let mixed = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 1, ra(bounce_self()), Some(cond()), ev.clone()),
     ];
     assert!(
         !group_is_order_independent(&state, &mixed),
@@ -1695,8 +1791,8 @@ fn s5_multiplayer_three_players() {
     );
 
     let both_p0 = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(12, 0, ra(bounce_self()), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 12, 0, ra(bounce_self()), Some(cond()), ev),
     ];
     assert!(
         group_is_order_independent(&state, &both_p0),
@@ -1728,8 +1824,8 @@ fn s6_owner_alignment() {
     };
 
     let donated = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(cond()), ev.clone()),
     ];
     assert!(
         !group_is_order_independent(&state, &donated),
@@ -1738,8 +1834,8 @@ fn s6_owner_alignment() {
 
     install_source(&mut state, 11, 0, 0); // now owner == controller == P0
     let aligned = vec![
-        ctx_c(10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
-        ctx_c(11, 0, ra(bounce_self()), Some(cond()), ev),
+        ctx_c_from_observed_source(&state, 10, 0, ra(bounce_self()), Some(cond()), ev.clone()),
+        ctx_c_from_observed_source(&state, 11, 0, ra(bounce_self()), Some(cond()), ev),
     ];
     assert!(
         group_is_order_independent(&state, &aligned),

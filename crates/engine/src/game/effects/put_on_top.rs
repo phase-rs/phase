@@ -1,12 +1,13 @@
 use rand::seq::SliceRandom;
 
 use crate::game::quantity::resolve_quantity_with_targets;
-use crate::game::zones;
+use crate::game::zone_pipeline::{self, ZoneMoveRequest};
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LibraryPosition, QuantityExpr, ResolvedAbility, TargetFilter,
+    Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
@@ -46,17 +47,17 @@ pub fn resolve(
     // into the library it just found empty, corrupting devotion and
     // library-count reads for any trailing win condition.
     //
-    // `ability.dig_found_nothing_for_parent_target` is a typed, per-ability
-    // signal stamped ONLY by `effects::apply_parent_chain_context` at the
-    // exact moment THIS ability is handed off as a Dig's immediate
-    // sub_ability — never copied to grandchildren and never read from raw
-    // global state here. That means every OTHER `ParentTarget` consumer
-    // (Avenging Angel's LTB self-return, etc.) keeps its ordinary
-    // self-fallback regardless of an unrelated Dig anywhere else in the same
-    // resolution, including a second, later `PutAtLibraryPosition` call.
+    // `ability.parent_target_missing_reason` is a typed, per-ability signal
+    // stamped ONLY by `effects::apply_parent_chain_context` at the exact
+    // moment THIS ability is handed off as a Dig's immediate sub_ability —
+    // never copied to grandchildren and never read from raw global state
+    // here. That means every OTHER `ParentTarget` consumer (Avenging Angel's
+    // LTB self-return, etc.) keeps its ordinary self-fallback regardless of
+    // an unrelated Dig anywhere else in the same resolution, including a
+    // second, later `PutAtLibraryPosition` call.
     let dig_found_nothing_for_parent_target = matches!(target_filter, TargetFilter::ParentTarget)
         && ability.targets.is_empty()
-        && ability.dig_found_nothing_for_parent_target;
+        && ability.parent_target_missing_reason == Some(ParentTargetMissingReason::Dig);
 
     // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch
     // (`resolved_targets`). `SelfRef` always resolves to the source object;
@@ -71,11 +72,28 @@ pub fn resolve(
     // CR 608.2c: `effect_object_targets` forwards `ability.targets` verbatim
     // for non-slot filters. A dig hand-keep binds `ParentTarget` on the exile
     // tail but must not pre-fill a `TrackedSet` bottom pick with the kept card.
+    //
+    // CR 701.13a: A filter that references `ExiledBySource` — the bare Chaos
+    // Wand form or Jodah's `And { ExiledBySource, DistinctFrom { ParentTarget }
+    // }` — is a resolution-time EXILE-ZONE SCAN, not a pre-chosen target. On the
+    // accept/decline path the cleanup INHERITS the cast's `ability.targets` (the
+    // hit, so `DistinctFrom { ParentTarget }` can exclude it). Forwarding that
+    // inherited hit through `effect_object_targets` would place the hit itself,
+    // bypassing both the exile scan and the exclusion. Force the scan branch
+    // below to run by starting empty, exactly like the tracked-set forms.
     let mut collected_targets = match &target_filter {
         TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. } => Vec::new(),
+        f if f.references_exiled_by_source() => Vec::new(),
         _ => crate::game::effects::effect_object_targets(&target_filter, &effective_targets),
     };
-    if collected_targets.is_empty() && matches!(target_filter, TargetFilter::ExiledBySource) {
+    // CR 701.13a + CR 608.2c: Any filter that references `ExiledBySource` — the
+    // bare form (Chaos Wand's "put the rest on the bottom") or an `And`-composed
+    // form (Jodah's "put the rest" = `And { ExiledBySource, DistinctFrom
+    // { ParentTarget } }`, which excludes a declined-and-still-exiled hit) —
+    // scans the exile zone. `matches_target_filter` evaluates the full filter,
+    // so every `And` leg (`ExiledBySource` membership + `DistinctFrom` exclusion)
+    // is applied together.
+    if collected_targets.is_empty() && target_filter.references_exiled_by_source() {
         let ctx = crate::game::filter::FilterContext::from_ability(ability);
         collected_targets = state
             .objects
@@ -165,6 +183,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -188,6 +207,7 @@ pub fn resolve(
                     events.push(GameEvent::EffectResolved {
                         kind: EffectKind::PutAtLibraryPosition,
                         source_id: ability.source_id,
+                        subject: None,
                     });
                     return Ok(());
                 }
@@ -215,6 +235,7 @@ pub fn resolve(
                     library_position: Some(position.clone()),
                     is_cost_payment: false,
                     enters_modified_if: None,
+                    duration: None,
                 };
                 return Ok(());
             }
@@ -230,6 +251,7 @@ pub fn resolve(
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
                 source_id: ability.source_id,
+                subject: None,
             });
             return Ok(());
         }
@@ -264,6 +286,7 @@ pub fn resolve(
             library_position: Some(position.clone()),
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
         return Ok(());
     }
@@ -274,8 +297,13 @@ pub fn resolve(
     // order" effects; linked-exile bottom cleanup randomizes separately below.
     let mut randomized_targets;
     let to_place = if expected == 0 {
+        // CR 701.13a: Both the bare (`ExiledBySource`) and And-composed (Jodah's
+        // `And { ExiledBySource, DistinctFrom { ParentTarget } }`) "put the rest
+        // on the bottom" cleanups place their whole pool at once. Jodah's ruling
+        // requires a RANDOM order; the bare Chaos Wand form is likewise
+        // randomized. Detect either via `references_exiled_by_source`.
         if matches!(position, LibraryPosition::Bottom)
-            && matches!(target_filter, TargetFilter::ExiledBySource)
+            && target_filter.references_exiled_by_source()
         {
             randomized_targets = collected_targets.clone();
             randomized_targets.shuffle(&mut state.rng);
@@ -287,45 +315,51 @@ pub fn resolve(
         &collected_targets[..collected_targets.len().min(expected)]
     };
 
-    let index = match &position {
-        // Top = index 0, Bottom = None (push to end), NthFromTop = index n-1
-        // ("second from the top" = index 1).
-        LibraryPosition::Top => Some(0),
-        LibraryPosition::Bottom => None,
-        LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+    let position = match position {
         // CR 401.7 (Unexpectedly Absent class): "just beneath the top N cards"
         // leaves exactly `depth` cards above the placed object, i.e. the 0-based
         // insertion index IS the resolved depth (no `-1`, unlike `NthFromTop`).
-        // Per CR 401.7 `move_to_library_at_index` clamps an index past the
-        // library size to the bottom.
-        LibraryPosition::BeneathTop { depth } => {
-            Some(resolve_quantity_with_targets(state, depth, ability).max(0) as usize)
-        }
+        // Resolve the depth before it enters the batch request because a parked
+        // request must carry a concrete placement across CR 616.1 pauses.
+        LibraryPosition::BeneathTop { depth } => LibraryPosition::BeneathTop {
+            depth: QuantityExpr::Fixed {
+                value: resolve_quantity_with_targets(state, &depth, ability).max(0),
+            },
+        },
+        other => other,
     };
-    match position {
-        LibraryPosition::Top => {
-            for object_id in to_place.iter().rev() {
-                zones::move_to_library_at_index(state, *object_id, index, events);
-            }
-        }
+    // CR 701.24a + CR 401.4: Top placement is reversed at request construction so the
+    // selected order remains top-to-bottom after sequential delivery; every
+    // other position preserves selection order. `move_objects_simultaneously`
+    // owns the suffix when a Library-destination replacement pauses.
+    let placement_order: Vec<ObjectId> = match &position {
+        LibraryPosition::Top => to_place.iter().rev().copied().collect(),
         LibraryPosition::Bottom
         | LibraryPosition::NthFromTop { .. }
-        | LibraryPosition::BeneathTop { .. } => {
-            for object_id in to_place {
-                zones::move_to_library_at_index(state, *object_id, index, events);
-            }
-        }
-    }
-    if matches!(target_filter, TargetFilter::ExiledBySource) {
-        state.exile_links.retain(|link| {
-            link.source_id != ability.source_id || !to_place.contains(&link.exiled_id)
-        });
-    }
-
-    events.push(GameEvent::EffectResolved {
-        kind: EffectKind::PutAtLibraryPosition,
-        source_id: ability.source_id,
-    });
+        | LibraryPosition::BeneathTop { .. }
+        | LibraryPosition::RandomWithinTop { .. } => to_place.to_vec(),
+    };
+    let requests = placement_order
+        .into_iter()
+        .map(|object_id| {
+            ZoneMoveRequest::effect(object_id, Zone::Library, ability.source_id)
+                .at_library_position(position.clone())
+        })
+        .collect();
+    let removed_exile_links = if target_filter.references_exiled_by_source() {
+        to_place.to_vec()
+    } else {
+        Vec::new()
+    };
+    zone_pipeline::move_objects_simultaneously_then(
+        state,
+        requests,
+        Some(BatchCompletion::PutOnTopComplete {
+            source_id: ability.source_id,
+            removed_exile_links,
+        }),
+        events,
+    );
 
     Ok(())
 }
@@ -616,7 +650,8 @@ mod tests {
             events.as_slice(),
             [GameEvent::EffectResolved {
                 kind: EffectKind::PutAtLibraryPosition,
-                source_id: ObjectId(100)
+                source_id: ObjectId(100),
+                ..
             }]
         ));
     }
@@ -693,11 +728,11 @@ mod tests {
     }
 
     /// Issue #1365 follow-up: this resolver must consult
-    /// `ability.dig_found_nothing_for_parent_target` (a typed field stamped
-    /// ONLY by `effects::apply_parent_chain_context` at a real Dig->child
-    /// hand-off), never `state.last_dig_found_nothing` directly. A freshly
+    /// `ability.parent_target_missing_reason` (a typed field stamped ONLY by
+    /// `effects::apply_parent_chain_context` at a real Dig->child hand-off),
+    /// never `state.last_parent_target_missing_reason` directly. A freshly
     /// built `ResolvedAbility` (as in any ordinary LTB self-return trigger)
-    /// never goes through that hand-off, so its field stays `false` no matter
+    /// never goes through that hand-off, so its field stays `None` no matter
     /// what stray global state an unrelated, earlier empty-library Dig left
     /// behind in the same resolution.
     #[test]
@@ -712,7 +747,7 @@ mod tests {
         );
         // Simulate a stale flag left behind by an unrelated empty-library Dig
         // earlier in the same top-level resolution.
-        state.last_dig_found_nothing = true;
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::Dig);
 
         let ability = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {

@@ -23,11 +23,13 @@
 //! Parameterizing on the counter type and its live count covers any spell mana
 //! value and any current/future card with this structure — not a single card.
 
-use engine::game::functioning_abilities::active_static_definitions;
+use engine::game::functioning_abilities::{
+    active_static_definitions, is_self_referential_prohibition,
+};
 use engine::game::static_abilities::{check_static_ability, StaticCheckContext};
 use engine::types::ability::{
     AbilityDefinition, Comparator, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    TargetFilter, TriggerDefinition,
+    TargetFilter, TriggerEntry,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -35,6 +37,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
@@ -133,6 +136,14 @@ fn spell_can_be_countered(
     }
     state.objects.get(&spell_id).is_none_or(|obj| {
         !active_static_definitions(state, obj).any(|sd| sd.mode == StaticMode::CantBeCountered)
+            // CR 113.6g: this policy scores the cast before the card moves to
+            // the stack, so predict the spell's own future stack-functioning
+            // self-prohibition instead of asking whether it functions in hand.
+            && !obj.static_definitions.iter_unchecked().any(|sd| {
+                sd.mode == StaticMode::CantBeCountered
+                    && is_self_referential_prohibition(sd)
+                    && (sd.active_zones.is_empty() || sd.active_zones.contains(&Zone::Stack))
+            })
     })
 }
 
@@ -160,29 +171,32 @@ fn chalice_matches<'a>(
 /// trigger that counters the cast spell when its mana value equals the count of
 /// some counter type on this permanent. Returns that counter type so the caller
 /// can read the live count. Covers any card with this shape — not just Chalice.
-fn chalice_counter_type(triggers: &[TriggerDefinition]) -> Option<CounterType> {
-    triggers.iter().find_map(|trigger| {
-        if !matches!(
-            trigger.mode,
-            TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
-        ) {
-            return None;
-        }
-        // CR 701.6a: the trigger must actually counter the spell.
-        if !trigger
-            .execute
-            .as_deref()
-            .is_some_and(ability_counters_spell)
-        {
-            return None;
-        }
-        // CR 202.3 + CR 122.1: the cast filter must gate on mana value equal to
-        // the count of one of this permanent's own counters.
-        trigger
-            .valid_card
-            .as_ref()
-            .and_then(filter_counter_type_for_cmc_eq_self_counters)
-    })
+fn chalice_counter_type(triggers: &[TriggerEntry]) -> Option<CounterType> {
+    triggers
+        .iter()
+        .map(|entry| &entry.definition)
+        .find_map(|trigger| {
+            if !matches!(
+                trigger.mode,
+                TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy
+            ) {
+                return None;
+            }
+            // CR 701.6a: the trigger must actually counter the spell.
+            if !trigger
+                .execute
+                .as_deref()
+                .is_some_and(ability_counters_spell)
+            {
+                return None;
+            }
+            // CR 202.3 + CR 122.1: the cast filter must gate on mana value equal to
+            // the count of one of this permanent's own counters.
+            trigger
+                .valid_card
+                .as_ref()
+                .and_then(filter_counter_type_for_cmc_eq_self_counters)
+        })
 }
 
 /// True when an ability's effect chain counters a spell/ability (CR 701.6).
@@ -228,7 +242,9 @@ mod tests {
     use crate::config::AiConfig;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, StaticDefinition, TypedFilter};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, StaticDefinition, TriggerDefinition, TypedFilter,
+    };
     use engine::types::card_type::CoreType;
     use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
     use engine::types::identifiers::CardId;
@@ -306,10 +322,7 @@ mod tests {
                 targets: Vec::new(),
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         };
         (decision, candidate)
     }

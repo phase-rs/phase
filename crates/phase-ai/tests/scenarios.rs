@@ -18,9 +18,9 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
 use phase_ai::choose_action;
-use phase_ai::config::{create_config, AiDifficulty, Platform};
+use phase_ai::config::{create_config, AiConfig, AiDifficulty, Platform};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
@@ -35,6 +35,7 @@ fn scenario_prefers_opponent_target_over_self() {
         target_slots: vec![TargetSelectionSlot {
             legal_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
             optional: false,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -70,6 +71,7 @@ fn scenario_skips_optional_target_with_no_legal_choices() {
         target_slots: vec![TargetSelectionSlot {
             legal_targets: Vec::new(),
             optional: true,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -109,6 +111,7 @@ fn scenario_blocks_lethal_attack_when_a_block_exists() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -142,6 +145,8 @@ fn scenario_multiplayer_attacks_to_finish_exposed_player() {
             player: P0,
             valid_attacker_ids: vec![attacker_a, attacker_b],
             valid_attack_targets: vec![AttackTarget::Player(P1), AttackTarget::Player(PlayerId(2))],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
         };
     }
 
@@ -227,6 +232,7 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
             valid_blocker_ids: vec![blocker],
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
+            blocker_constraints: Default::default(),
         };
     }
 
@@ -250,6 +256,128 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
         results.len() <= 200,
         "AI loop should stay within its hard safety cap"
     );
+}
+
+/// Builds a two-player game with BOTH seats AI, parked at the initial priority,
+/// and each library seeded deep so nobody decks out (draw-from-empty loss) for
+/// many turns. With an effectively empty board the AI's action stream is a long
+/// run of pass-priority / land plays that cycles phases and turns far beyond any
+/// small budget — so any early stop is the budget, not a natural game end. A
+/// bare `GameScenario::new()` has empty libraries and stalls after ~4 actions,
+/// which is why the seeding is load-bearing for the exact-equality assertions.
+fn two_ai_long_stream_runner() -> (GameRunner, HashSet<PlayerId>, HashMap<PlayerId, AiConfig>) {
+    let mut scenario = GameScenario::new();
+    let deck: Vec<&str> = vec!["Forest"; 60];
+    scenario.with_library_top(P0, &deck);
+    scenario.with_library_top(P1, &deck);
+    let runner = scenario.build();
+
+    let ai_players = HashSet::from([P0, P1]);
+    let ai_configs = HashMap::from([
+        (P0, create_config(AiDifficulty::VeryHard, Platform::Native)),
+        (P1, create_config(AiDifficulty::VeryHard, Platform::Native)),
+    ]);
+    (runner, ai_players, ai_configs)
+}
+
+#[test]
+fn run_ai_actions_bounded_stops_exactly_at_budget() {
+    // The stream is effectively unbounded (see helper), so a `results.len() == 3`
+    // outcome with no break reason can only be the budget cutting the stream.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let results = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        3,
+    );
+
+    assert_eq!(
+        results.len(),
+        3,
+        "bounded run must take exactly its budget of actions"
+    );
+    assert!(
+        results.break_reason.is_none(),
+        "budget cut the stream — the loop did not end for a break-door reason"
+    );
+}
+
+#[test]
+fn commander_driver_small_action_cap_is_never_exceeded() {
+    // Regression for the PR #6195 round-2 finding: the action-cap regressions
+    // must exercise the PRODUCTION driver boundary (`run_driver_loop`, the same
+    // helper `ai_commander`'s main calls), not a hand-mirror loop. Reverting
+    // main's/the helper's internals to unbounded batches (a full batch runs up
+    // to MAX_AI_ACTIONS_PER_SEQUENCE past a small cap) fails here.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let outcome = run_driver_loop(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        5,
+        &mut |_results, _state, total_before| {
+            assert!(
+                total_before < 5,
+                "observer must see a pre-batch total below the cap, got {total_before}"
+            );
+        },
+    );
+
+    assert_eq!(
+        outcome.total_actions, 5,
+        "the pass-priority stream is effectively unbounded, so the cap is \
+         exactly what stopped the driver"
+    );
+    assert!(matches!(outcome.exit, DriverExit::CapReached));
+}
+
+#[test]
+fn commander_driver_cap_beyond_one_batch_exercises_remaining_arithmetic() {
+    // A cap of 250 exceeds the 200 per-batch safety clamp, forcing TWO loop
+    // iterations: batch 1 is clamped to 200, batch 2 gets remaining = 50. The
+    // across-batch accounting (remaining shrinking, total accumulating) is
+    // exactly where the original overshoot bug lived; a cap <= 200 runs the loop
+    // once and cannot discriminate it.
+    let (mut runner, ai_players, ai_configs) = two_ai_long_stream_runner();
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let ai_session = phase_ai::session::AiSession::arc_from_game(runner.state());
+
+    let mut batch_sizes: Vec<usize> = Vec::new();
+    let outcome = run_driver_loop(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &ai_session,
+        250,
+        &mut |results, _state, total_before| {
+            assert!(
+                total_before < 250,
+                "observer must see a pre-batch total below the cap, got {total_before}"
+            );
+            batch_sizes.push(results.len());
+        },
+    );
+
+    assert_eq!(
+        batch_sizes,
+        vec![200, 50],
+        "200 is MAX_AI_ACTIONS_PER_SEQUENCE (phase-ai/src/auto_play.rs); if that \
+         constant changes this assertion fails loudly and should be updated in step"
+    );
+    assert_eq!(outcome.total_actions, 250);
+    assert!(matches!(outcome.exit, DriverExit::CapReached));
 }
 
 const GOLLUM_SCHEMING_GUIDE_ORACLE: &str = "Whenever Gollum attacks, look at the top two cards of your library, put them back in any order, then choose land or nonland. An opponent guesses whether the top card of your library is the chosen kind. Reveal that card. If they guessed right, remove Gollum from combat. Otherwise, you draw a card and Gollum can't be blocked this turn.";
@@ -1264,5 +1392,90 @@ fn scenario_master_transmuter_witness_board_is_legal() {
     assert!(
         activation_legal_for(runner.state(), transmuter),
         "the Island keeps {{U}} available after the return → activation must be legal"
+    );
+}
+
+/// AI-route reach-guard (Decision 3): the engine-owned completion seam that ALL AI
+/// declare-attackers routes funnel through (`complete_attacker_proposal[s]`) returns
+/// an `apply`-accepted, hard-legal declaration that obeys the CR 508.1d maximum
+/// requirement bar. Exercised through the direct-choice route (`choose_action`) and
+/// the host loop (`run_ai_actions`); routes 1/3/4 (candidate generation, fallback,
+/// scoring) are internal to `choose_action` and reached transitively, and route 7
+/// (Resolve All) shares the `run_ai_actions` seam. A lured attacker forces a
+/// non-empty completion, so the returned action is not the vacuous empty declaration.
+///
+/// Revert guard: if the AI route bypassed engine completion and fell back to the
+/// first generic legal action (an empty/illegal declaration), `runner.act(action)`
+/// would either reject it or fail to commit combat obeying the lure.
+#[test]
+fn ai_declare_attackers_completion_returns_apply_accepted_legal_action() {
+    use engine::types::ability::StaticDefinition;
+    use engine::types::statics::StaticMode;
+
+    fn parked_lured() -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        let attacker = {
+            let mut b = scenario.add_creature(P0, "Lured Bear", 2, 2);
+            b.with_static_definition(StaticDefinition::new(StaticMode::MustAttackPlayer {
+                player: P1,
+            }));
+            b.id()
+        };
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.phase = Phase::DeclareAttackers;
+        state.turn_number = 2;
+        state.waiting_for = WaitingFor::DeclareAttackers {
+            player: P0,
+            valid_attacker_ids: vec![attacker],
+            valid_attack_targets: vec![AttackTarget::Player(P1)],
+            valid_attack_targets_by_attacker: None,
+            attacker_constraints: Default::default(),
+        };
+        (runner, attacker)
+    }
+
+    // Route 2 (direct choice): `choose_action` returns a DeclareAttackers the real
+    // reducer accepts, obeying the lure (CR 508.1d max requirement = 1).
+    let (mut runner, attacker) = parked_lured();
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(7);
+    let action = choose_action(runner.state(), P0, &config, &mut rng)
+        .expect("AI must choose a declare-attackers action");
+    assert!(
+        matches!(action, GameAction::DeclareAttackers { .. }),
+        "expected DeclareAttackers, got {action:?}"
+    );
+    runner
+        .act(action)
+        .expect("the AI's declaration must be reducer-legal (apply-accepted)");
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == attacker)),
+        "the completed declaration obeys the lure and commits combat"
+    );
+
+    // Route 8 (host loop): `run_ai_actions` drives the same seam to a terminal state
+    // without panicking or looping on the declare step.
+    let (mut host, _attacker) = parked_lured();
+    let ai_players = HashSet::from([P0]);
+    let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let mut host_rng = SmallRng::seed_from_u64(7);
+    let session = phase_ai::session::AiSession::arc_from_game(host.state());
+    let results = run_ai_actions(
+        host.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut host_rng,
+        &session,
+    );
+    assert!(
+        !results.is_empty(),
+        "the host AI loop must take at least one action for the declare step"
     );
 }

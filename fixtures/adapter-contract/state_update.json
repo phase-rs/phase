@@ -1,6 +1,7 @@
 {
   "type": "StateUpdate",
   "data": {
+    "state_revision": 2,
     "state": {
       "turn_number": 1,
       "active_player": 0,
@@ -115,7 +116,7 @@
       "deck_pools": [],
       "sideboard_submitted": [],
       "triggers_fired_this_turn": [],
-      "trigger_fire_counts_this_turn": {},
+      "trigger_fire_counts_this_turn": [],
       "triggers_fired_this_game": [],
       "activated_abilities_this_turn": {},
       "activated_abilities_this_game": {},
@@ -148,6 +149,7 @@
       { "type": "PassPriority" }
     ],
     "auto_pass_recommended": false,
+    "mana_payment_shortcut_actions": [],
     "eliminated_players": [],
     "log_entries": [],
     "spell_costs": {}

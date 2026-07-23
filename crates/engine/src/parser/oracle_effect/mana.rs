@@ -10,8 +10,9 @@ use nom::Parser;
 use crate::parser::oracle_nom::error::OracleResult;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
-    AbilityKind, AbilityTag, Comparator, Effect, LinkedExileScope, ManaContribution,
-    ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
+    AbilityKind, AbilityTag, Comparator, Duration, Effect, FilterProp, LinkedExileScope,
+    ManaContribution, ManaProduction, ManaSpendRestriction, ObjectScope, QuantityExpr, QuantityRef,
+    TypeFilter, TypedFilter,
 };
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{
@@ -20,10 +21,13 @@ use crate::types::mana::{
 };
 use crate::types::zones::Zone;
 
-use super::super::oracle_keyword::parse_keyword_from_oracle;
-use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
+use super::super::oracle_keyword::parse_granted_keyword_fragment;
+use super::super::oracle_quantity::{
+    parse_cda_quantity, parse_cda_quantity_with_context, parse_event_context_quantity,
+};
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
+use crate::parser::oracle_ir::context::ParseContext;
 use crate::types::ability::TargetFilter;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
@@ -160,13 +164,26 @@ fn parse_object_colors_scope(text: &str) -> Option<ObjectScope> {
     parser.parse(lower.as_str()).ok().map(|(_, scope)| scope)
 }
 
+#[cfg(test)]
 pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
+    try_parse_add_mana_effect_with_context(text, &mut ParseContext::default())
+}
+
+/// Context-aware `try_parse_add_mana_effect`. The `ctx` carries the trigger
+/// subject so a count clause referencing the triggering object ("… equal to the
+/// number of creatures you control that share a creature type with it", Mana
+/// Echoes) resolves "it" to `TriggeringSource` rather than an empty
+/// `ParentTarget`.
+pub(super) fn try_parse_add_mana_effect_with_context(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
     // CR 505.1 + CR 106.4: A subject-led mana clause routes the produced mana
     // to the named player. Strip the subject, parse the bare "add …" clause,
     // and stamp the recipient onto the resulting `Effect::Mana.target`.
     if let Some((recipient, rest)) = strip_mana_subject_prefix(text.trim()) {
         let synthetic = format!("add {rest}");
-        let mut effect = try_parse_add_mana_effect(&synthetic)?;
+        let mut effect = try_parse_add_mana_effect_with_context(&synthetic, ctx)?;
         if let Effect::Mana { target, .. } = &mut effect {
             if target.is_none() {
                 *target = Some(recipient);
@@ -202,7 +219,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
     // `parse_mana_production_clause` so the where-X count is resolved here,
     // co-located with `apply_where_x_count_expression`.
     if let Some((count, color_options)) = parse_repeated_count_color_choice(clause) {
-        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref());
+        let (count, target) = apply_where_x_count_expression(count, where_x_expression.as_deref())?;
         return Some(Effect::Mana {
             produced: ManaProduction::AnyOneColor {
                 count,
@@ -275,13 +292,13 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
 
     // CR 106.1 / CR 106.3: "an amount of {color} equal to [quantity]"
     // e.g. "an amount of {G} equal to ~'s power"
-    if let Some(effect) = try_parse_amount_equal_to(clause, contribution) {
+    if let Some(effect) = try_parse_amount_equal_to_with_context(clause, contribution, ctx) {
         return Some(effect);
     }
 
     if let Some((count, rest)) = parse_mana_count_prefix(clause) {
         let (count, where_x_target) =
-            apply_where_x_count_expression(count, where_x_expression.as_deref());
+            apply_where_x_count_expression(count, where_x_expression.as_deref())?;
         let rest = rest.trim().trim_end_matches(['.', '"']).trim();
         let rest_lower = rest.to_lowercase();
 
@@ -629,7 +646,7 @@ pub(super) fn try_parse_add_mana_effect(text: &str) -> Option<Effect> {
         .map(|(count, _)| count)
         .unwrap_or(QuantityExpr::Fixed { value: 1 });
     let (fallback_count, fallback_target) =
-        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref());
+        apply_where_x_count_expression(fallback_count, where_x_expression.as_deref())?;
 
     // Scan for mana production type at word boundaries using nom combinators.
     let produced = scan_mana_production_type(&clause_lower, fallback_count.clone(), contribution)?;
@@ -1003,15 +1020,12 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
     let trimmed = text.trim_start();
     let lower = trimmed.to_lowercase();
 
-    if let Some((_, rest)) = nom_on_lower(trimmed, &lower, |i| {
-        value((), alt((tag("that much "), tag("that many ")))).parse(i)
-    }) {
-        return Some((
-            QuantityExpr::Ref {
-                qty: QuantityRef::EventContextAmount,
-            },
-            rest.trim_start(),
-        ));
+    if let Some((qty, rest)) = nom_on_lower(
+        trimmed,
+        &lower,
+        crate::parser::oracle_nom::quantity::parse_that_much_or_many,
+    ) {
+        return Some((QuantityExpr::Ref { qty }, rest.trim_start()));
     }
 
     // Try "x " via nom (case-insensitive via lowercase)
@@ -1035,10 +1049,13 @@ pub(super) fn parse_mana_count_prefix(text: &str) -> Option<(QuantityExpr, &str)
     ))
 }
 
+/// CR 107.3c: Bind a "where X is …" mana count, or FAIL (`None`) when the
+/// definition has no typed home. Never fabricates a raw-text placeholder — see
+/// `apply_where_x_quantity_expression` for why such a node is dead at runtime.
 pub(super) fn apply_where_x_count_expression(
     count: QuantityExpr,
     where_x_expression: Option<&str>,
-) -> (QuantityExpr, Option<TargetFilter>) {
+) -> Option<(QuantityExpr, Option<TargetFilter>)> {
     match (&count, where_x_expression) {
         (
             QuantityExpr::Ref {
@@ -1046,19 +1063,15 @@ pub(super) fn apply_where_x_count_expression(
             },
             Some(expression),
         ) if name.eq_ignore_ascii_case("X") => {
-            if let Some(count) = super::parse_where_x_quantity_expression(expression) {
-                return (count, where_x_expression_target_filter(expression));
-            }
-            (
-                QuantityExpr::Ref {
-                    qty: QuantityRef::Variable {
-                        name: expression.to_string(),
-                    },
-                },
-                None,
-            )
+            // CR 107.3c: the clause DEFINES X. An unrepresentable definition is a
+            // PARSE FAILURE (`None`), never a raw-text placeholder: the fabricated
+            // `QuantityRef::Variable { name: "<oracle text>" }` is dead at runtime
+            // (game/quantity.rs resolves a non-`X` variable name to 0), so the mana
+            // clause produced ZERO mana while still reading as supported.
+            let count = super::parse_where_x_quantity_expression(expression)?;
+            Some((count, where_x_expression_target_filter(expression)))
         }
-        _ => (count, None),
+        _ => Some((count, None)),
     }
 }
 
@@ -2367,36 +2380,61 @@ pub(super) fn parse_mana_spell_grant(lower: &str) -> Option<Vec<ManaSpellGrant>>
     None
 }
 
-/// CR 106.6 + CR 702: Parse mana-rider keyword grants:
-/// "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+/// CR 106.6 + CR 702.10: Parse mana-rider keyword grants:
+/// - "If that mana is spent on a Dragon creature spell, it gains haste until end of turn."
+/// - "If that mana is spent on a creature spell, it gains haste." (Hall of the Bandit Lord)
 fn parse_conditional_keyword_grant(lower: &str) -> Option<ManaSpellGrant> {
+    let trimmed = lower.trim().trim_end_matches('.');
     let (rest, _) = tag::<_, _, OracleError<'_>>("if that mana is spent on ")
-        .parse(lower)
+        .parse(trimmed)
         .ok()?;
     let (rest, _) = opt(alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))))
         .parse(rest)
         .ok()?;
-    let (rest, subtype) = terminated(
-        take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
-        tag(" creature spell, it gains "),
-    )
-    .parse(rest)
-    .ok()?;
-    let (rest, keyword_text) = terminated(
+
+    // Filter axis: bare "creature spell" vs "[subtype] creature spell".
+    let (rest, restriction) = if let Ok((remainder, _)) =
+        tag::<_, _, OracleError<'_>>("creature spell, it gains ").parse(rest)
+    {
+        (
+            remainder,
+            Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+        )
+    } else {
+        let (remainder, subtype) = terminated(
+            take_until::<_, _, OracleError<'_>>(" creature spell, it gains "),
+            tag(" creature spell, it gains "),
+        )
+        .parse(rest)
+        .ok()?;
+        (
+            remainder,
+            Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
+                subtype.trim(),
+            ))),
+        )
+    };
+
+    let (keyword, duration) = if let Ok((remainder, keyword_text)) = terminated(
         take_until::<_, _, OracleError<'_>>(" until end of turn"),
         tag(" until end of turn"),
     )
     .parse(rest)
-    .ok()?;
-    if !rest.trim().is_empty() {
-        return None;
-    }
-    let keyword = parse_keyword_from_oracle(keyword_text.trim())?;
+    {
+        if !remainder.trim().is_empty() {
+            return None;
+        }
+        let keyword = parse_granted_keyword_fragment(keyword_text.trim())?;
+        (keyword, Duration::UntilEndOfTurn)
+    } else {
+        let keyword = parse_granted_keyword_fragment(rest.trim())?;
+        (keyword, Duration::Permanent)
+    };
+
     Some(ManaSpellGrant::AddKeywordUntilEndOfTurn {
         keyword,
-        restriction: Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
-            subtype.trim(),
-        ))),
+        restriction,
+        duration: Box::new(duration),
     })
 }
 
@@ -2427,22 +2465,36 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
     )
     .parse(rest)
     .ok()?;
-    let restriction = parse_spend_trigger_filter(filter_part.trim())?;
+    let filter = parse_spend_trigger_filter(filter_part.trim())?;
     let effect_text = after.trim().trim_end_matches('.').trim();
     if effect_text.is_empty() {
         return None;
     }
-    // Parse the reflexive effect (scry N, gain N life, draw a card, …).
+    // Parse the reflexive effect (scry N, gain N life, draw a card, copy that spell…).
     let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
-    // First pass: accept only controller-scoped reflexive effects whose parse
-    // fully consumes the clause. Anything else — notably spell-referencing
-    // effects like Jade Orb's "it enters with an additional +1/+1 counter on it",
-    // which `parse_effect_chain` parses *partially* (silently swallowing the
-    // counter clause) — is rejected so the whole clause stays a loud gap rather
-    // than flipping the card to "supported" with a swallowed clause (follow-ups).
+    // COVERAGE-HONESTY ALLOWLIST — what it is actually for (CR 608.2c):
+    // `parse_effect_chain` parses some spell-referencing effects only PARTIALLY and
+    // silently swallows the remainder. Jade Orb of Dragonkind's "it enters with an
+    // additional +1/+1 counter on it AND GAINS HEXPROOF until your next turn" parses
+    // the counter clause and drops the rest. Admitting an effect like that would flip
+    // the card to "supported" while a printed clause quietly vanished, so the gate
+    // keeps the WHOLE clause an honest gap instead. Only effects whose parse provably
+    // consumes the clause are admitted — extend it only when that holds for the new
+    // effect, and say why.
+    //
+    // `CopySpell` qualifies (Primal Wellspring, Pyromancer's Goggles): the
+    // copy-retarget continuation — "…and you may choose new targets for the copy" —
+    // is ABSORBED INTO the `CopySpell` node as its CR 707.10c `retarget` permission
+    // rather than left behind as a trailing sibling, so a full parse leaves nothing
+    // dangling. The `sub_ability` bail below is what CHECKS that this actually held
+    // for a given card; it is a verification, not an assumption. If a future phrasing
+    // parks the retarget in a `sub_ability` instead, the card stays honestly gapped.
     if !matches!(
         *ability.effect,
-        Effect::Scry { .. } | Effect::GainLife { .. } | Effect::Draw { .. }
+        Effect::Scry { .. }
+            | Effect::GainLife { .. }
+            | Effect::Draw { .. }
+            | Effect::CopySpell { .. }
     ) {
         return None;
     }
@@ -2450,25 +2502,48 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
         return None;
     }
     Some(ManaSpellGrant::TriggerOnSpend {
-        restriction: Some(restriction),
+        filter,
         ability: Box::new(ability),
     })
 }
 
-/// Parse the spell-filter portion of a "when you spend this mana to cast …"
-/// clause into a `ManaRestriction`. First pass: mana-value thresholds and
-/// "[subtype] creature spell". Returns `None` for unsupported filters.
-fn parse_spend_trigger_filter(filter: &str) -> Option<ManaRestriction> {
-    // "a spell with mana value N or greater/less" (keeps its article).
+/// CR 603.3: Parse the spell-filter portion of a "when you spend this mana to
+/// cast …" clause into the trigger's EVENT filter — "which spell, cast with this
+/// mana, makes the trigger fire".
+///
+/// This is a [`TargetFilter`], not a `ManaRestriction`: none of these cards
+/// restricts its mana (Pyromancer's Goggles' {R} may be spent on anything), so a
+/// CR 106.6 spend restriction was never the right type — see
+/// [`ManaSpellGrant::TriggerOnSpend`].
+///
+/// The type/color phrase is DELEGATED to `oracle_target::parse_type_phrase`, the
+/// engine's single authority for phrases like "red instant or sorcery". One call
+/// therefore covers the whole type × color class ("an instant or sorcery spell",
+/// "a red instant or sorcery spell", "a Dragon creature spell") instead of the
+/// bespoke shape list this replaces. Two arms stay dedicated because they are
+/// predicates ON the spell rather than part of its type phrase: the CR 202.3
+/// mana-value threshold and the CR 205.3m commander-relational check.
+///
+/// Returns `None` for an unrecognized filter, so the clause stays a loud gap.
+fn parse_spend_trigger_filter(filter: &str) -> Option<TargetFilter> {
+    // CR 202.3: "a spell with mana value N or greater/less" — a post-`spell`
+    // threshold, not a type phrase (the helper keeps the article).
     if let Some((comparator, value)) = parse_mana_value_threshold(filter) {
-        return Some(ManaRestriction::OnlyForSpellWithManaValue { comparator, value });
+        return Some(TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed {
+                    value: value as i32,
+                },
+            }],
+            ..TypedFilter::default()
+        }));
     }
-    // CR 205.3m: "[a|an] creature spell that shares a creature type with your
-    // commander" — a relational filter resolved against live commander state at
-    // the spend site. `all_consuming` rejects any trailing text so the whole
-    // clause stays a loud gap if the phrasing drifts.
+    // CR 205.3m + CR 903.3: "[a|an] creature spell that shares a creature type with
+    // your commander" (Path of Ancestry). `all_consuming` rejects trailing text, so
+    // the clause stays a loud gap if the phrasing drifts.
     if all_consuming(value(
-        ManaRestriction::SharesCreatureTypeWithCommander,
+        (),
         (
             opt(alt((
                 tag::<_, _, OracleError<'_>>("a "),
@@ -2482,27 +2557,34 @@ fn parse_spend_trigger_filter(filter: &str) -> Option<ManaRestriction> {
     .parse(filter)
     .is_ok()
     {
-        return Some(ManaRestriction::SharesCreatureTypeWithCommander);
+        let mut typed = TypedFilter::new(TypeFilter::Creature);
+        typed
+            .properties
+            .push(FilterProp::SharesCreatureTypeWithCommander);
+        return Some(TargetFilter::Typed(typed));
     }
-    // "[a|an] [subtype] creature spell".
+    // "[a|an] <type-phrase> spell" — everything else. Mirrors
+    // `oracle_effect::extract_when_next_spell_filter`: isolate the phrase before
+    // " spell", hand it to the shared type-phrase parser, and refuse anything that
+    // does not fully consume (a partial parse would silently narrow the filter).
     let (rest, _) = opt(alt((
         tag::<_, _, OracleError<'_>>("a "),
         tag::<_, _, OracleError<'_>>("an "),
     )))
     .parse(filter)
     .ok()?;
-    let (rest, subtype) = terminated(
-        take_until::<_, _, OracleError<'_>>(" creature spell"),
-        tag::<_, _, OracleError<'_>>(" creature spell"),
-    )
-    .parse(rest)
-    .ok()?;
-    if !rest.trim().is_empty() || subtype.trim().is_empty() {
+    let (pre, post) = match nom_primitives::split_once_on(rest, " spell") {
+        Ok((_, (pre, post))) => (pre.trim(), post.trim()),
+        Err(_) => return None,
+    };
+    if !post.is_empty() || pre.is_empty() {
         return None;
     }
-    Some(ManaRestriction::OnlyForCreatureType(super::capitalize(
-        subtype.trim(),
-    )))
+    let (parsed, remainder) = parse_type_phrase(pre);
+    if !remainder.trim().is_empty() || matches!(parsed, TargetFilter::Any) {
+        return None;
+    }
+    Some(parsed)
 }
 
 /// CR 106.6: Extract trailing spell grants from a mana restriction clause.
@@ -2617,7 +2699,11 @@ fn parse_pure_color_symbol(
 
 /// CR 106.1 / CR 106.3: Parse "an amount of {color} equal to [quantity]"
 /// e.g. "an amount of {G} equal to ~'s power" -> AnyOneColor { count: SelfPower, [Green] }
-fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Option<Effect> {
+fn try_parse_amount_equal_to_with_context(
+    clause: &str,
+    contribution: ManaContribution,
+    ctx: &mut ParseContext,
+) -> Option<Effect> {
     let clause_lower = clause.to_lowercase();
     let (_, rest) = nom_on_lower(clause, &clause_lower, |i| {
         value((), tag("an amount of ")).parse(i)
@@ -2636,7 +2722,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     }) {
         let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
         let count = parse_event_context_quantity(quantity_text)
-            .or_else(|| parse_cda_quantity(quantity_text))?;
+            .or_else(|| parse_cda_quantity_with_context(quantity_text, ctx))?;
         return Some(Effect::Mana {
             produced: ManaProduction::ChosenColor {
                 count,
@@ -2666,7 +2752,7 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
         // triggering-spell spent-mana ref; fall back to `parse_cda_quantity` for
         // non-event quantities (e.g. "~'s power").
         let count = parse_event_context_quantity(quantity_text)
-            .or_else(|| parse_cda_quantity(quantity_text))?;
+            .or_else(|| parse_cda_quantity_with_context(quantity_text, ctx))?;
         return Some(Effect::Mana {
             produced: ManaProduction::Colorless { count },
             restrictions: vec![],
@@ -2711,6 +2797,51 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
 mod tests {
     use super::*;
     use crate::types::ability::{ControllerRef, TypeFilter};
+
+    #[test]
+    fn shares_type_with_it_in_trigger_context_uses_triggering_source() {
+        // #5329 Mana Echoes: with a trigger subject in context, "the number of
+        // creatures you control that share a creature type with it" must resolve
+        // "it" to `TriggeringSource`, not an empty `ParentTarget` (which counts
+        // nothing → adds no mana).
+        use crate::types::ability::{
+            FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
+        };
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::default())),
+            ..ParseContext::default()
+        };
+        let effect = try_parse_add_mana_effect_with_context(
+            "Add an amount of {C} equal to the number of creatures you control that share a creature type with it.",
+            &mut ctx,
+        )
+        .expect("mana amount clause must parse");
+        let Effect::Mana {
+            produced:
+                ManaProduction::Colorless {
+                    count:
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                },
+            ..
+        } = effect
+        else {
+            panic!("expected Colorless ObjectCount, got {effect:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        let reference = tf.properties.iter().find_map(|p| match p {
+            FilterProp::SharesQuality { reference, .. } => reference.as_deref(),
+            _ => None,
+        });
+        assert_eq!(
+            reference,
+            Some(&TargetFilter::TriggeringSource),
+            "\"share a creature type with it\" must reference the triggering object, got {reference:?}",
+        );
+    }
 
     fn extract_combinations(oracle: &str) -> Option<Vec<Vec<ManaColor>>> {
         match try_parse_add_mana_effect(oracle) {
@@ -3170,7 +3301,7 @@ mod tests {
         );
     }
 
-    /// CR 106.1 + CR 609.3 + CR 122.1: Coalition Relic — "add one mana of any
+    /// CR 106.1 + CR 608.2c + CR 122.1: Coalition Relic — "add one mana of any
     /// color for each charge counter removed this way". This is the AnyOneColor
     /// equivalent of the fixed-color "Add {R} for each X" pattern. Class also
     /// includes the Storage Counter cycle (Saprazzan Cove, Dwarven Hold, etc.).
@@ -3197,7 +3328,9 @@ mod tests {
                 assert_eq!(
                     count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::PreviousEffectAmount
+                        qty: QuantityRef::PreviousEffectAmount {
+                            channel: crate::types::ability::DamageChannel::Total,
+                        }
                     },
                     "for-each tail must dispatch to PreviousEffectAmount"
                 );
@@ -3648,6 +3781,24 @@ mod tests {
             vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
                 keyword: crate::types::keywords::Keyword::Haste,
                 restriction: Some(ManaRestriction::OnlyForCreatureType("Dragon".to_string())),
+                duration: Box::new(Duration::UntilEndOfTurn),
+            }]
+        );
+    }
+
+    /// CR 106.6 + CR 702.10a: Hall of the Bandit Lord — any creature spell,
+    /// permanent haste (no "until end of turn" rider).
+    #[test]
+    fn parses_hall_of_bandit_lord_creature_spell_haste_grant() {
+        let grants =
+            parse_mana_spell_grant("if that mana is spent on a creature spell, it gains haste.")
+                .expect("Hall of the Bandit Lord mana rider must parse");
+        assert_eq!(
+            grants,
+            vec![ManaSpellGrant::AddKeywordUntilEndOfTurn {
+                keyword: crate::types::keywords::Keyword::Haste,
+                restriction: Some(ManaRestriction::OnlyForSpellType("Creature".to_string())),
+                duration: Box::new(Duration::Permanent),
             }]
         );
     }
@@ -3663,14 +3814,17 @@ mod tests {
         )
         .expect("Path of Ancestry spend trigger must parse");
         match grant {
-            ManaSpellGrant::TriggerOnSpend {
-                restriction,
-                ability,
-            } => {
-                assert_eq!(
-                    restriction,
-                    Some(ManaRestriction::SharesCreatureTypeWithCommander)
-                );
+            ManaSpellGrant::TriggerOnSpend { filter, ability } => {
+                // CR 205.3m + CR 903.3: the commander-relational predicate is an OBJECT
+                // filter (which spell fires the trigger), not a CR 106.6 spend
+                // restriction — Path of Ancestry's mana may be spent on anything.
+                let TargetFilter::Typed(typed) = &filter else {
+                    panic!("expected a Typed spell filter, got {filter:?}");
+                };
+                assert!(typed.type_filters.contains(&TypeFilter::Creature));
+                assert!(typed
+                    .properties
+                    .contains(&FilterProp::SharesCreatureTypeWithCommander));
                 assert!(matches!(*ability.effect, Effect::Scry { .. }));
             }
             other => panic!("expected TriggerOnSpend, got {other:?}"),
@@ -3685,13 +3839,15 @@ mod tests {
             "when you spend this mana to cast a creature spell that shares a creature type with your commander, scry 1",
         )
         .expect("active-voice equivalent must parse");
-        assert!(matches!(
-            grant,
-            ManaSpellGrant::TriggerOnSpend {
-                restriction: Some(ManaRestriction::SharesCreatureTypeWithCommander),
-                ..
-            }
-        ));
+        let ManaSpellGrant::TriggerOnSpend { filter, .. } = grant else {
+            panic!("expected TriggerOnSpend");
+        };
+        let TargetFilter::Typed(typed) = &filter else {
+            panic!("expected a Typed spell filter, got {filter:?}");
+        };
+        assert!(typed
+            .properties
+            .contains(&FilterProp::SharesCreatureTypeWithCommander));
     }
 
     /// A malformed relational filter must decline so the clause stays a loud gap

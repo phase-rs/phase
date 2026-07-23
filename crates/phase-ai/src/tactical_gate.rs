@@ -309,7 +309,7 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     // choose such a target.
     for keyword in &object.keywords {
         if let Keyword::Ward(ward) = keyword {
-            if !can_pay_ward_cost(ctx, ward) {
+            if !can_pay_ward_cost(ctx, ward, object) {
                 return Some(GateDecision::Reject);
             }
             break;
@@ -725,10 +725,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state,
@@ -784,10 +781,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state,
@@ -848,6 +842,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -858,10 +853,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
         };
         let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
         let ctx = PolicyContext {
@@ -921,6 +913,7 @@ mod tests {
             target_slots: vec![TargetSelectionSlot {
                 legal_targets: vec![TargetRef::Object(creature)],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: TargetSelectionProgress::default(),
@@ -933,10 +926,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::CancelCast,
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Pass),
         };
         let ctx = PolicyContext {
             state,
@@ -976,6 +966,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(creature)],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: TargetSelectionProgress::default(),
@@ -989,10 +980,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
         }
     }
 
@@ -1099,5 +1087,47 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a + CR 119.4: Phyrexian Fleshgorger's Ward uses its current
+    /// power as the life payment, so targeting is futile at or below that
+    /// power and remains available when the AI can pay without losing.
+    #[test]
+    fn dynamic_life_ward_uses_the_warded_creatures_current_power() {
+        const FLESHGORGER: &str =
+            "Menace, lifelink\nWard—Pay life equal to Phyrexian Fleshgorger's power.";
+
+        let gate_for = |life, current_power| {
+            let mut scenario = GameScenario::new();
+            scenario.with_life(P0, life);
+            let creature = scenario
+                .add_creature_from_oracle(P1, "Phyrexian Fleshgorger", 7, 5, FLESHGORGER)
+                .id();
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            let fleshgorger = state.objects.get_mut(&creature).unwrap();
+            fleshgorger.base_power = Some(current_power);
+            fleshgorger.power = Some(current_power);
+
+            let decision = damage_target_decision(creature, 3);
+            let candidate = choose_target_candidate(creature);
+            let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+            let ctx = PolicyContext {
+                state,
+                decision: &decision,
+                candidate: &candidate,
+                ai_player: P0,
+                config: &config,
+                context: &AiContext::empty(&config.weights),
+                cast_facts: None,
+                search_depth: crate::policies::context::SearchDepth::Root,
+            };
+            assess_candidate(&ctx)
+        };
+
+        assert_eq!(gate_for(6, 7), GateDecision::Reject);
+        assert_eq!(gate_for(7, 7), GateDecision::Reject);
+        assert_ne!(gate_for(8, 7), GateDecision::Reject);
+        assert_ne!(gate_for(4, 3), GateDecision::Reject);
     }
 }

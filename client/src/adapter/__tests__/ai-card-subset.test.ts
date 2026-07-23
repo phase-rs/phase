@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadAiPoolCardDb } from "../card-db-subset";
-import type { EngineWorkerClient } from "../engine-worker-client";
+import { applyAiPoolCardDbPlan, resolveAiPoolCardDbPlan } from "../card-db-subset";
+import { EngineWorkerClient } from "../engine-worker-client";
 import type { AiWorkerPool } from "../ai-worker-pool";
 
 // The mocked EngineWorkerClient is shared by both the main engine and every AI
@@ -30,8 +30,8 @@ vi.mock("../engine-worker-client", () => ({
   }),
 }));
 
-// ── VM-4: loadAiPoolCardDb dispatch ───────────────────────────────────────
-describe("loadAiPoolCardDb", () => {
+// ── VM-4: plan resolution + application ───────────────────────────────────
+describe("resolveAiPoolCardDbPlan / applyAiPoolCardDbPlan", () => {
   function makeMocks() {
     const mainEngine = {
       buildAiCardSubset: vi.fn<() => Promise<string>>(),
@@ -48,36 +48,44 @@ describe("loadAiPoolCardDb", () => {
     return { mainEngine, aiPool };
   }
 
-  it("escalates a Momir game (kind:full) to the full DB, never the subset", async () => {
-    const { mainEngine, aiPool } = makeMocks();
+  it("resolves an unbounded universe (kind:full, e.g. Momir) without touching any pool", async () => {
+    const { mainEngine } = makeMocks();
     mainEngine.buildAiCardSubset.mockResolvedValue(JSON.stringify({ kind: "full" }));
 
-    await loadAiPoolCardDb("subset", mainEngine, aiPool);
+    const plan = await resolveAiPoolCardDbPlan("subset", mainEngine);
 
-    expect(aiPool.loadCardDb).toHaveBeenCalledOnce();
-    expect(aiPool.loadCardDbText).not.toHaveBeenCalled();
+    // The caller must skip creating (or dispose) the pool instead of fanning
+    // the full corpus (~380MB WASM linear memory per worker) across workers.
+    expect(plan).toEqual({ kind: "unbounded" });
   });
 
-  it("loads the subset JSON for a bounded (non-Momir) game", async () => {
+  it("resolves and applies the subset for a bounded (non-Momir) game", async () => {
     const { mainEngine, aiPool } = makeMocks();
     const innerJson = '{"Bounded Card":{}}';
     mainEngine.buildAiCardSubset.mockResolvedValue(
       JSON.stringify({ kind: "subset", json: innerJson, count: 1 }),
     );
 
-    await loadAiPoolCardDb("subset", mainEngine, aiPool);
+    const plan = await resolveAiPoolCardDbPlan("subset", mainEngine);
+    expect(plan).toEqual({ kind: "subset", json: innerJson });
+    if (plan.kind === "unbounded") throw new Error("unreachable");
 
+    await applyAiPoolCardDbPlan(plan, aiPool);
     expect(aiPool.loadCardDbText).toHaveBeenCalledWith(innerJson);
     expect(aiPool.loadCardDb).not.toHaveBeenCalled();
   });
 
-  it("mode=full loads the full DB without consulting the engine", async () => {
+  it("mode=full resolves without consulting the engine and applies the full DB", async () => {
     const { mainEngine, aiPool } = makeMocks();
 
-    await loadAiPoolCardDb("full", mainEngine, aiPool);
-
-    expect(aiPool.loadCardDb).toHaveBeenCalledOnce();
+    const plan = await resolveAiPoolCardDbPlan("full", mainEngine);
+    // Explicit user opt-in to the memory cost — the pool is kept.
+    expect(plan).toEqual({ kind: "full" });
     expect(mainEngine.buildAiCardSubset).not.toHaveBeenCalled();
+    if (plan.kind === "unbounded") throw new Error("unreachable");
+
+    await applyAiPoolCardDbPlan(plan, aiPool);
+    expect(aiPool.loadCardDb).toHaveBeenCalledOnce();
     expect(aiPool.loadCardDbText).not.toHaveBeenCalled();
   });
 });
@@ -86,6 +94,7 @@ describe("loadAiPoolCardDb", () => {
 describe("WasmAdapter AI-pool subset lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockWorkerClient.initialize.mockResolvedValue(undefined);
     mockWorkerClient.getAiScoredCandidates.mockResolvedValue([
       [{ type: "PassPriority" }, 1.0],
     ]);
@@ -132,5 +141,315 @@ describe("WasmAdapter AI-pool subset lifecycle", () => {
     // leaves the pool loaded with subset A, so both assertions flip.
     expect(loadedB).toContain("Game B Card");
     expect(loadedB).not.toContain("Game A Card");
+  });
+
+  it("falls through to single-worker getAiAction when selectActionFromScores returns null", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset.mockResolvedValue(
+      JSON.stringify({ kind: "subset", json: "{}", count: 0 }),
+    );
+    mockWorkerClient.getAiScoredCandidates.mockResolvedValue([
+      [{ type: "PassPriority" }, 1.0],
+      [{ type: "ActivateAbility", data: { source_id: 1, ability_index: 0 } }, 0.5],
+    ]);
+    mockWorkerClient.selectActionFromScores.mockResolvedValue(null);
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+
+    const action = await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    expect(mockWorkerClient.selectActionFromScores).toHaveBeenCalled();
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalledWith("VeryHard", 0);
+    expect(action).toEqual({ type: "PassPriority" });
+  });
+
+  it("disposes a partially initialized pool and never reuses it", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset.mockResolvedValue(
+      JSON.stringify({ kind: "subset", json: "{}", count: 0 }),
+    );
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+
+    const workersBeforePool = vi.mocked(EngineWorkerClient).mock.calls.length;
+    mockWorkerClient.initialize.mockRejectedValueOnce(
+      new Error("pool worker initialization timed out"),
+    );
+
+    const first = await adapter.getAiAction("VeryHard", 0, "Priority");
+    const workersAfterFailure = vi.mocked(EngineWorkerClient).mock.calls.length;
+    const failedPoolSize = workersAfterFailure - workersBeforePool;
+
+    expect(first).toEqual({ type: "PassPriority" });
+    expect(failedPoolSize).toBeGreaterThan(0);
+    expect(mockWorkerClient.dispose).toHaveBeenCalledTimes(failedPoolSize);
+    expect(mockWorkerClient.getAiScoredCandidates).not.toHaveBeenCalled();
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalledTimes(1);
+
+    const second = await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    expect(second).toEqual({ type: "PassPriority" });
+    expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBe(workersAfterFailure);
+    expect(mockWorkerClient.getAiScoredCandidates).not.toHaveBeenCalled();
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalledTimes(2);
+
+    await adapter.resetGameState();
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBeGreaterThan(
+      workersAfterFailure,
+    );
+    expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalled();
+  });
+
+  it("shares one pool initialization between concurrent decisions", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    const workersBeforePool = vi.mocked(EngineWorkerClient).mock.calls.length;
+
+    let finishPoolInitialization!: () => void;
+    const poolInitialization = new Promise<void>((resolve) => {
+      finishPoolInitialization = resolve;
+    });
+    mockWorkerClient.initialize.mockReturnValue(poolInitialization);
+
+    const first = adapter.getAiAction("VeryHard", 0, "Priority");
+    await vi.waitFor(() => {
+      expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBeGreaterThan(
+        workersBeforePool,
+      );
+    });
+    const second = adapter.getAiAction("VeryHard", 0, "Priority");
+    finishPoolInitialization();
+    await Promise.all([first, second]);
+
+    const expectedPoolSize = Math.max(
+      2,
+      Math.min((navigator.hardwareConcurrency ?? 0) - 1, 4),
+    );
+    expect(
+      vi.mocked(EngineWorkerClient).mock.calls.length - workersBeforePool,
+    ).toBe(expectedPoolSize);
+  });
+
+  it("discards a pool candidate invalidated by a game reset", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset.mockResolvedValue(
+      JSON.stringify({ kind: "subset", json: "{}", count: 0 }),
+    );
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+    const workersBeforePool = vi.mocked(EngineWorkerClient).mock.calls.length;
+
+    let finishPoolInitialization!: () => void;
+    const poolInitialization = new Promise<void>((resolve) => {
+      finishPoolInitialization = resolve;
+    });
+    mockWorkerClient.initialize.mockReturnValue(poolInitialization);
+
+    const staleDecision = adapter.getAiAction("VeryHard", 0, "Priority");
+    await vi.waitFor(() => {
+      expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBeGreaterThan(
+        workersBeforePool,
+      );
+    });
+    const workersAfterStaleCandidate = vi.mocked(EngineWorkerClient).mock.calls.length;
+    const poolSize = workersAfterStaleCandidate - workersBeforePool;
+
+    await adapter.resetGameState();
+    finishPoolInitialization();
+    await staleDecision;
+
+    expect(mockWorkerClient.dispose).toHaveBeenCalledTimes(poolSize);
+    expect(mockWorkerClient.getAiScoredCandidates).not.toHaveBeenCalled();
+
+    mockWorkerClient.initialize.mockResolvedValue(undefined);
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBe(
+      workersAfterStaleCandidate + poolSize,
+    );
+    expect(mockWorkerClient.getAiScoredCandidates).toHaveBeenCalled();
+  });
+
+  it("degrades to the single-worker path when the rebuild subset fails, then retries next decision", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset
+      .mockResolvedValueOnce(
+        JSON.stringify({ kind: "subset", json: '{"Game A Card":{}}', count: 1 }),
+      )
+      .mockRejectedValueOnce(new Error("subset build failed"))
+      .mockResolvedValueOnce(
+        JSON.stringify({ kind: "subset", json: '{"Retry Card":{}}', count: 1 }),
+      );
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+
+    // Game A: pool created and loaded normally.
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+
+    // Game B: the rebuild's subset resolution rejects. The decision must NOT
+    // reject (ensureAiPool is called outside getAiAction's try block) — it
+    // degrades to the single-worker path for this decision.
+    await adapter.resetGameState();
+    const degraded = await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(degraded).toEqual({ type: "PassPriority" });
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalled();
+
+    // The failure is transient, not latched: the next decision retries the
+    // subset build and restores the pool with the fresh subset.
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(3);
+    const calls = mockWorkerClient.loadCardDb.mock.calls;
+    expect(calls[calls.length - 1][0] as string).toContain("Retry Card");
+  });
+
+  it.each([
+    [
+      "bounded",
+      JSON.stringify({
+        kind: "subset",
+        json: '{"Stale Game Card":{}}',
+        count: 1,
+      }),
+    ],
+    ["unbounded", JSON.stringify({ kind: "full" })],
+  ])(
+    "ignores a stale %s preserved-pool reload after reset",
+    async (_staleKind, stalePlan) => {
+      const { WasmAdapter } = await import("../wasm-adapter");
+
+      let resolveStalePlan!: (plan: string) => void;
+      const stalePlanPromise = new Promise<string>((resolve) => {
+        resolveStalePlan = resolve;
+      });
+      let resolveCurrentPlan!: (plan: string) => void;
+      const currentPlanPromise = new Promise<string>((resolve) => {
+        resolveCurrentPlan = resolve;
+      });
+
+      mockWorkerClient.buildAiCardSubset
+        .mockResolvedValueOnce(
+          JSON.stringify({
+            kind: "subset",
+            json: '{"Initial Game Card":{}}',
+            count: 1,
+          }),
+        )
+        .mockReturnValueOnce(stalePlanPromise)
+        .mockReturnValueOnce(currentPlanPromise);
+      mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+      const adapter = new WasmAdapter();
+      await adapter.initialize();
+      await adapter.warmCardDatabase();
+      await adapter.getAiAction("VeryHard", 0, "Priority");
+
+      await adapter.resetGameState();
+      const staleDecision = adapter.getAiAction("VeryHard", 0, "Priority");
+      await vi.waitFor(() => {
+        expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(2);
+      });
+      const concurrentStaleDecision = adapter.getAiAction(
+        "VeryHard",
+        0,
+        "Priority",
+      );
+      await Promise.resolve();
+      expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(2);
+
+      await adapter.resetGameState();
+      const currentDecision = adapter.getAiAction("VeryHard", 0, "Priority");
+      await vi.waitFor(() => {
+        expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(3);
+      });
+
+      resolveStalePlan(stalePlan);
+      resolveCurrentPlan(
+        JSON.stringify({
+          kind: "subset",
+          json: '{"Current Game Card":{}}',
+          count: 1,
+        }),
+      );
+      await Promise.all([
+        staleDecision,
+        concurrentStaleDecision,
+        currentDecision,
+      ]);
+
+      const loadedSubsets = mockWorkerClient.loadCardDb.mock.calls.map(
+        ([text]) => text as string,
+      );
+      expect(loadedSubsets.some((text) => text.includes("Stale Game Card"))).toBe(
+        false,
+      );
+      expect(loadedSubsets[loadedSubsets.length - 1]).toContain("Current Game Card");
+
+      const scoredBeforeFollowUp = mockWorkerClient.getAiScoredCandidates.mock.calls.length;
+      await adapter.getAiAction("VeryHard", 0, "Priority");
+
+      expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(3);
+      expect(mockWorkerClient.getAiScoredCandidates.mock.calls.length).toBeGreaterThan(
+        scoredBeforeFollowUp,
+      );
+    },
+  );
+
+  it("drops the pool for an unbounded game (Momir) and restores it next game", async () => {
+    const { WasmAdapter } = await import("../wasm-adapter");
+
+    mockWorkerClient.buildAiCardSubset
+      .mockResolvedValueOnce(JSON.stringify({ kind: "full" }))
+      .mockResolvedValueOnce(
+        JSON.stringify({ kind: "subset", json: '{"Bounded Card":{}}', count: 1 }),
+      );
+    mockWorkerClient.getAiAction.mockResolvedValue({ type: "PassPriority" });
+
+    const adapter = new WasmAdapter();
+    await adapter.initialize();
+    await adapter.warmCardDatabase();
+    const workersBefore = vi.mocked(EngineWorkerClient).mock.calls.length;
+
+    // Momir game: the plan resolves to `unbounded` BEFORE any pool worker is
+    // spawned — no new EngineWorkerClient instances are created, and the AI
+    // answers via the single-worker path.
+    const action = await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(action).toEqual({ type: "PassPriority" });
+    expect(vi.mocked(EngineWorkerClient).mock.calls.length).toBe(workersBefore);
+    // Revert guard: without the unbounded branch the pool is created and the
+    // scored-candidates path answers instead of engine.getAiAction.
+    expect(mockWorkerClient.getAiAction).toHaveBeenCalled();
+
+    // Second decision in the same game: the pool is NOT recreated just to
+    // escalate again — the subset build ran exactly once.
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(1);
+
+    // Next game is bounded: the pool comes back with that game's subset.
+    await adapter.resetGameState();
+    await adapter.getAiAction("VeryHard", 0, "Priority");
+    expect(mockWorkerClient.buildAiCardSubset).toHaveBeenCalledTimes(2);
+    const calls = mockWorkerClient.loadCardDb.mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[calls.length - 1][0] as string).toContain("Bounded Card");
   });
 });

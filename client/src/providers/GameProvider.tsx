@@ -2,36 +2,56 @@ import { createContext, useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { FormatConfig, GameAction, MatchConfig, MatchType } from "../adapter/types";
+import {
+  type FormatConfig,
+  type GameAction,
+  type MatchConfig,
+  type MatchType,
+  persistedGameStateView,
+} from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { P2PHostAdapter, P2PGuestAdapter } from "../adapter/p2p-adapter";
 import type { P2PAdapterEvent } from "../adapter/p2p-adapter";
 import { WasmAdapter, getSharedAdapter } from "../adapter/wasm-adapter";
-import { WebSocketAdapter } from "../adapter/ws-adapter";
+import {
+  NativeEngineVersionMismatchError,
+  WebSocketAdapter,
+} from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
-import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
-import { ACTIVE_DECK_KEY, loadActiveDeck, loadSavedDeckBracket } from "../constants/storage";
+import type { DeckData, NativeAiSeat, WsAdapterEvent } from "../adapter/ws-adapter";
+import {
+  ACTIVE_DECK_KEY,
+  isRandomDeckSelection,
+  loadActiveDeck,
+  loadSavedDeckBracket,
+} from "../constants/storage";
 import type { CommanderBracket } from "../types/bracket";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type { AiDeckCandidate } from "../services/aiDeckCatalog";
 import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
+import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
 import { effectiveAiDifficulty } from "../services/cedhLock";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { clearPromptOverlayState } from "../game/sessionCleanup";
-import { usePhaseStopsSync } from "../hooks/usePhaseStopsSync";
+import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync";
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
-import { ensureCardDatabase } from "../services/cardData";
 import { loadDraftRun } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
+import {
+  canAttemptNativeEngine,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
+import { NativeEngineSocket } from "../services/nativeEngineSocket";
 import {
   clearGame,
   clearActiveGame,
@@ -39,6 +59,7 @@ import {
   loadActiveGame,
   loadGame,
   loadP2PHostSession,
+  nextGameSessionGeneration,
   saveActiveGame,
   useGameStore,
 } from "../stores/gameStore";
@@ -70,6 +91,10 @@ function resolveAiSeatBindings(
     playerId: i + 1,
     difficulty: snapshot?.[i]?.difficulty ?? fallback,
   }));
+}
+
+export function isDeckRejectedError(error: unknown): error is AdapterError {
+  return error instanceof AdapterError && error.code === AdapterErrorCode.DECK_REJECTED;
 }
 
 let avatarGeneration = 0;
@@ -185,7 +210,7 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
  */
 function loadActiveDeckBracket(): CommanderBracket | null {
   const name = localStorage.getItem(ACTIVE_DECK_KEY);
-  if (!name) return null;
+  if (!name || isRandomDeckSelection(name)) return null;
   return loadSavedDeckBracket(name);
 }
 
@@ -215,6 +240,7 @@ type ExpandedDeckWithTier = {
   planar_deck: string[];
   scheme_deck: string[];
   signature_spell: string[];
+  companion: string[];
   sticker_sheets: string[];
   bracket_tier: CommanderBracketTier;
 };
@@ -229,6 +255,45 @@ type DeckListPayload = {
   ai_difficulties: string[];
 };
 
+function nativeAiSeatsFromDeckList(deckList: DeckListPayload): NativeAiSeat[] {
+  return [deckList.opponent, ...deckList.ai_decks].map((deck, index) => ({
+    seatIndex: index + 1,
+    difficulty: deckList.ai_difficulties[index] ?? "Medium",
+    deck,
+  }));
+}
+
+/** Restores normal local resume behavior only after native setup has failed. */
+function saveWasmAiResumePointer(
+  gameId: string,
+  fallbackDifficulty: string | undefined,
+  playerCount: number | undefined,
+  formatConfig: FormatConfig | undefined,
+): void {
+  const { aiSeats, cedhMode } = usePreferencesStore.getState();
+  const opponentCount = Math.max(1, (playerCount ?? 2) - 1);
+  const seats = Array.from({ length: opponentCount }, (_, index) => {
+    const seat = aiSeats[index];
+    return {
+      difficulty: effectiveAiDifficulty(seat?.difficulty ?? fallbackDifficulty ?? "Medium", cedhMode),
+      deckId: seat?.deckId === AI_DECK_RANDOM ? null : seat?.deckId ?? null,
+    };
+  });
+  saveActiveGame({
+    id: gameId,
+    mode: "ai",
+    difficulty: seats[0]?.difficulty ?? fallbackDifficulty ?? "Medium",
+    aiSeats: seats,
+    formatConfig,
+  });
+}
+
+function nativeFallbackReason(error: unknown): string {
+  return error instanceof NativeEngineVersionMismatchError
+    ? "server_version_mismatch"
+    : "native_engine_unavailable";
+}
+
 function candidatePassesFilters(
   candidate: AiDeckCandidate,
   archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
@@ -238,18 +303,13 @@ function candidatePassesFilters(
   return archetypeFilter === "Any" || !candidate.archetype || candidate.archetype === archetypeFilter;
 }
 
-function randomPickDistinct(pool: AiDeckCandidate[], excludeIds: Set<string>): AiDeckCandidate {
-  const fresh = pool.filter((d) => !excludeIds.has(d.id));
-  const source = fresh.length > 0 ? fresh : pool;
-  return source[Math.floor(Math.random() * source.length)];
-}
-
 function pickOpponentDeck(
   catalog: AiDeckCandidate[],
   requestedDeckId: string,
   excludeIds: Set<string>,
   archetypeFilter: ReturnType<typeof usePreferencesStore.getState>["aiArchetypeFilter"],
   coverageFloor: number,
+  selectedFormat?: FormatConfig["format"] | null,
 ): AiDeckCandidate {
   if (requestedDeckId !== AI_DECK_RANDOM) {
     const pinned = catalog.find((candidate) => candidate.id === requestedDeckId);
@@ -259,7 +319,10 @@ function pickOpponentDeck(
   const filtered = catalog.filter((candidate) =>
     candidatePassesFilters(candidate, archetypeFilter, coverageFloor)
   );
-  return randomPickDistinct(filtered.length > 0 ? filtered : catalog, excludeIds);
+  return pickRandomDeckCandidate(filtered.length > 0 ? filtered : catalog, {
+    selectedFormat,
+    excludeIds,
+  }) ?? catalog[0];
 }
 
 // Placeholder decklist for fixed-deck formats (Momir's Madness): the player
@@ -279,6 +342,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     },
@@ -289,7 +353,7 @@ function buildPlayerOnlyDeckList(deck: ParsedDeck, playerBracket?: CommanderBrac
 
 async function buildLocalAiDeckList(
   t: TFunction,
-  deck: ParsedDeck,
+  deck: ParsedDeck | null,
   playerCount: number,
   formatConfig?: FormatConfig,
   selectedMatchType?: MatchType,
@@ -308,6 +372,7 @@ async function buildLocalAiDeckList(
       planar_deck: [],
       scheme_deck: [],
       signature_spell: [],
+      companion: [],
       sticker_sheets: [],
       bracket_tier: "core",
     });
@@ -335,8 +400,26 @@ async function buildLocalAiDeckList(
     );
   }
 
-  const opponentCount = Math.max(1, playerCount - 1);
   const excludeIds = new Set<string>();
+  let playerDeck = deck;
+  let resolvedPlayerBracket = playerBracket;
+  if (!playerDeck) {
+    const playerPick = pickRandomDeckCandidate(catalog.candidates, {
+      selectedFormat: formatConfig?.format,
+    });
+    if (!playerPick) {
+      throw new Error(
+        formatConfig?.format
+          ? t("gameProvider.noLegalAiDecks.withFormat", { format: formatConfig.format })
+          : t("gameProvider.noLegalAiDecks.generic"),
+      );
+    }
+    playerDeck = playerPick.deck;
+    resolvedPlayerBracket = playerPick.bracket;
+    excludeIds.add(playerPick.id);
+  }
+
+  const opponentCount = Math.max(1, playerCount - 1);
   const picks: AiDeckCandidate[] = [];
   for (let i = 0; i < opponentCount; i++) {
     // Unconfigured seats default to Random — NOT to `aiSeats[0]`. Falling
@@ -350,13 +433,14 @@ async function buildLocalAiDeckList(
       excludeIds,
       aiArchetypeFilter,
       aiCoverageFloor,
+      formatConfig?.format,
     );
     picks.push(result);
     excludeIds.add(result.id);
   }
 
-  const playerExpanded = expandParsedDeck(deck);
-  const playerTier = bracketToEngineTier(playerBracket);
+  const playerExpanded = expandParsedDeck(playerDeck);
+  const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. Missing seat prefs default to "Medium".
@@ -488,9 +572,9 @@ export function GameProvider({
 }: GameProviderProps) {
   const { t } = useTranslation("game");
 
-  // Sync the persistent phaseStops preference into engine-owned state so the
-  // engine remains the single authority for auto-pass / empty-blocker decisions.
-  usePhaseStopsSync();
+  // Sync persistent gameplay preferences into engine-owned state so the
+  // engine remains the single authority for priority recommendations.
+  useGameplayPreferencesSync();
 
   // Refs for callback props — these are notifications that should never
   // cause the game setup effect to re-run.
@@ -515,16 +599,19 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
-    const unsub = useGameStore.subscribe((state) => {
-      if (applied || !state.gameState?.command_zone?.length) return;
-      applied = true;
+    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
       setupCommanderAvatars(state.gameState);
+      return true;
+    };
+    const unsub = useGameStore.subscribe((state) => {
+      if (applied || !applyCommanderAvatars(state)) return;
+      applied = true;
       unsub();
     });
     const state = useGameStore.getState();
-    if (!applied && state.gameState?.command_zone?.length) {
+    if (!applied && applyCommanderAvatars(state)) {
       applied = true;
-      setupCommanderAvatars(state.gameState);
       unsub();
     }
     return unsub;
@@ -560,15 +647,37 @@ export function GameProvider({
     // responds.
     clearPromptOverlayState();
 
-    const { initGame, resumeGame, resumeP2PHost, reset, setGameMode } = useGameStore.getState();
+    const {
+      initGame,
+      resumeGame,
+      resumeP2PHost,
+      reset,
+      setEngineMode,
+      setGameMode,
+    } = useGameStore.getState();
+    const nativeEngineKey = nativeEngineKeyForCurrentOrigin();
+    const shouldUseNativeAi =
+      mode === "ai"
+      && source !== "draft"
+      && source !== "multiplayer"
+      && firstPlayer === undefined
+      && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+      && nativeEngineKey !== null;
+    const shouldUseNativeP2P =
+      mode === "p2p-host"
+      && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+      && nativeEngineKey !== null;
     setGameMode(mode);
+    setEngineMode(mode === "ai" ? (shouldUseNativeAi ? null : "wasm") : null);
 
     const isOnline = mode === "online" || mode === "spectate";
     const isSpectate = mode === "spectate";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
       if (mode === "ai") {
-        setupRandomAvatars(playerCount ?? 2, gameId);
+        if (!shouldUseNativeAi) {
+          setupRandomAvatars(playerCount ?? 2, gameId);
+        }
       } else if (mode === "draft-match") {
         setupDraftMatchAvatars(gameId);
       } else {
@@ -600,6 +709,7 @@ export function GameProvider({
     // direct `peer.destroy()` calls would double-destroy and also skip the
     // per-session cleanup that `dispose()` performs.
     let p2pAdapter: P2PHostAdapter | P2PGuestAdapter | null = null;
+    let nativeAdapter: WebSocketAdapter | null = null;
     let controller: ReturnType<typeof createGameLoopController> | null = null;
 
     if (mode === "draft-match") {
@@ -646,7 +756,7 @@ export function GameProvider({
             }
           }
           if (event.type === "stateChanged") {
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -681,26 +791,53 @@ export function GameProvider({
               await resumeP2PHost(gameId, adapter);
               signal.throwIfAborted();
             } else {
-            // Resume detection: if both the engine state and the P2P
-            // host session were persisted for this gameId, the host
-            // crashed/reloaded mid-game and should dial back in on the
-            // same room code so returning guests (whose IDB tokens are
-            // keyed on `phase-<roomCode>`) still match. Partial state
-            // (only one record present) is treated as inconsistent:
-            // clear both and fall through to a fresh game.
+            // WASM hosts persist the engine state plus P2P metadata. Native
+            // hosts persist only P2P metadata and local phase-server tokens:
+            // the server owns the authoritative game state.
             const [savedState, savedSession] = await Promise.all([
               loadGame(gameId),
               loadP2PHostSession(gameId),
             ]);
             signal.throwIfAborted();
 
-            const isResume =
-              savedState !== null && savedSession !== null && savedSession.gameStarted;
-            if ((savedState !== null) !== (savedSession !== null)) {
+            const isNativeResume = savedSession?.nativeSession !== undefined;
+            const isWasmResume =
+              !isNativeResume
+              && savedState !== null
+              && savedSession !== null
+              && savedSession.gameStarted;
+            const isResume = isNativeResume || isWasmResume;
+            if (!isNativeResume && (savedState !== null) !== (savedSession !== null)) {
               // Inconsistent: one record present, the other missing.
               // Drop both so the menu's Resume button doesn't re-offer.
               await clearGame(gameId);
               await clearP2PHostSession(gameId);
+            }
+
+            // Native P2P state belongs to the local phase-server, never the
+            // browser's WASM snapshot. For a fresh room, start that binary
+            // before publishing a PeerJS lobby entry; if it cannot start, the
+            // established WASM host remains the fallback for this attempt.
+            let nativeP2P: { expectedServerVersion?: string } | undefined;
+            if (((shouldUseNativeP2P && !isWasmResume) || isNativeResume) && nativeEngineKey) {
+              try {
+                await ensureNativeEngine(nativeEngineKey);
+                signal.throwIfAborted();
+                nativeP2P = {
+                  expectedServerVersion:
+                    "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+                };
+              } catch (err) {
+                if (isNativeResume) {
+                  throw new Error(
+                    `The local native engine is required to resume this hosted game: ${err instanceof Error ? err.message : String(err)}`,
+                  );
+                }
+                console.warn("[P2P] native engine unavailable; using WASM host", err);
+              }
+            }
+            if (isNativeResume && !nativeP2P) {
+              throw new Error("The local native engine is unavailable for this hosted game.");
             }
 
             // Only open a fresh broker client when starting a fresh
@@ -777,10 +914,15 @@ export function GameProvider({
                 gameId,
                 roomCode: host.roomCode,
                 hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
-                resumeData: isResume && savedState && savedSession
-                  ? { state: savedState, session: savedSession }
+                resumeData: isResume && savedSession
+                  ? isNativeResume
+                    ? { session: savedSession }
+                    : savedState
+                      ? { state: savedState, session: savedSession }
+                      : undefined
                   : undefined,
               },
+              nativeP2P,
             );
             p2pAdapter = adapter;
             // Ownership of the Peer transfers to the adapter here; don't
@@ -790,10 +932,9 @@ export function GameProvider({
             wireP2PEvents(adapter);
 
             if (isResume) {
-              // Resume path: adapter.initialize() loads the saved state
-              // via wasm.resumeMultiplayerHostState; resumeP2PHost
-              // pulls state + legal actions into the store. Skip
-              // initializeGame entirely — the engine is already live.
+              // The adapter restores either the WASM snapshot or reconnects
+              // its local phase-server viewers, then resumeP2PHost seeds the
+              // store from that authority. No second initializeGame call.
               await resumeP2PHost(gameId, adapter);
             } else {
               await initGame(gameId, adapter, undefined, formatConfig, effectivePlayerCount, matchConfig);
@@ -824,8 +965,6 @@ export function GameProvider({
             //    their original seat.
             const sessionKey = `phase-${code}`;
             const existing = await loadP2PSession(sessionKey);
-            const reservationToken =
-              window.sessionStorage.getItem(`phase-p2p-reservation:${code}`) ?? undefined;
             signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
@@ -834,7 +973,7 @@ export function GameProvider({
               conn,
               existing?.playerToken,
               useMultiplayerStore.getState().displayName || undefined,
-              reservationToken,
+              undefined,
               sessionKey,
             );
             p2pAdapter = adapter;
@@ -931,9 +1070,9 @@ export function GameProvider({
       const sessionKey = `phase-join-password:${joinCode ?? ""}`;
       let password: string | undefined =
         (joinCode && window.sessionStorage.getItem(sessionKey)) || undefined;
-      const reservationSessionKey = `phase-join-reservation:${joinCode ?? ""}`;
-      const reservationToken: string | undefined =
-        (joinCode && window.sessionStorage.getItem(reservationSessionKey)) || undefined;
+      if (joinCode) {
+        window.sessionStorage.removeItem(`phase-join-reservation:${joinCode}`);
+      }
       if (!password && urlParams.has("password")) {
         password = urlParams.get("password") ?? undefined;
         if (password && joinCode) {
@@ -960,7 +1099,7 @@ export function GameProvider({
           deck,
           wsMode === "join" ? joinCode : undefined,
           wsMode === "join" ? password : undefined,
-          wsMode === "join" ? reservationToken : undefined,
+          undefined,
           useMultiplayerStore.getState().displayName || "Player",
         );
 
@@ -996,11 +1135,12 @@ export function GameProvider({
             if (needAdapter) {
               useGameStore.setState({ adapter: wsAdapter });
             }
-            processRemoteUpdate(event.state, event.events, event.legalResult, event.logEntries);
+            processRemoteUpdate(event.snapshot, event.events, event.logEntries);
             useMultiplayerStore.getState().setConnectionStatus("connected");
+            const wsState = event.snapshot.state;
             if (
-              event.state.match_phase === "Completed"
-              || (!event.state.match_phase && event.state.waiting_for.type === "GameOver")
+              wsState.match_phase === "Completed"
+              || (!wsState.match_phase && wsState.waiting_for.type === "GameOver")
             ) {
               clearActiveGame();
             }
@@ -1083,10 +1223,9 @@ export function GameProvider({
             audioManager.setContext("battlefield");
           }).catch((err) => {
             if (cancelled) return;
-            const msg = err instanceof Error ? err.message : String(err);
             useMultiplayerStore.getState().setConnectionStatus("disconnected");
-            if (msg.includes("Deck not legal")) {
-              onWsEventRef.current?.({ type: "deckRejected", reason: msg });
+            if (isDeckRejectedError(err)) {
+              onWsEventRef.current?.({ type: "deckRejected", reason: err.message });
             } else {
               useMultiplayerStore.getState().showToast(tRef.current("gameProvider.toasts.connectionFailed"));
             }
@@ -1124,15 +1263,15 @@ export function GameProvider({
 
       if (savedState) {
         try {
-          // Load card DB before restore so the engine can rehydrate objects
-          // and handle token creation / effects after resume.
-          await ensureCardDatabase().catch(() => {/* card DB is best-effort */});
-          if (cancelled) return;
+          // WasmAdapter.restoreState() loads the card DB into its shared worker
+          // before rehydrating. Do not also initialize the main-thread runtime:
+          // that duplicates both the WASM module and full card corpus, which can
+          // exceed the WebContent memory budget on iOS.
           await resumeGame(gameId, adapter, savedState);
           if (cancelled) return;
           // Derive player count from the restored state — the URL param may be
           // absent on resume (e.g. navigating directly to a saved game URL).
-          const resumedPlayerCount = savedState.players?.length ?? playerCount;
+          const resumedPlayerCount = persistedGameStateView(savedState).players.length;
           controller = createGameLoopController({
             mode: mode === "local" ? "local" : "ai",
             difficulty,
@@ -1154,9 +1293,11 @@ export function GameProvider({
               });
           onResumeResetRef.current?.(reason);
           clearGame(gameId);
-          const parsedDeck = loadActiveDeck();
+          const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+          const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+          const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
           const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
-          if (!parsedDeck && !suppliesDeck) {
+          if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
             onNoDeckRef.current?.();
             return;
           }
@@ -1164,7 +1305,7 @@ export function GameProvider({
           try {
             deckList = await buildLocalAiDeckList(
               tRef.current,
-              parsedDeck ?? EMPTY_PARSED_DECK,
+              randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
               playerCount ?? 2,
               formatConfig,
               matchConfig?.match_type,
@@ -1246,6 +1387,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             opponent: {
               main_deck: run.opponentDeck,
@@ -1255,6 +1397,7 @@ export function GameProvider({
               scheme_deck: [] as string[],
               sticker_sheets: [] as string[],
               signature_spell: [] as string[],
+              companion: [] as string[],
             },
             ai_decks: [],
           };
@@ -1277,9 +1420,11 @@ export function GameProvider({
         }
       }
 
-      const parsedDeck = loadActiveDeck();
+      const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+      const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+      const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
       const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
-      if (!parsedDeck && !suppliesDeck) {
+      if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
         onNoDeckRef.current?.();
         return;
       }
@@ -1288,7 +1433,7 @@ export function GameProvider({
       try {
         deckList = await buildLocalAiDeckList(
           tRef.current,
-          parsedDeck ?? EMPTY_PARSED_DECK,
+          randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
           playerCount ?? 2,
           formatConfig,
           matchConfig?.match_type,
@@ -1334,7 +1479,135 @@ export function GameProvider({
       }
     };
 
-    setupLocal();
+    if (shouldUseNativeAi && nativeEngineKey) {
+      const setupNativeAi = async () => {
+        try {
+          // Native sessions deliberately do not resume a local snapshot. A
+          // pre-existing state belongs to the established WASM path instead.
+          if (await loadGame(gameId)) {
+            setEngineMode("wasm");
+            await setupLocal();
+            return;
+          }
+          if (cancelled) return;
+
+          const activeDeckName = localStorage.getItem(ACTIVE_DECK_KEY);
+          const randomPlayerDeck = isRandomDeckSelection(activeDeckName);
+          const parsedDeck = randomPlayerDeck ? null : loadActiveDeck();
+          const suppliesDeck = formatConfig ? formatSuppliesDeck(formatConfig.format) : false;
+          if (!parsedDeck && !suppliesDeck && !randomPlayerDeck) {
+            onNoDeckRef.current?.();
+            return;
+          }
+
+          const deckList = await buildLocalAiDeckList(
+            tRef.current,
+            randomPlayerDeck ? null : (parsedDeck ?? EMPTY_PARSED_DECK),
+            playerCount ?? 2,
+            formatConfig,
+            matchConfig?.match_type,
+            loadActiveDeckBracket(),
+          );
+          if (cancelled) return;
+
+          // Native games are server-authoritative and have no client resume
+          // contract in v1, so remove the setup-page pointer before hosting.
+          clearActiveGame();
+          await ensureNativeEngine(nativeEngineKey);
+          if (cancelled) return;
+
+          nativeAdapter = new WebSocketAdapter(
+            "native-engine",
+            "host",
+            deckList.player,
+            undefined,
+            undefined,
+            undefined,
+            "Player",
+            {
+              nativeAi: {
+                socketFactory: () => new NativeEngineSocket(),
+                aiSeats: nativeAiSeatsFromDeckList(deckList),
+                playerCount: playerCount ?? 2,
+                formatConfig,
+                matchConfig,
+                expectedServerVersion:
+                  "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+              },
+            },
+          );
+          wsUnsubscribe = nativeAdapter.onEvent((event) => {
+            if (event.type === "stateChanged") {
+              const adapter = nativeAdapter;
+              if (!useGameStore.getState().adapter && adapter) {
+                useGameStore.setState({ adapter });
+              }
+              processRemoteUpdate(event.snapshot, event.events, event.logEntries);
+            }
+            if (event.type === "gameOver") {
+              useGameStore.setState({
+                waitingFor: { type: "GameOver", data: { winner: event.winner } },
+              });
+            }
+            if (event.type === "reconnectFailed" || event.type === "error") {
+              const adapter = nativeAdapter;
+              nativeAdapter = null;
+              controller?.dispose();
+              controller = null;
+              adapter?.dispose();
+              if (useGameStore.getState().adapter === adapter) {
+                useGameStore.setState({ adapter: null });
+              }
+              // GamePage's existing reconnect-failed/error surface is terminal
+              // and provides the Return-to-Menu action for this native session.
+              onWsEventRef.current?.(event);
+            }
+          });
+
+          setEngineMode("native");
+          await initGame(
+            gameId,
+            nativeAdapter,
+            undefined,
+            formatConfig,
+            playerCount,
+            matchConfig,
+          );
+          if (cancelled) {
+            nativeAdapter.dispose({ concede: true });
+            return;
+          }
+
+          setGameMode("native-ai");
+          controller = createGameLoopController({ mode: "online" });
+          controller.start();
+          audioManager.setContext("battlefield");
+        } catch (error) {
+          nativeAdapter?.dispose({ concede: true });
+          nativeAdapter = null;
+          if (cancelled) return;
+
+          setGameMode("ai");
+          setEngineMode("wasm", nativeFallbackReason(error));
+          saveWasmAiResumePointer(gameId, difficulty, playerCount, formatConfig);
+          await setupLocal();
+        }
+      };
+
+      void setupNativeAi();
+
+      return () => {
+        cancelled = true;
+        if (controller) controller.dispose();
+        if (wsUnsubscribe) wsUnsubscribe();
+        nativeAdapter?.dispose({ concede: true });
+        audioManager.setContext("menu");
+        clearPromptOverlayState();
+        scheduleStoreReset(reset);
+      };
+    }
+
+    void setupLocal();
 
     return () => {
       cancelled = true;
@@ -1363,9 +1636,11 @@ export function GameProvider({
             logHistory: [],
             nextLogSeq: 0,
             adapter: null,
+            gameSessionGeneration: nextGameSessionGeneration(),
             waitingFor: null,
             legalActions: [],
             autoPassRecommended: false,
+            manaPaymentShortcutActions: [],
             spellCosts: {},
             stateHistory: [],
             turnCheckpoints: [],

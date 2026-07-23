@@ -5,11 +5,20 @@ import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
   encodeWireMessage,
+  legalActionsFromWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
 
 describe("encodeWireMessage / decodeWireMessage", () => {
+  it("pins the P2P wire protocol to v14", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(14);
+  });
+
+  it("defaults shortcut actions for a v14 payload created before the additive field", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
+  });
+
   // (a) Round-trip across P2PMessage variants.
   const variants: P2PMessage[] = [
     { type: "ping", timestamp: 12345 },
@@ -29,6 +38,8 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     { type: "reconnect", playerToken: "token-123" },
     { type: "reconnect_rejected", reason: "Unknown token" },
     { type: "action_rejected", reason: "Player kicked" },
+    { type: "mana_payment_preview", requestId: 4, sourceIds: [12] },
+    { type: "mana_payment_preview_rejected", requestId: 4, reason: "Not your turn" },
     {
       type: "action",
       senderPlayerId: 0,
@@ -37,7 +48,33 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     {
       type: "action",
       senderPlayerId: 0,
+      action: {
+        type: "SetPriorityPassingMode",
+        data: { mode: "SkipLowUseWindows" },
+      },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
       action: { type: "TapForConvoke", data: { object_id: 42, mana_type: "Green" } },
+    },
+    {
+      type: "preview_mana_payment",
+      requestId: 4,
+      action: { type: "PassPriority" },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: { type: "ChooseMeldPair", data: { source_id: 42, partner_id: 43 } },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: {
+        type: "ChooseEntryAttackTarget",
+        data: { target: { type: "Battle", data: 44 } },
+      },
     },
     {
       type: "game_setup",
@@ -45,6 +82,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       assignedPlayerId: 1,
       playerToken: "token-123",
       state: buildGameState({
+        priority_passing_modes: { 1: "SkipLowUseWindows" },
         derived: {
           planechase: {
             can_roll: true,
@@ -55,6 +93,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
       events: [],
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
     },
     {
       type: "reconnect_ack",
@@ -71,6 +110,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
         },
       }),
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
     },
   ];
 
@@ -120,6 +160,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       state: buildGameState(),
       events: [],
       legalActions: [],
+      manaPaymentShortcutActions: [],
     })).toThrow(/Wire protocol mismatch/);
   });
 

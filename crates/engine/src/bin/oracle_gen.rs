@@ -1,11 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::thread;
 
 use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
-use engine::database::mtgjson::{load_atomic_cards, load_card_types, AtomicCard, Ruling, SetFile};
+use engine::database::mtgjson::{
+    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+};
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
 use engine::database::synthesis::{
@@ -28,6 +31,11 @@ struct CardExportEntry {
     /// `LayoutKind` when loading from the export (where `CardRules` is not available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     layout: Option<String>,
+    /// Original zero-based position of this face within MTGJSON's multi-face
+    /// record. Used by runtime loaders to choose the card's front face
+    /// deterministically after flattening the JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    face_index: Option<usize>,
     /// Set codes the card has been printed in (from MTGJSON `printings`).
     /// Used by the coverage dashboard to group supported/gap cards by set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -334,10 +342,234 @@ fn build_export_layout(
     }
 }
 
+/// Which `face_index` collision policy a pending face uses. Homonym groups
+/// (distinct cards sharing one printed name) resolve collisions differently
+/// from ordinary faces — see `homonym_face_priority` / `same_class_face_priority`.
+enum FacePriority {
+    SameClass,
+    Homonym,
+}
+
+/// Read-only inputs shared by every worker thread of the per-card parse pass.
+struct CardWorkCtx<'a> {
+    filter_names: &'a [String],
+    token_source_metadata: &'a HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
+    rarity_map: &'a HashMap<String, BTreeSet<Rarity>>,
+    bracket_lists: &'a BracketLists,
+    #[cfg(feature = "forge")]
+    forge_index: Option<&'a engine::database::forge::ForgeIndex>,
+}
+
+/// One card's fully-parsed export payload. Produced off-thread by
+/// `build_card_work` (Oracle-text parsing dominates the pass at ~5ms/card) and
+/// merged into the order-sensitive shared indexes afterwards, in input order.
+struct CardWork<'a> {
+    mtgjson_key: &'a str,
+    /// Faces to insert into `face_index`, in the order the sequential loop emitted them.
+    entries: Vec<(String, CardExportEntry, FacePriority)>,
+    /// `(face key, source)` pairs destined for the localized sidecars.
+    localized: Vec<(String, &'a AtomicCard)>,
+    /// Number of `cards_with_unimplemented` increments this card contributes.
+    /// A homonym group increments once per unimplemented face, so this is a
+    /// count rather than a flag. Always computed (the AST scan is trivial next
+    /// to the parse); `--stats` only gates the printout.
+    unimplemented_faces: u32,
+}
+
+/// Parse one MTGJSON atomic group into its export payload. Pure: reads only
+/// `ctx` and `faces`, touches no shared mutable state, so it is safe to run
+/// concurrently across cards. Returns `None` for cards the export skips.
+fn build_card_work<'a>(
+    ctx: &CardWorkCtx<'_>,
+    mtgjson_key: &'a str,
+    faces: &'a [AtomicCard],
+) -> Option<CardWork<'a>> {
+    // Drop officially-removed offensive cards before any other handling,
+    // so they never enter the card database (and not even an explicit
+    // --filter can resurrect them).
+    if faces
+        .first()
+        .is_some_and(|f| is_removed_offensive_card(&f.name))
+    {
+        return None;
+    }
+    // --filter: skip cards not matching any filter name
+    if !ctx.filter_names.is_empty() {
+        let card_name = faces
+            .first()
+            .map(|f| f.name.to_lowercase())
+            .unwrap_or_default();
+        if !ctx.filter_names.iter().any(|n| card_name.contains(n)) {
+            return None;
+        }
+    }
+
+    let mut work = CardWork {
+        mtgjson_key,
+        entries: Vec::new(),
+        localized: Vec::new(),
+        unimplemented_faces: 0,
+    };
+
+    let oracle_id = faces
+        .first()
+        .and_then(|f| f.identifiers.scryfall_oracle_id.clone());
+
+    let layout_kind = map_layout(&faces[0].layout);
+
+    if is_homonym_atomic_group(faces) {
+        for source in faces.iter() {
+            let oracle_id = source.identifiers.scryfall_oracle_id.clone();
+            let mut face = build_oracle_face(source, oracle_id);
+            #[cfg(feature = "forge")]
+            if let Some(fi) = ctx.forge_index {
+                engine::database::forge::apply_forge_fallback(&mut face, fi);
+            }
+            stamp_token_source_metadata(&mut face, source, ctx.token_source_metadata);
+            let key = face.name.to_lowercase();
+            let legalities = legalities_to_export_map(&normalize_legalities(&source.legalities));
+
+            if card_face_has_unimplemented_parts(&face) {
+                work.unimplemented_faces += 1;
+            }
+
+            let rarities = ctx
+                .rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+
+            let bracket_signals = bracket_signals_for_face(ctx.bracket_lists, &face, source);
+            work.localized.push((key.clone(), source));
+            work.entries.push((
+                key,
+                CardExportEntry {
+                    face,
+                    legalities,
+                    layout: None,
+                    face_index: None,
+                    printings: source.printings.clone(),
+                    rulings: source.rulings.clone(),
+                    rarities,
+                    bracket_signals,
+                },
+                FacePriority::Homonym,
+            ));
+        }
+    } else if faces.len() >= 2 {
+        let mut legalities_by_face = BTreeMap::new();
+        let layout = build_export_layout(faces, oracle_id, layout_kind);
+        for (face, source) in layout_faces(&layout).iter().zip(faces.iter()) {
+            legalities_by_face.insert(
+                face.name.to_lowercase(),
+                legalities_to_export_map(&normalize_legalities(&source.legalities)),
+            );
+        }
+
+        if layout_faces(&layout)
+            .iter()
+            .any(|f| card_face_has_unimplemented_parts(f))
+        {
+            work.unimplemented_faces += 1;
+        }
+
+        for (face_idx, (face_ref, source)) in layout_faces(&layout)
+            .into_iter()
+            .zip(faces.iter())
+            .enumerate()
+        {
+            let key = face_ref.name.to_lowercase();
+            let legalities = legalities_by_face.remove(&key).unwrap_or_default();
+            let mut face = face_ref.clone();
+            #[cfg(feature = "forge")]
+            if let Some(fi) = ctx.forge_index {
+                engine::database::forge::apply_forge_fallback(&mut face, fi);
+            }
+            stamp_token_source_metadata(&mut face, source, ctx.token_source_metadata);
+            let layout_str = match layout_kind {
+                LayoutKind::Single => None,
+                _ => Some(faces[0].layout.clone()),
+            };
+            // Front face (index 0) owns the rulings; back faces get an empty vec.
+            // MTGJSON duplicates rulings across faces; this dedups at export time.
+            let rulings = if face_idx == 0 {
+                faces[0].rulings.clone()
+            } else {
+                Vec::new()
+            };
+            let rarities = ctx
+                .rarity_map
+                .get(&face.name.to_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            let bracket_signals = bracket_signals_for_face(ctx.bracket_lists, &face, source);
+            // Localized sidecars cover single-faced cards only — see
+            // `collect_localized`. Multi-face `foreignData` is a combined
+            // "A // B" name with no reliable per-face split, so these faces
+            // fall back to English at the display layer.
+            work.entries.push((
+                key,
+                CardExportEntry {
+                    face,
+                    legalities,
+                    layout: layout_str,
+                    face_index: Some(face_idx),
+                    printings: faces[0].printings.clone(),
+                    rulings,
+                    rarities,
+                    bracket_signals,
+                },
+                FacePriority::SameClass,
+            ));
+        }
+    } else {
+        let mut face = build_oracle_face(&faces[0], oracle_id);
+        #[cfg(feature = "forge")]
+        if let Some(fi) = ctx.forge_index {
+            engine::database::forge::apply_forge_fallback(&mut face, fi);
+        }
+        stamp_token_source_metadata(&mut face, &faces[0], ctx.token_source_metadata);
+        let key = face.name.to_lowercase();
+        let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
+
+        if card_face_has_unimplemented_parts(&face) {
+            work.unimplemented_faces += 1;
+        }
+
+        let rarities = ctx
+            .rarity_map
+            .get(&face.name.to_lowercase())
+            .cloned()
+            .unwrap_or_default();
+
+        let bracket_signals = bracket_signals_for_face(ctx.bracket_lists, &face, &faces[0]);
+        work.localized.push((key.clone(), &faces[0]));
+        work.entries.push((
+            key,
+            CardExportEntry {
+                face,
+                legalities,
+                layout: None,
+                face_index: None,
+                printings: faces[0].printings.clone(),
+                rulings: faces[0].rulings.clone(),
+                rarities,
+                bracket_signals,
+            },
+            FacePriority::SameClass,
+        ));
+    }
+
+    Some(work)
+}
+
 /// Write parser-authoritative creature subtypes: CardTypes.json ∪ corroborated
 /// AtomicCards harvest (token-only + newer card-printed types).
+///
+/// Runs only under `--write-subtypes` (see `main`), and takes `CardTypesFile` by
+/// reference rather than `Option` so a partial source set cannot reach it.
 fn write_oracle_subtypes(
-    card_types: Option<&engine::database::mtgjson::CardTypesFile>,
+    card_types: &engine::database::mtgjson::CardTypesFile,
     atomic: &engine::database::mtgjson::AtomicCardsFile,
 ) {
     use engine::database::subtype_vocab::build_creature_subtype_vocabulary;
@@ -349,12 +581,32 @@ fn write_oracle_subtypes(
     // `serde_json::to_string_pretty` does not emit a trailing newline; append one
     // so the committed generated file stays POSIX-compliant (no "\ No newline at
     // end of file" diff churn on every regeneration).
+    //
+    // Write only when the bytes actually change. The engine lib pulls this file
+    // in with `include_str!` (see `parser/oracle_util.rs`), so an unconditional
+    // `fs::write` bumps its mtime, dirties the engine crate's dep-info
+    // fingerprint, and forces a full engine recompile on the next cargo
+    // invocation — a byte-identical file costing ~220s of CI rebuild. This
+    // mirrors the `cmp`/`mv` mtime-preservation dance `scripts/gen-card-data.sh`
+    // performs on `known-tokens.toml` for exactly the same reason.
     match serde_json::to_string_pretty(&list)
         .map_err(|e| e.to_string())
-        .and_then(|json| std::fs::write(&out_path, format!("{json}\n")).map_err(|e| e.to_string()))
-    {
-        Ok(()) => eprintln!(
+        .and_then(|json| {
+            let contents = format!("{json}\n");
+            if std::fs::read_to_string(&out_path).is_ok_and(|prev| prev == contents) {
+                return Ok(false);
+            }
+            std::fs::write(&out_path, contents)
+                .map(|()| true)
+                .map_err(|e| e.to_string())
+        }) {
+        Ok(true) => eprintln!(
             "Wrote {} creature subtypes to {}",
+            list.len(),
+            out_path.display()
+        ),
+        Ok(false) => eprintln!(
+            "Skipped write of {} creature subtypes to {} (unchanged)",
             list.len(),
             out_path.display()
         ),
@@ -446,22 +698,90 @@ struct TokenSourceMetadata {
     spellbook: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TokenSourceMetadataKey {
+    Oracle {
+        oracle_id: String,
+        face_name: String,
+    },
+    Name {
+        card_name: String,
+        face_name: String,
+    },
+}
+
+impl TokenSourceMetadataKey {
+    fn from_set_card(card: &SetCard) -> Self {
+        let face_name = normalized_source_face_name(&card.name, card.face_name.as_deref());
+        if let Some(oracle_id) = card.identifiers.scryfall_oracle_id.as_deref() {
+            Self::Oracle {
+                oracle_id: oracle_id.to_string(),
+                face_name,
+            }
+        } else {
+            Self::Name {
+                card_name: card.name.to_lowercase(),
+                face_name,
+            }
+        }
+    }
+
+    fn candidates_for_atomic(source: &AtomicCard) -> Vec<Self> {
+        let face_name = normalized_source_face_name(&source.name, source.face_name.as_deref());
+        let mut candidates = Vec::new();
+        if let Some(oracle_id) = source.identifiers.scryfall_oracle_id.as_deref() {
+            candidates.push(Self::Oracle {
+                oracle_id: oracle_id.to_string(),
+                face_name: face_name.clone(),
+            });
+        }
+        candidates.push(Self::Name {
+            card_name: source.name.to_lowercase(),
+            face_name,
+        });
+        candidates
+    }
+}
+
+fn normalized_source_face_name(card_name: &str, face_name: Option<&str>) -> String {
+    face_name.unwrap_or(card_name).to_lowercase()
+}
+
 fn build_token_source_metadata(
     mtgjson_path: &std::path::Path,
-) -> HashMap<String, TokenSourceMetadata> {
+    atomic: &engine::database::mtgjson::AtomicCardsFile,
+) -> HashMap<TokenSourceMetadataKey, TokenSourceMetadata> {
     let sets_dir = mtgjson_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("sets");
 
-    if !sets_dir.exists() {
-        return HashMap::new();
+    let mut map: HashMap<TokenSourceMetadataKey, TokenSourceMetadata> = HashMap::new();
+
+    // Per-set token/spellbook metadata requires local set files, so guard the
+    // set loop on the directory. It must NOT early-return the whole function —
+    // the Alchemy spellbook harvest below runs unconditionally so the
+    // Effect::DraftFromSpellbook faces are populated even when only
+    // AtomicCards.json is present locally.
+    if sets_dir.exists() {
+        merge_set_token_metadata(&sets_dir, &mut map);
     }
 
-    let mut map: HashMap<String, TokenSourceMetadata> = HashMap::new();
-    let entries = match std::fs::read_dir(&sets_dir) {
+    // Revive Effect::DraftFromSpellbook: source each face's Alchemy spellbook
+    // list from the already-loaded AtomicCards.json (relatedCards.spellbook),
+    // which serde previously dropped for lack of a capturing field.
+    merge_atomic_spellbooks(&mut map, atomic);
+
+    map
+}
+
+fn merge_set_token_metadata(
+    sets_dir: &std::path::Path,
+    map: &mut HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
+) {
+    let entries = match std::fs::read_dir(sets_dir) {
         Ok(entries) => entries,
-        Err(_) => return HashMap::new(),
+        Err(_) => return,
     };
 
     for entry in entries.flatten() {
@@ -482,11 +802,7 @@ fn build_token_source_metadata(
             {
                 continue;
             }
-            let key = card
-                .face_name
-                .as_deref()
-                .unwrap_or(&card.name)
-                .to_lowercase();
+            let key = TokenSourceMetadataKey::from_set_card(&card);
             let entry = map.entry(key).or_default();
             entry.related_token_ids.extend(card.related_cards.tokens);
             // Alchemy spellbook: keep the first non-empty list seen for the face.
@@ -498,11 +814,55 @@ fn build_token_source_metadata(
             }
         }
     }
-    map
 }
 
-fn stamp_token_source_metadata(face: &mut CardFace, map: &HashMap<String, TokenSourceMetadata>) {
-    if let Some(metadata) = map.get(&face.name.to_lowercase()) {
+/// Harvest each card's Alchemy spellbook (`relatedCards.spellbook`) from the
+/// already-loaded AtomicCards data and merge it into the token-source map.
+///
+/// This is the data-pipeline fix that revives `Effect::DraftFromSpellbook`:
+/// the spellbook faces are absent from the local per-set files, and serde
+/// previously dropped the nested `relatedCards`, so the map was empty and every
+/// DraftFromSpellbook face drafted from an empty list (a runtime no-op).
+///
+/// The key mirrors the set-file loop's derivation — `faceName` when present,
+/// otherwise `name`, lowercased — NOT `faceName` alone: several spellbook
+/// sources (e.g. Tome of Gadwick, Boseiju Pathlighter) have `faceName: null`,
+/// so keying by face name alone would leave them inert. The "first non-empty
+/// list wins" guard matches the set-file loop so a set-file spellbook, if any,
+/// is not clobbered.
+fn merge_atomic_spellbooks(
+    map: &mut HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
+    atomic: &engine::database::mtgjson::AtomicCardsFile,
+) {
+    for faces in atomic.data.values() {
+        for card in faces {
+            if card.related_cards.spellbook.is_empty() {
+                continue;
+            }
+            // Mirror the set-file loop's key derivation (oracle id when present,
+            // else card name; qualified by face name) so an atomic-sourced spellbook
+            // merges into the same entry a set file would populate.
+            let key = TokenSourceMetadataKey::candidates_for_atomic(card)
+                .into_iter()
+                .next()
+                .expect("candidates_for_atomic always yields at least the Name key");
+            let entry = map.entry(key).or_default();
+            if entry.spellbook.is_empty() {
+                entry.spellbook = card.related_cards.spellbook.clone();
+            }
+        }
+    }
+}
+
+fn stamp_token_source_metadata(
+    face: &mut CardFace,
+    source: &AtomicCard,
+    map: &HashMap<TokenSourceMetadataKey, TokenSourceMetadata>,
+) {
+    if let Some(metadata) = TokenSourceMetadataKey::candidates_for_atomic(source)
+        .iter()
+        .find_map(|key| map.get(key))
+    {
         face.metadata.related_token_ids = metadata.related_token_ids.iter().cloned().collect();
         face.metadata.source_printing_ids = metadata.source_printing_ids.iter().cloned().collect();
         face.metadata.spellbook = metadata.spellbook.clone();
@@ -539,6 +899,7 @@ fn main() {
     let mut output: Option<PathBuf> = None;
     let mut sidecar_dir: Option<PathBuf> = None;
     let mut stats = false;
+    let mut write_subtypes = false;
     let mut filter_names: Vec<String> = Vec::new();
     #[cfg(feature = "forge")]
     let mut forge_path: Option<PathBuf> = None;
@@ -580,6 +941,9 @@ fn main() {
             }
             "--stats" => {
                 stats = true;
+            }
+            "--write-subtypes" => {
+                write_subtypes = true;
             }
             "--filter" => {
                 i += 1;
@@ -624,6 +988,12 @@ fn main() {
                 );
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
+                eprintln!(
+                    "  --write-subtypes Regenerate the committed creature-subtype vocabulary\n\
+                     \x20                 (crates/engine/data/oracle-subtypes.json). Requires\n\
+                     \x20                 CardTypes.json alongside AtomicCards.json. Without this\n\
+                     \x20                 flag the export never writes to the tracked tree."
+                );
                 process::exit(1);
             }
         },
@@ -650,22 +1020,46 @@ fn main() {
         }
     };
 
-    let card_types_path = mtgjson_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("CardTypes.json");
-    let card_types = load_card_types(&card_types_path).ok();
-    if card_types.is_none() {
-        eprintln!(
-            "warning: CardTypes.json not found at {} — using AtomicCards harvest only",
-            card_types_path.display()
-        );
+    // The creature-subtype vocabulary is a COMMITTED parser input: the engine
+    // pulls `crates/engine/data/oracle-subtypes.json` in with `include_str!`.
+    // Regenerating it is therefore a deliberate data-pipeline act, not a side
+    // effect of exporting cards, and it happens only under `--write-subtypes`
+    // (passed by `scripts/gen-card-data.sh`, the one caller that fetches the
+    // MTGJSON sidecars). A plain export is a pure read: it must not mutate the
+    // tracked tree it is measuring, and it must not bump the mtime of a file the
+    // engine compiles in — that rebuilds the parser underneath the very export
+    // whose output is being compared.
+    //
+    // When the refresh IS requested, CardTypes.json is REQUIRED. It is the sole
+    // source of the token-only creature subtypes (Army, Servo, Pentavite,
+    // Sculpture, Tentacle, …), which are printed on no card face and so cannot
+    // be recovered from the AtomicCards harvest. Regenerating without it silently
+    // deletes all 26 and degrades every later parse, so a missing sidecar is a
+    // hard failure rather than a quiet downgrade.
+    if write_subtypes {
+        let card_types_path = mtgjson_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("CardTypes.json");
+        match load_card_types(&card_types_path) {
+            Ok(card_types) => write_oracle_subtypes(&card_types, &atomic),
+            Err(e) => {
+                eprintln!(
+                    "Error: --write-subtypes requires {}: {e}",
+                    card_types_path.display()
+                );
+                eprintln!(
+                    "  Run scripts/gen-card-data.sh, which downloads the MTGJSON sidecars, \
+                     or drop --write-subtypes to export without refreshing the vocabulary."
+                );
+                process::exit(1);
+            }
+        }
     }
-    write_oracle_subtypes(card_types.as_ref(), &atomic);
 
     // Scan per-set MTGJSON files to build a card name → rarities map.
     let rarity_map = build_rarity_map(&mtgjson_path);
-    let token_source_metadata = build_token_source_metadata(&mtgjson_path);
+    let token_source_metadata = build_token_source_metadata(&mtgjson_path, &atomic);
 
     let set_catalog = data_dir
         .as_ref()
@@ -735,178 +1129,67 @@ fn main() {
     // tiebreakers produce the same winner every time.
     let mut atomic_keys: Vec<&String> = atomic.data.keys().collect();
     atomic_keys.sort_unstable();
-    for mtgjson_key in atomic_keys {
-        let faces = &atomic.data[mtgjson_key];
-        // Drop officially-removed offensive cards before any other handling,
-        // so they never enter the card database (and not even an explicit
-        // --filter can resurrect them).
-        if faces
-            .first()
-            .is_some_and(|f| is_removed_offensive_card(&f.name))
-        {
-            continue;
-        }
-        // --filter: skip cards not matching any filter name
-        if !filter_names.is_empty() {
-            let card_name = faces
-                .first()
-                .map(|f| f.name.to_lowercase())
-                .unwrap_or_default();
-            if !filter_names.iter().any(|n| card_name.contains(n)) {
-                continue;
-            }
-        }
 
+    let ctx = CardWorkCtx {
+        filter_names: &filter_names,
+        token_source_metadata: &token_source_metadata,
+        rarity_map: &rarity_map,
+        bracket_lists: &bracket_lists,
+        #[cfg(feature = "forge")]
+        forge_index: forge_index.as_ref(),
+    };
+
+    // Parse pass: Oracle-text parsing dominates this loop (~5ms/card over
+    // ~35k cards) and `build_card_work` is pure, so fan it out across cores.
+    // Results are collected index-addressed — each worker owns one contiguous
+    // chunk of the sorted key list and the chunks are concatenated in order —
+    // so the merge below observes exactly the sequential iteration order. That
+    // determinism is load-bearing: `insert_face`'s collision tiebreakers are
+    // order-sensitive, and CI caches card-data.json by content hash.
+    let worker_count = thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk_len = atomic_keys.len().div_ceil(worker_count).max(1);
+    let ctx = &ctx;
+    let atomic_data = &atomic.data;
+    let card_work: Vec<CardWork> = thread::scope(|scope| {
+        let handles: Vec<_> = atomic_keys
+            .chunks(chunk_len)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|key| build_card_work(ctx, key.as_str(), &atomic_data[*key]))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("card parse worker panicked"))
+            .collect()
+    });
+
+    // Merge pass: single-threaded and in sorted-key order, because every
+    // mutation here is order-sensitive (`insert_face` collision resolution,
+    // sidecar first-writer-wins) or an accumulator.
+    for card in card_work {
         total_cards += 1;
-
-        let oracle_id = faces
-            .first()
-            .and_then(|f| f.identifiers.scryfall_oracle_id.clone());
-
-        let layout_kind = map_layout(&faces[0].layout);
-
-        if is_homonym_atomic_group(faces) {
-            for source in faces.iter() {
-                let oracle_id = source.identifiers.scryfall_oracle_id.clone();
-                let mut face = build_oracle_face(source, oracle_id);
-                #[cfg(feature = "forge")]
-                if let Some(ref fi) = forge_index {
-                    engine::database::forge::apply_forge_fallback(&mut face, fi);
+        cards_with_unimplemented += card.unimplemented_faces;
+        for (key, source) in &card.localized {
+            collect_localized(&mut sidecars, key, source);
+        }
+        for (key, entry, priority) in card.entries {
+            match priority {
+                FacePriority::SameClass => {
+                    insert_face(&mut face_index, card.mtgjson_key, key, entry)
                 }
-                stamp_token_source_metadata(&mut face, &token_source_metadata);
-                let key = face.name.to_lowercase();
-                let legalities =
-                    legalities_to_export_map(&normalize_legalities(&source.legalities));
-
-                if stats && card_face_has_unimplemented_parts(&face) {
-                    cards_with_unimplemented += 1;
-                }
-
-                let rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
-
-                let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
-                collect_localized(&mut sidecars, &key, source);
-                insert_face_with_priority(
+                FacePriority::Homonym => insert_face_with_priority(
                     &mut face_index,
-                    mtgjson_key.as_str(),
+                    card.mtgjson_key,
                     key,
-                    CardExportEntry {
-                        face,
-                        legalities,
-                        layout: None,
-                        printings: source.printings.clone(),
-                        rulings: source.rulings.clone(),
-                        rarities,
-                        bracket_signals,
-                    },
+                    entry,
                     homonym_face_priority,
-                );
+                ),
             }
-        } else if faces.len() >= 2 {
-            let mut legalities_by_face = BTreeMap::new();
-            let layout = build_export_layout(faces, oracle_id, layout_kind);
-            for (face, source) in layout_faces(&layout).iter().zip(faces.iter()) {
-                legalities_by_face.insert(
-                    face.name.to_lowercase(),
-                    legalities_to_export_map(&normalize_legalities(&source.legalities)),
-                );
-            }
-
-            if stats {
-                let has_unimplemented = layout_faces(&layout)
-                    .iter()
-                    .any(|f| card_face_has_unimplemented_parts(f));
-                if has_unimplemented {
-                    cards_with_unimplemented += 1;
-                }
-            }
-
-            for (face_idx, (face_ref, source)) in layout_faces(&layout)
-                .into_iter()
-                .zip(faces.iter())
-                .enumerate()
-            {
-                let key = face_ref.name.to_lowercase();
-                let legalities = legalities_by_face.remove(&key).unwrap_or_default();
-                let mut face = face_ref.clone();
-                #[cfg(feature = "forge")]
-                if let Some(ref fi) = forge_index {
-                    engine::database::forge::apply_forge_fallback(&mut face, fi);
-                }
-                stamp_token_source_metadata(&mut face, &token_source_metadata);
-                let layout_str = match layout_kind {
-                    LayoutKind::Single => None,
-                    _ => Some(faces[0].layout.clone()),
-                };
-                // Front face (index 0) owns the rulings; back faces get an empty vec.
-                // MTGJSON duplicates rulings across faces; this dedups at export time.
-                let rulings = if face_idx == 0 {
-                    faces[0].rulings.clone()
-                } else {
-                    Vec::new()
-                };
-                let rarities = rarity_map
-                    .get(&face.name.to_lowercase())
-                    .cloned()
-                    .unwrap_or_default();
-                let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, source);
-                // Localized sidecars cover single-faced cards only — see
-                // `collect_localized`. Multi-face `foreignData` is a combined
-                // "A // B" name with no reliable per-face split, so these faces
-                // fall back to English at the display layer.
-                insert_face(
-                    &mut face_index,
-                    mtgjson_key.as_str(),
-                    key,
-                    CardExportEntry {
-                        face,
-                        legalities,
-                        layout: layout_str,
-                        printings: faces[0].printings.clone(),
-                        rulings,
-                        rarities,
-                        bracket_signals,
-                    },
-                );
-            }
-        } else {
-            let mut face = build_oracle_face(&faces[0], oracle_id);
-            #[cfg(feature = "forge")]
-            if let Some(ref fi) = forge_index {
-                engine::database::forge::apply_forge_fallback(&mut face, fi);
-            }
-            stamp_token_source_metadata(&mut face, &token_source_metadata);
-            let key = face.name.to_lowercase();
-            let legalities = legalities_to_export_map(&normalize_legalities(&faces[0].legalities));
-
-            if stats && card_face_has_unimplemented_parts(&face) {
-                cards_with_unimplemented += 1;
-            }
-
-            let rarities = rarity_map
-                .get(&face.name.to_lowercase())
-                .cloned()
-                .unwrap_or_default();
-
-            let bracket_signals = bracket_signals_for_face(&bracket_lists, &face, &faces[0]);
-            collect_localized(&mut sidecars, &key, &faces[0]);
-            insert_face(
-                &mut face_index,
-                mtgjson_key.as_str(),
-                key,
-                CardExportEntry {
-                    face,
-                    legalities,
-                    layout: None,
-                    printings: faces[0].printings.clone(),
-                    rulings: faces[0].rulings.clone(),
-                    rarities,
-                    bracket_signals,
-                },
-            );
         }
     }
 
@@ -1527,11 +1810,13 @@ mod tests {
     use std::sync::OnceLock;
 
     use engine::database::mtgjson::{
-        load_atomic_cards, AtomicCard, AtomicCardsFile, AtomicIdentifiers,
+        load_atomic_cards, AtomicCard, AtomicCardsFile, AtomicIdentifiers, SetIdentifiers,
+        SetRelatedCards,
     };
     use engine::types::ability::TargetFilter;
     use engine::types::card::CardFace;
     use engine::types::keywords::Keyword;
+    use serde_json::json;
 
     use super::*;
 
@@ -1555,11 +1840,23 @@ mod tests {
                 .map(|(format, status)| (format.to_string(), status.to_string()))
                 .collect(),
             layout: layout.map(|s| s.to_string()),
+            face_index: None,
             printings: printings.iter().map(|s| s.to_string()).collect(),
             rulings: Vec::new(),
             rarities: BTreeSet::new(),
             bracket_signals: BracketSignals::default(),
         }
+    }
+
+    #[test]
+    fn card_export_entry_serializes_multiface_face_index() {
+        let mut entry = make_entry("ordered-oracle", &["TST"], Some("transform"));
+        entry.face.name = "Back Face".to_string();
+        entry.face_index = Some(1);
+
+        let value = serde_json::to_value(&entry).expect("entry should serialize");
+
+        assert_eq!(value["face_index"], json!(1));
     }
 
     fn atomic_single(name: &str, oracle_id: Option<&str>) -> AtomicCard {
@@ -1592,6 +1889,32 @@ mod tests {
                 scryfall_oracle_id: oracle_id.map(str::to_string),
             },
             foreign_data: Vec::new(),
+            related_cards: SetRelatedCards::default(),
+        }
+    }
+
+    fn set_card_with_metadata(
+        name: &str,
+        face_name: Option<&str>,
+        oracle_id: Option<&str>,
+        printing_id: Option<&str>,
+        tokens: &[&str],
+        spellbook: &[&str],
+    ) -> SetCard {
+        SetCard {
+            uuid: format!("{name}-uuid"),
+            name: name.to_string(),
+            face_name: face_name.map(str::to_string),
+            rarity: "rare".to_string(),
+            identifiers: SetIdentifiers {
+                scryfall_id: printing_id.map(str::to_string),
+                scryfall_oracle_id: oracle_id.map(str::to_string),
+            },
+            related_cards: SetRelatedCards {
+                tokens: tokens.iter().map(|token| token.to_string()).collect(),
+                reverse_related: Vec::new(),
+                spellbook: spellbook.iter().map(|card| card.to_string()).collect(),
+            },
         }
     }
 
@@ -1636,6 +1959,94 @@ mod tests {
             atomic_single("Shared Name", Some("same-oracle")),
         ];
         assert!(!is_homonym_atomic_group(&faces));
+    }
+
+    #[test]
+    fn token_source_metadata_preserves_spellbook_and_printing_ids() {
+        let set_card = set_card_with_metadata(
+            "Spellbook Source",
+            None,
+            Some("spellbook-oracle"),
+            Some("spellbook-printing"),
+            &["token-id"],
+            &["Draft Pick"],
+        );
+        let mut map = HashMap::new();
+        let mut metadata = TokenSourceMetadata::default();
+        metadata
+            .related_token_ids
+            .extend(set_card.related_cards.tokens.clone());
+        metadata
+            .source_printing_ids
+            .insert(set_card.identifiers.scryfall_id.clone().unwrap());
+        metadata.spellbook = set_card.related_cards.spellbook.clone();
+        map.insert(TokenSourceMetadataKey::from_set_card(&set_card), metadata);
+
+        let source = atomic_single("Spellbook Source", Some("spellbook-oracle"));
+        let mut face = CardFace {
+            name: "Spellbook Source".to_string(),
+            scryfall_oracle_id: Some("spellbook-oracle".to_string()),
+            ..Default::default()
+        };
+        stamp_token_source_metadata(&mut face, &source, &map);
+
+        assert_eq!(
+            face.metadata.related_token_ids,
+            vec!["token-id".to_string()]
+        );
+        assert_eq!(
+            face.metadata.source_printing_ids,
+            vec!["spellbook-printing".to_string()]
+        );
+        assert_eq!(face.metadata.spellbook, vec!["Draft Pick".to_string()]);
+    }
+
+    #[test]
+    fn token_source_metadata_disambiguates_homonymous_oracle_ids() {
+        let first = set_card_with_metadata(
+            "Shared Name",
+            None,
+            Some("first-oracle"),
+            Some("first-printing"),
+            &["first-token"],
+            &[],
+        );
+        let second = set_card_with_metadata(
+            "Shared Name",
+            None,
+            Some("second-oracle"),
+            Some("second-printing"),
+            &["second-token"],
+            &[],
+        );
+        let mut map = HashMap::new();
+        for set_card in [&first, &second] {
+            let mut metadata = TokenSourceMetadata::default();
+            metadata
+                .related_token_ids
+                .extend(set_card.related_cards.tokens.clone());
+            metadata
+                .source_printing_ids
+                .insert(set_card.identifiers.scryfall_id.clone().unwrap());
+            map.insert(TokenSourceMetadataKey::from_set_card(set_card), metadata);
+        }
+
+        let source = atomic_single("Shared Name", Some("second-oracle"));
+        let mut face = CardFace {
+            name: "Shared Name".to_string(),
+            scryfall_oracle_id: Some("second-oracle".to_string()),
+            ..Default::default()
+        };
+        stamp_token_source_metadata(&mut face, &source, &map);
+
+        assert_eq!(
+            face.metadata.related_token_ids,
+            vec!["second-token".to_string()]
+        );
+        assert_eq!(
+            face.metadata.source_printing_ids,
+            vec!["second-printing".to_string()]
+        );
     }
 
     #[test]
@@ -1828,6 +2239,68 @@ mod tests {
             Some("finish-oracle"),
             "on a tie, first-inserted wins"
         );
+    }
+
+    /// DATA-PIPELINE guard for the Alchemy spellbook fix. Reverting the
+    /// unconditional `merge_atomic_spellbooks` fold (or the `related_cards`
+    /// capture on `AtomicCard`) empties the map and flips this test red. The
+    /// path deliberately has NO `sets/` subdir, so ONLY the AtomicCards harvest
+    /// can populate the spellbook — exercising the fold in isolation.
+    #[test]
+    fn build_token_source_metadata_harvests_spellbook_from_atomic() {
+        // Drafting source with a 12-name Alchemy spellbook.
+        let spellbook: Vec<String> = (1..=12).map(|i| format!("Spell {i}")).collect();
+        let mut source = atomic_single("Tome Test", Some("tome-oracle"));
+        source.related_cards.spellbook = spellbook.clone();
+
+        // Reach-guard: a second card WITH a spellbook must get its own entry.
+        let mut other = atomic_single("Second Source", Some("second-oracle"));
+        other.related_cards.spellbook = vec!["A".to_string(), "B".to_string()];
+
+        // Negative: a card with an EMPTY spellbook must create no entry.
+        let empty = atomic_single("No Spellbook", Some("none-oracle"));
+
+        let mut data: HashMap<String, Vec<AtomicCard>> = HashMap::new();
+        data.insert("Tome Test".to_string(), vec![source]);
+        data.insert("Second Source".to_string(), vec![other]);
+        data.insert("No Spellbook".to_string(), vec![empty]);
+        let atomic = AtomicCardsFile { data };
+
+        // Temp path whose parent has no `sets/` subdir → set-file loop skipped.
+        let dir =
+            std::env::temp_dir().join(format!("phase-spellbook-harvest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir should be creatable");
+        let mtgjson_path = dir.join("AtomicCards.json");
+
+        let map = build_token_source_metadata(&mtgjson_path, &atomic);
+
+        // Atomic spellbooks key the same way the set-file loop does: oracle id when
+        // present, face name (here == lowercased name, as face_name is None) as qualifier.
+        let oracle_key = |oracle: &str, name: &str| TokenSourceMetadataKey::Oracle {
+            oracle_id: oracle.to_string(),
+            face_name: name.to_lowercase(),
+        };
+
+        assert_eq!(
+            map[&oracle_key("tome-oracle", "Tome Test")].spellbook,
+            spellbook,
+            "12-name spellbook must be harvested from AtomicCards even with no set files"
+        );
+        assert_eq!(
+            map[&oracle_key("tome-oracle", "Tome Test")].spellbook.len(),
+            12
+        );
+        assert_eq!(
+            map[&oracle_key("second-oracle", "Second Source")].spellbook,
+            vec!["A".to_string(), "B".to_string()],
+            "a second spellbook source must yield its own populated entry"
+        );
+        assert!(
+            !map.contains_key(&oracle_key("none-oracle", "No Spellbook")),
+            "a card with an empty spellbook must not create a map entry"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn load_atomic_fixture() -> &'static AtomicCardsFile {

@@ -353,6 +353,7 @@ pub fn room_effects(
                         granted_to: crate::types::player::PlayerId(0),
                         frequency: crate::types::statics::CastFrequency::Unlimited,
                         source_id: None,
+                        invalidation: None,
                         exiled_by_ability_controller: None,
                         mana_spend_permission: None,
                         card_filter: None,
@@ -861,6 +862,8 @@ pub fn room_effects(
                         ),
                         attack_defended: None,
                         source_controller: None,
+                        source_object: None,
+                        bypass_beneficiary: None,
                     }],
                     triggers: Vec::new(),
                 },
@@ -1454,6 +1457,30 @@ static BALDURS_GATE_WILDERNESS: DungeonDefinition = DungeonDefinition {
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+
+/// CR 309.7: "A player completes a dungeon as that dungeon card is removed from
+/// the game." True when `player` has completed at least one dungeon
+/// (`specific: None`) or the named dungeon (`specific: Some(d)`).
+///
+/// SINGLE AUTHORITY for the "have you completed a dungeon" predicate. The same
+/// printed clause is read two ways — as a triggered ability's intervening-if
+/// (`TriggerCondition::CompletedDungeon`) and at resolution
+/// (`AbilityCondition::CompletedDungeon`, e.g. Tomb of Horrors Adventurer's "If
+/// you've completed a dungeon, copy that spell twice instead"). Both delegate
+/// here so the two readings can never disagree about what "completed" means.
+pub fn has_completed_dungeon(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    specific: &Option<DungeonId>,
+) -> bool {
+    state
+        .dungeon_progress
+        .get(&player)
+        .is_some_and(|progress| match specific {
+            None => !progress.completed.is_empty(),
+            Some(dungeon) => progress.completed.contains(dungeon),
+        })
+}
 
 #[cfg(test)]
 mod tests {

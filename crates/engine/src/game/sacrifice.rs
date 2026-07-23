@@ -6,7 +6,7 @@ use crate::game::zone_pipeline::{
     self, ApprovedZoneChange, DeliveryCtx, ExileLinkSpec, ZoneDeliveryResult,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingSacrificeProvenance};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -21,6 +21,16 @@ pub(crate) enum SacrificeOutcome {
     /// A replacement effect requires player choice before sacrifice can proceed.
     /// Callers must handle this by surfacing the replacement choice to the player.
     NeedsReplacementChoice(PlayerId),
+}
+
+/// Signed current power of the selected permanents. Aggregate sacrifice costs
+/// count every selected permanent, including zero- and negative-power objects.
+pub(crate) fn selected_total_power(state: &GameState, selected: &[ObjectId]) -> i32 {
+    selected
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .map(|object| object.power.unwrap_or(0))
+        .sum()
 }
 
 /// CR 701.21 + CR 118.3: Sacrifice a permanent — move to graveyard as a cost or effect.
@@ -137,7 +147,15 @@ pub(crate) fn apply_sacrifice_after_replacement(
                 ReplacementResult::Prevented => {}
                 ReplacementResult::NeedsChoice(player) => {
                     // CR 616.1: an ordered/optional Moved replacement needs a
-                    // choice — pause and let the caller resume.
+                    // choice — pause and let the caller resume. The pending
+                    // replacement now owns the inner ZoneChange, so retain the
+                    // enclosing sacrifice's identity until that move resumes.
+                    if let Some(pending) = state.pending_replacement.as_mut() {
+                        pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
+                            object_id: oid,
+                            player_id: pid,
+                        });
+                    }
                     state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
                     return SacrificeApply::NeedsChoice(player);
                 }
