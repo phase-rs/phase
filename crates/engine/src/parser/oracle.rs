@@ -1688,7 +1688,7 @@ fn detect_linked_choice_copy_chosen_host(
     let chooser = items.iter().find(|item| {
         item_replacement(item)
             .and_then(|replacement| replacement.execute.as_ref())
-            .is_some_and(is_as_enters_choose_permanent_unsupported)
+            .is_some_and(|exec| is_as_enters_choose_permanent_unsupported(exec))
     });
     let copy_static = items.iter().find(|item| {
         item_static(item).is_some_and(|s| {
@@ -1729,9 +1729,11 @@ fn apply_linked_choice_copy_chosen_host(
         let Some(execute) = result.replacements[pos].execute.as_mut() else {
             continue;
         };
-        let description = match execute.effect.as_ref() {
-            Effect::Unimplemented { description, .. } => description.clone(),
-            _ => continue,
+        if !is_as_enters_choose_permanent_unsupported(execute) {
+            continue;
+        }
+        let Some(description) = execute.effect.unimplemented_description().map(str::to_owned) else {
+            continue;
         };
         let lower = description.to_lowercase();
         let Some((_, _, choose_suffix)) =
@@ -1744,7 +1746,7 @@ fn apply_linked_choice_copy_chosen_host(
         else {
             continue;
         };
-        *execute = AbilityDefinition::new(
+        **execute = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChoosePermanent {
                 filter,
