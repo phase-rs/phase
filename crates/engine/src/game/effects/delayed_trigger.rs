@@ -768,11 +768,14 @@ fn snapshot_quantity_ref(
         } => {
             let filter_ctx =
                 crate::game::filter::FilterContext::from_source(state, ability.source_id);
+            // Latch routing is identity-gated inside the resolver: it engages
+            // only if the parent's target IS the latched trigger source.
             crate::game::quantity::resolve_mana_spent_to_cast_metric(
                 state,
                 target_object_id,
                 metric,
                 &filter_ctx,
+                ability.trigger_source.as_ref(),
             )
             .or(Some(0))
         }

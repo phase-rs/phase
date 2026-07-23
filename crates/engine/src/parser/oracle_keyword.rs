@@ -1260,6 +1260,7 @@ fn parse_disguise_keyword_line(text: &str) -> Option<Keyword> {
     Some(Keyword::Disguise(DisguiseCost::Reduced {
         cost,
         reduction: Box::new(CostReduction {
+            mode: crate::types::statics::CostModifyMode::Reduce,
             amount_per,
             count: QuantityExpr::Ref { qty },
             condition: None,

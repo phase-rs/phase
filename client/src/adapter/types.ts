@@ -2668,6 +2668,9 @@ export interface TurnOrderSlotView {
   player: PlayerId;
   slot_index: number;
   turns_from_now: number;
+  turn_number: number;
+  is_viewer?: boolean;
+  is_starting_player?: boolean;
 }
 
 /**
@@ -2749,6 +2752,8 @@ export interface DerivedViews {
    * intentional when extra turns put the same player in multiple slots.
    */
   turn_order?: TurnOrderSlotView[];
+  /** One-based projected turn position for the current viewer. */
+  viewer_turn_number?: number;
   /**
    * CR 732.2a: `∞` HUD rows — one per (engine-attributed player, pumped axis)
    * of every unbounded-resource loop. Empty/omitted when no loop is active. The

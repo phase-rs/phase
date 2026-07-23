@@ -23,9 +23,9 @@ describe("NextUpBadge", () => {
       gameState: buildGameState({
         derived: {
           turn_order: [
-            { player: 0, slot_index: 0, turns_from_now: 0 },
-            { player: 2, slot_index: 1, turns_from_now: 1 },
-            { player: 0, slot_index: 2, turns_from_now: 2 },
+            { player: 0, slot_index: 0, turns_from_now: 0, turn_number: 1 },
+            { player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 },
+            { player: 0, slot_index: 2, turns_from_now: 2, turn_number: 3 },
           ],
         },
       }),
@@ -40,8 +40,8 @@ describe("NextUpBadge", () => {
       gameState: buildGameState({
         derived: {
           turn_order: [
-            { player: 0, slot_index: 0, turns_from_now: 0 },
-            { player: 2, slot_index: 1, turns_from_now: 1 },
+            { player: 0, slot_index: 0, turns_from_now: 0, turn_number: 1 },
+            { player: 2, slot_index: 1, turns_from_now: 1, turn_number: 2 },
           ],
         },
       }),

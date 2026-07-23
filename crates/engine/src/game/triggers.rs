@@ -26,6 +26,10 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::resolved_commands::{
+    ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
+    ResolvedTriggerCollectionReplayInvariantError,
+};
 use crate::types::statics::{
     StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
 };
@@ -302,6 +306,57 @@ impl PendingTriggerContext {
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
         }
     }
+}
+
+/// Applies exact trigger/LKI collection output without rerunning trigger matching.
+///
+/// CR 603.2 + CR 603.3b: pending contexts preserve their resolved firing and
+/// placement order. CR 603.10 + CR 603.10a: a logical zone-change final pass
+/// appends its last-known-information-aware settlement. CR 603.2c: consumed
+/// event occurrences prevent a duplicate generic priority collection.
+pub fn apply_resolved_trigger_collection(
+    state: &mut GameState,
+    command: &ResolvedTriggerCollectionCommand,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    match &command.collection {
+        ResolvedTriggerCollection::DeferPending { contexts } => {
+            state.deferred_triggers.extend(contexts.clone());
+        }
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences } => {
+            state
+                .consumed_before_priority_trigger_events
+                .extend(occurrences.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Resolves, applies, and journals one non-empty trigger/LKI collection append.
+///
+/// Empty vectors are no-ops, so they deliberately do not allocate a causal
+/// node or add a journal entry.
+pub fn resolve_and_apply_trigger_collection(
+    state: &mut GameState,
+    collection: ResolvedTriggerCollection,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    let is_empty = match &collection {
+        ResolvedTriggerCollection::DeferPending { contexts } => contexts.is_empty(),
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences } => occurrences.is_empty(),
+    };
+    if is_empty {
+        return Ok(());
+    }
+
+    let command = ResolvedTriggerCollectionCommand {
+        collection,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_trigger_collection(state, &command)?;
+    state
+        .resolved_rules_journal
+        .record_trigger_collection(command)
+        .expect("resolved trigger collection must have a live journal cause");
+    Ok(())
 }
 
 fn matching_batched_trigger_events(
@@ -2183,7 +2238,11 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
         .collect();
     group.append_delivery_events(&zone_change_events)?;
     let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
-    state.deferred_triggers.extend(pending);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending { contexts: pending },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2235,7 +2294,13 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     group.stamp_battlefield_departures()?;
     sync_logical_zone_change_departure_stamps(group, final_events);
     let settlement = collect_logical_zone_trigger_settlement(state, group)?;
-    state.deferred_triggers.extend(settlement);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending {
+            contexts: settlement,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2305,9 +2370,10 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
         .iter()
         .map(|occurrence| occurrence.event.clone())
         .collect();
-    state
-        .consumed_before_priority_trigger_events
-        .extend(events.iter().enumerate().filter_map(|(index, event)| {
+    let occurrences = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
             matches!(event, GameEvent::ZoneChanged { .. })
                 .then(|| {
                     unclaimed_owned_zone_events
@@ -2322,7 +2388,13 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                         occurrence: trigger_event_occurrence(events, index),
                     }
                 })
-        }));
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("consumed-before-priority trigger journal cause must be live");
 }
 
 /// Collect the one final observer pass owned by a completed logical zone-change
@@ -4600,13 +4672,36 @@ fn dispatch_collected_triggers(state: &mut GameState, pending: Vec<PendingTrigge
     let _ = drain_deferred_triggers_after_trigger_construction(state, &mut events_out);
 }
 
-/// Clear transient cast-tally booleans/color breakdown on all objects after
-/// trigger collection. `mana_spent_to_cast_amount` is intentionally NOT
-/// cleared: it is a historical fact about the object (how much mana was
-/// spent to cast it) used by spell resolution effects like "deals damage
-/// equal to the amount of mana spent to cast this spell" (Molten Note) and
-/// by CR 603.4 intervening-if resolution re-checks (Hungry Graffalon /
-/// Topiary Lecturer Increment).
+/// Clear the transient `mana_spent_to_cast` boolean on all objects after
+/// trigger collection, and clear all five cast-payment stamps (the bool,
+/// `colors_spent_to_cast`, `mana_spent_to_cast_amount`, `phyrexian_life_paid`,
+/// `mana_spent_source_snapshots`) on objects outside the Battlefield/Stack
+/// provenance zones, via the single authority
+/// `GameObject::clear_cast_payment_stamps`.
+///
+/// CR 601.2h + CR 603.4: for objects on the **Battlefield** or **Stack** the
+/// payment stamps survive (issue #5943). `mana_spent_to_cast_amount` is a
+/// historical fact about the object (how much mana was spent to cast it)
+/// used by spell resolution effects like "deals damage equal to the amount
+/// of mana spent to cast this spell" (Molten Note) and by CR 603.4
+/// intervening-if resolution re-checks (Hungry Graffalon / Topiary Lecturer
+/// Increment). The per-color tally `colors_spent_to_cast` feeds a
+/// "if {W}{W} was spent to cast it" ETB intervening-if (Emptiness,
+/// CR 107.4e hybrid pips) re-checked when the triggered ability *resolves*,
+/// and a spend-color rider on a spell still on the stack reads the tally at
+/// its own resolution. Clearing them here for those zones made every such
+/// rider silently do nothing at the re-check.
+///
+/// Like `cast_from_zone`, all five payment stamps are cleared once the
+/// object leaves the Battlefield|Stack provenance zones (CR 400.7 family):
+/// a spell that was COUNTERED or fizzled goes Stack → Graveyard, so
+/// `reset_for_battlefield_exit` never runs on it — it loses its payment
+/// record at the next collection pass instead, mirroring `cast_from_zone`.
+/// Leaving any stamp behind would let a reanimation produce a battlefield
+/// permanent with a phantom payment record (Satoru-class "no mana was
+/// spent" reads, `CastManaSpentMetric`). On battlefield exit,
+/// `reset_for_battlefield_exit` (the CR 400.7 exit-clear authority) clears
+/// them through the same helper.
 ///
 /// CR 603.4: `cast_from_zone` is likewise preserved for permanents on the
 /// battlefield — a `WasCast` / "if you cast it" ETB intervening-if is
@@ -4628,9 +4723,19 @@ fn clear_post_collection_transients(state: &mut GameState) {
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if !matches!(obj.zone, Zone::Battlefield | Zone::Stack) {
             obj.cast_from_zone = None;
+            // CR 601.2h + CR 603.4 + CR 107.4e (issue #5943): the payment
+            // stamps must stay readable on Battlefield/Stack objects for
+            // intervening-if re-checks at resolution ("if {W}{W} was spent to
+            // cast it"). Everywhere else the cast provenance is no longer
+            // meaningful — a countered/fizzled spell went Stack → Graveyard,
+            // so `reset_for_battlefield_exit` (the exit-clear authority for
+            // battlefield objects, CR 400.7) never ran on it. Clear all five
+            // payment stamps through the single authority, mirroring
+            // `cast_from_zone`, so none of them leak onto a later object
+            // identity via reanimation.
+            obj.clear_cast_payment_stamps();
         }
         obj.mana_spent_to_cast = false;
-        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
     }
 }
 
@@ -24139,6 +24244,80 @@ pub mod tests {
         assert!(
             !check_trigger_condition(&state, &condition, PlayerId(0), Some(satoru), Some(&event),),
             "a mana-paid cast must not satisfy Satoru's intervening-if at resolution"
+        );
+    }
+
+    /// CR 601.2h + CR 603.4 (issue #5943): the per-color tally must survive
+    /// `clear_post_collection_transients` for a battlefield object so a
+    /// spend-color intervening-if ("if {W}{W} was spent to cast it",
+    /// Emptiness) still holds at the resolution re-check — while a graveyard
+    /// sibling's tally is cleared (its cast provenance is no longer
+    /// meaningful).
+    #[test]
+    fn mana_color_spent_survives_transient_clear_on_battlefield_only() {
+        let mut state = setup();
+        let battlefield_obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Emptiness".to_string(),
+            Zone::Battlefield,
+        );
+        let graveyard_obj = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Fizzled Emptiness".to_string(),
+            Zone::Graveyard,
+        );
+        for id in [battlefield_obj, graveyard_obj] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.colors_spent_to_cast.add(ManaColor::White, 2);
+            obj.mana_spent_to_cast_amount = 2;
+            let lki = obj.snapshot_for_mana_spent();
+            obj.mana_spent_source_snapshots
+                .push(crate::types::game_state::ManaSpentSourceSnapshot { source_id: id, lki });
+        }
+
+        clear_post_collection_transients(&mut state);
+
+        let cond = TriggerCondition::ManaColorSpent {
+            color: ManaColor::White,
+            minimum: 2,
+        };
+        assert!(
+            check_trigger_condition(&state, &cond, PlayerId(0), Some(battlefield_obj), None),
+            "battlefield object's {{W}}{{W}} tally must survive the post-collection clear"
+        );
+        // Reach-guard pair: same stamping, same condition — only the zone
+        // differs, so the negative below cannot pass vacuously.
+        assert!(
+            !check_trigger_condition(&state, &cond, PlayerId(0), Some(graveyard_obj), None),
+            "graveyard object's tally must be cleared by the post-collection clear"
+        );
+        // Issue #5943 fix-round: the amount and payment-source snapshots ride
+        // the SAME lifecycle as the per-color tally (single authority:
+        // `clear_cast_payment_stamps`) — preserved on the battlefield object,
+        // cleared on the graveyard sibling so a countered spell cannot be
+        // reanimated with a phantom payment record.
+        let bf = &state.objects[&battlefield_obj];
+        assert_eq!(
+            bf.mana_spent_to_cast_amount, 2,
+            "battlefield object's spent-mana amount must survive the clear"
+        );
+        assert_eq!(
+            bf.mana_spent_source_snapshots.len(),
+            1,
+            "battlefield object's payment-source snapshots must survive the clear"
+        );
+        let gy = &state.objects[&graveyard_obj];
+        assert_eq!(
+            gy.mana_spent_to_cast_amount, 0,
+            "graveyard object's spent-mana amount must be cleared"
+        );
+        assert!(
+            gy.mana_spent_source_snapshots.is_empty(),
+            "graveyard object's payment-source snapshots must be cleared"
         );
     }
 

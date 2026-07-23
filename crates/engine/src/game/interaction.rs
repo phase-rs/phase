@@ -823,6 +823,9 @@ pub(crate) fn rebind_interaction_slots_after_action(
 }
 
 pub(crate) fn debug_assert_interaction_consistency(state: &GameState) {
+    #[cfg(not(debug_assertions))]
+    let _ = state;
+
     #[cfg(debug_assertions)]
     {
         if state

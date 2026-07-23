@@ -83,8 +83,19 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
             engine::game::library::apply_resolved_library_shuffle(state, command, &mut Vec::new())
                 .unwrap();
         }
+        ResolvedRulesCommand::ZoneChange(command) => {
+            engine::game::zones::apply_resolved_zone_change(state, command).unwrap();
+        }
         ResolvedRulesCommand::Information(command) => {
             state.apply_resolved_information(command).unwrap();
+        }
+        ResolvedRulesCommand::FrameTransition(command) => {
+            state
+                .apply_resolved_frame_transition(command.as_ref())
+                .unwrap();
+        }
+        ResolvedRulesCommand::TriggerCollection(command) => {
+            engine::game::triggers::apply_resolved_trigger_collection(state, command).unwrap();
         }
     }
 }
@@ -173,7 +184,12 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ObjectCounter(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
-            | ResolvedRulesCommand::Information(_) => apply_semantic_command(&mut replay, command),
+            | ResolvedRulesCommand::ZoneChange(_)
+            | ResolvedRulesCommand::Information(_)
+            | ResolvedRulesCommand::FrameTransition(_)
+            | ResolvedRulesCommand::TriggerCollection(_) => {
+                apply_semantic_command(&mut replay, command)
+            }
         }
     }
     assert!(

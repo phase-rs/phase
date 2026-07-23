@@ -4653,6 +4653,13 @@ pub(super) fn handle_resolution_choice(
                             if state.active_ability_continuation().is_none() {
                                 state.finish_active_paused_post_replacement_dispatch();
                             }
+                            // CR 608.2c + CR 701.21a: Singular sacrificed referent
+                            // for a chained Demonstrative / CostPaidObject consumer
+                            // is stamped once at the sacrifice-completion seam
+                            // (`perform_player_scope_sacrifices` when
+                            // `propagate_parent_context` is set). Do not re-scan
+                            // here — a second authority drifts when the snapshot
+                            // ladder changes (issue #5925).
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(

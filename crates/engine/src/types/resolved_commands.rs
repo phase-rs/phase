@@ -7,13 +7,17 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
+
 use super::ability::TriggerDefinitionRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
-use super::game_state::SpellCastRecord;
+use super::game_state::{SpellCastRecord, ZoneChangeRecord};
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
+use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
+use super::zones::Zone;
 
 /// Globally ordered identity of a resolved command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -263,11 +267,101 @@ pub struct ResolvedLibraryShuffleCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// One exact transition of an object occurrence between zone containers.
+///
+/// CR 400.7: the command binds the source occurrence and its resulting
+/// incarnation, so replay neither selects a new object nor creates a new
+/// incarnation. CR 613.7d: battlefield-entry timestamps are captured by the
+/// ordinary path and installed exactly on replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedZoneChangeCommand {
+    pub object: ObjectIncarnationRef,
+    pub resulting_incarnation: u64,
+    pub from: Zone,
+    pub to: Zone,
+    /// Zero-based position after the source occurrence has been removed.
+    pub destination_position: usize,
+    pub owner: PlayerId,
+    pub entry_timestamp: Option<u64>,
+    pub turn_zone_change_index: usize,
+    pub zone_change_record: ZoneChangeRecord,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved zone transition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedZoneChangeReplayInvariantError {
+    #[error("zone-change command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("zone-change occurrence mismatch: expected {expected:?}, found {found:?}")]
+    OccurrenceMismatch {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("zone-change owner mismatch: expected {expected:?}, found {found:?}")]
+    OwnerMismatch { expected: PlayerId, found: PlayerId },
+    #[error("zone-change source-zone mismatch: expected {expected:?}, found {found:?}")]
+    SourceZoneMismatch { expected: Zone, found: Zone },
+    #[error("zone-change destination position mismatch: expected {expected}, found {found}")]
+    DestinationPositionMismatch { expected: usize, found: usize },
+    #[error("zone-change turn-record index mismatch: expected {expected}, found {found}")]
+    TurnRecordIndexMismatch { expected: usize, found: usize },
+    #[error("zone-change battlefield entry is missing its timestamp")]
+    MissingBattlefieldEntryTimestamp,
+    #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
+    UnexpectedNonbattlefieldTimestamp,
+    #[error("zone-change installed incarnation mismatch: expected {expected}, found {found}")]
+    ResultingIncarnationMismatch { expected: u64, found: u64 },
+}
+
+/// One bounded structural transition of the resolution-frame stack.
+///
+/// This carries only the primitive operation and its native operand. It never
+/// records stack positions, frame identities, or displaced frame payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ResolvedFrameTransition {
+    Push { frame: ResolutionFrame },
+    InsertParentOfActive { frame: ResolutionFrame },
+    PopExpected { kind: FrameKind },
+    ReplaceActive { frame: ResolutionFrame },
+}
+
+/// One exact resolution-frame transition under its causal rules-execution node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedFrameTransitionCommand {
+    pub transition: ResolvedFrameTransition,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Exact trigger occurrences collected at one logical trigger/LKI boundary.
+///
+/// CR 603.2 + CR 603.3b: collected trigger contexts retain their already
+/// determined firing and placement order. CR 603.10 + CR 603.10a: final
+/// logical zone-change settlement uses the recorded pre-event authority.
+/// CR 603.2c: consumed event occurrences prevent the generic priority scan
+/// from collecting the same occurrence a second time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedTriggerCollection {
+    DeferPending {
+        contexts: Vec<PendingTriggerContext>,
+    },
+    ConsumeBeforePriority {
+        occurrences: Vec<ConsumedTriggerEventOccurrence>,
+    },
+}
+
+/// One exact trigger/LKI collection append under its causal rules-execution node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedTriggerCollectionCommand {
+    pub collection: ResolvedTriggerCollection,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
 /// authority rather than by a central replay dispatcher.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResolvedRulesCommand {
     ManaInsert(ResolvedManaInsertCommand),
     ManaSpend(ResolvedManaSpendCommand),
@@ -277,6 +371,23 @@ pub enum ResolvedRulesCommand {
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
+    ZoneChange(Box<ResolvedZoneChangeCommand>),
+    FrameTransition(Box<ResolvedFrameTransitionCommand>),
+    TriggerCollection(ResolvedTriggerCollectionCommand),
+}
+
+/// An append-only trigger collection command has no replay-time precondition.
+///
+/// The uninhabited type keeps the uniform resolved-command applier signature
+/// without inventing a failure mode for a pure `Vec::extend` operation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedTriggerCollectionReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved frame transition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedFrameTransitionReplayInvariantError {
+    #[error(transparent)]
+    Stack(#[from] ResolutionStackError),
 }
 
 /// Typed failure while advancing the canonical ChaCha20 entropy high-water mark.
@@ -700,7 +811,7 @@ pub struct SettlementNode {
 }
 
 /// One command slot assigned to a journal node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedCommandJournalEntry {
     pub ordinal: ResolvedCommandOrdinal,
     pub node: RulesExecutionNodeRef,
@@ -781,7 +892,7 @@ impl std::fmt::Display for ResolvedRulesJournalError {
 impl std::error::Error for ResolvedRulesJournalError {}
 
 /// Persistent resolved rules journal.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResolvedRulesJournal {
     next_command_ordinal: u64,
     next_settlement_node_ordinal: u64,
@@ -1116,6 +1227,39 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::LibraryShuffle(command))
     }
 
+    /// Records one exact zone-container transition under its causal node.
+    pub fn record_zone_change(
+        &mut self,
+        command: ResolvedZoneChangeCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ZoneChange(Box::new(command)),
+        )
+    }
+
+    /// Records one exact bounded resolution-frame transition under its causal node.
+    pub fn record_frame_transition(
+        &mut self,
+        command: ResolvedFrameTransitionCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::FrameTransition(Box::new(command)),
+        )
+    }
+
+    /// Records one exact trigger/LKI collection append under its causal node.
+    pub fn record_trigger_collection(
+        &mut self,
+        command: ResolvedTriggerCollectionCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::TriggerCollection(command),
+        )
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -1316,7 +1460,10 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ObjectCounter(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
-                | ResolvedRulesCommand::LibraryShuffle(_) => {}
+                | ResolvedRulesCommand::LibraryShuffle(_)
+                | ResolvedRulesCommand::ZoneChange(_)
+                | ResolvedRulesCommand::FrameTransition(_)
+                | ResolvedRulesCommand::TriggerCollection(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1548,6 +1695,28 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::ZoneChange(command) => {
+                if entry.node != command.cause || zone_change_command_is_invalid(command) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "zone-change command has an invalid occurrence, receipt, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::FrameTransition(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "frame-transition command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::TriggerCollection(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "trigger-collection command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1617,6 +1786,23 @@ fn information_command_is_invalid(command: &ResolvedInformationCommand) -> bool 
         || command.occurrences.iter().any(|occurrence| {
             occurrence.incarnation == LEGACY_INCARNATION || !object_ids.insert(occurrence.object_id)
         })
+}
+
+fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
+    let record = &command.zone_change_record;
+    let changes_incarnation = command.from != command.to;
+    command.object.incarnation == LEGACY_INCARNATION
+        || command.owner != record.owner
+        || record.object_id != command.object.object_id
+        || record.from_zone != Some(command.from)
+        || record.to_zone != command.to
+        || record.turn_zone_change_index != command.turn_zone_change_index
+        || (changes_incarnation && command.resulting_incarnation <= command.object.incarnation)
+        || (!changes_incarnation && command.resulting_incarnation != command.object.incarnation)
+        || (command.to == Zone::Battlefield) != command.entry_timestamp.is_some()
+        || (command.to == Zone::Battlefield
+            && record.entered_incarnation != Some(command.resulting_incarnation))
+        || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
 }
 
 fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {

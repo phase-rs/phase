@@ -81,16 +81,20 @@ pub use resolution::{
 };
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
-    ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedLedgerEditReplayInvariantError,
-    ResolvedLibraryShuffleCommand, ResolvedLibraryShuffleReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedManaSpentUnit, ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedLedgerEdit, ResolvedLedgerEditCommand,
+    ResolvedLedgerEditReplayInvariantError, ResolvedLibraryShuffleCommand,
+    ResolvedLibraryShuffleReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedManaSpentUnit,
+    ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError, ResolvedObjectStatus, ResolvedObjectStatusCommand,
     ResolvedObjectStatusReplayInvariantError, ResolvedOncePerTurnPermission, ResolvedPlayerEdit,
     ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
-    ResolvedRulesJournalError, ResolvedTriggerLedgerEdit, RulesExecutionNodeKind,
-    RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
+    ResolvedRulesJournalError, ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
+    ResolvedTriggerCollectionReplayInvariantError, ResolvedTriggerLedgerEdit,
+    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
+    SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};

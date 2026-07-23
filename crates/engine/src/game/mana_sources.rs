@@ -16,7 +16,8 @@
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, TargetFilter, TriggerDefinition, TriggerDefinitionRef, TypedFilter,
+    PlayerFilter, QuantityExpr, SacrificeCost, SacrificeRequirement, TargetFilter,
+    TriggerDefinition, TriggerDefinitionRef, TypedFilter,
 };
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
@@ -466,6 +467,66 @@ pub(crate) fn activate_mana_source_option(
 /// bare `Untap` cost and one nested inside a `Composite` (Pili-Pala: `{2}, {Q}`).
 pub(crate) fn has_untap_component(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Untap))
+}
+
+/// CR 605.3a + CR 701.21: True when this whole cost tree pays by sacrificing
+/// only the ability's own source (`TargetFilter::SelfRef`, exactly one
+/// permanent) with **no** other player choice anywhere in the tree — Gold's
+/// bare "Sacrifice this token" and Treasure's `{T}, Sacrifice this artifact`.
+/// Such an activation is exactly as deterministic as a `{T}` cost, so auto-tap
+/// may select it the same way.
+///
+/// The predicate validates the **entire** cost, not a single component: it
+/// reuses the deny-by-default full-tree authority
+/// [`mana_abilities::cost_component_choice_free`] (`Tap` + single-token
+/// self-sacrifice + `Composite`s built solely from those) and additionally
+/// requires that a self-sacrifice component actually be present. A composite
+/// that merely *contains* a self-sacrifice beside a choice-bearing sibling —
+/// Lion's Eye Diamond's `Composite[Discard{Chosen}, Sacrifice(SelfRef,1)]` —
+/// fails the whole-tree check and is correctly rejected, so its `Discard`
+/// prompt is never bypassed. It stays off the auto-tap path and remains
+/// reachable only through
+/// `has_activatable_non_tap_mana_ability_for_payment`'s manual-payment flow.
+pub(crate) fn has_unambiguous_self_sacrifice_component(cost: &Option<AbilityCost>) -> bool {
+    // Whole-tree invariant first (shared authority): rejects any interactive
+    // sibling such as LED's `Discard`. Then confirm a self-sacrifice component
+    // is actually present, so a pure `{T}` cost is not misclassified as
+    // self-sacrifice by this predicate.
+    cost.as_ref()
+        .is_some_and(mana_abilities::cost_component_choice_free)
+        && cost_has_component(cost, |c| {
+            matches!(
+                c,
+                AbilityCost::Sacrifice(SacrificeCost {
+                    target: TargetFilter::SelfRef,
+                    requirement: SacrificeRequirement::Count { count: 1 },
+                })
+            )
+        })
+}
+
+/// CR 605.3a + CR 106.12 + CR 302.6: True when `obj` has an activated mana
+/// ability that pays purely by sacrificing its own source with **no** `{T}`
+/// component (Gold's "Sacrifice this token: Add one mana of any color."). Such
+/// an ability is unaffected by the untapped/summoning-sickness gate, so a
+/// *tapped* or summoning-sick source can still pay it. Auto-tap source
+/// discovery uses this to decide whether the tapped/summoning-sick object-level
+/// prefilter may be skipped for that source.
+///
+/// A source whose only self-sacrifice mana ability *also* carries `{T}`
+/// (Treasure's `{T}, Sacrifice this artifact`) is deliberately excluded: once
+/// tapped it genuinely cannot activate, so it must stay behind the object-level
+/// tapped prefilter — skipping it would let the tapped source re-enter the
+/// per-ability payability scan and break the auto-tap linearity guarantee.
+pub(crate) fn object_has_tapless_self_sacrifice_mana_ability(
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && mana_abilities::is_mana_ability(ability)
+            && has_unambiguous_self_sacrifice_component(&ability.cost)
+            && !has_tap_component(&ability.cost)
+    })
 }
 
 /// CR 605.3a + CR 106.12 + CR 107.6: True when paying this mana-ability cost is
@@ -1178,10 +1239,23 @@ pub(crate) fn auto_tap_mana_options(
     let Some(obj) = state.objects.get(&object_id) else {
         return Vec::new();
     };
-    if obj.zone != Zone::Battlefield || obj.controller != controller || obj.tapped {
+    if obj.zone != Zone::Battlefield || obj.controller != controller {
         return Vec::new();
     }
-    if restrictions::summoning_sick_for_tap_ability(state, obj) {
+    // CR 106.12 + CR 302.6: The tapped / summoning-sickness prefilter is only
+    // valid for a `{T}` cost. A source whose sole payable mana ability is an
+    // unambiguous self-sacrifice (Gold's "Sacrifice this token: Add one mana of
+    // any color.") can pay even while tapped or summoning-sick, so we must not
+    // discard it at the object level. When such an ability is present we fall
+    // through to `scan_mana_abilities`; the per-ability `{T}` gate in
+    // `is_active_tap_mana_ability` still rejects any tap-cost ability of a
+    // tapped/summoning-sick source, so no `{T}` source leaks through.
+    if obj.tapped && !object_has_tapless_self_sacrifice_mana_ability(obj) {
+        return Vec::new();
+    }
+    if restrictions::summoning_sick_for_tap_ability(state, obj)
+        && !object_has_tapless_self_sacrifice_mana_ability(obj)
+    {
         return Vec::new();
     }
     scan_mana_abilities(state, obj, object_id, controller, false, None)
@@ -1413,7 +1487,13 @@ pub(crate) fn has_activatable_non_tap_mana_ability_for_payment(
             if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
                 return false;
             }
-            if has_tap_component(&ability.cost) {
+            // Tap-cost and unambiguous self-sacrifice abilities (Gold, Treasure)
+            // need no player choice, so `is_active_tap_mana_ability` already
+            // covers them on the auto-tap path — only ambiguous non-tap costs
+            // (KCI's "Sacrifice an artifact", discard, pay-life) belong here.
+            if has_tap_component(&ability.cost)
+                || has_unambiguous_self_sacrifice_component(&ability.cost)
+            {
                 return false;
             }
             if !mana_abilities::can_activate_mana_ability_now(
@@ -1909,7 +1989,11 @@ fn land_mana_options(
 }
 
 /// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
-/// with a `{T}` component that `controller` could currently activate."
+/// with a `{T}` component, or an unambiguous self-sacrifice component, that
+/// `controller` could currently activate." Both shapes require no choice
+/// among candidates to activate, so auto-tap can select either one exactly
+/// as it does a `{T}` cost (Gold's "Sacrifice this token: Add one mana of
+/// any color" sits alongside Treasure's `{T}, Sacrifice this artifact`).
 /// Single authority shared by `scan_mana_abilities` (which builds per-color
 /// `ManaSourceOption` rows) and `max_mana_yield` (which sums total output) so
 /// the two never diverge on which abilities count as mana sources.
@@ -1947,14 +2031,16 @@ fn is_active_tap_mana_ability(
             return false;
         }
     }
-    if !has_tap_component(&ability.cost) {
+    if !has_tap_component(&ability.cost) && !has_unambiguous_self_sacrifice_component(&ability.cost)
+    {
         return false;
     }
     activation_condition_satisfied(state, controller, object_id, ability_index, ability)
 }
 
-/// Scan an object's abilities for activated mana abilities with a tap cost component.
-/// Type-agnostic — works for lands, creatures, artifacts, etc.
+/// Scan an object's abilities for activated mana abilities with a tap cost
+/// component or an unambiguous self-sacrifice component. Type-agnostic —
+/// works for lands, creatures, artifacts, etc.
 fn scan_mana_abilities(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
@@ -1965,6 +2051,28 @@ fn scan_mana_abilities(
 ) -> Vec<ManaSourceOption> {
     let mut options = Vec::new();
     for (ability_index, ability) in obj.abilities.iter().enumerate() {
+        // CR 106.12 + CR 302.6 + CR 107.6: On the auto-tap path
+        // (`require_current_payability == false`) `is_active_tap_mana_ability`
+        // does not consult the current-payability gate, so a `{T}`/`{Q}` ability
+        // of a *tapped* or summoning-sick source would otherwise be offered.
+        // This can only be reached when the object-level tapped/summoning-sick
+        // prefilter was skipped because the source carries a tapless
+        // self-sacrifice mana ability (Gold); its own `{T}` abilities (if any)
+        // must still be excluded here. A pure cost/field check — no legality
+        // simulation, so it never triggers a readiness call and leaves the
+        // `require_current_payability == true` callers (which already gate via
+        // `can_activate_mana_ability_now`) untouched.
+        if !require_current_payability
+            && (has_tap_component(&ability.cost) || has_untap_component(&ability.cost))
+        {
+            let tap_gated = has_tap_component(&ability.cost)
+                && (obj.tapped || restrictions::object_cant_tap(state, object_id));
+            let untap_gated = has_untap_component(&ability.cost) && !obj.tapped;
+            let sick_gated = restrictions::summoning_sick_for_tap_ability(state, obj);
+            if tap_gated || untap_gated || sick_gated {
+                continue;
+            }
+        }
         if !is_active_tap_mana_ability(
             state,
             object_id,
@@ -3395,6 +3503,81 @@ mod tests {
         );
         // Should have 5 color options
         assert_eq!(options.len(), 5);
+    }
+
+    /// Regression for #6157/#6230: the auto-tap eligibility predicate must
+    /// classify a cost by validating the **whole** cost tree, not by matching a
+    /// single component. Lion's Eye Diamond activates with
+    /// `Composite[Discard{ selection: Chosen }, Sacrifice(SelfRef, 1)]`
+    /// (see `mana_abilities.rs` LED build) and exposes a
+    /// `WaitingFor::PayCost { kind: Discard }` prompt; auto-tap must not bypass
+    /// that discard choice. Before the fix, `cost_has_component`'s `any` match
+    /// on the self-sacrifice component wrongly classified LED as unambiguous
+    /// self-sacrifice, letting the auto-tap gate (`mana_sources.rs:1820`) and
+    /// the manual-payment exclusion (`mana_sources.rs:1281`) auto-select it.
+    /// Reusing `mana_abilities::cost_component_choice_free` (deny-by-default,
+    /// full-tree) rejects LED's `Discard` sibling while keeping Gold (bare
+    /// self-sacrifice) and Treasure (`{T}` + self-sacrifice) eligible.
+    #[test]
+    fn led_shaped_discard_sacrifice_stays_off_auto_tap() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope, TargetFilter};
+
+        let self_sac = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
+
+        // Gold: bare "Sacrifice this token" — no player choice → auto-tap eligible.
+        let gold = Some(self_sac());
+        assert!(
+            has_unambiguous_self_sacrifice_component(&gold),
+            "Gold's bare self-sacrifice must remain auto-tap eligible"
+        );
+
+        // Treasure: "{T}, Sacrifice this artifact" — Tap is choice-free → eligible.
+        let treasure = Some(AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, self_sac()],
+        });
+        assert!(
+            has_unambiguous_self_sacrifice_component(&treasure),
+            "Treasure's {{T}} + self-sacrifice must remain auto-tap eligible"
+        );
+
+        // Lion's Eye Diamond: "Discard your hand, Sacrifice Lion's Eye Diamond".
+        // The `Discard` sibling requires a player choice, so the whole cost is
+        // NOT unambiguous — it must stay on the manual-payment path and keep its
+        // discard prompt. This is the shape that was misclassified before the fix.
+        let led = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+                self_sac(),
+            ],
+        });
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&led),
+            "LED-shaped composite (Discard + self-sacrifice) must NOT be auto-tap \
+             eligible — its discard choice must not be bypassed"
+        );
+
+        // The same LED shape with the components reordered is still rejected: the
+        // whole-tree check does not depend on component position.
+        let led_reordered = Some(AbilityCost::Composite {
+            costs: vec![
+                self_sac(),
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    filter: None,
+                    selection: CardSelectionMode::Chosen,
+                    self_scope: DiscardSelfScope::FromHand,
+                },
+            ],
+        });
+        assert!(
+            !has_unambiguous_self_sacrifice_component(&led_reordered),
+            "component order must not affect the whole-tree choice-free check"
+        );
     }
 
     #[test]

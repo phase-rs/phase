@@ -694,9 +694,10 @@ pub enum BlockExceptionKind {
 
 /// CR 601.2f: Direction/semantic axis for mana-cost modification statics.
 /// All three modes are applied in the CR 601.2f cost-locking step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CostModifyMode {
     /// Subtractive — reduce generic mana (floor: 0).
+    #[default]
     Reduce,
     /// Additive — increase generic mana. Thalia, Guardian of Thraben class.
     Raise,
@@ -710,6 +711,12 @@ pub enum CostModifyMode {
 /// field was added still deserializes as a reduction (CR 118.7).
 fn cost_modify_mode_reduce() -> CostModifyMode {
     CostModifyMode::Reduce
+}
+
+/// Serde `skip_serializing_if` for [`CostModifyMode::Reduce`] defaults on
+/// directional cost-modification fields (self `CostReduction`, ability statics).
+pub(crate) fn is_cost_modify_mode_reduce(mode: &CostModifyMode) -> bool {
+    matches!(mode, CostModifyMode::Reduce)
 }
 
 /// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
