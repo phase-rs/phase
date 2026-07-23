@@ -11566,7 +11566,7 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 ///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
-    // CR 303.4b + CR 301.5a + CR 120.3a: Aura/Equipment self-referential
+    // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
     // damage-source subjects are article-less determiners — "enchanted creature"
     // (the creature an Aura is attached to, CR 303.4b) and "equipped creature"
     // (the creature an Equipment is attached to, CR 301.5a). Both name THIS

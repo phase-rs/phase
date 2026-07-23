@@ -24977,7 +24977,7 @@ fn ketramose_exile_trigger_gated_on_source_zones_and_own_turn() {
     );
 }
 
-/// CR 120.3 + CR 303.4 + CR 702.6 + CR 603.7c (issue: Sigil of Sleep freeze):
+/// CR 303.4b + CR 301.5a + CR 603.2 (issue: Sigil of Sleep freeze):
 /// An article-less damage-source subject — the Aura/Equipment self-referential
 /// determiners "enchanted creature" / "equipped creature" — must still be
 /// recognized as a "deals damage to a player" trigger so a later "that player"
