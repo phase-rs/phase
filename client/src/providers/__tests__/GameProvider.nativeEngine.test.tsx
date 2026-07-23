@@ -1,6 +1,8 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useMultiplayerStore } from "../../stores/multiplayerStore";
+
 type NativeAdapterEvent =
   | { type: "reconnectFailed" }
   | { type: "error"; message: string };
