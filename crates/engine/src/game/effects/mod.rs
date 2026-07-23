@@ -14,7 +14,8 @@ use crate::types::ability::{
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
     PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
-    SharedQualityRelation, SubAbilityLink, TapStateChange, TargetFilter, TargetRef, ThisWayCause,
+    SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter,
+    TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -8263,11 +8264,28 @@ fn resolve_chain_body(
                     sub.condition.as_ref(),
                     Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
                 );
+                // CR 608.2c: A sub produced by per-item keyword-list replication
+                // (`SiblingCondition::ReplicatedOrBranch`) is an INDEPENDENT
+                // OR-branch gated on its OWN keyword — Mutable Pupa's "perpetually
+                // gains <K_i> if that creature has <K_i>" and Kathril's "put a
+                // <K_i> counter if a creature card in your graveyard has <K_i>".
+                // Its gate references neither this node's effect nor this node's
+                // keyword, so it must be evaluated regardless of whether this
+                // node's own gate (K_j's keyword check) held. Without this, once
+                // any earlier sibling's gate is false the rest of the keyword list
+                // never resolves ("list collapse"). Same shape of independent
+                // per-branch gate as `PostReplacementDamageSourceMatchesFilter`
+                // above, keyed on the replication marker rather than the condition
+                // variant (the gate here is a plain `ZoneChangeObjectMatchesFilter`
+                // / `QuantityCheck` that would otherwise look dependent).
+                let sub_is_replicated_or_branch =
+                    sub.sibling_condition == SiblingCondition::ReplicatedOrBranch;
                 if sub
                     .condition
                     .as_ref()
                     .is_some_and(condition_depends_on_effect_performed)
                     || sub_has_independent_event_gate
+                    || sub_is_replicated_or_branch
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && sub.condition.is_none())
                 {

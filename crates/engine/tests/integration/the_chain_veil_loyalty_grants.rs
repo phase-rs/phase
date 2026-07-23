@@ -27,8 +27,8 @@ use engine::game::planeswalker;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CopyCountStatus, Effect, QuantityExpr,
-    QuantityModification, ReplacementDefinition, ResolvedAbility, SubAbilityLink, TargetFilter,
-    TargetRef, TargetSelectionMode,
+    QuantityModification, ReplacementDefinition, ResolvedAbility, SiblingCondition, SubAbilityLink,
+    TargetFilter, TargetRef, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -192,6 +192,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         chosen_players: Vec::new(),
         repeat_until: None,
         sub_link: SubAbilityLink::ContinuationStep,
+        sibling_condition: SiblingCondition::Dependent,
         modal: None,
         mode_abilities: vec![],
         parent_target_missing_reason: None,

@@ -16455,6 +16455,11 @@ pub struct AbilityDefinition {
     /// counter type must be rewritten to the current iteration's counter kind
     /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
     pub iteration_kind_binding: Option<IterationKindBinding>,
+    /// CR 608.2c: whether a `SequentialSibling` continuation with its OWN gating
+    /// condition must still be checked when a PRECEDING sibling's condition was
+    /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
+    /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
+    pub sibling_condition: SiblingCondition,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -16530,6 +16535,8 @@ struct AbilityDefinitionRepr<'a> {
     sub_link: SubAbilityLink,
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_kind_binding: &'a Option<IterationKindBinding>,
+    #[serde(skip_serializing_if = "SiblingCondition::is_default")]
+    sibling_condition: SiblingCondition,
 }
 
 impl Serialize for AbilityDefinition {
@@ -16574,6 +16581,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link,
             iteration_kind_binding,
+            sibling_condition,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -16613,6 +16621,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link: *sub_link,
             iteration_kind_binding,
+            sibling_condition: *sibling_condition,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -16721,6 +16730,8 @@ struct AbilityDefinitionDe {
     sub_link: SubAbilityLink,
     #[serde(default)]
     iteration_kind_binding: Option<IterationKindBinding>,
+    #[serde(default)]
+    sibling_condition: SiblingCondition,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -16770,6 +16781,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             repeat_until: de.repeat_until,
             sub_link: de.sub_link,
             iteration_kind_binding: de.iteration_kind_binding,
+            sibling_condition: de.sibling_condition,
         })
     }
 }
@@ -16800,6 +16812,35 @@ impl SubAbilityLink {
     /// `skip_serializing_if` predicate — the default needs no JSON byte.
     pub fn is_continuation(link: &Self) -> bool {
         matches!(link, Self::ContinuationStep)
+    }
+}
+
+/// CR 608.2c: whether a `SequentialSibling` continuation with its OWN gating
+/// condition must still be checked when a PRECEDING sibling's condition was
+/// false. `Dependent` (default) is today's behavior — the continuation's own
+/// condition/effect may presuppose the preceding sibling's effect actually ran
+/// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
+/// `GainControl` produced a target), so it is skipped alongside a failed
+/// predecessor. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// keyword-list replication (CR 608.2c "The same is true for…" / "Repeat this
+/// process for…") — each item is an INDEPENDENT OR-branch checked on its own
+/// keyword, so it must be evaluated regardless of any other branch's outcome.
+/// Stamped ONLY by the `ReplicatePerKeyword` lowering helpers
+/// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) —
+/// never by ordinary sentence-boundary `SequentialSibling` stamping — so it
+/// cannot leak into a Thieving-Skydiver-shaped dependent continuation that
+/// also happens to carry `SequentialSibling`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SiblingCondition {
+    #[default]
+    Dependent,
+    ReplicatedOrBranch,
+}
+
+impl SiblingCondition {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_default(cond: &Self) -> bool {
+        matches!(cond, Self::Dependent)
     }
 }
 
@@ -16924,6 +16965,7 @@ impl AbilityDefinition {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
+            sibling_condition: SiblingCondition::Dependent,
         }
     }
 
@@ -21468,6 +21510,14 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 608.2c: Copied through from the originating `AbilityDefinition`. When
+    /// `ReplicatedOrBranch`, this `SequentialSibling` is an INDEPENDENT
+    /// per-item OR-branch produced by keyword-list replication (Mutable Pupa,
+    /// Kathril) and must be evaluated by `resolve_chain_body` regardless of a
+    /// preceding sibling's failed gate. `Dependent` (default) preserves the
+    /// prior skip-with-failed-predecessor behavior. See [`SiblingCondition`].
+    #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
+    pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
     /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
@@ -21542,6 +21592,7 @@ impl ResolvedAbility {
             repeat_until: None,
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
+            sibling_condition: SiblingCondition::Dependent,
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,

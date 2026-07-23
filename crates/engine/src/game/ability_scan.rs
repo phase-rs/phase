@@ -258,6 +258,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         chosen_players: _,         // concrete chosen player ids
         replacement_applied: _,    // replacement provenance set, no dynamic read
         sub_link: _,               // SubAbilityLink kind tag
+        sibling_condition: _,      // SiblingCondition replication marker, no dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -4240,6 +4241,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         target_selection_mode: _,
         sub_link: _,
         iteration_kind_binding: _,
+        sibling_condition: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -6451,6 +6453,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
+        sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
     } = a;
 

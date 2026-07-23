@@ -398,6 +398,7 @@ pub fn resolve_tally(
                 repeat_until: None,
                 replacement_applied: Default::default(),
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                sibling_condition: crate::types::ability::SiblingCondition::Dependent,
                 modal: None,
                 mode_abilities: vec![],
                 parent_target_missing_reason: None,
@@ -463,6 +464,7 @@ pub fn resolve_tally(
                 repeat_until: None,
                 replacement_applied: Default::default(),
                 sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+                sibling_condition: crate::types::ability::SiblingCondition::Dependent,
                 modal: None,
                 mode_abilities: vec![],
                 parent_target_missing_reason: None,
@@ -706,6 +708,8 @@ fn resolved_from_def(
         replacement_applied: Default::default(),
         // CR 608.2c: Carry the parent-link kind through to the resolved ability.
         sub_link: def.sub_link,
+        // CR 608.2c: Carry the replication marker through (Dependent for vote sub-effects).
+        sibling_condition: def.sibling_condition,
         // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode
         // abilities through (None for vote sub-effects).
         modal: def.modal.clone(),
@@ -958,6 +962,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
@@ -1064,6 +1069,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
@@ -1495,6 +1501,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
@@ -1658,6 +1665,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
+            sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,

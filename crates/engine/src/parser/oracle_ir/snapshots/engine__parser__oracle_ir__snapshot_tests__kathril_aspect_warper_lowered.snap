@@ -224,7 +224,8 @@ expression: "&lowered"
                             "optional_targeting": false,
                             "optional": false,
                             "forward_result": false,
-                            "sub_link": "SequentialSibling"
+                            "sub_link": "SequentialSibling",
+                            "sibling_condition": "ReplicatedOrBranch"
                           },
                           "duration": null,
                           "description": null,
@@ -263,7 +264,8 @@ expression: "&lowered"
                           "optional_targeting": false,
                           "optional": false,
                           "forward_result": false,
-                          "sub_link": "SequentialSibling"
+                          "sub_link": "SequentialSibling",
+                          "sibling_condition": "ReplicatedOrBranch"
                         },
                         "duration": null,
                         "description": null,
@@ -302,7 +304,8 @@ expression: "&lowered"
                         "optional_targeting": false,
                         "optional": false,
                         "forward_result": false,
-                        "sub_link": "SequentialSibling"
+                        "sub_link": "SequentialSibling",
+                        "sibling_condition": "ReplicatedOrBranch"
                       },
                       "duration": null,
                       "description": null,
@@ -341,7 +344,8 @@ expression: "&lowered"
                       "optional_targeting": false,
                       "optional": false,
                       "forward_result": false,
-                      "sub_link": "SequentialSibling"
+                      "sub_link": "SequentialSibling",
+                      "sibling_condition": "ReplicatedOrBranch"
                     },
                     "duration": null,
                     "description": null,
@@ -380,7 +384,8 @@ expression: "&lowered"
                     "optional_targeting": false,
                     "optional": false,
                     "forward_result": false,
-                    "sub_link": "SequentialSibling"
+                    "sub_link": "SequentialSibling",
+                    "sibling_condition": "ReplicatedOrBranch"
                   },
                   "duration": null,
                   "description": null,
@@ -419,7 +424,8 @@ expression: "&lowered"
                   "optional_targeting": false,
                   "optional": false,
                   "forward_result": false,
-                  "sub_link": "SequentialSibling"
+                  "sub_link": "SequentialSibling",
+                  "sibling_condition": "ReplicatedOrBranch"
                 },
                 "duration": null,
                 "description": null,
@@ -458,7 +464,8 @@ expression: "&lowered"
                 "optional_targeting": false,
                 "optional": false,
                 "forward_result": false,
-                "sub_link": "SequentialSibling"
+                "sub_link": "SequentialSibling",
+                "sibling_condition": "ReplicatedOrBranch"
               },
               "duration": null,
               "description": null,
@@ -497,7 +504,8 @@ expression: "&lowered"
               "optional_targeting": false,
               "optional": false,
               "forward_result": false,
-              "sub_link": "SequentialSibling"
+              "sub_link": "SequentialSibling",
+              "sibling_condition": "ReplicatedOrBranch"
             },
             "duration": null,
             "description": null,
@@ -536,7 +544,8 @@ expression: "&lowered"
             "optional_targeting": false,
             "optional": false,
             "forward_result": false,
-            "sub_link": "SequentialSibling"
+            "sub_link": "SequentialSibling",
+            "sibling_condition": "ReplicatedOrBranch"
           },
           "duration": null,
           "description": null,
@@ -575,7 +584,8 @@ expression: "&lowered"
           "optional_targeting": false,
           "optional": false,
           "forward_result": false,
-          "sub_link": "SequentialSibling"
+          "sub_link": "SequentialSibling",
+          "sibling_condition": "ReplicatedOrBranch"
         },
         "duration": null,
         "description": null,
