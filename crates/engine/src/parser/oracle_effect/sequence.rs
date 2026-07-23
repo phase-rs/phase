@@ -5128,6 +5128,22 @@ pub(super) fn parse_intrinsic_continuation_ast(
     }
 }
 
+/// CR 608.2c + CR 608.2k: Parse a Dig continuation's reveal/put filter with
+/// the enclosing context, so anaphoric references bind to a triggering subject
+/// when one exists.
+fn parse_dig_from_among_filter(filter_text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    if filter_text.is_empty()
+        || filter_text == "card"
+        || filter_text == "cards"
+        || filter_text == "of them"
+    {
+        TargetFilter::Any
+    } else {
+        let (filter, _) = parse_target_with_ctx(filter_text, ctx);
+        filter
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Parse "put/return up to N [filter] from among
 /// them/those cards onto the battlefield / into your hand / to your hand" into
 /// a DigFromAmong continuation that patches the preceding Dig effect. The
@@ -5272,23 +5288,7 @@ pub(super) fn parse_dig_from_among(
             )
         };
 
-        let filter = if filter_text.is_empty()
-            || filter_text == "card"
-            || filter_text == "cards"
-            || filter_text == "of them"
-        {
-            TargetFilter::Any
-        } else {
-            // CR 608.2c + CR 608.2k: parse the "from among them" reveal/put filter
-            // with the enclosing ctx so an anaphoric reference inside it (e.g.
-            // "a card that shares a creature type with that creature") binds to
-            // the trigger subject (`TriggeringSource`) when one exists — Conjurer's
-            // Mantle's "equipped creature attacks" trigger. A ctx-free parse loses
-            // the subject and mis-binds the reference to `ParentTarget`, which has
-            // no referent here (no chosen target), so it matched no card (#5900).
-            let (parsed_filter, _) = parse_target_with_ctx(filter_text, ctx);
-            parsed_filter
-        };
+        let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
         let filter = apply_where_x_to_filter(filter, where_x_expression.as_deref())?;
 
@@ -5378,24 +5378,8 @@ pub(super) fn parse_dig_from_among(
             (PutCount::up(1), after_put)
         };
 
-        // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less")
-        let filter = if filter_text.is_empty()
-            || filter_text == "card"
-            || filter_text == "cards"
-            || filter_text == "of them"
-        {
-            TargetFilter::Any
-        } else {
-            // CR 608.2c + CR 608.2k: parse the "from among them" reveal/put filter
-            // with the enclosing ctx so an anaphoric reference inside it (e.g.
-            // "a card that shares a creature type with that creature") binds to
-            // the trigger subject (`TriggeringSource`) when one exists — Conjurer's
-            // Mantle's "equipped creature attacks" trigger. A ctx-free parse loses
-            // the subject and mis-binds the reference to `ParentTarget`, which has
-            // no referent here (no chosen target), so it matched no card (#5900).
-            let (parsed_filter, _) = parse_target_with_ctx(filter_text, ctx);
-            parsed_filter
-        };
+        // Parse the filter from the remaining text (e.g., "creature cards with mana value 3 or less").
+        let filter = parse_dig_from_among_filter(filter_text, ctx);
         // CR 202.3 + CR 107.3i: Bind the literal `X` in the filter's `Cmc` bound
         // with the stripped "where X is <expression>" defining clause.
         // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.

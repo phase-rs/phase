@@ -6161,7 +6161,7 @@ fn parse_shared_quality_reference<'a>(
     }
 
     // CR 608.2k: a singular demonstrative back-reference ("that creature" /
-    // "that permanent" / "that card") to the trigger subject resolves to the
+    // "that permanent" / "that card" / "that token") to the trigger subject resolves to the
     // triggering object exactly like the bare pronoun "it" above — Conjurer's
     // Mantle ("Whenever equipped creature attacks, ... reveal a card that shares
     // a creature type with that creature"). Route through the same ctx-aware
@@ -6169,7 +6169,7 @@ fn parse_shared_quality_reference<'a>(
     // subject exists and stays `ParentTarget` (chosen-target anaphor) otherwise.
     // Restricted to the singular object demonstratives so a fresh noun phrase
     // ("a creature you control") still parses as its own filter below.
-    for demonstrative in ["that creature", "that permanent", "that card"] {
+    for demonstrative in ["that creature", "that permanent", "that card", "that token"] {
         if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
             let mut ctx_mut = ctx.clone();
             return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
@@ -9025,6 +9025,29 @@ mod tests {
         let (f, rest) = parse_target_with_ctx("it", &mut ctx);
         assert_eq!(f, TargetFilter::TriggeringSource);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn shared_quality_that_token_with_typed_trigger_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let (filter, rest) =
+            parse_target_with_ctx("a card that shares a card type with that token", &mut ctx);
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed card filter");
+        };
+        let reference = filter
+            .properties
+            .iter()
+            .find_map(|property| match property {
+                FilterProp::SharesQuality { reference, .. } => reference.as_deref(),
+                _ => None,
+            })
+            .expect("expected shared-quality reference");
+        assert_eq!(reference, &TargetFilter::TriggeringSource);
     }
 
     #[test]
