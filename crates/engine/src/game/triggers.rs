@@ -9443,10 +9443,20 @@ fn record_trigger_fired_with_ref(
 
     match constraint {
         TriggerConstraint::OncePerTurn => {
-            state.triggers_fired_this_turn.insert(key.clone());
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::OncePerTurn,
+            )
+            .expect("once-per-turn trigger must have a valid ledger prefix");
         }
         TriggerConstraint::OncePerGame => {
-            state.triggers_fired_this_game.insert(key.clone());
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::OncePerGame,
+            )
+            .expect("once-per-game trigger must have a valid ledger prefix");
         }
         TriggerConstraint::OncePerOpponentPerTurn => {
             // CR 603.2: The trigger event only matches the first life-loss event
@@ -9463,10 +9473,14 @@ fn record_trigger_fired_with_ref(
             if opponent_id == controller || state.active_player != opponent_id {
                 return;
             }
-            let per_opponent_key = (key.clone(), opponent_id);
-            state
-                .triggers_fired_this_turn_per_opponent
-                .insert(per_opponent_key);
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::OncePerOpponentPerTurn {
+                    opponent: opponent_id,
+                },
+            )
+            .expect("per-opponent trigger must have a valid ledger prefix");
         }
         TriggerConstraint::OnlyDuringYourTurn
         | TriggerConstraint::OnlyDuringOpponentsTurn
@@ -9477,12 +9491,21 @@ fn record_trigger_fired_with_ref(
         | TriggerConstraint::AtClassLevel { .. } => {
             // No tracking needed — checked at fire time via game/object/event state
         }
-        // CR 603.4: Increment fire count for MaxTimesPerTurn tracking.
+        // Increment the captured fire count for MaxTimesPerTurn tracking.
         TriggerConstraint::MaxTimesPerTurn { .. } => {
-            *state
+            let expected_old = state
                 .trigger_fire_counts_this_turn
-                .entry(key.clone())
-                .or_insert(0) += 1;
+                .get(key)
+                .copied()
+                .unwrap_or(0);
+            crate::game::ledger::record_trigger_fired(
+                state,
+                key.clone(),
+                crate::types::resolved_commands::ResolvedTriggerLedgerEdit::MaxTimesPerTurn {
+                    expected_old,
+                },
+            )
+            .expect("max-times trigger must have a valid ledger prefix");
         }
     }
 }

@@ -8,7 +8,10 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::ability::TriggerDefinitionRef;
-use super::identifiers::ObjectIncarnationRef;
+use super::card_type::CoreType;
+use super::counter::CounterType;
+use super::game_state::SpellCastRecord;
+use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 
@@ -114,6 +117,110 @@ pub struct ResolvedObjectStatusCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// The final mutation to one exact object's counter map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedObjectCounterEdit {
+    /// CR 122.1 + CR 122.6: Put this final post-replacement count of counters
+    /// on the exact object. The actor is retained for counter-history facts.
+    Add { actor: PlayerId, count: u32 },
+    /// CR 122.1: Remove this final already-clamped count from the exact object.
+    Remove { count: u32 },
+}
+
+/// One exact object-counter delivery after all replacement effects have settled.
+///
+/// `expected_old` makes this semantic delta non-idempotent: retained-prefix
+/// replay applies it exactly once instead of adding/removing another count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectCounterCommand {
+    pub object: ObjectIncarnationRef,
+    pub counter_type: CounterType,
+    pub expected_old: u32,
+    pub edit: ResolvedObjectCounterEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// One exact constrained-trigger ledger fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedTriggerLedgerEdit {
+    /// CR 603.2c: This trigger occurrence has used its one-per-turn fact.
+    OncePerTurn,
+    /// CR 603.2c: This trigger occurrence has used its one-per-game fact.
+    OncePerGame,
+    /// CR 603.2c: This trigger occurrence has used this opponent's per-turn fact.
+    OncePerOpponentPerTurn { opponent: PlayerId },
+    /// Increment from the captured prior count for MaxTimesPerTurn.
+    MaxTimesPerTurn { expected_old: u32 },
+}
+
+/// A named once-per-turn permission slot consumed by a completed play or cast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResolvedOncePerTurnPermission {
+    GraveyardCast,
+    GraveyardCastPermanentType { permanent_type: CoreType },
+    HandCastFree,
+    AlternativeCostGrant,
+    ExilePlay,
+    ExileCast,
+    TopOfLibraryCast,
+}
+
+/// A composable per-event ledger mutation.
+///
+/// Each payload changes only one exact key or append position. Turn-boundary
+/// bulk clears intentionally belong to the future turn-transition family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedLedgerEdit {
+    /// CR 601.2i: Append one finalized spell-cast fact to this player's history.
+    SpellCast {
+        player: PlayerId,
+        record: SpellCastRecord,
+        expected_turn_count: u8,
+        expected_game_count: u32,
+        expected_turn_history_len: u32,
+        expected_game_history_len: u32,
+    },
+    /// CR 602.5b: Increment exactly one activated-ability occurrence's facts.
+    AbilityActivated {
+        source: super::identifiers::ObjectId,
+        ability_index: usize,
+        expected_turn_count: u32,
+        expected_game_count: u32,
+    },
+    /// CR 603.2c: Record one constrained trigger occurrence.
+    TriggerFired {
+        trigger: TriggerDefinitionRef,
+        edit: ResolvedTriggerLedgerEdit,
+    },
+    /// CR 601.2i: Consume one already-selected bounded permission slot.
+    OncePerTurnPermission {
+        source: super::identifiers::ObjectId,
+        permission: ResolvedOncePerTurnPermission,
+    },
+}
+
+/// One exact per-event ledger mutation with its causal node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedLedgerEditCommand {
+    pub edit: ResolvedLedgerEdit,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// One exact library shuffle with its consumed ChaCha20 stream span.
+///
+/// CR 701.24a: the ordinary path randomizes the captured predecessor order
+/// once. Replay installs `resulting_order` and advances only through the
+/// recorded entropy span; it never samples the RNG again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedLibraryShuffleCommand {
+    pub player: PlayerId,
+    pub precondition_order: Vec<ObjectId>,
+    pub resulting_order: Vec<ObjectId>,
+    pub pre_word_pos: u128,
+    pub post_word_pos: u128,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -124,6 +231,114 @@ pub enum ResolvedRulesCommand {
     ManaSpend(ResolvedManaSpendCommand),
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
+    ObjectCounter(ResolvedObjectCounterCommand),
+    LedgerEdit(ResolvedLedgerEditCommand),
+    LibraryShuffle(ResolvedLibraryShuffleCommand),
+}
+
+/// Typed failure while advancing the canonical ChaCha20 entropy high-water mark.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedRngReplayInvariantError {
+    HighWaterRegression { current: u128, requested: u128 },
+    StreamPositionRegression { current: u128, requested: u128 },
+}
+
+impl std::fmt::Display for ResolvedRngReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HighWaterRegression { current, requested } => write!(
+                f,
+                "resolved entropy command would regress high-water from {current} to {requested}"
+            ),
+            Self::StreamPositionRegression { current, requested } => write!(
+                f,
+                "resolved entropy command would rewind the ChaCha20 stream from {current} to {requested}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedRngReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved library shuffle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedLibraryShuffleReplayInvariantError {
+    UnknownPlayer(PlayerId),
+    LibraryOrderPreconditionMismatch,
+    RngWordPositionPreconditionMismatch {
+        expected: u128,
+        found: u128,
+    },
+    RngCursorPositionPreconditionMismatch {
+        expected: u128,
+        found: u128,
+    },
+    InvalidLibraryOrderReceipt,
+    EntropyReceiptRegression {
+        pre: u128,
+        post: u128,
+    },
+    /// CR 701.24a: A Fisher-Yates shuffle of two or more cards always consumes
+    /// at least one random draw, so a multi-card receipt whose entropy span is
+    /// empty could not have come from a real shuffle. Accepting it would install
+    /// a permutation while leaving the RNG cursor unadvanced, desynchronizing
+    /// every later entropy-backed replay.
+    MultiCardReceiptWithoutEntropy {
+        cards: usize,
+        position: u128,
+    },
+    RngHighWater(ResolvedRngReplayInvariantError),
+}
+
+impl std::fmt::Display for ResolvedLibraryShuffleReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPlayer(player) => {
+                write!(
+                    f,
+                    "resolved library shuffle cannot find player {}",
+                    player.0
+                )
+            }
+            Self::LibraryOrderPreconditionMismatch => {
+                write!(
+                    f,
+                    "resolved library shuffle does not match its recorded predecessor order"
+                )
+            }
+            Self::RngWordPositionPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved library shuffle expected RNG high-water {expected}, found {found}"
+            ),
+            Self::RngCursorPositionPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved library shuffle expected ChaCha20 position {expected}, found {found}"
+            ),
+            Self::InvalidLibraryOrderReceipt => {
+                write!(
+                    f,
+                    "resolved library shuffle has an invalid ordered-card receipt"
+                )
+            }
+            Self::EntropyReceiptRegression { pre, post } => write!(
+                f,
+                "resolved library shuffle regresses entropy from {pre} to {post}"
+            ),
+            Self::MultiCardReceiptWithoutEntropy { cards, position } => write!(
+                f,
+                "resolved library shuffle permutes {cards} cards without advancing entropy past {position}"
+            ),
+            Self::RngHighWater(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedLibraryShuffleReplayInvariantError {}
+
+impl From<ResolvedRngReplayInvariantError> for ResolvedLibraryShuffleReplayInvariantError {
+    fn from(error: ResolvedRngReplayInvariantError) -> Self {
+        Self::RngHighWater(error)
+    }
 }
 
 /// Typed failure while applying an already-resolved mana command to a replay state.
@@ -244,6 +459,106 @@ impl std::fmt::Display for ResolvedObjectStatusReplayInvariantError {
 }
 
 impl std::error::Error for ResolvedObjectStatusReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved object-counter command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedObjectCounterReplayInvariantError {
+    MissingObject(ObjectIncarnationRef),
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    ZeroCount,
+    CounterPreconditionMismatch {
+        counter_type: CounterType,
+        expected: u32,
+        found: u32,
+    },
+    CounterOverflow {
+        counter_type: CounterType,
+        previous: u32,
+        added: u32,
+    },
+}
+
+impl std::fmt::Display for ResolvedObjectCounterReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingObject(object) => {
+                write!(f, "resolved counter command cannot find {object:?}")
+            }
+            Self::StaleObject { expected, found } => write!(
+                f,
+                "resolved counter command expected {expected:?}, found {found:?}"
+            ),
+            Self::ZeroCount => write!(f, "resolved counter command has a zero count"),
+            Self::CounterPreconditionMismatch {
+                counter_type,
+                expected,
+                found,
+            } => write!(
+                f,
+                "resolved {counter_type:?} counter command expected {expected}, found {found}"
+            ),
+            Self::CounterOverflow {
+                counter_type,
+                previous,
+                added,
+            } => write!(
+                f,
+                "resolved {counter_type:?} counter command overflows {previous} + {added}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedObjectCounterReplayInvariantError {}
+
+/// Typed failure while applying an already-resolved per-event ledger command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedLedgerEditReplayInvariantError {
+    UnknownPlayer(PlayerId),
+    SpellCastPreconditionMismatch,
+    AbilityActivationPreconditionMismatch,
+    TriggerAlreadyRecorded,
+    TriggerCountPreconditionMismatch { expected: u32, found: u32 },
+    PermissionAlreadyConsumed(ResolvedOncePerTurnPermission),
+    CounterOverflow,
+}
+
+impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownPlayer(player) => write!(f, "unknown ledger-command player {}", player.0),
+            Self::SpellCastPreconditionMismatch => {
+                write!(
+                    f,
+                    "resolved spell-cast command does not match its ledger prefix"
+                )
+            }
+            Self::AbilityActivationPreconditionMismatch => write!(
+                f,
+                "resolved activated-ability command does not match its ledger prefix"
+            ),
+            Self::TriggerAlreadyRecorded => {
+                write!(
+                    f,
+                    "resolved trigger command repeats an existing once-only fact"
+                )
+            }
+            Self::TriggerCountPreconditionMismatch { expected, found } => write!(
+                f,
+                "resolved trigger command expected count {expected}, found {found}"
+            ),
+            Self::PermissionAlreadyConsumed(permission) => {
+                write!(f, "resolved {permission:?} permission was already consumed")
+            }
+            Self::CounterOverflow => write!(f, "resolved ledger command overflows a counter"),
+        }
+    }
+}
+
+impl std::error::Error for ResolvedLedgerEditReplayInvariantError {}
 
 /// Semantic category of a resolved rules-execution node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -672,6 +987,30 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::ObjectStatus(command))
     }
 
+    /// Records one final object-counter delivery under its causal node.
+    pub fn record_object_counter(
+        &mut self,
+        command: ResolvedObjectCounterCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::ObjectCounter(command))
+    }
+
+    /// Records one exact semantic ledger mutation under its causal node.
+    pub fn record_ledger_edit(
+        &mut self,
+        command: ResolvedLedgerEditCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::LedgerEdit(command))
+    }
+
+    /// Records one exact library order plus its already-consumed entropy span.
+    pub fn record_library_shuffle(
+        &mut self,
+        command: ResolvedLibraryShuffleCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::LibraryShuffle(command))
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -867,7 +1206,11 @@ impl ResolvedRulesJournal {
                         }
                     }
                 }
-                ResolvedRulesCommand::PlayerEdit(_) | ResolvedRulesCommand::ObjectStatus(_) => {}
+                ResolvedRulesCommand::PlayerEdit(_)
+                | ResolvedRulesCommand::ObjectStatus(_)
+                | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::LedgerEdit(_)
+                | ResolvedRulesCommand::LibraryShuffle(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1052,6 +1395,45 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::ObjectCounter(command) => {
+                if entry.node != command.cause || object_counter_edit_is_empty(&command.edit) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "object-counter command has an empty edit or unrelated cause".to_string(),
+                    ));
+                }
+                if command.object.incarnation == LEGACY_INCARNATION {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "object-counter command cannot use a legacy object identity".to_string(),
+                    ));
+                }
+                if let ResolvedObjectCounterEdit::Remove { count } = &command.edit {
+                    if *count > command.expected_old {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "object-counter removal has an impossible predecessor".to_string(),
+                        ));
+                    }
+                }
+            }
+            ResolvedRulesCommand::LedgerEdit(command) => {
+                if entry.node != command.cause
+                    || ledger_edit_is_invalid(&command.edit)
+                    || ledger_edit_has_legacy_object_identity(&command.edit)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "ledger command has an impossible edit, legacy identity, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::LibraryShuffle(command) => {
+                if entry.node != command.cause || validate_library_shuffle_receipt(command).is_err()
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "library shuffle command has an invalid receipt or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1097,9 +1479,96 @@ fn player_edit_is_empty(edit: &ResolvedPlayerEdit) -> bool {
     }
 }
 
+fn object_counter_edit_is_empty(edit: &ResolvedObjectCounterEdit) -> bool {
+    match edit {
+        ResolvedObjectCounterEdit::Add { count, .. }
+        | ResolvedObjectCounterEdit::Remove { count } => *count == 0,
+    }
+}
+
+fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
+    match edit {
+        ResolvedLedgerEdit::SpellCast {
+            expected_game_count,
+            expected_turn_history_len,
+            expected_game_history_len,
+            ..
+        } => {
+            // `expected_turn_count` is a u8 advanced via saturating_add in the
+            // applier, so 255 is a legitimate saturated value, not a reserved
+            // sentinel — only the u32 count fields carry the u32::MAX
+            // "never recorded" marker this pre-screen fails closed on.
+            *expected_game_count == u32::MAX
+                || *expected_turn_history_len == u32::MAX
+                || *expected_game_history_len == u32::MAX
+        }
+        ResolvedLedgerEdit::AbilityActivated {
+            expected_turn_count,
+            expected_game_count,
+            ..
+        } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::TriggerFired {
+            edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old },
+            ..
+        } => *expected_old == u32::MAX,
+        ResolvedLedgerEdit::TriggerFired { .. }
+        | ResolvedLedgerEdit::OncePerTurnPermission { .. } => false,
+    }
+}
+
+fn ledger_edit_has_legacy_object_identity(edit: &ResolvedLedgerEdit) -> bool {
+    matches!(
+        edit,
+        ResolvedLedgerEdit::TriggerFired { trigger, .. }
+            if trigger.source.incarnation == LEGACY_INCARNATION
+    )
+}
+
+/// Validates the closed operands of a library-order entropy receipt.
+///
+/// CR 701.24a: shuffling can only permute the same exact cards. The recorded
+/// stream span can advance or remain unchanged, but never rewind.
+pub(crate) fn validate_library_shuffle_receipt(
+    command: &ResolvedLibraryShuffleCommand,
+) -> Result<(), ResolvedLibraryShuffleReplayInvariantError> {
+    if command.post_word_pos < command.pre_word_pos {
+        return Err(
+            ResolvedLibraryShuffleReplayInvariantError::EntropyReceiptRegression {
+                pre: command.pre_word_pos,
+                post: command.post_word_pos,
+            },
+        );
+    }
+    if command.precondition_order.len() != command.resulting_order.len()
+        || has_duplicate_values(&command.precondition_order)
+        || has_duplicate_values(&command.resulting_order)
+    {
+        return Err(ResolvedLibraryShuffleReplayInvariantError::InvalidLibraryOrderReceipt);
+    }
+
+    // CR 701.24a: A shuffle of two or more cards draws at least once, so its
+    // entropy span must be non-empty. A zero-span multi-card receipt is a
+    // corrupt permutation that would leave the RNG cursor unadvanced.
+    if command.resulting_order.len() >= 2 && command.post_word_pos == command.pre_word_pos {
+        return Err(
+            ResolvedLibraryShuffleReplayInvariantError::MultiCardReceiptWithoutEntropy {
+                cards: command.resulting_order.len(),
+                position: command.pre_word_pos,
+            },
+        );
+    }
+
+    let expected: HashSet<_> = command.precondition_order.iter().copied().collect();
+    let resulting: HashSet<_> = command.resulting_order.iter().copied().collect();
+    (expected == resulting)
+        .then_some(())
+        .ok_or(ResolvedLibraryShuffleReplayInvariantError::InvalidLibraryOrderReceipt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::{ManaRestriction, ManaType};
 
@@ -1352,6 +1821,165 @@ mod tests {
         command.cause = RulesExecutionNodeRef::Payment(SettlementNodeOrdinal(99));
         assert!(serde_json::from_value::<ResolvedRulesJournal>(
             serde_json::to_value(unrelated_cause).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn library_shuffle_command_roundtrips_and_rejects_invalid_receipts() {
+        let mut journal = ResolvedRulesJournal::default();
+        let cause = journal.begin_proposal().unwrap();
+        journal
+            .record_library_shuffle(ResolvedLibraryShuffleCommand {
+                player: PlayerId(0),
+                precondition_order: vec![ObjectId(1), ObjectId(2), ObjectId(3)],
+                resulting_order: vec![ObjectId(3), ObjectId(1), ObjectId(2)],
+                pre_word_pos: 7,
+                post_word_pos: 11,
+                cause,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serde_json::to_value(&journal).unwrap())
+                .unwrap(),
+            journal
+        );
+
+        let mut missing_entropy = serde_json::to_value(&journal).unwrap();
+        missing_entropy["entries"][1]["command"]["LibraryShuffle"]
+            .as_object_mut()
+            .unwrap()
+            .remove("post_word_pos");
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(missing_entropy).is_err());
+
+        let mut duplicate_card = journal.clone();
+        let Some(ResolvedRulesCommand::LibraryShuffle(command)) =
+            duplicate_card.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the library shuffle");
+        };
+        command.resulting_order = vec![ObjectId(3), ObjectId(3), ObjectId(2)];
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(duplicate_card).unwrap()
+        )
+        .is_err());
+
+        let mut backwards_entropy = journal.clone();
+        let Some(ResolvedRulesCommand::LibraryShuffle(command)) =
+            backwards_entropy.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the library shuffle");
+        };
+        command.post_word_pos = 6;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(backwards_entropy).unwrap()
+        )
+        .is_err());
+
+        // CR 701.24a: a three-card permutation with an empty entropy span could
+        // not have come from a real shuffle and must be rejected.
+        let mut zero_span_multi_card = journal.clone();
+        let Some(ResolvedRulesCommand::LibraryShuffle(command)) =
+            zero_span_multi_card.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the library shuffle");
+        };
+        command.post_word_pos = command.pre_word_pos;
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(zero_span_multi_card).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn counter_and_ledger_commands_roundtrip_and_reject_malformed_payloads() {
+        let mut journal = ResolvedRulesJournal::default();
+        let cause = journal.begin_proposal().unwrap();
+        journal
+            .record_object_counter(ResolvedObjectCounterCommand {
+                object: ObjectIncarnationRef::of(ObjectId(9), 0),
+                counter_type: CounterType::Plus1Plus1,
+                expected_old: 2,
+                edit: ResolvedObjectCounterEdit::Add {
+                    actor: PlayerId(0),
+                    count: 1,
+                },
+                cause,
+            })
+            .unwrap();
+        journal
+            .record_ledger_edit(ResolvedLedgerEditCommand {
+                edit: ResolvedLedgerEdit::AbilityActivated {
+                    source: ObjectId(9),
+                    ability_index: 0,
+                    expected_turn_count: 0,
+                    expected_game_count: 0,
+                },
+                cause,
+            })
+            .unwrap();
+        journal
+            .record_ledger_edit(ResolvedLedgerEditCommand {
+                edit: ResolvedLedgerEdit::TriggerFired {
+                    trigger: TriggerDefinitionRef {
+                        source: ObjectIncarnationRef::of(ObjectId(10), 0),
+                        occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                            base_set: TriggerBaseSetInstanceRef::INITIAL,
+                            printed_index: 0,
+                        },
+                    },
+                    edit: ResolvedTriggerLedgerEdit::OncePerTurn,
+                },
+                cause,
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedRulesJournal>(serde_json::to_value(&journal).unwrap())
+                .unwrap(),
+            journal
+        );
+
+        let mut empty_counter = journal.clone();
+        let Some(ResolvedRulesCommand::ObjectCounter(command)) =
+            empty_counter.entries[1].command.as_mut()
+        else {
+            panic!("entry 1 must be the counter command");
+        };
+        command.edit = ResolvedObjectCounterEdit::Add {
+            actor: PlayerId(0),
+            count: 0,
+        };
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(empty_counter).unwrap()
+        )
+        .is_err());
+
+        // A pre-incarnation bare object id deserializes to LEGACY_INCARNATION.
+        // It is valid only for its original compatibility readers, never for a
+        // new executable command whose applier requires an exact occurrence.
+        let mut legacy_counter = serde_json::to_value(&journal).unwrap();
+        legacy_counter["entries"][1]["command"]["ObjectCounter"]["object"] = serde_json::json!(9);
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(legacy_counter).is_err());
+
+        let mut legacy_trigger = serde_json::to_value(&journal).unwrap();
+        legacy_trigger["entries"][3]["command"]["LedgerEdit"]["edit"]["TriggerFired"]["trigger"]
+            ["source"] = serde_json::json!(10);
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(legacy_trigger).is_err());
+
+        let mut impossible_ledger = journal.clone();
+        let Some(ResolvedRulesCommand::LedgerEdit(command)) =
+            impossible_ledger.entries[2].command.as_mut()
+        else {
+            panic!("entry 2 must be the ledger command");
+        };
+        command.edit = ResolvedLedgerEdit::AbilityActivated {
+            source: ObjectId(9),
+            ability_index: 0,
+            expected_turn_count: u32::MAX,
+            expected_game_count: 0,
+        };
+        assert!(serde_json::from_value::<ResolvedRulesJournal>(
+            serde_json::to_value(impossible_ledger).unwrap()
         )
         .is_err());
     }

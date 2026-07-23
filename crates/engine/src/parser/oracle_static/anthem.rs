@@ -1062,7 +1062,7 @@ pub(crate) fn parse_continuous_gets_has(
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
             if let Some(quantity) =
-                super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
+                super::oracle_quantity::parse_for_each_clause_expr_deferred(for_each_clause)
             {
                 let mut modifications = Vec::new();
                 push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
@@ -1127,7 +1127,7 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
     let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
         .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
     let (power, toughness) = parse_pt_mod(pt_source)?;
-    let quantity = super::oracle_quantity::parse_for_each_clause_expr(
+    let quantity = super::oracle_quantity::parse_for_each_clause_expr_deferred(
         strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
     )?;
 

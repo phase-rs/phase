@@ -73,6 +73,8 @@ pub mod interaction;
 mod haunt_tests;
 pub mod keywords;
 pub mod layers;
+pub mod ledger;
+pub mod library;
 pub mod life_costs;
 pub mod log;
 pub mod mana_abilities;

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import { isTauri } from "../../services/platform";
+
 function EnterFullscreenIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={className ?? "w-5 h-5"}>
@@ -26,6 +28,34 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   const [isFullscreen, setIsFullscreen] = useState(!!document.fullscreenElement);
 
   useEffect(() => {
+    if (isTauri()) {
+      let active = true;
+      let unlisten: (() => void) | undefined;
+
+      void (async () => {
+        try {
+          const { getCurrentWindow } = await import("@tauri-apps/api/window");
+          const appWindow = getCurrentWindow();
+          const syncFullscreen = async () => {
+            const fullscreen = await appWindow.isFullscreen();
+            if (active) setIsFullscreen(fullscreen);
+          };
+
+          await syncFullscreen();
+          unlisten = await appWindow.onResized(() => {
+            void syncFullscreen();
+          });
+        } catch (error) {
+          console.warn("[phase.rs] Could not synchronize Tauri fullscreen state.", error);
+        }
+      })();
+
+      return () => {
+        active = false;
+        unlisten?.();
+      };
+    }
+
     function onChange() {
       setIsFullscreen(!!document.fullscreenElement);
     }
@@ -33,11 +63,24 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
     return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
-  const toggle = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen();
-    } else {
-      document.documentElement.requestFullscreen();
+  const toggle = useCallback(async () => {
+    try {
+      if (isTauri()) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const appWindow = getCurrentWindow();
+        const nextFullscreen = !(await appWindow.isFullscreen());
+        await appWindow.setFullscreen(nextFullscreen);
+        setIsFullscreen(nextFullscreen);
+        return;
+      }
+
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (error) {
+      console.warn("[phase.rs] Could not toggle fullscreen.", error);
     }
   }, []);
 
@@ -47,7 +90,7 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
   if (variant === "game") {
     return (
       <button
-        onClick={toggle}
+        onClick={() => void toggle()}
         className="flex h-7 w-7 items-center justify-center rounded-md bg-white/6 text-gray-400 transition-colors hover:bg-white/10 hover:text-gray-200"
         aria-label={label}
         title={label}
@@ -59,7 +102,7 @@ export function FullscreenButton({ variant }: FullscreenButtonProps) {
 
   return (
     <button
-      onClick={toggle}
+      onClick={() => void toggle()}
       className="flex min-h-9 min-w-9 items-center justify-center rounded-[12px] border border-white/12 bg-black/18 text-white/46 backdrop-blur-sm transition-colors hover:text-white/72"
       aria-label={label}
       title={label}

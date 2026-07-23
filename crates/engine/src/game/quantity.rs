@@ -296,6 +296,14 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             | QuantityRef::ManaSymbolsInManaCost {
                 scope: ObjectScope::Recipient,
                 ..
+            }
+            // CR 122.1 + CR 613.4c: "…for each [kind] counter on it/them" in a
+            // per-recipient continuous static counts the counters on the
+            // affected object, so the magnitude varies per recipient (Toxrill,
+            // Clamavus, Thelon of Havenwood, Luxior, Spark Rupture).
+            | QuantityRef::CountersOn {
+                scope: ObjectScope::Recipient,
+                ..
             } => true,
             QuantityRef::Power {
                 scope: ObjectScope::CostPaidObject,
@@ -4421,13 +4429,26 @@ fn resolve_counters_on_scope(
         // (where the cleared field becomes `None`); the counter analogue must
         // be zone-keyed because an empty `HashMap<CounterType, u32>` is
         // `Some({})`, not `None`.
-        ObjectScope::Source | ObjectScope::EventSource => {
-            if matches!(scope, ObjectScope::Source) && ctx.trigger_source.is_some() {
+        // CR 608.2k: An `Anaphoric` counter read that reached runtime found no
+        // clause subject and no per-recipient static to bind it, so the pronoun
+        // names the ability's own object — "+1/+1 counters on him" on Red Hulk's
+        // Enrage reflex. Grouped with `Source` so the unbound anaphor keeps
+        // exactly the referent it had before the scope carried provenance.
+        ObjectScope::Source | ObjectScope::EventSource | ObjectScope::Anaphoric => {
+            if matches!(scope, ObjectScope::Source | ObjectScope::Anaphoric)
+                && ctx.trigger_source.is_some()
+            {
                 return source_lki_for_context(state, &ctx)
                     .map(|lki| counter_count_from_map(&lki.counters, counter_type))
                     .unwrap_or(0);
             }
-            let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+            // An unbound anaphor resolves through the `Source` lookup — the
+            // generic scope helpers have no referent for `Anaphoric` itself.
+            let lookup_scope = match scope {
+                ObjectScope::Anaphoric => ObjectScope::Source,
+                other => other,
+            };
+            let Some(object_id) = object_id_for_scope(state, lookup_scope, ctx, targets) else {
                 return 0;
             };
             let live = state.objects.get(&object_id);
