@@ -725,10 +725,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state,
@@ -784,10 +781,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state,
@@ -859,10 +853,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
         };
         let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
         let ctx = PolicyContext {
@@ -935,10 +926,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::CancelCast,
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Pass),
         };
         let ctx = PolicyContext {
             state,
@@ -992,10 +980,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(creature)),
             },
-            metadata: ActionMetadata {
-                actor: Some(P0),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Target),
         }
     }
 

@@ -77,6 +77,18 @@ export interface PersistedP2PHostSession {
   /** True once `initializeGame` has run; false while still in lobby. */
   gameStarted: boolean;
   seatState?: SeatState;
+  /**
+   * Present when the desktop host delegated authority to its local
+   * phase-server. The server persists the game state; IndexedDB retains only
+   * the opaque credentials needed to reconnect each host-local viewer.
+   */
+  nativeSession?: NativeP2PServerSession;
+}
+
+export interface NativeP2PServerSession {
+  gameCode: string;
+  /** Native player token keyed by the matching P2P player id. */
+  playerTokens: Record<number, string>;
 }
 
 const P2P_HOST_KEY_PREFIX = "phase-p2p-host:";

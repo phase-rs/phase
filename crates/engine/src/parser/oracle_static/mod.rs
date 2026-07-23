@@ -221,6 +221,11 @@ pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
 pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDefinition {
     let mut def = ir.definition.clone();
     shared::populate_active_zones_from_condition(&mut def);
+    // CR 611.3a: a bare counter anaphor in a per-recipient continuous static
+    // names the affected object, not the source. Rebound here — after every
+    // builder has produced its definition — so the transform is single-authority
+    // rather than repeated in anthem / type_change / grammar.
+    shared::bind_counter_anaphor_to_recipient(&mut def);
     def
 }
 

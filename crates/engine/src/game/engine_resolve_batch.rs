@@ -129,6 +129,7 @@ where
         let Ok(boundary) = apply_action_boundary_with_stack_limit(
             state,
             actor,
+            actor,
             action,
             mode,
             stack_resolution_limit,

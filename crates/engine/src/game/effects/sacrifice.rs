@@ -291,6 +291,11 @@ pub fn resolve(
         if !up_to && eligible.len() <= count {
             let completion = PendingPlayerScopeSacrificeCompletion {
                 effect_kind: Some(EffectKind::from(&ability.effect)),
+                // CR 608.2c: A replacement pause may stash a Demonstrative /
+                // CostPaidObject rider before this auto-path completes; keep the
+                // same continuation stamp the EffectZoneChoice path uses.
+                publish_fresh_tracked_set: state.active_ability_continuation().is_some(),
+                propagate_parent_context: state.active_ability_continuation().is_some(),
                 ..Default::default()
             };
             let _ = super::perform_collected_player_scope_sacrifices_with_completion(
@@ -332,6 +337,7 @@ pub fn resolve(
             library_position: None,
             is_cost_payment: false,
             enters_modified_if: None,
+            duration: None,
         };
 
         // EffectResolved is emitted by the EffectZoneChoice handler after the player chooses

@@ -52,6 +52,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
+      - name: Interaction bindings are current
+        run: ./scripts/check-interaction-bindings.sh --check
+
       - name: Parser combinator gate
         # Diff-based gate: new parser code must use nom combinators, not
         # string-matching methods. See crates/engine/src/parser/oracle_nom/PATTERNS.md.

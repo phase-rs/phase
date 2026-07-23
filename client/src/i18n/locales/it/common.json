@@ -22,6 +22,7 @@
     "updatePending": "aggiornamento in attesa al termine della partita",
     "cards": "carte {{age}} ({{commit}})",
     "cardDataTitle": "Dati carte generati il {{date}} da {{commit}}",
+    "desktopAppVersion": "App desktop v{{version}}",
     "checkForUpdates": "Controlla aggiornamenti",
     "updaterDebugInfo": "Info di debug dell'aggiornatore",
     "updaterIssue": "Problema dell'aggiornatore: {{error}}",

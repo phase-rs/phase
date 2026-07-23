@@ -22608,3 +22608,45 @@ fn standalone_spell_emblem_grant_parses_to_create_emblem() {
         "emblem carries both outcome-lock statics, got {create:#?}"
     );
 }
+
+/// T14b (BB-FU10 Step 3b). `quantity_ref_uses_filter_prop` asks a
+/// variant-agnostic question — "does any `TargetFilter` reachable from this
+/// quantity use `pred`?" — so the CR 608.2i look-back sibling must recurse into
+/// its filter instead of falling to `_ => false`.
+///
+/// REVERT-PROBE: remove the one-line or-group addition → the first assertion
+/// reads `false`, FAIL. The prop-free twin is the negative control that keeps the
+/// first assertion from passing on a "returns true for everything" bug.
+#[test]
+fn bbfu10_ledger_variant_reaches_filter_prop_scan() {
+    use crate::types::ability::{
+        FilterProp, PlayerScope, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    };
+
+    let pred = |p: &FilterProp| matches!(p, FilterProp::IsChosenCreatureType);
+    let with_prop = QuantityRef::BattlefieldEntriesThisTurn {
+        player: PlayerScope::Controller,
+        filter: TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::IsChosenCreatureType],
+        }),
+    };
+    let without_prop = QuantityRef::BattlefieldEntriesThisTurn {
+        player: PlayerScope::Controller,
+        filter: TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![],
+        }),
+    };
+
+    assert!(
+        super::quantity_ref_uses_filter_prop(&with_prop, &pred),
+        "CR 608.2i: the ledger variant's filter must be scanned for filter props",
+    );
+    assert!(
+        !super::quantity_ref_uses_filter_prop(&without_prop, &pred),
+        "negative control: a prop-free ledger filter must still read false",
+    );
+}

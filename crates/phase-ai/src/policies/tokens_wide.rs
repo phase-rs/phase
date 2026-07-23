@@ -217,10 +217,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         }
     }
 
@@ -232,10 +229,7 @@ mod tests {
                 attacks,
                 bands: vec![],
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Attack,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Attack),
         }
     }
 

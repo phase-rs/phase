@@ -5,6 +5,7 @@ import {
   collectObjectActions,
   isManaObjectAction,
   requiresConfirmation,
+  resolveDirectPlayOrCastAction,
   resolveSingleActionDispatch,
 } from "../cardActionChoice.ts";
 import { abilityChoiceLabel } from "../costLabel.ts";
@@ -57,6 +58,23 @@ function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   };
 }
 
+function tapLandAction(objectId: number): GameAction {
+  return {
+    type: "TapLandForMana",
+    data: {
+      selection: {
+        source: { object_id: objectId, incarnation: 1 },
+        ability_index: null,
+        mana_type: "Green",
+        atomic_combination: null,
+        restrictions: [],
+        penalty: "None",
+        taps_for_mana: [],
+      },
+    },
+  };
+}
+
 describe("collectObjectActions", () => {
   it("returns the engine-provided bucket for the requested object", () => {
     // Engine-grouped map mirrors what `legal_actions_full` produces in Rust:
@@ -101,7 +119,7 @@ describe("isManaObjectAction", () => {
       ],
     });
 
-    expect(isManaObjectAction({ type: "TapLandForMana", data: { object_id: 1 } }, object)).toBe(true);
+    expect(isManaObjectAction(tapLandAction(1), object)).toBe(true);
     expect(
       isManaObjectAction(
         { type: "TapForConvoke", data: { object_id: 1, mana_type: "Green" } },
@@ -269,6 +287,41 @@ describe("resolveSingleActionDispatch", () => {
   });
 });
 
+describe("resolveDirectPlayOrCastAction", () => {
+  const playLandAction: GameAction = {
+    type: "PlayLand",
+    data: { object_id: 1, card_id: 100 },
+  };
+  const cyclingAction: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 1, ability_index: 0 },
+  };
+
+  it("returns the one unambiguous engine-provided play action", () => {
+    expect(
+      resolveDirectPlayOrCastAction({ "1": [playLandAction] }, makeGameObject()),
+    ).toBe(playLandAction);
+  });
+
+  it("does not promise release-to-cast when another action requires a choice", () => {
+    expect(
+      resolveDirectPlayOrCastAction(
+        { "1": [playLandAction, cyclingAction] },
+        makeGameObject(),
+      ),
+    ).toBeNull();
+  });
+
+  it("does not classify a lone non-cast ability as release-to-cast", () => {
+    expect(
+      resolveDirectPlayOrCastAction(
+        { "1": [cyclingAction] },
+        makeGameObject({ abilities: [{ consumes_source: false }] }),
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("abilityChoiceLabel", () => {
   it("labels convoke tap actions by the mana they pay for", () => {
     const object = makeGameObject({
@@ -304,7 +357,7 @@ describe("abilityChoiceLabel", () => {
 
     expect(
       abilityChoiceLabel(
-        { type: "TapLandForMana", data: { object_id: 1 } },
+        tapLandAction(1),
         object,
       ).label,
     ).toBe("Tap for Mana");

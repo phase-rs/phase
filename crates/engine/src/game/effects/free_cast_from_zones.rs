@@ -55,7 +55,33 @@ pub fn resolve(
         return Err(EffectError::PlayerNotFound);
     }
 
-    let candidates = eligible_candidates(state, controller, &filter, &zones, max_total_mv);
+    // CR 607.2a + CR 608.2g: When this window is the continuation of a
+    // `ChooseFromZone` over "cards exiled this way" (Plargg and Nassari), the
+    // answer handler forwards the choose's FULL candidate pool — THIS
+    // resolution's typed exile batch — as this ability's object targets. That
+    // concrete member pool confines the offer to the current resolution's
+    // batch: `ExiledBySource` alone reads the source's complete live
+    // linked-exile ledger, which would wrongly re-offer a linked nonland card
+    // left in exile by a PREVIOUS resolution. Empty (Invoke Calamity's
+    // graveyard/hand window — no choose head) means no batch restriction.
+    let member_pool: Vec<ObjectId> = ability
+        .targets
+        .iter()
+        .filter_map(|t| match t {
+            crate::types::ability::TargetRef::Object(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+
+    let candidates = eligible_candidates(
+        state,
+        controller,
+        ability.source_id,
+        &filter,
+        &zones,
+        max_total_mv,
+        &member_pool,
+    );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::FreeCastFromZones,
@@ -80,40 +106,77 @@ pub fn resolve(
             filter,
             zones,
             exile_instead_of_graveyard,
+            source: ability.source_id,
+            member_pool,
         },
     };
 
     Ok(())
 }
 
-/// CR 601.2a + CR 202.3: Gather the controller's own cards in `zones` that match
-/// `filter` and (when `max_total_mv` is `Some`) whose mana value fits the
-/// remaining budget. Shared by the resolver and the handler's re-offer loop so
-/// the candidate set stays consistent across both entry points.
+/// CR 601.2a + CR 202.3: Gather the cards in `zones` that match `filter` and
+/// (when `max_total_mv` is `Some`) whose mana value fits the remaining budget.
+/// Shared by the resolver and the handler's re-offer loop so the candidate set
+/// stays consistent across both entry points.
+///
+/// `source` is the resolving ability's source object: `TargetFilter`s such as
+/// `ExiledBySource` (Plargg and Nassari's "the other cards exiled this way")
+/// resolve their exile links against it, so the real id must be threaded
+/// rather than a sentinel.
+///
+/// `member_pool`, when non-empty, is THIS resolution's concrete "exiled this
+/// way" batch (the pool the preceding `ChooseFromZone` offered): candidates
+/// must belong to it, applied BEFORE the filter's `Not(InTrackedSet)`
+/// chosen-card exclusion so a stale linked card from a previous resolution is
+/// never offered (CR 607.2a — "the other cards exiled this way" is scoped to
+/// this resolution's exile batch). Empty means no batch restriction.
 pub(crate) fn eligible_candidates(
     state: &GameState,
     controller: PlayerId,
+    source: ObjectId,
     filter: &TargetFilter,
     zones: &[Zone],
     max_total_mv: Option<u32>,
+    member_pool: &[ObjectId],
 ) -> Vec<ObjectId> {
     let Some(player) = state.players.iter().find(|p| p.id == controller) else {
         return Vec::new();
     };
 
-    let ctx = FilterContext::from_source_with_controller(ObjectId(0), controller);
+    let ctx = FilterContext::from_source_with_controller(source, controller);
     let mut candidates = Vec::new();
     for &zone in zones {
         let zone_ids = match zone {
             Zone::Graveyard => &player.graveyard,
             Zone::Hand => &player.hand,
-            // CR 601.2a: The class today only draws from the controller's
-            // graveyard and hand. A new zone would need a parser/effect change,
-            // so an unexpected zone contributes no candidates rather than
-            // silently scanning the wrong pile.
+            // CR 400.10a + CR 608.2g: Exile is a shared zone — the whole pile
+            // is scanned and the `filter` (e.g. `ExiledBySource` +
+            // `Not(InTrackedSet)`) narrows it to this resolution's linked set
+            // regardless of who owns the exiled cards (Plargg and Nassari
+            // exiles from EVERY player's library).
+            Zone::Exile => &state.exile,
+            // CR 601.2a: Other zones would need a parser/effect change, so an
+            // unexpected zone contributes no candidates rather than silently
+            // scanning the wrong pile.
             _ => continue,
         };
         for &id in zone_ids {
+            // CR 607.2a: Confine the offer to THIS resolution's exile batch
+            // before any other narrowing — a card linked by a previous
+            // resolution is not among "the cards exiled this way" now.
+            if !member_pool.is_empty() && !member_pool.contains(&id) {
+                continue;
+            }
+            // CR 305.1: a land card can never be cast — this window is a cast
+            // grant, so lands are excluded from the offer outright (mirrors
+            // `cast_from_zone`'s cast-mode land guard).
+            if state.objects.get(&id).is_some_and(|obj| {
+                obj.card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Land)
+            }) {
+                continue;
+            }
             if !matches_target_filter_in_owner_zone(state, id, filter, &ctx) {
                 continue;
             }
@@ -207,9 +270,11 @@ mod tests {
         let candidates = eligible_candidates(
             &state,
             PlayerId(0),
+            ObjectId(0),
             &instant_sorcery_filter(),
             &[Zone::Graveyard, Zone::Hand],
             None,
+            &[],
         );
         assert!(candidates.contains(&gy_instant));
         assert!(candidates.contains(&hand_sorcery));
@@ -237,9 +302,11 @@ mod tests {
         let candidates = eligible_candidates(
             &state,
             PlayerId(0),
+            ObjectId(0),
             &instant_sorcery_filter(),
             &[Zone::Graveyard, Zone::Hand],
             Some(6),
+            &[],
         );
         assert_eq!(candidates, vec![cheap]);
     }
@@ -267,9 +334,11 @@ mod tests {
         let candidates = eligible_candidates(
             &state,
             PlayerId(0),
+            ObjectId(0),
             &instant_sorcery_filter(),
             &[Zone::Graveyard, Zone::Hand],
             None,
+            &[],
         );
         assert_eq!(candidates, vec![mine]);
     }
