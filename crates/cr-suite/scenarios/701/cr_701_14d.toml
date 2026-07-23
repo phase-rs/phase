@@ -1,0 +1,5 @@
+rule = "701.14d"
+section = 701
+title = "Keyword Actions - CR 701.14d"
+status = "skeleton"
+text = "The damage dealt when a creature fights isn’t combat damage."

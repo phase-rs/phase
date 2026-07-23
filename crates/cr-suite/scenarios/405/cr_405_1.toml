@@ -1,0 +1,38 @@
+rule = "405.1"
+section = 405
+title = "Stack — CR 405.1"
+status = "executable"
+text = "When a spell is cast, the physical card is put on the stack. When an ability is activated or triggers, it goes on top of the stack."
+notes = "Production path: cast Lightning Bolt (it goes on the stack, CR 601.2a), resolve it (CR 608.1), then the stack is empty and the target lost 3 life. Discriminates: if the bolt never reached the stack, resolve_top would error / life would be unchanged."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_player = 1
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "stack_is_empty"
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = 17

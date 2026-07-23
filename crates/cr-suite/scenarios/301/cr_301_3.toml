@@ -1,0 +1,5 @@
+rule = "301.3"
+section = 301
+title = "Artifacts - CR 301.3"
+status = "skeleton"
+text = "Artifact subtypes are always a single word and are listed after a long dash: “Artifact — Equipment.” Artifact subtypes are also called artifact types. Artifacts may have multiple subtypes. See rule 205.3g for the complete list of artifact types."

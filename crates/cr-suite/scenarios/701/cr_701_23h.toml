@@ -1,0 +1,5 @@
+rule = "701.23h"
+section = 701
+title = "Keyword Actions - CR 701.23h"
+status = "skeleton"
+text = "An effect may instruct a player to search a library for one or more cards more than once before instructing a player to shuffle that library. This is the same as a single instruction for that player to search that library for all those cards. The player searches that library only once."

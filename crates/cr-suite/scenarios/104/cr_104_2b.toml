@@ -1,0 +1,5 @@
+rule = "104.2b"
+section = 104
+title = "Ending the Game - CR 104.2b"
+status = "skeleton"
+text = "An effect may state that a player wins the game."

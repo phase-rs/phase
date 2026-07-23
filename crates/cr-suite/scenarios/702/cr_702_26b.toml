@@ -1,0 +1,5 @@
+rule = "702.26b"
+section = 702
+title = "Keyword Abilities - CR 702.26b"
+status = "skeleton"
+text = "If a permanent phases out, its status changes to “phased out.” Except for rules and effects that specifically mention phased-out permanents, a phased-out permanent is treated as though it does not exist. It can’t affect or be affected by anything else in the game. A permanent that phases out is removed from combat. (See rule 506.4.)"

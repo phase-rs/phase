@@ -1,0 +1,5 @@
+rule = "701.12h"
+section = 701
+title = "Keyword Actions - CR 701.12h"
+status = "skeleton"
+text = "One card (Exchange of Words) instructs a player to exchange the text boxes of two creatures. This creates a text-changing effect (see rule 612, “Text-Changing Effects”). In such an exchange, the rules text of each permanent becomes the previous rules text of the other."

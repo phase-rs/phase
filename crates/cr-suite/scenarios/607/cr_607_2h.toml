@@ -1,0 +1,5 @@
+rule = "607.2h"
+section = 607
+title = "Linked Abilities - CR 607.2h"
+status = "skeleton"
+text = "If an object has both a static ability and one or more triggered abilities printed on it in the same paragraph, each of those triggered abilities is linked to the static ability. Each triggered ability refers only to actions taken as a result of the static ability. See rule 603.11."

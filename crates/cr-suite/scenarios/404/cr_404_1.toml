@@ -1,0 +1,5 @@
+rule = "404.1"
+section = 404
+title = "Graveyard - CR 404.1"
+status = "skeleton"
+text = "A player’s graveyard is their discard pile. Any object that’s countered, discarded, destroyed, or sacrificed is put on top of its owner’s graveyard, as is any instant or sorcery spell that’s finished resolving. Each player’s graveyard starts out empty."

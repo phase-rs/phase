@@ -1,0 +1,5 @@
+rule = "405.6h"
+section = 405
+title = "Stack - CR 405.6h"
+status = "skeleton"
+text = "If a player leaves a multiplayer game, objects may leave the game, cease to exist, change control, or be exiled as a result. These actions happen immediately. See rule 800.4a."

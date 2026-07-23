@@ -1,0 +1,5 @@
+rule = "509.2a"
+section = 509
+title = "Declare Blockers Step - CR 509.2a"
+status = "skeleton"
+text = "Any abilities that triggered on blockers being declared or that triggered during the process described in rule 509.1 are put onto the stack before the active player gets priority; the order in which they triggered doesn’t matter. (See rule 603, “Handling Triggered Abilities.”)"

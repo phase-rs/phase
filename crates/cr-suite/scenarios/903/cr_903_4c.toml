@@ -1,0 +1,5 @@
+rule = "903.4c"
+section = 903
+title = "Commander - CR 903.4c"
+status = "skeleton"
+text = "Reminder text is ignored when determining a card’s color identity. See rule 207.2."

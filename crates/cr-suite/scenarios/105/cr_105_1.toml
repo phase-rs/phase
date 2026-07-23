@@ -1,0 +1,5 @@
+rule = "105.1"
+section = 105
+title = "Colors - CR 105.1"
+status = "skeleton"
+text = "There are five colors in the Magic game: white, blue, black, red, and green."

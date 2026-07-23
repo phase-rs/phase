@@ -1,0 +1,5 @@
+rule = "613.8b"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.8b"
+status = "skeleton"
+text = "An effect dependent on one or more other effects waits to apply until just after all of those effects have been applied. If multiple dependent effects would apply simultaneously in this way, they’re applied in timestamp order relative to each other. If several dependent effects form a dependency loop, then this rule is ignored and the effects in the dependency loop are applied in timestamp order."

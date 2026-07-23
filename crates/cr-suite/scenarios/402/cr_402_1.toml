@@ -1,0 +1,5 @@
+rule = "402.1"
+section = 402
+status = "deferred"
+text = "The hand is where a player holds cards that have been drawn but not yet played."
+notes = "Deferred: asserting a setup-seeded hand size is tautological. A discriminating fixture needs a real draw/discard transition to move a card into/out of hand; the hand_count assertion kinds are already wired."

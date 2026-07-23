@@ -1,0 +1,5 @@
+rule = "603.6d"
+section = 603
+title = "Handling Triggered Abilities - CR 603.6d"
+status = "skeleton"
+text = "Some permanents have text that reads “[This permanent] enters with . . . ,” “As [this permanent] enters . . . ,” “[This permanent] enters as . . . ,” or “[This permanent] enters tapped.” Such text is a static ability—not a triggered ability—whose effect occurs as part of the event that puts the permanent onto the battlefield."

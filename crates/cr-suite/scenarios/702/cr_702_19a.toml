@@ -1,0 +1,5 @@
+rule = "702.19a"
+section = 702
+title = "Keyword Abilities - CR 702.19a"
+status = "skeleton"
+text = "Trample is a static ability that modifies the rules for assigning an attacking creature’s combat damage. The ability has no effect when a creature with trample is blocking or is dealing noncombat damage. (See rule 510, “Combat Damage Step.”)"

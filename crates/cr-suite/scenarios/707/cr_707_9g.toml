@@ -1,0 +1,5 @@
+rule = "707.9g"
+section = 707
+title = "Copying Objects - CR 707.9g"
+status = "skeleton"
+text = "Some replacement effects that generate copy effects are linked to triggered abilities written in the same paragraph. (See rule 603.11.) If another copy effect is applied to that object after applying the copy effect with the linked triggered ability, the ability doesn’t trigger."

@@ -1,0 +1,5 @@
+rule = "708.12"
+section = 708
+title = "Face-Down Spells and Permanents - CR 708.12"
+status = "skeleton"
+text = "If a spell or ability that instructs a player to reveal a face-down permanent needs information about the revealed object, it uses the characteristics of that object ignoring any continuous effects that may be applying to it."

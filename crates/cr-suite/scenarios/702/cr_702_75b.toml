@@ -1,0 +1,5 @@
+rule = "702.75b"
+section = 702
+title = "Keyword Abilities - CR 702.75b"
+status = "skeleton"
+text = "Previously, the rules for the hideaway ability caused the permanent to enter the battlefield tapped, and the number of cards the player looked at was fixed at four. Cards printed before this rules change had the printed text “Hideaway” with no numeral after the word. Those older cards have received errata in the Oracle card reference to have “Hideaway 4” and the additional ability “[This permanent] enters tapped.”"

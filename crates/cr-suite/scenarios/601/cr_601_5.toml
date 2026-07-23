@@ -1,0 +1,5 @@
+rule = "601.5"
+section = 601
+title = "Casting Spells - CR 601.5"
+status = "skeleton"
+text = "If a player is no longer allowed to cast a spell after completing its proposal (see rules 601.2a–d), the casting of the spell is illegal and the game returns to the moment before the casting of that spell was proposed (see rule 733, “Handling Illegal Actions”). It doesn’t matter if a rule or effect would make the casting of the spell illegal while determining and paying that spell’s costs (see rules 601.2f–h) or any time after the spell has been cast."

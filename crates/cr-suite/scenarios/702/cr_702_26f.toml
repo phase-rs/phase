@@ -1,0 +1,5 @@
+rule = "702.26f"
+section = 702
+title = "Keyword Abilities - CR 702.26f"
+status = "skeleton"
+text = "Continuous effects that affect a phased-out permanent may expire while that permanent is phased out. If so, they will no longer affect that permanent once it’s phased in. In particular, effects with “for as long as” durations that track that permanent (see rule 611.2b) end when that permanent phases out because they can no longer see it."

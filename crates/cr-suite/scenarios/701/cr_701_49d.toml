@@ -1,0 +1,5 @@
+rule = "701.49d"
+section = 701
+title = "Keyword Actions - CR 701.49d"
+status = "skeleton"
+text = "Venture into [quality] is a variant of venture into the dungeon. If a player is instructed to “venture into [quality]” while they don’t own a dungeon card in the command zone, they choose a dungeon card they own from outside the game with the indicated quality and put it into the command zone. They put their venture marker on the topmost room of that dungeon. If they already own a dungeon card in the command zone, they follow the normal procedure for venturing into the dungeon outlined in 701.49b–c."

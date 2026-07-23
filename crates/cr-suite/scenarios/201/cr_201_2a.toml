@@ -1,0 +1,5 @@
+rule = "201.2a"
+section = 201
+title = "Name - CR 201.2a"
+status = "skeleton"
+text = "Two or more objects have the same name if they have at least one name in common, even if one or more of those objects have additional names. An object with no name doesn’t have the same name as any other object, including another object with no name."

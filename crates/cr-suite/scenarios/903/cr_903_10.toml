@@ -1,0 +1,5 @@
+rule = "903.10"
+section = 903
+status = "deferred"
+text = "The Commander variant includes a specification for winning and losing the game: a player that has been dealt 21 or more combat damage by the same commander over the course of the game loses the game."
+notes = "Deferred: needs commander-damage tracking plus combat. Once wired, deal 21 commander combat damage across turns and assert game_over with that player as the loser."

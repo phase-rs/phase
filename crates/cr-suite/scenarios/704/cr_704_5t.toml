@@ -1,0 +1,5 @@
+rule = "704.5t"
+section = 704
+title = "State-Based Actions - CR 704.5t"
+status = "skeleton"
+text = "If a player’s venture marker is on the bottommost room of a dungeon card, and that dungeon card isn’t the source of a room ability that has triggered but not yet left the stack, the dungeon card’s owner removes it from the game. See rule 309, “Dungeons.”"

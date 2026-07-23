@@ -1,0 +1,5 @@
+rule = "703.4n"
+section = 703
+title = "Turn-Based Actions - CR 703.4n"
+status = "skeleton"
+text = "Immediately after the cleanup step begins, if the active player’s hand contains more cards than their maximum hand size (normally seven), they discard enough cards to reduce their hand size to that number. See rule 514.1."

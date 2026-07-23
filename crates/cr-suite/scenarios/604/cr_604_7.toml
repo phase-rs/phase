@@ -1,0 +1,5 @@
+rule = "604.7"
+section = 604
+title = "Handling Static Abilities - CR 604.7"
+status = "skeleton"
+text = "Unlike spells and other kinds of abilities, static abilities can’t use an object’s last known information for purposes of determining how their effects are applied."

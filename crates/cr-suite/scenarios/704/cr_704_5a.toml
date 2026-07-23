@@ -1,0 +1,39 @@
+rule = "704.5a"
+section = 704
+title = "State-Based Actions — CR 704.5a"
+status = "executable"
+text = "If a player has 0 or less life, that player loses the game."
+notes = "Production path: Lightning Bolt deals 3 to a player at 3 life; SBA on resolution ends the game."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 3
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_player = 1
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = 0
+
+[[assertions]]
+kind = "game_over"
+winner = 0

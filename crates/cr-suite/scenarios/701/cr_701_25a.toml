@@ -1,0 +1,5 @@
+rule = "701.25a"
+section = 701
+title = "Keyword Actions - CR 701.25a"
+status = "skeleton"
+text = "To “surveil N” means to look at the top N cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order."

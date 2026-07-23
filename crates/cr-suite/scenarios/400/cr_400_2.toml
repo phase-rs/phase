@@ -1,0 +1,5 @@
+rule = "400.2"
+section = 400
+title = "General (Zones) - CR 400.2"
+status = "skeleton"
+text = "Public zones are zones in which all players can see the cards’ faces, except for those cards that some rule or effect specifically allow to be face down. Graveyard, battlefield, stack, exile, ante, and command are public zones. Hidden zones are zones in which not all players can be expected to see the cards’ faces. Library and hand are hidden zones, even if all the cards in one such zone happen to be revealed."

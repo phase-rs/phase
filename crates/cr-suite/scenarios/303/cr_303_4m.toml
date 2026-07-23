@@ -1,0 +1,5 @@
+rule = "303.4m"
+section = 303
+title = "Enchantments - CR 303.4m"
+status = "skeleton"
+text = "An ability of a permanent that refers to the “enchanted [object or player]” refers to whatever object or player that permanent is attached to, even if the permanent with the ability isn’t an Aura."

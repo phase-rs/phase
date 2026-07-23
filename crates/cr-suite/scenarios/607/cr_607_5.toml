@@ -1,0 +1,5 @@
+rule = "607.5"
+section = 607
+title = "Linked Abilities - CR 607.5"
+status = "skeleton"
+text = "If an object acquires a pair of linked abilities as part of the same effect, the abilities will be similarly linked to one another on that object even though they weren’t printed on that object. They can’t be linked to any other ability, regardless of what other abilities the object may currently have or may have had in the past."

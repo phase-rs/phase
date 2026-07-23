@@ -1,0 +1,5 @@
+rule = "716.2d"
+section = 716
+title = "Class Cards - CR 716.2d"
+status = "skeleton"
+text = "If a rule or effect refers to a permanent’s level and that permanent doesn’t have a level, it is treated as though its level is 1."

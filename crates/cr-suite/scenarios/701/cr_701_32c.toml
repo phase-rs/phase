@@ -1,0 +1,5 @@
+rule = "701.32c"
+section = 701
+title = "Keyword Actions - CR 701.32c"
+status = "skeleton"
+text = "Schemes may only be set in motion one at a time. If a player is instructed to set multiple schemes in motion, that player sets a scheme in motion that many times."

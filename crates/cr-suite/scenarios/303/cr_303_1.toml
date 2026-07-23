@@ -1,0 +1,5 @@
+rule = "303.1"
+section = 303
+title = "Enchantments - CR 303.1"
+status = "skeleton"
+text = "A player who has priority may cast an enchantment card from their hand during a main phase of their turn when the stack is empty. Casting an enchantment as a spell uses the stack. (See rule 601, “Casting Spells.”)"

@@ -1,0 +1,5 @@
+rule = "121.2"
+section = 121
+title = "Drawing a Card - CR 121.2"
+status = "skeleton"
+text = "Cards may only be drawn one at a time. If a player is instructed to draw multiple cards, that player performs that many individual card draws."

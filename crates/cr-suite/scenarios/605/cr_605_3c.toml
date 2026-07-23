@@ -1,0 +1,5 @@
+rule = "605.3c"
+section = 605
+title = "Mana Abilities - CR 605.3c"
+status = "skeleton"
+text = "Once a player begins to activate a mana ability, that ability can’t be activated again until it has resolved."

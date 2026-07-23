@@ -1,0 +1,5 @@
+rule = "715.2c"
+section = 715
+title = "Adventurer Cards - CR 715.2c"
+status = "skeleton"
+text = "Although adventurer cards are printed with multiple sets of characteristics, each adventurer card is only one card. For example, a player who has drawn or discarded an adventurer card has drawn or discarded one card, not two."

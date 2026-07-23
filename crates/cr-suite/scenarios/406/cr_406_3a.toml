@@ -1,0 +1,5 @@
+rule = "406.3a"
+section = 406
+title = "Exile - CR 406.3a"
+status = "skeleton"
+text = "A card exiled face down has no characteristics, but the spell or ability that exiled it may allow it to be played from exile. Unless that card is being cast face down (see rule 708.4), the card is turned face up just before the player announces that they are playing the card (see rule 601.2)."

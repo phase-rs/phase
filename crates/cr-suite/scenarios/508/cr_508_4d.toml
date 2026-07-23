@@ -1,0 +1,5 @@
+rule = "508.4d"
+section = 508
+title = "Declare Attackers Step - CR 508.4d"
+status = "skeleton"
+text = "A creature that’s put onto the battlefield attacking during the declare blockers step, combat damage step, or end of combat step enters the battlefield as an unblocked creature. It remains unblocked until it is removed from combat, an effect says it becomes blocked, or the combat phase ends, whichever comes first."

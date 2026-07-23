@@ -1,0 +1,5 @@
+rule = "701.66a"
+section = 701
+title = "Keyword Actions - CR 701.66a"
+status = "skeleton"
+text = "“Earthbend N” means “Target land you control becomes a 0/0 land creature with haste in addition to its other types. Put N +1/+1 counters on it. When that land dies or is put into exile, return it to the battlefield tapped under your control.”"

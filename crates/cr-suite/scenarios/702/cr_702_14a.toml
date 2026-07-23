@@ -1,0 +1,5 @@
+rule = "702.14a"
+section = 702
+title = "Keyword Abilities - CR 702.14a"
+status = "skeleton"
+text = "Landwalk is a generic term that appears within an object’s rules text as “[type]walk,” where [type] is usually a land type, but it can also be the card type land plus any combination of land types, card types, and/or supertypes."

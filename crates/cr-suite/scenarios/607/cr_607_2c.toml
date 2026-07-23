@@ -1,0 +1,5 @@
+rule = "607.2c"
+section = 607
+title = "Linked Abilities - CR 607.2c"
+status = "skeleton"
+text = "If an object has an activated or triggered ability printed on it that puts one or more objects onto the battlefield and an ability printed on it that refers to objects “put onto the battlefield with [this object]” or “created with [this object],” those abilities are linked. The second can refer only to objects put onto the battlefield as a result of the first."

@@ -1,0 +1,5 @@
+rule = "613.8c"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.8c"
+status = "skeleton"
+text = "After each effect is applied, the order of remaining effects is reevaluated and may change if an effect that has not yet been applied becomes dependent on or independent of one or more other effects that have not yet been applied."

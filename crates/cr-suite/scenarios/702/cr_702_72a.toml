@@ -1,0 +1,5 @@
+rule = "702.72a"
+section = 702
+title = "Keyword Abilities - CR 702.72a"
+status = "skeleton"
+text = "Champion represents two triggered abilities. “Champion an [object]” means “When this permanent enters, sacrifice it unless you exile another [object] you control” and “When this permanent leaves the battlefield, return the exiled card to the battlefield under its owner’s control.”"

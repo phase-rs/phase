@@ -1,0 +1,5 @@
+rule = "509.1h"
+section = 509
+title = "Declare Blockers Step - CR 509.1h"
+status = "skeleton"
+text = "An attacking creature with one or more creatures declared as blockers for it becomes a blocked creature; one with no creatures declared as blockers for it becomes an unblocked creature. This remains unchanged until the creature is removed from combat, an effect says that it becomes blocked or unblocked, or the combat phase ends, whichever comes first. A creature remains blocked even if all the creatures blocking it are removed from combat."

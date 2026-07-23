@@ -1,0 +1,5 @@
+rule = "117.3b"
+section = 117
+status = "deferred"
+text = "The active player receives priority after a spell or ability (other than a mana ability) resolves."
+notes = "Deferred: needs a stable post-resolution priority window to assert priority_player = active player. The runner's resolve_top may leave the engine in an SBA/game-over state after a lethal bolt; a non-lethal resolve plus a priority read is the future executable shape."

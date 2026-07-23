@@ -1,0 +1,5 @@
+rule = "304.4"
+section = 304
+title = "Instants - CR 304.4"
+status = "skeleton"
+text = "Instants can’t enter the battlefield. If an instant would enter the battlefield, it remains in its previous zone instead."

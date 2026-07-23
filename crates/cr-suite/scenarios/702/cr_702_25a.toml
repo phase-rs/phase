@@ -1,0 +1,5 @@
+rule = "702.25a"
+section = 702
+title = "Keyword Abilities - CR 702.25a"
+status = "skeleton"
+text = "Flanking is a triggered ability that triggers during the declare blockers step. (See rule 509, “Declare Blockers Step.”) “Flanking” means “Whenever this creature becomes blocked by a creature without flanking, the blocking creature gets -1/-1 until end of turn.”"

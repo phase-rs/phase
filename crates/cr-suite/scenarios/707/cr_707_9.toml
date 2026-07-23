@@ -1,0 +1,5 @@
+rule = "707.9"
+section = 707
+title = "Copying Objects - CR 707.9"
+status = "skeleton"
+text = "Copy effects may include modifications or exceptions to the copying process."

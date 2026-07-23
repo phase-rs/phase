@@ -1,0 +1,5 @@
+rule = "508.7d"
+section = 508
+title = "Declare Attackers Step - CR 508.7d"
+status = "skeleton"
+text = "In a multiplayer game not using the attack multiple players option (see rule 802), the reselected player, planeswalker, or battle must be the chosen defending player, a planeswalker controlled by that player, or a battle protected by that player."

@@ -1,0 +1,5 @@
+rule = "729.1b"
+section = 729
+title = "Daybound and Nightbound - CR 729.1b"
+status = "skeleton"
+text = "No effects or definitions created in either the main game or the subgame have any meaning in the other, except as defined by the effect that created the subgame. For example, the effect may say that something happens in the main game to the winner or loser of the subgame."

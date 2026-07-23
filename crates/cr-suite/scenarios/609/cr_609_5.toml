@@ -1,0 +1,5 @@
+rule = "609.5"
+section = 609
+title = "Effects - CR 609.5"
+status = "skeleton"
+text = "If an effect could result in a tie, the text of the spell or ability that created the effect will specify what to do in the event of a tie. The Magic game has no default for ties."

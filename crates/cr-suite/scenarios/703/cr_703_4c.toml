@@ -1,0 +1,5 @@
+rule = "703.4c"
+section = 703
+title = "Turn-Based Actions - CR 703.4c"
+status = "skeleton"
+text = "Immediately after the game checks to see if its day or night designation should change during the untap step or, if the game doesn’t have a day or night designation, immediately after the phasing action has been completed during the untap step, the active player determines which permanents they control will untap. Then they untap them all simultaneously. See rule 502.3."

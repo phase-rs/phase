@@ -1,0 +1,5 @@
+rule = "103.6b"
+section = 103
+title = "Starting the Game - CR 103.6b"
+status = "skeleton"
+text = "If a card allows a player to reveal it from their opening hand, the player taking this action does so. The card remains revealed until the first turn begins. Each card may be revealed this way only once."

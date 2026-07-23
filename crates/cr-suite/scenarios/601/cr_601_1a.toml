@@ -1,0 +1,5 @@
+rule = "601.1a"
+section = 601
+title = "Casting Spells - CR 601.1a"
+status = "skeleton"
+text = "Some effects still refer to “playing” a card. “Playing a card” means playing that card as a land or casting that card as a spell, whichever is appropriate."

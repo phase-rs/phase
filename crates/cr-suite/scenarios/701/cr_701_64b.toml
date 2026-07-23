@@ -1,0 +1,5 @@
+rule = "701.64b"
+section = 701
+title = "Keyword Actions - CR 701.64b"
+status = "skeleton"
+text = "Harnessed is a designation that has no rules meaning other than to act as a marker that other spells and abilities can identify. Only permanents can be or become harnessed. Once a permanent becomes harnessed, it stays harnessed until it leaves the battlefield. Harnessed is neither an ability nor part of the permanent’s copiable values."

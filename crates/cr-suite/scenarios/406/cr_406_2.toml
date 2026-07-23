@@ -1,0 +1,5 @@
+rule = "406.2"
+section = 406
+title = "Exile - CR 406.2"
+status = "skeleton"
+text = "To exile an object is to put it into the exile zone from whatever zone it’s currently in. An exiled card is a card that’s been put into the exile zone."

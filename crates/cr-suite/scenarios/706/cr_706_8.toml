@@ -1,0 +1,5 @@
+rule = "706.8"
+section = 706
+title = "Rolling a Die - CR 706.8"
+status = "skeleton"
+text = "One card (Centaur of Attention) has an ability that instructs a player to roll dice and “store” those results on it and another ability that allows a player to reroll any number of those results."

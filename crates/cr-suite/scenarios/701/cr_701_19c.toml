@@ -1,0 +1,5 @@
+rule = "701.19c"
+section = 701
+title = "Keyword Actions - CR 701.19c"
+status = "skeleton"
+text = "Neither activating an ability that creates a regeneration shield nor casting a spell that creates a regeneration shield is the same as regenerating a permanent. Effects that say that a permanent can’t be regenerated don’t preclude such abilities from being activated or such spells from being cast; rather, they cause regeneration shields to not be applied."

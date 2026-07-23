@@ -1,0 +1,5 @@
+rule = "704.5h"
+section = 704
+status = "deferred"
+text = "If a creature has toughness greater than 0, and it's been dealt damage by a source with deathtouch since the last time state-based actions were checked, that creature is destroyed."
+notes = "Deferred: needs a deathtouch damage source to deal combat/noncombat damage to a creature with toughness > damage. The runner's only damage spell (Lightning Bolt) has no deathtouch; once a deathtouch damage step exists, assert creature_in_graveyard."

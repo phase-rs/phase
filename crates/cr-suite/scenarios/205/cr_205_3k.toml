@@ -1,0 +1,5 @@
+rule = "205.3k"
+section = 205
+title = "Type Line - CR 205.3k"
+status = "skeleton"
+text = "Instants and sorceries share their lists of subtypes; these subtypes are called spell types. The spell types are Adventure, Arcane, Lesson, Omen, and Trap."

@@ -1,0 +1,5 @@
+rule = "702.151a"
+section = 702
+title = "Keyword Abilities - CR 702.151a"
+status = "skeleton"
+text = "Reconfigure represents two activated abilities. Reconfigure [cost] means “[Cost]: Attach this permanent to another target creature you control. Activate only as a sorcery” and “[Cost]: Unattach this permanent. Activate only if this permanent is attached to a creature and only as a sorcery.”"

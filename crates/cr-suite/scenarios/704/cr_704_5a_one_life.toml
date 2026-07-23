@@ -1,0 +1,39 @@
+rule = "704.5a"
+section = 704
+title = "State-Based Actions — CR 704.5a (below zero)"
+status = "executable"
+text = "If a player has 0 or less life, that player loses the game."
+notes = "Variant of cr_704_5a: player 1 is at 1 life; Lightning Bolt (3 damage) takes them to -2, which is 0 or less, so they lose and player 0 wins. Discriminates the '<= 0' boundary (not just exactly 0)."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 1
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_player = 1
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = -2
+
+[[assertions]]
+kind = "game_over"
+winner = 0

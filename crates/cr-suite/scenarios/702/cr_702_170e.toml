@@ -1,0 +1,5 @@
+rule = "702.170e"
+section = 702
+title = "Keyword Abilities - CR 702.170e"
+status = "skeleton"
+text = "If an effect refers to plotting a card, it means performing the special action associated with a plot ability."

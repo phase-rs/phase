@@ -1,0 +1,24 @@
+[package]
+name = "cr-suite"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+description = "Executable Comprehensive Rules scenario suite for the phase.rs engine"
+publish = false
+
+[dependencies]
+engine = { path = "../engine" }
+serde = { workspace = true }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+walkdir = "2"
+indexmap = { version = "2", features = ["serde"] }
+
+[[bin]]
+name = "cr-suite"
+path = "src/bin/cr_suite.rs"
+
+[dev-dependencies]
+tempfile = "3"
+pretty_assertions = "1"

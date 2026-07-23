@@ -1,0 +1,5 @@
+rule = "732.3"
+section = 732
+title = "Ending the Turn - CR 732.3"
+status = "skeleton"
+text = "Sometimes a loop can be fragmented, meaning that each player involved in the loop performs an independent action that results in the same game state being reached multiple times. If that happens, the active player (or, if the active player is not involved in the loop, the first player in turn order who is involved) must then make a different game choice so the loop does not continue."

@@ -1,0 +1,6 @@
+rule = "119.1"
+section = 119
+title = "Life — CR 119.1"
+status = "deferred"
+text = "Each player begins the game with a starting life total of 20."
+notes = "Would only assert setup-provided life totals. Defer until the runner exercises real game-start initialization (CR 103) rather than SetupSpec.with_life."

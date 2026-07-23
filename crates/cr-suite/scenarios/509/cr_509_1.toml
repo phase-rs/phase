@@ -1,0 +1,5 @@
+rule = "509.1"
+section = 509
+status = "deferred"
+text = "First, the defending player declares blockers. This turn-based action doesn't use the stack."
+notes = "Deferred: needs DeclareAttackers + DeclareBlockers runner steps. The blocker_declared assertion reads live CombatState and is ready once those steps exist."

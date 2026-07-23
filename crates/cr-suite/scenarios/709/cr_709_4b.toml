@@ -1,0 +1,5 @@
+rule = "709.4b"
+section = 709
+title = "Split Cards - CR 709.4b"
+status = "skeleton"
+text = "The mana cost of a split card is the combined mana costs of its two halves. A split card’s colors and mana value are determined from its combined mana cost. An effect that refers specifically to the symbols in a split card’s mana cost sees the separate symbols rather than the whole mana cost."

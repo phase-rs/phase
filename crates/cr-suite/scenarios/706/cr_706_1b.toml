@@ -1,0 +1,5 @@
+rule = "706.1b"
+section = 706
+title = "Rolling a Die - CR 706.1b"
+status = "skeleton"
+text = "Players may agree to use an alternate method for rolling a die, including a digital substitute, as long as the method used has the same number of equally likely outcomes as the die specified in the instruction."

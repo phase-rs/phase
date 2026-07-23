@@ -1,0 +1,5 @@
+rule = "208.2"
+section = 208
+title = "Power/Toughness - CR 208.2"
+status = "skeleton"
+text = "Rather than a fixed number, some creature cards have power and/or toughness that includes a star (*)."

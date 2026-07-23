@@ -1,0 +1,5 @@
+rule = "701.2a"
+section = 701
+title = "Keyword Actions - CR 701.2a"
+status = "skeleton"
+text = "To activate an activated ability is to put it onto the stack and pay its costs, so that it will eventually resolve and have its effect. Only an object’s controller (or its owner, if it doesn’t have a controller) can activate its activated ability unless the object specifically says otherwise. A player may activate an ability if they have priority. See rule 602, “Activating Activated Abilities.”"

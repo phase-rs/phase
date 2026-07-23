@@ -1,0 +1,5 @@
+rule = "701.24f"
+section = 701
+title = "Keyword Actions - CR 701.24f"
+status = "skeleton"
+text = "If two or more effects cause a library to be shuffled multiple times simultaneously, abilities that trigger when that library is shuffled will trigger that many times."

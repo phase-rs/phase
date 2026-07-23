@@ -1,0 +1,5 @@
+rule = "706.8b"
+section = 706
+title = "Rolling a Die - CR 706.8b"
+status = "skeleton"
+text = "To reroll one or more stored results of a permanent, roll one of the kind of die noted for each of them. If one kind of die is noted for more than one of those results, roll that many of that kind of die. The results you rerolled stop being stored results, and you store the results of each of the new die rolls on that permanent."

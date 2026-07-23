@@ -1,0 +1,5 @@
+rule = "704.6e"
+section = 704
+title = "State-Based Actions - CR 704.6e"
+status = "skeleton"
+text = "In an Archenemy game, if a non-ongoing scheme card is face up in the command zone, and no triggered abilities of any scheme are on the stack or waiting to be put on the stack, that scheme card is turned face down and put on the bottom of its owner’s scheme deck. See rule 904, “Archenemy.”"

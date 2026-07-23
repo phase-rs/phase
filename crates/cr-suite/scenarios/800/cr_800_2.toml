@@ -1,0 +1,5 @@
+rule = "800.2"
+section = 800
+title = "General (Multiplayer Rules) - CR 800.2"
+status = "skeleton"
+text = "These rules consist of a series of options that can be added to a multiplayer game and a number of variant styles of multiplayer play. A single game may use multiple options but only one variant."

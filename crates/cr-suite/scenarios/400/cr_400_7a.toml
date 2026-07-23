@@ -1,0 +1,5 @@
+rule = "400.7a"
+section = 400
+title = "General (Zones) - CR 400.7a"
+status = "skeleton"
+text = "Effects from spells, activated abilities, and triggered abilities that change the characteristics or controller of a permanent spell on the stack continue to apply to the permanent that spell becomes."

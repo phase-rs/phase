@@ -1,0 +1,31 @@
+rule = "702.2"
+section = 702
+title = "Keyword Abilities — CR 702.2 (Deathtouch)"
+status = "executable"
+text = "Deathtouch is a static ability; any nonzero damage a source with deathtouch deals to a creature is lethal."
+notes = "Reads the post-layer keyword set via engine has_keyword. Presence-only; the combat interaction (CR 704.5h) is covered by a deferred fixture."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "rats"
+player = 0
+name = "Typhoid Rats"
+power = 1
+toughness = 1
+keywords = ["Deathtouch"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "rats"
+keyword = "Deathtouch"

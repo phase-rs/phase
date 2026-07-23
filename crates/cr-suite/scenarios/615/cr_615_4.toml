@@ -1,0 +1,5 @@
+rule = "615.4"
+section = 615
+title = "Prevention Effects - CR 615.4"
+status = "skeleton"
+text = "Prevention effects must exist before the appropriate damage event occurs—they can’t “go back in time” and change something that’s already happened. Spells or abilities that generate these effects are often cast or activated in response to whatever would produce the event and thus resolve before that event would occur."

@@ -1,0 +1,5 @@
+rule = "707.9c"
+section = 707
+title = "Copying Objects - CR 707.9c"
+status = "skeleton"
+text = "Some copy effects specifically state that they don’t copy certain characteristics and the affected objects instead retain their original values. Copy effects may also simply state that certain characteristics are not copied."

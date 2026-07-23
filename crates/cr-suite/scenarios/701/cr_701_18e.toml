@@ -1,0 +1,5 @@
+rule = "701.18e"
+section = 701
+title = "Keyword Actions - CR 701.18e"
+status = "skeleton"
+text = "Previously, the action of using an activated ability was referred to on cards as “playing” that ability. Cards that were printed with that text have received errata in the Oracle card reference so they now refer to “activating” that ability."

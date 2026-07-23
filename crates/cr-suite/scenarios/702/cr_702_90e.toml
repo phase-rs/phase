@@ -1,0 +1,5 @@
+rule = "702.90e"
+section = 702
+title = "Keyword Abilities - CR 702.90e"
+status = "skeleton"
+text = "The infect rules function no matter what zone an object with infect deals damage from."

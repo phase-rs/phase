@@ -1,0 +1,5 @@
+rule = "727.4"
+section = 727
+title = "Subgames - CR 727.4"
+status = "skeleton"
+text = "The effect that restarts the game finishes resolving just before the first turn’s untap step. If the spell or ability that generated that effect has additional instructions, those instructions are followed at this time. No player has priority, and any triggered abilities that trigger as a result will go on the stack the next time a player receives priority, usually during the first turn’s upkeep step."

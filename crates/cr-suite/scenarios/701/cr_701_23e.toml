@@ -1,0 +1,5 @@
+rule = "701.23e"
+section = 701
+title = "Keyword Actions - CR 701.23e"
+status = "skeleton"
+text = "If the effect that contains the search instruction doesn’t also contain instructions to reveal the found card(s), then they’re not revealed."

@@ -1,0 +1,5 @@
+rule = "208.4a"
+section = 208
+title = "Power/Toughness - CR 208.4a"
+status = "skeleton"
+text = "Effects that set a creature’s power and/or toughness to specific values may refer to base power and/or toughness. Other continuous effects may further modify the creature’s power and toughness. See rule 613, “Interaction of Continuous Effects.”"

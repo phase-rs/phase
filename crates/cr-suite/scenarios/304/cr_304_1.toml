@@ -1,0 +1,5 @@
+rule = "304.1"
+section = 304
+title = "Instants - CR 304.1"
+status = "skeleton"
+text = "A player who has priority may cast an instant card from their hand. Casting an instant as a spell uses the stack. (See rule 601, “Casting Spells.”)"

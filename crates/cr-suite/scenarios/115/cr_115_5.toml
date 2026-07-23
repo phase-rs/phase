@@ -1,0 +1,5 @@
+rule = "115.5"
+section = 115
+title = "Targets - CR 115.5"
+status = "skeleton"
+text = "A spell or ability on the stack is an illegal target for itself."

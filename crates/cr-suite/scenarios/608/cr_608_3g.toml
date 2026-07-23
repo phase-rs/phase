@@ -1,0 +1,5 @@
+rule = "608.3g"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.3g"
+status = "skeleton"
+text = "If the object that’s resolving has a static ability that functions on the stack and creates a delayed triggered ability, that delayed triggered ability is created as that permanent is put onto the battlefield in any of the steps above. (See rules 702.109, “Dash,” 702.152, “Blitz,” and 702.185, “Warp.”)"

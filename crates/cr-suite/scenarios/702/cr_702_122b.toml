@@ -1,0 +1,5 @@
+rule = "702.122b"
+section = 702
+title = "Keyword Abilities - CR 702.122b"
+status = "skeleton"
+text = "A creature “crews a Vehicle” when it’s tapped to pay the cost to activate a Vehicle’s crew ability."

@@ -1,0 +1,5 @@
+rule = "611.3c"
+section = 611
+title = "Continuous Effects - CR 611.3c"
+status = "skeleton"
+text = "Continuous effects that modify characteristics of permanents do so simultaneously with the permanent entering the battlefield. They don’t wait until the permanent is on the battlefield and then change it. Because such effects apply as the permanent enters the battlefield, they are applied before determining whether the permanent will cause an ability to trigger when it enters the battlefield."

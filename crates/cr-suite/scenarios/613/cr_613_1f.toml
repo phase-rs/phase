@@ -1,0 +1,5 @@
+rule = "613.1f"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.1f"
+status = "skeleton"
+text = "Layer 6: Ability-adding effects, keyword counters, ability-removing effects, and effects that say an object can’t have an ability are applied."

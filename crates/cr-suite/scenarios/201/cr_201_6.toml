@@ -1,0 +1,5 @@
+rule = "201.6"
+section = 201
+title = "Name - CR 201.6"
+status = "skeleton"
+text = "Promotional or alternate-art versions of some cards feature a secondary title bar below the name line. The card’s name as listed in the Oracle card reference is displayed in the secondary title bar, and an alternate name appears in the upper left corner. For the purposes of deck construction, game rules, and effects, these cards have only the card name specified in the secondary title bar. Rules text may also refer to a card’s alternate name; instances of the alternate name that are present in rules text refer to the name specified in the secondary title bar. The alternate name has no effect on game play."

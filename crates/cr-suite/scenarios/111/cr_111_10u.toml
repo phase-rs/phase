@@ -1,0 +1,5 @@
+rule = "111.10u"
+section = 111
+title = "Tokens - CR 111.10u"
+status = "skeleton"
+text = "A Lander token is a colorless Lander artifact token with “{2}, {T}, Sacrifice this token: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.”"

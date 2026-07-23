@@ -1,0 +1,5 @@
+rule = "701.27b"
+section = 701
+title = "Keyword Actions - CR 701.27b"
+status = "skeleton"
+text = "Although transforming a permanent uses the same physical action as turning a permanent face up or face down, they are different game actions. Abilities that trigger when a permanent is turned face down won’t trigger when that permanent transforms, and so on."

@@ -1,0 +1,5 @@
+rule = "106.4a"
+section = 106
+title = "Mana - CR 106.4a"
+status = "skeleton"
+text = "If any mana remains in a player’s mana pool after mana is spent to pay a cost, that player announces what mana is still there."

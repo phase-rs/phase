@@ -1,0 +1,5 @@
+rule = "100.4d"
+section = 100
+title = "General - CR 100.4d"
+status = "skeleton"
+text = "In limited play involving other multiplayer team variants, each card in a team’s card pool but not in any player’s deck is assigned to the sideboard of one of those players. Each player has their own sideboard; cards may not be transferred between players."

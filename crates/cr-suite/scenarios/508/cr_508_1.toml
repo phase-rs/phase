@@ -1,0 +1,5 @@
+rule = "508.1"
+section = 508
+status = "deferred"
+text = "First, the active player declares attackers. This turn-based action doesn't use the stack."
+notes = "Deferred: needs a DeclareAttackers runner step (the engine has declare_attackers, but no scenario step wraps it yet). The attacker_declared assertion reads live CombatState and is ready once the step exists."

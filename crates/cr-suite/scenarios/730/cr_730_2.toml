@@ -1,0 +1,5 @@
+rule = "730.2"
+section = 730
+title = "Miscellaneous - CR 730.2"
+status = "skeleton"
+text = "To merge an object with a permanent, place that object on top of or under that permanent. That permanent becomes a merged permanent represented by the card or copy that represented that object in addition to any other components that were representing it."

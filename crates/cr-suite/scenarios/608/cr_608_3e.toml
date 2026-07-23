@@ -1,0 +1,5 @@
+rule = "608.3e"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.3e"
+status = "skeleton"
+text = "If a permanent spell resolves but its controller can’t put it onto the battlefield, that player puts it into its owner’s graveyard."

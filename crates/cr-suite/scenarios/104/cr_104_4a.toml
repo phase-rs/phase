@@ -1,0 +1,5 @@
+rule = "104.4a"
+section = 104
+title = "Ending the Game - CR 104.4a"
+status = "skeleton"
+text = "If all the players remaining in a game lose simultaneously, the game is a draw."

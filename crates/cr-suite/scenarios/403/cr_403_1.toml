@@ -1,0 +1,6 @@
+rule = "403.1"
+section = 403
+title = "Battlefield — CR 403.1"
+status = "deferred"
+text = "Most of the area between the players represents the battlefield."
+notes = "Would only assert a setup-placed creature. Defer until a zone-change transition (ETB / ChangeZone) is exercised."

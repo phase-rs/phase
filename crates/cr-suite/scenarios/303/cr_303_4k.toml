@@ -1,0 +1,5 @@
+rule = "303.4k"
+section = 303
+title = "Enchantments - CR 303.4k"
+status = "skeleton"
+text = "If an effect allows an Aura that’s being turned face up to become attached to an object or player, the Aura’s controller considers the characteristics of that Aura as it would exist if it were face up to determine what it may be attached to, and they must choose a legal object or player according to the Aura’s enchant ability and any other applicable effects."

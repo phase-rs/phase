@@ -1,0 +1,5 @@
+rule = "722.3d"
+section = 722
+title = "Ending Turns and Phases - CR 722.3d"
+status = "skeleton"
+text = "If a prepare spell is copied, the copy is also a prepare spell. Any rule or effect that refers to a spell cast as a prepare spell refers to the copy as well."

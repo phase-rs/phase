@@ -1,0 +1,5 @@
+rule = "706.8a"
+section = 706
+title = "Rolling a Die - CR 706.8a"
+status = "skeleton"
+text = "To store the result of a die roll on a permanent means to note both the kind of die rolled and the result of that roll. That noted information is considered a “stored result” of that permanent, and the result is the “value” of that stored result."

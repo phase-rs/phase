@@ -1,0 +1,5 @@
+rule = "604.2"
+section = 604
+title = "Handling Static Abilities - CR 604.2"
+status = "skeleton"
+text = "Static abilities create continuous effects, some of which are prevention effects or replacement effects. These effects are active as long as the permanent with the ability remains on the battlefield and has the ability, or as long as the object with the ability remains in the appropriate zone, as described in rule 113.6."

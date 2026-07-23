@@ -1,0 +1,5 @@
+rule = "111.3"
+section = 111
+title = "Tokens - CR 111.3"
+status = "skeleton"
+text = "The spell or ability that creates a token may define the values of any number of characteristics for the token. This becomes the token’s “text.” The characteristic values defined this way are functionally equivalent to the characteristic values that are printed on a card; for example, they define the token’s copiable values. A token doesn’t have any characteristics not defined by the spell or ability that created it."

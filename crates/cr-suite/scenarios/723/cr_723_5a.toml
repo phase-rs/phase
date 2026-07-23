@@ -1,0 +1,5 @@
+rule = "723.5a"
+section = 723
+title = "The Monarch - CR 723.5a"
+status = "skeleton"
+text = "The controller of another player can use only that player’s resources (cards, mana, and so on) to pay costs for that player."

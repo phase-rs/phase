@@ -1,0 +1,5 @@
+rule = "702.131d"
+section = 702
+title = "Keyword Abilities - CR 702.131d"
+status = "skeleton"
+text = "After a player gets the city’s blessing, continuous effects are reapplied before the game checks to see if the game state or preceding events have matched any trigger conditions."

@@ -1,0 +1,5 @@
+rule = "601.2c"
+section = 601
+status = "deferred"
+text = "The player announces their choice of an appropriate object or player for each target the spell requires."
+notes = "Target selection during casting is already exercised by the SelectTargets step in every bolt fixture (e.g. cr_704_5g targets a creature). A standalone fixture asserting only 'a target was chosen' is redundant with those, so this is left deferred to avoid duplicate coverage."

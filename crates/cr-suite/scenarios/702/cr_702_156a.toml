@@ -1,0 +1,5 @@
+rule = "702.156a"
+section = 702
+title = "Keyword Abilities - CR 702.156a"
+status = "skeleton"
+text = "Ravenous is a keyword found on some creature cards with {X} in their mana cost. Ravenous represents both a replacement effect and a triggered ability. “Ravenous” means “This permanent enters with X +1/+1 counters on it” and “When this permanent enters, if X is 5 or more, draw a card.” See rule 107.3m."

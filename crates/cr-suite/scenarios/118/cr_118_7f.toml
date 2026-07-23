@@ -1,0 +1,5 @@
+rule = "118.7f"
+section = 118
+title = "Costs - CR 118.7f"
+status = "skeleton"
+text = "If a cost is reduced by an amount of mana represented by a Phyrexian mana symbol, the cost is reduced by one mana of that symbol’s color."

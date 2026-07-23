@@ -1,0 +1,5 @@
+rule = "701.46a"
+section = 701
+title = "Keyword Actions - CR 701.46a"
+status = "skeleton"
+text = "“Adapt N” means “If this permanent has no +1/+1 counters on it, put N +1/+1 counters on it.”"

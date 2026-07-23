@@ -1,0 +1,5 @@
+rule = "115.9b"
+section = 115
+title = "Targets - CR 115.9b"
+status = "skeleton"
+text = "An object that looks for a “[spell or ability] that targets [something]” checks the current state of that spell or ability’s targets. If an object it targets is still in the zone it’s expected to be in or a player it targets is still in the game, that target’s current information is used, even if it’s not currently legal for that spell or ability. If an object it targets is no longer in the zone it’s expected to be in or a player it targets is no longer in the game, that target is ignored; its last known information is not used."

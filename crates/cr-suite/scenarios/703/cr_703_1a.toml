@@ -1,0 +1,5 @@
+rule = "703.1a"
+section = 703
+title = "Turn-Based Actions - CR 703.1a"
+status = "skeleton"
+text = "Abilities that watch for a specified step or phase to begin are triggered abilities, not turn-based actions. (See rule 603, “Handling Triggered Abilities.”)"

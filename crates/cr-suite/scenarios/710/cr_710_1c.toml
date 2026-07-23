@@ -1,0 +1,5 @@
+rule = "710.1c"
+section = 710
+title = "Flip Cards - CR 710.1c"
+status = "skeleton"
+text = "A flip card’s color and mana cost don’t change if the permanent is flipped. Also, any changes to it by external effects will still apply."

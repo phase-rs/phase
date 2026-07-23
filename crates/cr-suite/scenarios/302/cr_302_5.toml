@@ -1,0 +1,5 @@
+rule = "302.5"
+section = 302
+title = "Creatures - CR 302.5"
+status = "skeleton"
+text = "Creatures can attack and block. (See rule 508, “Declare Attackers Step,” and rule 509, “Declare Blockers Step.”)"

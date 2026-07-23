@@ -1,0 +1,5 @@
+rule = "113.3c"
+section = 113
+title = "Abilities - CR 113.3c"
+status = "skeleton"
+text = "Triggered abilities have a trigger condition and an effect. They are written as “[Trigger condition], [effect],” and include (and usually begin with) the word “when,” “whenever,” or “at.” Whenever the trigger event occurs, the ability is put on the stack the next time a player would receive priority and stays there until it’s countered, it resolves, or it otherwise leaves the stack. See rule 603, “Handling Triggered Abilities.”"

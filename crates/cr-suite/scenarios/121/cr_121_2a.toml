@@ -1,0 +1,5 @@
+rule = "121.2a"
+section = 121
+title = "Drawing a Card - CR 121.2a"
+status = "skeleton"
+text = "An instruction to draw multiple cards can be modified by replacement effects that refer to the number of cards drawn. This modification occurs before considering any of the individual card draws. See rule 616.1g."

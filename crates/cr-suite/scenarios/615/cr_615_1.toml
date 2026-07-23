@@ -1,0 +1,5 @@
+rule = "615.1"
+section = 615
+status = "deferred"
+text = "Some continuous effects are prevention effects. Such effects watch for a damage event that would happen and completely or partially prevent the damage that would be dealt."
+notes = "Deferred: needs a prevention source (e.g. Fog or protection) plus a bolt damage event. Once wired, cast the prevention then the bolt and assert player_life / creature_damage is unchanged."

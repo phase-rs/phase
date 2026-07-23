@@ -1,0 +1,5 @@
+rule = "117.4"
+section = 117
+status = "deferred"
+text = "If all players pass in succession, the spell or ability on top of the stack resolves or, if the stack is empty, the phase or step ends."
+notes = "Deferred: the stack-resolves half is covered executably by cr_608_1; the step-ends half needs a phase-advance assertion after PassBoth with an empty stack, which changes the phase (not yet assertable without a turn-advance model)."

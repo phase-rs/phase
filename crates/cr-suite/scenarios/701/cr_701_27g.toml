@@ -1,0 +1,5 @@
+rule = "701.27g"
+section = 701
+title = "Keyword Actions - CR 701.27g"
+status = "skeleton"
+text = "Some spells and abilities refer to a “transformed permanent.” This phrase refers to a double-faced permanent on the battlefield with its back face up. A permanent with its front face up is never considered a transformed permanent, even if it had its back face up previously. Similarly, an object represented by more than one card, such as a melded or merged permanent, is never considered a transformed permanent, even if it has components that are back face up. See rules 701.42, “Meld,” and 730, “Merging with Permanents.”"

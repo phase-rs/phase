@@ -1,0 +1,5 @@
+rule = "510.1c"
+section = 510
+title = "Combat Damage Step - CR 510.1c"
+status = "skeleton"
+text = "A blocked creature assigns its combat damage to the creatures blocking it. If no creatures are currently blocking it (if, for example, they were destroyed or removed from combat), it assigns no combat damage. If exactly one creature is blocking it, it assigns all its combat damage to that creature. If two or more creatures are blocking it, it assigns its combat damage to those creatures divided as its controller chooses among them."

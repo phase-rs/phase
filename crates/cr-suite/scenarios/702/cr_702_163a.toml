@@ -1,0 +1,5 @@
+rule = "702.163a"
+section = 702
+title = "Keyword Abilities - CR 702.163a"
+status = "skeleton"
+text = "For Mirrodin! is a triggered ability. “For Mirrodin!” means “When this Equipment enters, create a 2/2 red Rebel creature token, then attach this Equipment to it.”"

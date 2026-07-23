@@ -1,0 +1,5 @@
+rule = "201.2c"
+section = 201
+title = "Name - CR 201.2c"
+status = "skeleton"
+text = "Some spells or abilities check if one object has a different name than a second object or group of objects. The first object has a different name than those objects if the first object has at least one name and has no names in common with any of the other objects, even if one or more of the other objects have no names. If the first object has no name, it does not have a different name than any of the other objects, even if those other objects themselves have names."

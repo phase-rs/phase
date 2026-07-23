@@ -1,0 +1,5 @@
+rule = "800.1"
+section = 800
+status = "deferred"
+text = "A multiplayer game is a game that begins with more than two players."
+notes = "Deferred: the runner builds two-player games. Once an N-player (N>2) setup is exposed, assert game state consistency across all players."

@@ -1,0 +1,5 @@
+rule = "903.3c"
+section = 903
+title = "Commander - CR 903.3c"
+status = "skeleton"
+text = "If a player’s commander is a component of a merged permanent, the resulting merged permanent is that player’s commander."

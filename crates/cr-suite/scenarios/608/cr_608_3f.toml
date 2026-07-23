@@ -1,0 +1,5 @@
+rule = "608.3f"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.3f"
+status = "skeleton"
+text = "If the object that’s resolving is a copy of a permanent spell, it will become a token permanent as it is put onto the battlefield in any of the steps above. A token put onto the battlefield this way is no longer a copy of a spell and is not “created” for the purposes of any rules or effects that refer to creating a token."

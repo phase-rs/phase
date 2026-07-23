@@ -1,0 +1,5 @@
+rule = "301.5f"
+section = 301
+title = "Artifacts - CR 301.5f"
+status = "skeleton"
+text = "An ability of a permanent that refers to the “equipped creature” refers to whatever creature that permanent is attached to, even if the permanent with the ability isn’t an Equipment."

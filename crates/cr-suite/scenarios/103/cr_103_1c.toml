@@ -1,0 +1,5 @@
+rule = "103.1c"
+section = 103
+title = "Starting the Game - CR 103.1c"
+status = "skeleton"
+text = "One card (Power Play) states that its controller is the starting player. This effect applies after this determination has happened and supersedes these methods."

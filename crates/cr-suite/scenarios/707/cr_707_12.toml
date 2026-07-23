@@ -1,0 +1,5 @@
+rule = "707.12"
+section = 707
+title = "Copying Objects - CR 707.12"
+status = "skeleton"
+text = "An effect that instructs a player to cast a copy of an object (and not just copy a spell) follows the rules for casting spells, except that the copy is created in the same zone the object is in and then cast while another spell or ability is resolving. Casting a copy of an object follows steps 601.2a–h of rule 601, “Casting Spells,” and then the copy becomes cast. Once cast, the copy is a spell on the stack, and just like any other spell it can resolve or be countered."

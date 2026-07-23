@@ -1,0 +1,5 @@
+rule = "616.2"
+section = 616
+title = "Interaction of Replacement and/or Prevention Effects - CR 616.2"
+status = "skeleton"
+text = "A replacement or prevention effect can become applicable to an event as the result of another replacement or prevention effect that modifies the event."

@@ -1,0 +1,5 @@
+rule = "613.4"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.4"
+status = "skeleton"
+text = "Within layer 7, apply effects in a series of sublayers in the order described below. Within each sublayer, apply effects in timestamp order. (See rule 613.7.) Note that dependency may alter the order in which effects are applied within a sublayer. (See rule 613.8.)"

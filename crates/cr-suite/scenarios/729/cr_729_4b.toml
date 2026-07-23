@@ -1,0 +1,5 @@
+rule = "729.4b"
+section = 729
+title = "Daybound and Nightbound - CR 729.4b"
+status = "skeleton"
+text = "A player’s main-game counters aren’t considered part of the subgame, although the player will still have them when the main game resumes. Similarly, any counters a player gets during a subgame will cease to exist when the subgame ends."

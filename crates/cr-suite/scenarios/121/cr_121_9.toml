@@ -1,0 +1,5 @@
+rule = "121.9"
+section = 121
+title = "Drawing a Card - CR 121.9"
+status = "skeleton"
+text = "If an effect gives a player the option to reveal a card as they draw it, that player may look at that card as they draw it before choosing whether to reveal it."

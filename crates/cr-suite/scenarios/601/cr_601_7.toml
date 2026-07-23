@@ -1,0 +1,5 @@
+rule = "601.7"
+section = 601
+title = "Casting Spells - CR 601.7"
+status = "skeleton"
+text = "Casting a spell that alters costs won’t affect spells and abilities that are already on the stack."

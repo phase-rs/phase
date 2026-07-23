@@ -1,0 +1,5 @@
+rule = "702.7c"
+section = 702
+title = "Keyword Abilities - CR 702.7c"
+status = "skeleton"
+text = "Giving first strike to a creature without it after combat damage has already been dealt in the first combat damage step won’t preclude that creature from assigning combat damage in the second combat damage step. Removing first strike from a creature after it has already dealt combat damage in the first combat damage step won’t allow it to also assign combat damage in the second combat damage step (unless the creature has double strike)."

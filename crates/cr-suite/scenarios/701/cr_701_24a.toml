@@ -1,0 +1,5 @@
+rule = "701.24a"
+section = 701
+title = "Keyword Actions - CR 701.24a"
+status = "skeleton"
+text = "To shuffle a library or a face-down pile of cards, randomize the cards within it so that no player knows their order."

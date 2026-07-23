@@ -1,0 +1,5 @@
+rule = "122.3"
+section = 122
+title = "Counters - CR 122.3"
+status = "skeleton"
+text = "If a permanent has both a +1/+1 counter and a -1/-1 counter on it, N +1/+1 and N -1/-1 counters are removed from it as a state-based action, where N is the smaller of the number of +1/+1 and -1/-1 counters on it. See rule 704."

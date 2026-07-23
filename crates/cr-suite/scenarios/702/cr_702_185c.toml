@@ -1,0 +1,5 @@
+rule = "702.185c"
+section = 702
+title = "Keyword Abilities - CR 702.185c"
+status = "skeleton"
+text = "Some effects refer to whether “a spell was warped this turn.” This means that a spell was cast for its warp cost this turn."

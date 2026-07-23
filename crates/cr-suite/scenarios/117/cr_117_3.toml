@@ -1,0 +1,5 @@
+rule = "117.3"
+section = 117
+title = "Timing and Priority - CR 117.3"
+status = "skeleton"
+text = "Which player has priority is determined by the following rules:"

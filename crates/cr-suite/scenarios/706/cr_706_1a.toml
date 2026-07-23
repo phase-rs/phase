@@ -1,0 +1,5 @@
+rule = "706.1a"
+section = 706
+title = "Rolling a Die - CR 706.1a"
+status = "skeleton"
+text = "Such an effect may refer to an “N-sided die,” “N-sided dice,” or one or more “dN,” where N is a positive integer. In those cases, the die must have N equally likely outcomes, numbered from 1 to N. For example, a d20 is a twenty-sided die with possible outcomes from 1 to 20."

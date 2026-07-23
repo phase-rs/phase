@@ -1,0 +1,5 @@
+rule = "117.7"
+section = 117
+title = "Timing and Priority - CR 117.7"
+status = "skeleton"
+text = "If a player with priority casts a spell or activates an activated ability while another spell or ability is already on the stack, the new spell or ability has been cast or activated “in response to” the earlier spell or ability. The new spell or ability will resolve first. See rule 608, “Resolving Spells and Abilities.”"

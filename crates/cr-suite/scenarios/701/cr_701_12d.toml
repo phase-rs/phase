@@ -1,0 +1,5 @@
+rule = "701.12d"
+section = 701
+title = "Keyword Actions - CR 701.12d"
+status = "skeleton"
+text = "Some spells or abilities may instruct a player to exchange cards in one zone with cards in a different zone (for example, exiled cards and cards in a player’s hand). These spells and abilities work the same as other “exchange” spells and abilities, except they can exchange the cards only if all the cards are owned by the same player, and they can exchange the cards even if one zone is empty."

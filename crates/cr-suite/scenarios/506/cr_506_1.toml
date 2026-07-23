@@ -1,0 +1,5 @@
+rule = "506.1"
+section = 506
+title = "Combat Phase - CR 506.1"
+status = "skeleton"
+text = "The combat phase has five steps, which proceed in order: beginning of combat, declare attackers, declare blockers, combat damage, and end of combat. The declare blockers and combat damage steps are skipped if no creatures are declared as attackers or put onto the battlefield attacking (see rule 508.8). There are two combat damage steps if any attacking or blocking creature has first strike (see rule 702.7) or double strike (see rule 702.4)."

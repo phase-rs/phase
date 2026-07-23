@@ -1,0 +1,5 @@
+rule = "101.4"
+section = 101
+title = "The Magic Golden Rules - CR 101.4"
+status = "skeleton"
+text = "If multiple players would make choices and/or take actions at the same time, the active player (the player whose turn it is) makes any choices required, then the next player in turn order (usually the player seated to the active player’s left) makes any choices required, followed by the remaining nonactive players in turn order. Then the actions happen simultaneously. This rule is often referred to as the “Active Player, Nonactive Player (APNAP) order” rule."

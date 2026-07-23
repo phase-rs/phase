@@ -1,0 +1,5 @@
+rule = "707.8a"
+section = 707
+title = "Copying Objects - CR 707.8a"
+status = "skeleton"
+text = "If an effect creates a token that is a copy of a double-faced permanent or a double-faced card not on the battlefield, the resulting token is a double-faced token that has both a front face and a back face. The characteristics of each face are determined by the copiable values of the same face of the permanent or card it is a copy of, as modified by any other copy effects that apply to that object. If the token is a copy of a double-faced permanent with its back face up, the token enters the battlefield with its back face up. This rule does not apply to tokens that are created with their own set of characteristics and enter the battlefield as a copy of a double-faced object due to a replacement effect."

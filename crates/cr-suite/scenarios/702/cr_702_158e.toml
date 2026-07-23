@@ -1,0 +1,5 @@
+rule = "702.158e"
+section = 702
+title = "Keyword Abilities - CR 702.158e"
+status = "skeleton"
+text = "Two permanents are in the same sector if each has the same sector designation."

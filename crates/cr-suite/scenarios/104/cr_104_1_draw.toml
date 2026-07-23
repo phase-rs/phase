@@ -1,0 +1,6 @@
+rule = "104.1"
+section = 104
+title = "Ending the Game — CR 104.1 (draw path)"
+status = "deferred"
+text = "A game ends immediately when a player wins, when the game is a draw, or when the game is restarted."
+notes = "Draw path of CR 104.1 (distinct from the win path in cr_104_1.toml). A draw occurs when the last players in the game all leave simultaneously (CR 104.4a) — e.g. both remaining players hit 0 or less life on the same SBA check (CR 704.5a applied simultaneously). Deferred: the runner cannot yet stage a simultaneous double-lethal event through a production path (Lightning Bolt targets a single recipient), so this would only be reachable once a symmetric-damage or paired-life-loss transition exists."

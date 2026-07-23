@@ -1,0 +1,5 @@
+rule = "702.171a"
+section = 702
+title = "Keyword Abilities - CR 702.171a"
+status = "skeleton"
+text = "Saddle is an activated ability. “Saddle N” means “Tap any number of other untapped creatures you control with total power N or greater: This permanent becomes saddled until end of turn. Activate only as a sorcery.”"

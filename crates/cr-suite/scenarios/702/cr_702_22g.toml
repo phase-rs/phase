@@ -1,0 +1,5 @@
+rule = "702.22g"
+section = 702
+title = "Keyword Abilities - CR 702.22g"
+status = "skeleton"
+text = "Banding doesn’t cause attacking creatures to share abilities, nor does it remove any abilities. The attacking creatures in a band are separate permanents."

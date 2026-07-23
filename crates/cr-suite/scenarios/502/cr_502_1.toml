@@ -1,0 +1,5 @@
+rule = "502.1"
+section = 502
+status = "deferred"
+text = "The untap step has no turn-based actions other than the untap. No player receives priority during the untap step (CR 502.4)."
+notes = "Deferred: asserting the setup-chosen Untap phase is tautological. A discriminating fixture needs a real advance into the untap step and an assertion that no priority window opened; not yet modeled."

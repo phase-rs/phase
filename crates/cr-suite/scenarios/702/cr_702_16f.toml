@@ -1,0 +1,5 @@
+rule = "702.16f"
+section = 702
+title = "Keyword Abilities - CR 702.16f"
+status = "skeleton"
+text = "Attacking creatures with protection can’t be blocked by creatures that have the stated quality."

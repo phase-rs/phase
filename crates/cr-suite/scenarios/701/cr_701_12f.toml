@@ -1,0 +1,5 @@
+rule = "701.12f"
+section = 701
+title = "Keyword Actions - CR 701.12f"
+status = "skeleton"
+text = "If a spell or ability instructs a player to simply exchange two zones, and one of the zones is empty, the cards in the zones are still exchanged."

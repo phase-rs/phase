@@ -1,0 +1,5 @@
+rule = "704.8"
+section = 704
+title = "State-Based Actions - CR 704.8"
+status = "skeleton"
+text = "If a state-based action results in a permanent leaving the battlefield at the same time other state-based actions were performed, that permanent’s last known information is derived from the game state before any of those state-based actions were performed."

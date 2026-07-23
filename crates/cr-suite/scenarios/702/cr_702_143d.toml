@@ -1,0 +1,5 @@
+rule = "702.143d"
+section = 702
+title = "Keyword Abilities - CR 702.143d"
+status = "skeleton"
+text = "If an effect states that a card in exile becomes foretold, that card becomes a foretold card. That effect may give the card a foretell cost. That card’s owner may look at that card as long as it remains in exile and it may be cast for any foretell cost it has after the turn it became a foretold card has ended, even if the resulting spell doesn’t have foretell."

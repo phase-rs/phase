@@ -1,0 +1,5 @@
+rule = "702.125b"
+section = 702
+title = "Keyword Abilities - CR 702.125b"
+status = "skeleton"
+text = "Players who have left the game are not counted when determining how many opponents you have."

@@ -1,0 +1,5 @@
+rule = "730.2c"
+section = 730
+title = "Miscellaneous - CR 730.2c"
+status = "skeleton"
+text = "Because a merged permanent is the same object that it was before, it hasn’t just come under a player’s control, any continuous effects that affected it continue to do so, and so on."

@@ -1,0 +1,5 @@
+rule = "116.2m"
+section = 116
+title = "Special Actions - CR 116.2m"
+status = "skeleton"
+text = "A player who controls a permanent that has one or more locked halves (see rule 709.5) may pay the mana cost of a locked half of that permanent to give that permanent the appropriate unlocked designation. This cost is referred to as an “unlock cost.” A player can take this action any time they have priority and the stack is empty during a main phase of their turn."

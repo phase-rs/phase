@@ -1,0 +1,5 @@
+rule = "701.12a"
+section = 701
+title = "Keyword Actions - CR 701.12a"
+status = "skeleton"
+text = "A spell or ability may instruct players to exchange something (for example, life totals or control of two permanents) as part of its resolution. When such a spell or ability resolves, if the entire exchange can’t be completed, no part of the exchange occurs."

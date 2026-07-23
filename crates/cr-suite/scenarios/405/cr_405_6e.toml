@@ -1,0 +1,5 @@
+rule = "405.6e"
+section = 405
+title = "Stack - CR 405.6e"
+status = "skeleton"
+text = "Turn-based actions don’t use the stack; they happen automatically when certain steps or phases begin. They’re dealt with before a player would receive priority (see rule 117.3a). Turn-based actions also happen automatically when each step and phase ends; no player receives priority afterward. See rule 703."

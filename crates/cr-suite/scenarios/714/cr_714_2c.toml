@@ -1,0 +1,5 @@
+rule = "714.2c"
+section = 714
+title = "Saga Cards - CR 714.2c"
+status = "skeleton"
+text = "“{rN1}, {rN2}—[Effect]” means the same as “{rN1}—[Effect]” and “{rN2}—[Effect].”"

@@ -1,0 +1,5 @@
+rule = "117.1d"
+section = 117
+title = "Timing and Priority - CR 117.1d"
+status = "skeleton"
+text = "A player may activate a mana ability whenever they have priority, whenever they are casting a spell or activating an ability that requires a mana payment, or whenever a rule or effect asks for a mana payment (even in the middle of casting or resolving a spell or activating or resolving an ability)."

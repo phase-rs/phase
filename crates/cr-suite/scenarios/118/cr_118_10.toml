@@ -1,0 +1,5 @@
+rule = "118.10"
+section = 118
+title = "Costs - CR 118.10"
+status = "skeleton"
+text = "Each payment of a cost applies to only one spell, ability, or effect. For example, a player can’t sacrifice just one creature to activate the activated abilities of two permanents that each require sacrificing a creature as a cost. Also, the resolution of a spell or ability doesn’t pay another spell or ability’s cost, even if part of its effect is doing the same thing the other cost asks for."

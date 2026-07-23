@@ -1,0 +1,5 @@
+rule = "207.1"
+section = 207
+title = "Text Box - CR 207.1"
+status = "skeleton"
+text = "The text box is printed on the lower half of the card. It usually contains rules text defining the card’s abilities."

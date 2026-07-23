@@ -1,0 +1,5 @@
+rule = "704.5c"
+section = 704
+status = "deferred"
+text = "If a player has ten or more poison counters, that player loses the game."
+notes = "Deferred: the runner has no production infect/toxic damage path to accrue poison counters. Once one exists, seed 9 poison, deal 1 infect damage, and assert player_poison = 10 + game_over."

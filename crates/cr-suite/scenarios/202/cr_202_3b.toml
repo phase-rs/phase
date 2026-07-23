@@ -1,0 +1,5 @@
+rule = "202.3b"
+section = 202
+title = "Mana Cost and Color - CR 202.3b"
+status = "skeleton"
+text = "The mana value of the back face of a nonmodal double-faced permanent or spell’s back face is calculated as though it had the mana cost of its front face. If a permanent or spell is a copy of the back face of a nonmodal double-faced object (even if the card representing that copy is itself a double-faced card), the mana value of the copy is 0."

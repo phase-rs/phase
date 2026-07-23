@@ -1,0 +1,5 @@
+rule = "700.2a"
+section = 700
+title = "General (Additional Rules) - CR 700.2a"
+status = "skeleton"
+text = "The controller of a modal spell or activated ability chooses the mode(s) as part of casting that spell or activating that ability. If one of the modes would be illegal (due to an inability to choose legal targets, for example), that mode can’t be chosen. (See rule 601.2b.)"

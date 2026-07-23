@@ -1,0 +1,5 @@
+rule = "701.22a"
+section = 701
+title = "Keyword Actions - CR 701.22a"
+status = "skeleton"
+text = "To “scry N” means to look at the top N cards of your library, then put any number of them on the bottom of your library in any order and the rest on top of your library in any order."

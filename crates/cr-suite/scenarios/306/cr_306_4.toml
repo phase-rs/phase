@@ -1,0 +1,5 @@
+rule = "306.4"
+section = 306
+title = "Planeswalkers - CR 306.4"
+status = "skeleton"
+text = "Previously, planeswalkers were subject to a “planeswalker uniqueness rule” that stopped a player from controlling two planeswalkers of the same planeswalker type. This rule has been removed and planeswalker cards printed before this change have received errata in the Oracle card reference to have the legendary supertype. Like other legendary permanents, they are subject to the “legend rule” (see rule 704.5j)."

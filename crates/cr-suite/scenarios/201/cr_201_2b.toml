@@ -1,0 +1,5 @@
+rule = "201.2b"
+section = 201
+title = "Name - CR 201.2b"
+status = "skeleton"
+text = "Some spells and abilities refer to two or more objects with different names. Those objects have different names only if each of them has at least one name and no two objects in that group have a name in common."

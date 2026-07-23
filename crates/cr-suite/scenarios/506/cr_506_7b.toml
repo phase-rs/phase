@@ -1,0 +1,5 @@
+rule = "506.7b"
+section = 506
+title = "Combat Phase - CR 506.7b"
+status = "skeleton"
+text = "A spell that states it may be cast “only before (or after) blockers are declared” is referring to the turn-based action of declaring blockers. It may be cast only before (or after) the declare blockers step begins, regardless of whether any blockers are actually declared. (See rule 509.)"

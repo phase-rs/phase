@@ -1,0 +1,41 @@
+rule = "704.5g"
+section = 704
+title = "State-Based Actions — CR 704.5g"
+status = "executable"
+text = "If a creature has toughness greater than 0, and the total damage marked on it is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed. Regeneration can replace this event."
+notes = "Production path: Lightning Bolt (Effect::DealDamage 3) into a 2/2 → resolve → lethal damage SBA."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "bear"
+player = 1
+name = "Bear"
+power = 2
+toughness = 2
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_creature = "bear"
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "creature_in_graveyard"
+creature = "bear"

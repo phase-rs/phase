@@ -1,0 +1,5 @@
+rule = "103.4b"
+section = 103
+title = "Starting the Game - CR 103.4b"
+status = "skeleton"
+text = "In a Vanguard game, each player’s starting life total is 20 plus or minus the life modifier of their vanguard card."

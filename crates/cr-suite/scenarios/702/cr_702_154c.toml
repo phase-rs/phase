@@ -1,0 +1,5 @@
+rule = "702.154c"
+section = 702
+title = "Keyword Abilities - CR 702.154c"
+status = "skeleton"
+text = "A creature “enlists” another creature when you pay the cost of the creature’s enlist ability by tapping the other creature. Note that it isn’t possible for a creature to enlist itself."

@@ -1,0 +1,5 @@
+rule = "108.5"
+section = 108
+title = "Cards - CR 108.5"
+status = "skeleton"
+text = "Nontraditional Magic cards can’t start the game in any zone other than the command zone (see rule 408). If an effect would bring a nontraditional Magic card other than a dungeon card (see rule 309, “Dungeons”) into the game from outside the game, it doesn’t; that card remains outside the game."

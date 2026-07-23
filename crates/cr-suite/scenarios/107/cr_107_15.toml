@@ -1,0 +1,5 @@
+rule = "107.15"
+section = 107
+title = "Numbers and Symbols - CR 107.15"
+status = "skeleton"
+text = "The text box of a Saga card contains chapter symbols, each of which is a keyword ability that represents a triggered ability. A chapter symbol includes a Roman numeral, indicated here as “rN”. The text printed in the text box striation to the right of a chapter symbol is the effect of the triggered ability it represents. See rule 714, “Saga Cards.”"

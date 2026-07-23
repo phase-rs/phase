@@ -1,0 +1,5 @@
+rule = "118.6"
+section = 118
+title = "Costs - CR 118.6"
+status = "skeleton"
+text = "Some objects have no mana cost. This represents an unpayable cost. An ability can also have an unpayable cost if its cost is based on the mana cost of an object with no mana cost. Attempting to cast a spell or activate an ability that has an unpayable cost is a legal action. However, attempting to pay an unpayable cost is an illegal action."

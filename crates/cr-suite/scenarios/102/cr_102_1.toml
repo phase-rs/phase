@@ -1,0 +1,5 @@
+rule = "102.1"
+section = 102
+title = "Players - CR 102.1"
+status = "skeleton"
+text = "A player is one of the people in the game. The active player is the player whose turn it is. The other players are nonactive players."

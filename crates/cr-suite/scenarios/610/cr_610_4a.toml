@@ -1,0 +1,5 @@
+rule = "610.4a"
+section = 610
+title = "One-Shot Effects - CR 610.4a"
+status = "skeleton"
+text = "A permanent phased out this way doesn’t phase in as a result of the turn-based action during a player’s untap step (see rule 502.1). Other effects may cause it to phase in. If a permanent phased out this way phases in due to another effect, the second one-shot effect doesn’t happen, even if that permanent has phased out again."

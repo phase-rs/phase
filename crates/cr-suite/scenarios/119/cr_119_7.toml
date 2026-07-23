@@ -1,0 +1,5 @@
+rule = "119.7"
+section = 119
+status = "deferred"
+text = "If an effect says that a player can't gain life, that player can't make an exchange such that the player's life total would become higher; a cost that involves that player gaining life can't be paid, and a life-gain replacement won't do anything."
+notes = "Deferred: needs both a can't-gain-life continuous effect and a life-gain event to be prevented. Once wired, assert player_life is unchanged after an attempted gain."

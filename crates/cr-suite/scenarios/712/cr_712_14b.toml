@@ -1,0 +1,5 @@
+rule = "712.14b"
+section = 712
+title = "Double-Faced Cards - CR 712.14b"
+status = "skeleton"
+text = "If a player is instructed to put a modal double-faced card onto the battlefield and its front face isn’t a permanent card, the card stays in its current zone."

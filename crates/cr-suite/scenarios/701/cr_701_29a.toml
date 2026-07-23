@@ -1,0 +1,5 @@
+rule = "701.29a"
+section = 701
+title = "Keyword Actions - CR 701.29a"
+status = "skeleton"
+text = "To “fateseal N” means to look at the top N cards of an opponent’s library, then put any number of them on the bottom of that library in any order and the rest on top of that library in any order."

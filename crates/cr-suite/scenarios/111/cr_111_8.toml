@@ -1,0 +1,5 @@
+rule = "111.8"
+section = 111
+title = "Tokens - CR 111.8"
+status = "skeleton"
+text = "A token that has left the battlefield can’t move to another zone or come back onto the battlefield. If such a token would change zones, it remains in its current zone instead. It ceases to exist the next time state-based actions are checked; see rule 704."

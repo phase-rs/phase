@@ -1,0 +1,5 @@
+rule = "711.1"
+section = 711
+title = "Leveler Cards - CR 711.1"
+status = "skeleton"
+text = "Each leveler card has a striated text box and three power/toughness boxes. The text box of a leveler card contains two level symbols."

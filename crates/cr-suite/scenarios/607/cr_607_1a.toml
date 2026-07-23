@@ -1,0 +1,5 @@
+rule = "607.1a"
+section = 607
+title = "Linked Abilities - CR 607.1a"
+status = "skeleton"
+text = "An ability printed on an object within another ability that grants that ability to that object is considered to be “printed on” that object for these purposes."

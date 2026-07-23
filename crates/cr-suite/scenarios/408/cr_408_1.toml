@@ -1,0 +1,5 @@
+rule = "408.1"
+section = 408
+status = "deferred"
+text = "The command zone is a game area reserved for certain specialized objects that have an overarching effect on the game."
+notes = "Deferred: needs command-zone setup (a commander / emblem). The in_command_zone assertion kind is wired; once a fixture can place an object in the command zone, assert in_command_zone."

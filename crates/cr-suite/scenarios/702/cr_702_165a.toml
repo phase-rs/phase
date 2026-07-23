@@ -1,0 +1,5 @@
+rule = "702.165a"
+section = 702
+title = "Keyword Abilities - CR 702.165a"
+status = "skeleton"
+text = "Backup is a triggered ability. “Backup N” means “When this creature enters, put N +1/+1 counters on target creature. If that’s another creature, it also gains the non-backup abilities of this creature printed below this one until end of turn.” Cards with backup have one or more abilities printed after the backup ability. (Some cards with backup also have abilities printed before the backup ability.)"

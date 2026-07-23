@@ -1,0 +1,5 @@
+rule = "701.51c"
+section = 701
+title = "Keyword Actions - CR 701.51c"
+status = "skeleton"
+text = "An ability which triggers whenever a player opens an Attraction triggers when that player puts an Attraction card onto the battlefield while performing the instruction in the above rule. If an effect prevents that Attraction from entering the battlefield or replaces entering the battlefield with another event, that ability doesn’t trigger."

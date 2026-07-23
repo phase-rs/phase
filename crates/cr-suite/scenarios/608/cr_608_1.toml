@@ -1,0 +1,38 @@
+rule = "608.1"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.1"
+status = "executable"
+text = "Each time all players pass in succession, the spell or ability on top of the stack resolves."
+notes = "Production path: cast Lightning Bolt then resolve_top; after resolution the top object leaves the stack and its effect (3 damage) is applied. Discriminates: reverting the resolve leaves the stack non-empty and life unchanged."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_player = 1
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = 17
+
+[[assertions]]
+kind = "stack_is_empty"

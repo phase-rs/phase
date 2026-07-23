@@ -1,0 +1,5 @@
+rule = "702.177a"
+section = 702
+title = "Keyword Abilities - CR 702.177a"
+status = "skeleton"
+text = "An exhaust ability is a special kind of activated ability. “Exhaust — [Cost]: [Effect]” means “[Cost]: [Effect]. Activate only once.”"

@@ -1,0 +1,5 @@
+rule = "616.1d"
+section = 616
+title = "Interaction of Replacement and/or Prevention Effects - CR 616.1d"
+status = "skeleton"
+text = "If any of the replacement and/or prevention effects would cause a card to enter the battlefield with its back face up, one of them must be chosen (See rule 701.27, “Transform,” and rule 701.28, “Convert.”). If not, proceed to 616.1e."

@@ -1,0 +1,5 @@
+rule = "205.3c"
+section = 205
+title = "Type Line - CR 205.3c"
+status = "skeleton"
+text = "If a card with multiple card types has one or more subtypes, each subtype is correlated to its appropriate card type."

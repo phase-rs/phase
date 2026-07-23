@@ -1,0 +1,5 @@
+rule = "113.6d"
+section = 113
+title = "Abilities - CR 113.6d"
+status = "skeleton"
+text = "An object’s ability that allows a player to pay an alternative cost rather than its mana cost or otherwise modifies what that particular object costs to cast functions on the stack."

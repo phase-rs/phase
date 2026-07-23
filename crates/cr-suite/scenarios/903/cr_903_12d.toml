@@ -1,0 +1,5 @@
+rule = "903.12d"
+section = 903
+title = "Commander - CR 903.12d"
+status = "skeleton"
+text = "A player’s deck must contain exactly 60 cards, including its commander. In other words, the minimum deck size and the maximum deck size are both 60."

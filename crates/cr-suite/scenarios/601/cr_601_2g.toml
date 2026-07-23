@@ -1,0 +1,5 @@
+rule = "601.2g"
+section = 601
+title = "Casting Spells - CR 601.2g"
+status = "skeleton"
+text = "If the total cost includes a mana payment, the player then has a chance to activate mana abilities (see rule 605, “Mana Abilities”). Mana abilities must be activated before costs are paid."

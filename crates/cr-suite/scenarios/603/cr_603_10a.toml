@@ -1,0 +1,5 @@
+rule = "603.10a"
+section = 603
+title = "Handling Triggered Abilities - CR 603.10a"
+status = "skeleton"
+text = "Some zone-change triggers look back in time. These are leaves-the-battlefield abilities, abilities that trigger when a player sacrifices a permanent, abilities that trigger when a card leaves a graveyard, and abilities that trigger when an object that all players can see is put into a hand or library."

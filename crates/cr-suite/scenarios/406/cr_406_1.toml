@@ -1,0 +1,5 @@
+rule = "406.1"
+section = 406
+status = "deferred"
+text = "The exile zone is a holding area for objects. Some effects exile an object without any way to return it, and others exile an object only temporarily."
+notes = "Deferred: needs a production exile transition (an exile effect). The runner has no exile step yet; once one exists, assert creature_zone with zone = Exile."

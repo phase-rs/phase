@@ -1,0 +1,5 @@
+rule = "514.1"
+section = 514
+status = "deferred"
+text = "First, if the active player's hand contains more cards than their maximum hand size, they discard enough cards to reduce their hand size to that number. This turn-based action doesn't use the stack."
+notes = "Deferred: needs a real advance into the cleanup step (and, for the damage-clearing half of CR 514.2, marked damage that then clears to 0). Once wired, assert creature_damage = 0 and hand_count_equals maximum hand size."

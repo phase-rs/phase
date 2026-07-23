@@ -1,0 +1,5 @@
+rule = "505.2"
+section = 505
+title = "Main Phase - CR 505.2"
+status = "skeleton"
+text = "The main phase has no steps, so a main phase ends when all players pass in succession while the stack is empty. (See rule 500.2.)"

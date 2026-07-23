@@ -1,0 +1,5 @@
+rule = "701.49b"
+section = 701
+title = "Keyword Actions - CR 701.49b"
+status = "skeleton"
+text = "If a player is instructed to venture into the dungeon while their venture marker is in any room except a dungeon card’s bottommost room, they choose an adjacent room, following the direction of an arrow pointing away from their current room. If there are multiple arrows pointing away from the room the player’s venture marker is in, they choose one of them to follow. They move their venture marker to that adjacent room."

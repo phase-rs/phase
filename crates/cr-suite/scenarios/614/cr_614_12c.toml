@@ -1,0 +1,5 @@
+rule = "614.12c"
+section = 614
+title = "Replacement Effects - CR 614.12c"
+status = "skeleton"
+text = "Some replacement effects cause a permanent to enter the battlefield with its controller’s choice of one of two abilities, each marked with an anchor word and preceded by a bullet point. “[Anchor word] — [ability]” means “As long as [anchor word] was chosen as this permanent entered the battlefield, this permanent has [ability].” The abilities preceded by anchor words are each linked to the ability that causes a player to choose between them. See rule 607, “Linked Abilities.”"

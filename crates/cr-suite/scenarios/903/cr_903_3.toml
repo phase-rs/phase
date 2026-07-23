@@ -1,0 +1,5 @@
+rule = "903.3"
+section = 903
+title = "Commander - CR 903.3"
+status = "skeleton"
+text = "Each deck has a legendary card designated as its commander. That card must be either (a) a creature card, (b) a Vehicle card, or (c) a Spacecraft card with one or more power/toughness boxes. This designation is not a characteristic of the object represented by the card; rather, it is an attribute of the card itself. The card retains this designation even when it changes zones."

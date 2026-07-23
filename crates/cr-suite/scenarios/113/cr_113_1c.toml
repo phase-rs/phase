@@ -1,0 +1,5 @@
+rule = "113.1c"
+section = 113
+title = "Abilities - CR 113.1c"
+status = "skeleton"
+text = "An ability can be an activated or triggered ability on the stack. This kind of ability is an object. (See section 6, “Spells, Abilities, and Effects.”)"

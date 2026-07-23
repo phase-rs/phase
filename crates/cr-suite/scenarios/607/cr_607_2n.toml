@@ -1,0 +1,5 @@
+rule = "607.2n"
+section = 607
+title = "Linked Abilities - CR 607.2n"
+status = "skeleton"
+text = "If an object has a static ability printed on it that allows a player to exile one or more cards “before you shuffle your deck to start the game” and an ability printed on it that refers to cards “exiled with cards named [this object’s name],” the second ability is linked to the first ability of any objects that had the specified name before the game began."

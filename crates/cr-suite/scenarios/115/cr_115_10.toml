@@ -1,0 +1,5 @@
+rule = "115.10"
+section = 115
+title = "Targets - CR 115.10"
+status = "skeleton"
+text = "Spells and abilities can affect objects and players they don’t target. In general, those objects and players aren’t chosen until the spell or ability resolves. See rule 608, “Resolving Spells and Abilities.”"

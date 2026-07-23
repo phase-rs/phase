@@ -1,0 +1,5 @@
+rule = "800.4"
+section = 800
+status = "deferred"
+text = "Unlike two-player games, multiplayer games can continue after one or more players have left the game."
+notes = "Deferred: needs a multiplayer (N>2) game plus a leave/concede action. Once wired, remove one player and assert the game is not over and their objects have left (CR 800.4a)."

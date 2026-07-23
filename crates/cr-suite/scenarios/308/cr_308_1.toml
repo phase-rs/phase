@@ -1,0 +1,5 @@
+rule = "308.1"
+section = 308
+title = "Tribals - CR 308.1"
+status = "skeleton"
+text = "Each kindred card has another card type. Casting and resolving a kindred card follows the rules for casting and resolving a card of the other card type."

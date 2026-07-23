@@ -1,0 +1,5 @@
+rule = "708.2b"
+section = 708
+title = "Face-Down Spells and Permanents - CR 708.2b"
+status = "skeleton"
+text = "A face-down permanent can’t be turned face-down. If a spell or ability attempts to turn a face-down permanent face down, nothing happens and that effect doesn’t change any of its characteristics or their copiable values."

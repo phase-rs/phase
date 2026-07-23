@@ -1,0 +1,5 @@
+rule = "702.110b"
+section = 702
+title = "Keyword Abilities - CR 702.110b"
+status = "skeleton"
+text = "A creature with exploit “exploits a creature” when the controller of the exploit ability sacrifices a creature as that ability resolves."

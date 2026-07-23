@@ -1,0 +1,5 @@
+rule = "101.3"
+section = 101
+title = "The Magic Golden Rules - CR 101.3"
+status = "skeleton"
+text = "Any part of an instruction that’s impossible to perform is ignored. (In many cases the card will specify consequences for this; if it doesn’t, there’s no effect.)"

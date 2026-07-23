@@ -1,0 +1,5 @@
+rule = "712.13a"
+section = 712
+title = "Double-Faced Cards - CR 712.13a"
+status = "skeleton"
+text = "Some abilities may cause a double-faced spell with its front face up on the stack to enter the battlefield transformed or converted. If the back face of the card that represents that spell is an instant or sorcery face, or that spell is a copy of a double-faced card created with an instant or sorcery back face, it doesn’t enter the battlefield, and is instead put into its owner’s graveyard."

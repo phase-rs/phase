@@ -1,0 +1,5 @@
+rule = "706.3b"
+section = 706
+title = "Rolling a Die - CR 706.3b"
+status = "skeleton"
+text = "An instruction to roll one or more dice, any instructions to modify that roll printed in the same paragraph, any additional instructions based on the result of the roll, and the associated results table are all part of one ability."

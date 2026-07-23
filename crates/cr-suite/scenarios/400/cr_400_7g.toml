@@ -1,0 +1,5 @@
+rule = "400.7g"
+section = 400
+title = "General (Zones) - CR 400.7g"
+status = "skeleton"
+text = "If an effect grants a nonland card an ability that allows it to be cast, that ability will continue to apply to the new object that card became after it moved to the stack as a result of being cast this way."

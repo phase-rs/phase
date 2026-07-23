@@ -1,0 +1,5 @@
+rule = "508.1e"
+section = 508
+title = "Declare Attackers Step - CR 508.1e"
+status = "skeleton"
+text = "If any of the chosen creatures have banding or a “bands with other” ability, the active player announces which creatures, if any, are banded with which. (See rule 702.22, “Banding.”)"

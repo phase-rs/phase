@@ -1,0 +1,5 @@
+rule = "701.6a"
+section = 701
+title = "Keyword Actions - CR 701.6a"
+status = "skeleton"
+text = "To counter a spell or ability means to cancel it, removing it from the stack. It doesn’t resolve and none of its effects occur. A countered spell is put into its owner’s graveyard."

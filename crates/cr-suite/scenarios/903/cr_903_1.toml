@@ -1,0 +1,5 @@
+rule = "903.1"
+section = 903
+status = "deferred"
+text = "In the Commander variant, each deck is led by a legendary creature designated as that deck's commander."
+notes = "Deferred: needs Commander-format setup (GameScenario::with_commander) and command-zone assertions. Once wired, assert the commander is in_command_zone at game start."

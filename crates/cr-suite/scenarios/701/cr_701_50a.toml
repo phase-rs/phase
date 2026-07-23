@@ -1,0 +1,5 @@
+rule = "701.50a"
+section = 701
+title = "Keyword Actions - CR 701.50a"
+status = "skeleton"
+text = "Certain spells and abilities instruct a permanent to connive. To do so, that permanent’s controller draws a card, then discards a card. If a nonland card is discarded this way, that player puts a +1/+1 counter on the conniving permanent."

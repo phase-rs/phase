@@ -1,0 +1,5 @@
+rule = "601.3a"
+section = 601
+title = "Casting Spells - CR 601.3a"
+status = "skeleton"
+text = "If an effect prohibits a player from casting a spell with certain qualities, that player may consider any choices to be made during that spell’s proposal that may cause those qualities to change. If any such choices could cause that effect to no longer prohibit that player from casting that spell, the player may begin to cast the spell, ignoring the effect."

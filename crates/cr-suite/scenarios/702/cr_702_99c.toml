@@ -1,0 +1,5 @@
+rule = "702.99c"
+section = 702
+title = "Keyword Abilities - CR 702.99c"
+status = "skeleton"
+text = "The card with cipher remains encoded on the chosen creature as long as the card with cipher remains exiled and the creature remains on the battlefield. The card remains encoded on that object even if it changes controller or stops being a creature, as long as it remains on the battlefield."

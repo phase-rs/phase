@@ -1,0 +1,5 @@
+rule = "729.4a"
+section = 729
+title = "Daybound and Nightbound - CR 729.4a"
+status = "skeleton"
+text = "Some effects can bring cards into a game from outside of it. If a card is brought into a subgame from a main game, abilities in the main game that trigger on objects leaving a main-game zone will trigger, but they won’t be put onto the stack until the main game resumes."

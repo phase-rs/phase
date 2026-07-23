@@ -1,0 +1,5 @@
+rule = "509.1i"
+section = 509
+title = "Declare Blockers Step - CR 509.1i"
+status = "skeleton"
+text = "Any abilities that trigger on blockers being declared trigger. See rule 509.2a for more information."

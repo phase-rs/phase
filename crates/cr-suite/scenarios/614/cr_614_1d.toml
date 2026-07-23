@@ -1,0 +1,5 @@
+rule = "614.1d"
+section = 614
+title = "Replacement Effects - CR 614.1d"
+status = "skeleton"
+text = "Continuous effects that read “[This permanent] enters . . .” or “[Objects] enter [the battlefield] . . .” are replacement effects."

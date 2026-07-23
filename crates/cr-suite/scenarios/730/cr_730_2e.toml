@@ -1,0 +1,5 @@
+rule = "730.2e"
+section = 730
+title = "Miscellaneous - CR 730.2e"
+status = "skeleton"
+text = "If a merged permanent contains face-up and face-down components, the permanent’s status is determined by its topmost component. If a face-down permanent becomes a face-up permanent as a result of an object merging with it, other effects don’t count it as being turned face up."

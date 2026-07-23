@@ -1,0 +1,5 @@
+rule = "514.3"
+section = 514
+title = "Cleanup Step - CR 514.3"
+status = "skeleton"
+text = "Normally, no player receives priority during the cleanup step, so no spells can be cast and no abilities can be activated. However, this rule is subject to the following exception:"

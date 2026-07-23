@@ -1,0 +1,5 @@
+rule = "116.2k"
+section = 116
+title = "Special Actions - CR 116.2k"
+status = "skeleton"
+text = "A player who has a card with plot in their hand may exile that card. This is a special action. A player can take this action any time they have priority during their own turn while the stack is empty. See rule 702.170, “Plot.”"

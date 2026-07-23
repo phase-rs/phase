@@ -1,0 +1,5 @@
+rule = "101.4c"
+section = 101
+title = "The Magic Golden Rules - CR 101.4c"
+status = "skeleton"
+text = "If a player would make more than one choice at the same time, the player makes the choices in the order specified. If no order is specified, the player chooses the order."

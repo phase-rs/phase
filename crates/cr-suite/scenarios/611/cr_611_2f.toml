@@ -1,0 +1,5 @@
+rule = "611.2f"
+section = 611
+title = "Continuous Effects - CR 611.2f"
+status = "skeleton"
+text = "Some spells and abilities generate a continuous effect that modifies the characteristics of the next spell a player casts, the next spell that fulfills certain conditions a player casts during some duration, or similar. These effects do not begin immediately. Rather, they begin to apply at the time that player next puts an appropriate spell on the stack, and they apply to that spell. See rule 601.2a."

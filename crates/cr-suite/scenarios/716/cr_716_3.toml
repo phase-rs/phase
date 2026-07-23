@@ -1,0 +1,5 @@
+rule = "716.3"
+section = 716
+title = "Class Cards - CR 716.3"
+status = "skeleton"
+text = "Any ability printed on a Class card that isn’t preceded by a class level bar is treated normally. In particular, the Class has the ability printed in its top text box section at all times. That ability may affect the game if it’s a static ability, it may trigger if it’s a triggered ability, and it can be activated if it’s an activated ability."

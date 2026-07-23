@@ -1,0 +1,5 @@
+rule = "122.1h"
+section = 122
+title = "Counters - CR 122.1h"
+status = "skeleton"
+text = "One or more finality counters on a permanent create a single replacement effect that stops the permanent from going to the graveyard. That effect is “If this permanent would be put into a graveyard from the battlefield, exile it instead.”"

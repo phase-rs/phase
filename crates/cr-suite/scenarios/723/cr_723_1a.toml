@@ -1,0 +1,5 @@
+rule = "723.1a"
+section = 723
+title = "The Monarch - CR 723.1a"
+status = "skeleton"
+text = "Multiple player-controlling effects that affect the same player overwrite each other. The last one to be created is the one that works."

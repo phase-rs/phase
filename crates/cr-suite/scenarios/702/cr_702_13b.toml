@@ -1,0 +1,5 @@
+rule = "702.13b"
+section = 702
+title = "Keyword Abilities - CR 702.13b"
+status = "skeleton"
+text = "A creature with intimidate can’t be blocked except by artifact creatures and/or creatures that share a color with it. (See rule 509, “Declare Blockers Step.”)"

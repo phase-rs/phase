@@ -1,0 +1,5 @@
+rule = "701.59c"
+section = 701
+title = "Keyword Actions - CR 701.59c"
+status = "skeleton"
+text = "A spell that has an ability that allows a player to collect evidence as an additional cost to cast it may have another ability that refers to whether evidence was collected. These abilities are linked. See rule 607, “Linked Abilities.”"

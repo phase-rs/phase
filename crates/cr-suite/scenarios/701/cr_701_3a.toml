@@ -1,0 +1,5 @@
+rule = "701.3a"
+section = 701
+title = "Keyword Actions - CR 701.3a"
+status = "skeleton"
+text = "To attach an Aura, Equipment, or Fortification to an object or player means to take it from where it currently is and put it onto that object or player. If something is attached to a permanent on the battlefield, it’s customary to place it so that it’s physically touching the permanent. An Aura, Equipment, or Fortification can’t be attached to an object or player it couldn’t enchant, equip, or fortify, respectively."

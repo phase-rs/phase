@@ -1,0 +1,5 @@
+rule = "613.1"
+section = 613
+status = "deferred"
+text = "The values of an object's characteristics are determined by starting with the actual object, then applying continuous effects in a series of layers."
+notes = "Deferred: the existing keyword/creature assertions already read post-layer values, so single-effect layer output is covered implicitly. A discriminating layer-ordering fixture needs two conflicting continuous effects and a characteristic read; not yet wired."

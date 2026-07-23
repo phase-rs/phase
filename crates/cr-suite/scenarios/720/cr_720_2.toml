@@ -1,0 +1,5 @@
+rule = "720.2"
+section = 720
+title = "Taking Shortcuts - CR 720.2"
+status = "skeleton"
+text = "The text that appears in the inset frame on the left defines alternative characteristics that the object may have while it’s a spell. The card’s normal characteristics appear as usual, although with a smaller text box on the right."

@@ -1,0 +1,5 @@
+rule = "508.3b"
+section = 508
+title = "Declare Attackers Step - CR 508.3b"
+status = "skeleton"
+text = "An ability that reads “Whenever [a player, planeswalker, or battle] is attacked, . . .” triggers if one or more creatures are declared as attackers attacking that player or permanent. It won’t trigger if a creature is put onto the battlefield attacking that player or permanent."

@@ -1,0 +1,5 @@
+rule = "712.21a"
+section = 712
+title = "Double-Faced Cards - CR 712.21a"
+status = "skeleton"
+text = "If a melded permanent is put into its owner’s graveyard or library, that player may arrange the two cards in any order. If it’s put into its owner’s library, that player doesn’t reveal the order."

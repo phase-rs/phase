@@ -1,0 +1,5 @@
+rule = "111.4"
+section = 111
+title = "Tokens - CR 111.4"
+status = "skeleton"
+text = "A spell or ability that creates a token sets both its name and its subtype(s). If the spell or ability doesn’t specify the name of the token, its name is the same as its subtype(s) plus the word “Token.” Once a token is on the battlefield, changing its name doesn’t change its subtype(s), and vice versa."

@@ -1,0 +1,5 @@
+rule = "726.5"
+section = 726
+title = "Restarting the Game - CR 726.5"
+status = "skeleton"
+text = "If the player who currently has the initiative is instructed to take the initiative, this causes the last triggered ability in 726.2 to trigger but does not create a second initiative designation."

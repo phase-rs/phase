@@ -1,0 +1,31 @@
+rule = "702.15"
+section = 702
+title = "Keyword Abilities — CR 702.15 (Lifelink)"
+status = "executable"
+text = "Lifelink is a static ability; damage dealt by a source with lifelink also causes its controller to gain that much life."
+notes = "Presence read via engine has_keyword. The life-gain-on-damage proof (CR 702.15b) is deferred (needs a lifelink combat/damage step)."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "linker"
+player = 0
+name = "Lifelink Body"
+power = 2
+toughness = 2
+keywords = ["Lifelink"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "linker"
+keyword = "Lifelink"

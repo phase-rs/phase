@@ -1,0 +1,5 @@
+rule = "701.22d"
+section = 701
+title = "Keyword Actions - CR 701.22d"
+status = "skeleton"
+text = "An ability that triggers whenever a player scries triggers after the process described in rule 701.22a is complete, even if some or all of those actions were impossible."

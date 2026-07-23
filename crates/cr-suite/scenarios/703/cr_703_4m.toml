@@ -1,0 +1,5 @@
+rule = "703.4m"
+section = 703
+title = "Turn-Based Actions - CR 703.4m"
+status = "skeleton"
+text = "Immediately after combat damage has been assigned during the combat damage step, all combat damage is dealt simultaneously. See rule 510.2."

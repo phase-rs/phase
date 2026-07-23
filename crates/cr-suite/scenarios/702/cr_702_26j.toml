@@ -1,0 +1,5 @@
+rule = "702.26j"
+section = 702
+title = "Keyword Abilities - CR 702.26j"
+status = "skeleton"
+text = "Abilities that trigger when a permanent becomes attached or unattached from an object or player don’t trigger when that permanent phases in or out."

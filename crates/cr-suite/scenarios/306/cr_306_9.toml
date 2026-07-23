@@ -1,0 +1,5 @@
+rule = "306.9"
+section = 306
+title = "Planeswalkers - CR 306.9"
+status = "skeleton"
+text = "If a planeswalker’s loyalty is 0, it’s put into its owner’s graveyard. (This is a state-based action. See rule 704.)"

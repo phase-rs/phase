@@ -1,0 +1,5 @@
+rule = "702.16n"
+section = 702
+title = "Keyword Abilities - CR 702.16n"
+status = "skeleton"
+text = "Some Auras both give the enchanted creature protection from a quality and say “this effect doesn’t remove” either that specific Aura or all Auras. This means that the specified Auras aren’t put into their owners’ graveyards as a state-based action. If the creature has other instances of protection from the same quality, those instances affect Auras as normal."

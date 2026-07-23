@@ -1,0 +1,5 @@
+rule = "303.4g"
+section = 303
+title = "Enchantments - CR 303.4g"
+status = "skeleton"
+text = "If an Aura is entering the battlefield and there is no legal object or player for it to enchant, the Aura remains in its current zone, unless that zone is the stack. In that case, the Aura is put into its owner’s graveyard instead of entering the battlefield. If the Aura is a token, it isn’t created."

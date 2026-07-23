@@ -1,0 +1,5 @@
+rule = "121.1"
+section = 121
+title = "Drawing a Card - CR 121.1"
+status = "skeleton"
+text = "A player draws a card by putting the top card of their library into their hand. This is done as a turn-based action during each player’s draw step. It may also be done as part of a cost or effect of a spell or ability."

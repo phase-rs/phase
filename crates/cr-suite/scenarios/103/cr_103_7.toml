@@ -1,0 +1,5 @@
+rule = "103.7"
+section = 103
+title = "Starting the Game - CR 103.7"
+status = "skeleton"
+text = "In a Planechase game, the starting player moves the top card of their planar deck off that planar deck and turns it face up. If it’s a phenomenon card, the player puts that card on the bottom of their planar deck and repeats this process until a plane card is turned face up. The face-up plane card becomes the starting plane. (See rule 901, “Planechase.”)"

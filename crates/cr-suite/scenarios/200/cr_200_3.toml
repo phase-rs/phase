@@ -1,0 +1,5 @@
+rule = "200.3"
+section = 200
+title = "General (Parts of a Card) - CR 200.3"
+status = "skeleton"
+text = "Some objects that aren’t cards (tokens, copies of cards, and copies of spells) have some of the parts of a card, but only the ones that are also characteristics. See rule 111 and rule 707."

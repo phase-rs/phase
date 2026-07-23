@@ -1,0 +1,5 @@
+rule = "701.42a"
+section = 701
+title = "Keyword Actions - CR 701.42a"
+status = "skeleton"
+text = "Meld is a keyword action that appears in an ability on one card in a meld pair. To meld the two cards in a meld pair, put them onto the battlefield with their back faces up and combined. The resulting permanent is a single object represented by two cards. See rule 712, “Double-Faced Cards.”"

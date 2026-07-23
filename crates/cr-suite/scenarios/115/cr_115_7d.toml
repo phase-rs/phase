@@ -1,0 +1,5 @@
+rule = "115.7d"
+section = 115
+title = "Targets - CR 115.7d"
+status = "skeleton"
+text = "If an effect allows a player to “choose new targets” for a spell or ability, the player may leave any number of the targets unchanged, even if those targets would be illegal. If the player chooses to change some or all of the targets, the new targets must be legal and must not cause any unchanged targets to become illegal."

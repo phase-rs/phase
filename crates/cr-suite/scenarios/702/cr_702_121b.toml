@@ -1,0 +1,5 @@
+rule = "702.121b"
+section = 702
+title = "Keyword Abilities - CR 702.121b"
+status = "skeleton"
+text = "If a creature has multiple instances of melee, each triggers separately."

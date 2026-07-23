@@ -1,0 +1,5 @@
+rule = "718.1"
+section = 718
+title = "Prototype Cards - CR 718.1"
+status = "skeleton"
+text = "Prototype cards have a two-part frame, with a smaller frame inset below the type line of the card. The inset frame contains the prototype keyword ability as well as a second set of power, toughness, and mana cost characteristics."

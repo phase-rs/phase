@@ -1,0 +1,5 @@
+rule = "701.10f"
+section = 701
+title = "Keyword Actions - CR 701.10f"
+status = "skeleton"
+text = "To double the amount of a type of mana in a player’s mana pool, that player adds an amount of mana of that type equal to the amount they already have."

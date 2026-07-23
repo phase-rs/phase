@@ -1,0 +1,31 @@
+rule = "702.9"
+section = 702
+title = "Keyword Abilities — CR 702.9 (Flying)"
+status = "executable"
+text = "Flying is an evergreen evasion keyword ability."
+notes = "Reads the post-CR-613-layer keyword set via engine has_keyword. Discriminates: a creature placed without Flying would fail this assertion."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "flier"
+player = 0
+name = "Wind Drake"
+power = 2
+toughness = 2
+keywords = ["Flying"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "flier"
+keyword = "Flying"

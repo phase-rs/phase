@@ -1,0 +1,5 @@
+rule = "117.2a"
+section = 117
+title = "Timing and Priority - CR 117.2a"
+status = "skeleton"
+text = "Triggered abilities can trigger at any time, including while a spell is being cast, an ability is being activated, or a spell or ability is resolving. (See rule 603, “Handling Triggered Abilities.”) However, nothing actually happens at the time an ability triggers. Each time a player would receive priority, each ability that has triggered but hasn’t yet been put on the stack is put on the stack. See rule 117.5."

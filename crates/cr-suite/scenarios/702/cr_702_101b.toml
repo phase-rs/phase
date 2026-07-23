@@ -1,0 +1,5 @@
+rule = "702.101b"
+section = 702
+title = "Keyword Abilities - CR 702.101b"
+status = "skeleton"
+text = "If a permanent has multiple instances of extort, each triggers separately."

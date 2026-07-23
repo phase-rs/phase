@@ -1,0 +1,5 @@
+rule = "702.22j"
+section = 702
+title = "Keyword Abilities - CR 702.22j"
+status = "skeleton"
+text = "During the combat damage step, if an attacking creature is being blocked by a creature with banding, or by both a [quality] creature with “bands with other [quality]” and another [quality] creature, the defending player (rather than the active player) chooses how the attacking creature’s damage is assigned. That player can divide that creature’s combat damage as they choose among any creatures blocking it. This is an exception to the procedure described in rule 510.1c."

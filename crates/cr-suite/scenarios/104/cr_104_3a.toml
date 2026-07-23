@@ -1,0 +1,6 @@
+rule = "104.3a"
+section = 104
+title = "Ending the Game — CR 104.3a (concede)"
+status = "deferred"
+text = "A player can concede the game at any time. A player who concedes leaves the game immediately. That player loses the game."
+notes = "Concede is CR 104.3a — NOT CR 104.2a (which is winning because all opponents left). Deferred: the scenario runner has no production concede action wired yet. Once an engine concede GameAction is exposed, this becomes executable: player 1 concedes → game_over with winner = 0."

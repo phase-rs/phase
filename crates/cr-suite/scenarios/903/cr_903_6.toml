@@ -1,0 +1,5 @@
+rule = "903.6"
+section = 903
+title = "Commander - CR 903.6"
+status = "skeleton"
+text = "At the start of the game, each player puts their commander from their deck face up into the command zone. Then each player shuffles the remaining cards of their deck so that the cards are in a random order. Those cards become the player’s library."

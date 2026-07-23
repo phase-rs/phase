@@ -1,0 +1,5 @@
+rule = "103.6a"
+section = 103
+title = "Starting the Game - CR 103.6a"
+status = "skeleton"
+text = "If a card allows a player to begin the game with that card on the battlefield, the player taking this action puts that card onto the battlefield."

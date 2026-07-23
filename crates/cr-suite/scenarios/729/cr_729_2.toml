@@ -1,0 +1,5 @@
+rule = "729.2"
+section = 729
+title = "Daybound and Nightbound - CR 729.2"
+status = "skeleton"
+text = "As the subgame starts, an entirely new set of game zones is created. Each player takes all the cards in their main-game library, moves them to their subgame library, and shuffles them. No other cards in a main-game zone are moved to their corresponding subgame zone, except as specified in rules 729.2a–c. Randomly determine which player goes first. The subgame proceeds like a normal game, following all other rules in rule 103, “Starting the Game.”"

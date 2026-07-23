@@ -1,0 +1,5 @@
+rule = "612.2a"
+section = 612
+title = "Text-Changing Effects - CR 612.2a"
+status = "skeleton"
+text = "Most spells and abilities that create creature tokens use creature types to define both the creature types and the names of the tokens. A text-changing effect that affects such a spell or an object with such an ability can change these words because they’re being used as creature types, even though they’re also being used as names."

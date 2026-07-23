@@ -1,0 +1,5 @@
+rule = "400.4a"
+section = 400
+title = "General (Zones) - CR 400.4a"
+status = "skeleton"
+text = "If an instant or sorcery card would enter the battlefield, it remains in its previous zone."

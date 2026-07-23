@@ -1,0 +1,5 @@
+rule = "707.2a"
+section = 707
+title = "Copying Objects - CR 707.2a"
+status = "skeleton"
+text = "A copy acquires the color of the object it’s copying because that value is derived from its mana cost or color indicator. A copy acquires the abilities of the object it’s copying because those values are derived from its rules text. A copy doesn’t wind up with two values of each ability (that is, it doesn’t copy the object’s abilities and its rules text, then have that rules text define a new set of abilities)."

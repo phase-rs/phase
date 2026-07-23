@@ -1,0 +1,5 @@
+rule = "702.154d"
+section = 702
+title = "Keyword Abilities - CR 702.154d"
+status = "skeleton"
+text = "Multiple instances of enlist on a single creature function independently. The triggered ability represented by each instance of enlist triggers only once and only for the cost associated with that enlist ability."

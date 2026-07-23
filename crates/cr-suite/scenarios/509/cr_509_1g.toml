@@ -1,0 +1,5 @@
+rule = "509.1g"
+section = 509
+title = "Declare Blockers Step - CR 509.1g"
+status = "skeleton"
+text = "Each chosen creature still controlled by the defending player becomes a blocking creature. Each one is blocking the attacking creatures chosen for it. It remains a blocking creature until it’s removed from combat or the combat phase ends, whichever comes first. See rule 506.4."

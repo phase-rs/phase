@@ -1,0 +1,5 @@
+rule = "113.6n"
+section = 113
+title = "Abilities - CR 113.6n"
+status = "skeleton"
+text = "An ability that modifies the rules for deck construction functions before the game begins. Such an ability modifies not just the Comprehensive Rules, but also the Magic: The Gathering Tournament Rules and any other documents that set the deck construction rules for a specific format. However, such an ability can’t affect the format legality of a card, including whether it’s banned or restricted. The current Magic: The Gathering Tournament Rules can be found at WPN.Wizards.com/en/rules-documents."

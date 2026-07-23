@@ -1,0 +1,5 @@
+rule = "201.5c"
+section = 201
+title = "Name - CR 201.5c"
+status = "skeleton"
+text = "Text printed on some cards refers to that card by a shortened version of its name. Instances of a card’s shortened name used in this manner are treated as though they used the card’s full name."

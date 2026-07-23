@@ -1,0 +1,5 @@
+rule = "613.1b"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.1b"
+status = "skeleton"
+text = "Layer 2: Control-changing effects are applied."

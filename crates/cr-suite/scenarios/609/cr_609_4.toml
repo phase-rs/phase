@@ -1,0 +1,5 @@
+rule = "609.4"
+section = 609
+title = "Effects - CR 609.4"
+status = "skeleton"
+text = "Some effects state that a player may do something “as though” some condition were true or a creature can do something “as though” some condition were true. This applies only to the stated effect. For purposes of that effect, treat the game exactly as if the stated condition were true. For all other purposes, treat the game normally."

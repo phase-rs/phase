@@ -1,0 +1,5 @@
+rule = "208.1"
+section = 208
+title = "Power/Toughness - CR 208.1"
+status = "skeleton"
+text = "A creature card has two numbers separated by a slash printed in its lower right corner. The first number is its power (the amount of damage it deals in combat); the second is its toughness (the amount of damage needed to destroy it). For example, 2/3 means the object has power 2 and toughness 3. Power and toughness can be modified or set to particular values by effects."

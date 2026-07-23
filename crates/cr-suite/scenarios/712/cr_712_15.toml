@@ -1,0 +1,5 @@
+rule = "712.15"
+section = 712
+title = "Double-Faced Cards - CR 712.15"
+status = "skeleton"
+text = "If an effect allows a player to cast a double-faced card as a face-down creature spell, or if a double-faced card enters the battlefield face down, it will have the characteristics given to it by the rule or effect that caused it to be face down. That card remains hidden, using a face-down substitute card (see rule 713) and/or opaque sleeves. See rule 708, “Face-Down Spells and Permanents.”"

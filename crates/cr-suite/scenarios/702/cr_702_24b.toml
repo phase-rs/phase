@@ -1,0 +1,5 @@
+rule = "702.24b"
+section = 702
+title = "Keyword Abilities - CR 702.24b"
+status = "skeleton"
+text = "If a permanent has multiple instances of cumulative upkeep, each triggers separately. However, the age counters are not connected to any particular ability; each cumulative upkeep ability will count the total number of age counters on the permanent at the time that ability resolves."

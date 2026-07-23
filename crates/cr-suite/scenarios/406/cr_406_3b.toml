@@ -1,0 +1,5 @@
+rule = "406.3b"
+section = 406
+title = "Exile - CR 406.3b"
+status = "skeleton"
+text = "Some spells and abilities allow a player to cast spells with certain qualities from among face-down cards in exile. A player may cast such a spell only if they are allowed to look at the face-down card in exile and if the resulting spell has the specified qualities."

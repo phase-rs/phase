@@ -1,0 +1,5 @@
+rule = "405.4"
+section = 405
+title = "Stack - CR 405.4"
+status = "skeleton"
+text = "Each spell has all the characteristics of the card associated with it. Each activated or triggered ability that’s on the stack has the text of the ability that created it and no other characteristics. The controller of a spell is the player who cast it. The controller of an activated ability is the player who activated it. The controller of a triggered ability is the player who controlled the ability’s source when it triggered, unless it’s a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."

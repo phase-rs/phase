@@ -1,0 +1,5 @@
+rule = "302.1"
+section = 302
+status = "deferred"
+text = "A player who has priority may cast a creature card from their hand during a main phase of their turn when the stack is empty."
+notes = "Deferred: the runner's only production cast step is Lightning Bolt (an instant). Once a generic creature-cast step exists, cast a creature and assert creature_on_battlefield after it resolves."

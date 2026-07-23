@@ -1,0 +1,5 @@
+rule = "604.3"
+section = 604
+title = "Handling Static Abilities - CR 604.3"
+status = "skeleton"
+text = "Some static abilities are characteristic-defining abilities. A characteristic-defining ability conveys information about an object’s characteristics that would normally be found elsewhere on that object (such as in its mana cost, type line, or power/toughness box). Characteristic-defining abilities can add to or override information found elsewhere on that object. Characteristic-defining abilities function in all zones. They also function outside the game and before the game begins."

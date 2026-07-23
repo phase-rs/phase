@@ -1,0 +1,5 @@
+rule = "701.54e"
+section = 701
+title = "Keyword Actions - CR 701.54e"
+status = "skeleton"
+text = "Some abilities check to see if a creature “is your Ring-bearer.” For the purposes of those abilities, that condition is true if that creature is on the battlefield under your control and has the Ring-bearer designation."

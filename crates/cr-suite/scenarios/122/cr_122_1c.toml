@@ -1,0 +1,5 @@
+rule = "122.1c"
+section = 122
+title = "Counters - CR 122.1c"
+status = "skeleton"
+text = "One or more shield counters on a permanent create a single replacement effect and a single prevention effect that protect the permanent. These effects are “If this permanent would be destroyed as the result of an effect, instead remove a shield counter from it” and “If damage would be dealt to this permanent, prevent that damage and remove a shield counter from it.” See rule 614, “Replacement Effects,” and rule 615, “Prevention Effects.”"

@@ -1,0 +1,5 @@
+rule = "700.3c"
+section = 700
+title = "General (Additional Rules) - CR 700.3c"
+status = "skeleton"
+text = "Objects grouped into piles don’t leave the zone they’re currently in. If cards in a graveyard are split into piles, the order of the graveyard must be maintained."

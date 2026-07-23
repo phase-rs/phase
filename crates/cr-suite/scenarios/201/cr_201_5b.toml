@@ -1,0 +1,5 @@
+rule = "201.5b"
+section = 201
+title = "Name - CR 201.5b"
+status = "skeleton"
+text = "If an ability of an object refers to that object by name, and an object with a different name gains that ability, each instance of the first name in the gained ability that refers to the first object by name should be treated as the second name."

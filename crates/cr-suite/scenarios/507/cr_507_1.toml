@@ -1,0 +1,5 @@
+rule = "507.1"
+section = 507
+title = "Beginning of Combat Step - CR 507.1"
+status = "skeleton"
+text = "First, if the game being played is a multiplayer game in which the active player’s opponents don’t all automatically become defending players, the active player chooses one of their opponents. That player becomes the defending player. This turn-based action doesn’t use the stack. (See rule 506.2.)"

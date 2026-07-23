@@ -1,0 +1,5 @@
+rule = "122.1"
+section = 122
+status = "deferred"
+text = "A counter is a marker placed on an object or player that modifies its characteristics and/or interacts with a rule, ability, or effect."
+notes = "Deferred: needs a production counter-placement path (e.g. an infect source for poison counters, or a +1/+1 counter effect). The runner cannot yet place counters through a production step; once one exists, assert player_poison or a counter-count read."

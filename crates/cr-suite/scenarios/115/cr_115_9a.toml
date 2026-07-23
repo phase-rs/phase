@@ -1,0 +1,5 @@
+rule = "115.9a"
+section = 115
+title = "Targets - CR 115.9a"
+status = "skeleton"
+text = "An object that looks for a “[spell or ability] with [a number of] targets” checks the number of times any object or player was chosen as the target of that spell or ability when it was put on the stack, not the number of its targets that are currently legal. If the same object or player became a target more than once, each of those instances is counted separately."

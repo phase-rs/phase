@@ -1,0 +1,5 @@
+rule = "701.21a"
+section = 701
+title = "Keyword Actions - CR 701.21a"
+status = "skeleton"
+text = "To sacrifice a permanent, its controller moves it from the battlefield directly to its owner’s graveyard. A player can’t sacrifice something that isn’t a permanent, or something that’s a permanent they don’t control. Sacrificing a permanent doesn’t destroy it, so regeneration or other effects that replace destruction can’t affect this action."

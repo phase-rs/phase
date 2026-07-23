@@ -1,0 +1,5 @@
+rule = "610.4b"
+section = 610
+title = "One-Shot Effects - CR 610.4b"
+status = "skeleton"
+text = "If a resolving spell or activated ability creates the initial one-shot effect that causes the permanent to phase out, and the specified event has already occurred before that one-shot effect would occur but after that spell or ability was put onto the stack, the permanent doesn’t phase out."

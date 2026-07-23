@@ -1,0 +1,5 @@
+rule = "702.44c"
+section = 702
+title = "Keyword Abilities - CR 702.44c"
+status = "skeleton"
+text = "Sunburst can also be used to set a variable number for another ability. If the keyword is used in this way, it doesn’t matter whether the ability is on a creature spell or on a noncreature spell."

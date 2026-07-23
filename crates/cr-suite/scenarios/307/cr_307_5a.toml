@@ -1,0 +1,5 @@
+rule = "307.5a"
+section = 307
+title = "Sorceries - CR 307.5a"
+status = "skeleton"
+text = "Similarly, if an effect checks to see if a spell was cast “any time a sorcery couldn’t have been cast,” it’s checking only whether the spell’s controller cast it without having priority, during a phase other than their main phase, or while another object was on the stack."

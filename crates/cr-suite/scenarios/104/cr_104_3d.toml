@@ -1,0 +1,5 @@
+rule = "104.3d"
+section = 104
+title = "Ending the Game - CR 104.3d"
+status = "skeleton"
+text = "If a player has ten or more poison counters, that player loses the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"

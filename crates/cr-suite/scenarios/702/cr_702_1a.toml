@@ -1,0 +1,5 @@
+rule = "702.1a"
+section = 702
+title = "Keyword Abilities - CR 702.1a"
+status = "skeleton"
+text = "If an effect refers to a “[keyword ability] cost,” it refers only to the variable costs for that keyword."

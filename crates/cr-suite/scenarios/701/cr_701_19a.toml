@@ -1,0 +1,5 @@
+rule = "701.19a"
+section = 701
+title = "Keyword Actions - CR 701.19a"
+status = "skeleton"
+text = "If the effect of a resolving spell or ability regenerates a permanent, it creates a replacement effect that protects the permanent the next time it would be destroyed this turn. In this case, “Regenerate [permanent]” means “The next time [permanent] would be destroyed this turn, instead remove all damage marked on it and its controller taps it. If it’s an attacking or blocking creature, remove it from combat.”"

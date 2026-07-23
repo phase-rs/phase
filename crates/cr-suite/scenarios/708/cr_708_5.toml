@@ -1,0 +1,5 @@
+rule = "708.5"
+section = 708
+title = "Face-Down Spells and Permanents - CR 708.5"
+status = "skeleton"
+text = "At any time, you may look at a face-down spell you control on the stack or a face-down permanent you control (even if it’s phased out). You can’t look at face-down cards in any other zone or face-down spells or permanents controlled by another player."

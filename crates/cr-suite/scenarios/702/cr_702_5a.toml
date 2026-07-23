@@ -1,0 +1,5 @@
+rule = "702.5a"
+section = 702
+title = "Keyword Abilities - CR 702.5a"
+status = "skeleton"
+text = "Enchant is a static ability, written “Enchant [object or player].” The enchant ability restricts what an Aura spell can target and what an Aura can enchant."

@@ -1,0 +1,5 @@
+rule = "606.4"
+section = 606
+title = "Loyalty Abilities - CR 606.4"
+status = "skeleton"
+text = "The cost to activate a loyalty ability of a permanent is to put on or remove from that permanent a certain number of loyalty counters, as shown by the loyalty symbol in the ability’s cost. This cost may be modified by other effects."

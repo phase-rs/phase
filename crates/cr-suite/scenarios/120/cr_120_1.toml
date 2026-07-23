@@ -1,0 +1,49 @@
+rule = "120.1"
+section = 120
+title = "Damage — CR 120.1"
+status = "executable"
+text = "Objects can deal damage to creatures, planeswalkers, battles, and players."
+notes = "Production path: Lightning Bolt deals 3 to a 4/4 creature (nonlethal). Marked damage is observable and the creature survives. Discriminates: no damage marked if the bolt didn't resolve onto the creature."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "wall"
+player = 1
+name = "Big Body"
+power = 4
+toughness = 4
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_creature = "wall"
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "creature_damage"
+creature = "wall"
+damage = 3
+
+[[assertions]]
+kind = "creature_on_battlefield"
+creature = "wall"
+
+[[assertions]]
+kind = "stack_is_empty"

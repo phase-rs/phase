@@ -1,0 +1,31 @@
+rule = "702.17"
+section = 702
+title = "Keyword Abilities — CR 702.17 (Reach)"
+status = "executable"
+text = "Reach is a static ability; a creature with reach can block creatures with flying."
+notes = "Presence read via engine has_keyword. The block-a-flier proof (CR 509.1b) is deferred."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "reacher"
+player = 0
+name = "Reach Body"
+power = 2
+toughness = 3
+keywords = ["Reach"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "reacher"
+keyword = "Reach"

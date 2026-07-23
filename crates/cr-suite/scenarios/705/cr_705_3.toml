@@ -1,0 +1,5 @@
+rule = "705.3"
+section = 705
+title = "Flipping a Coin - CR 705.3"
+status = "skeleton"
+text = "An effect may state that a coin flip has a certain result and/or that a certain player wins a coin flip. In that case, ignore the actual results of that flip and use the indicated results instead. This can cause a player to win a flip that couldn’t otherwise be won."

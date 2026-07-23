@@ -1,0 +1,5 @@
+rule = "706.5"
+section = 706
+title = "Rolling a Die - CR 706.5"
+status = "skeleton"
+text = "One card (Celebr-8000) has an ability that instructs a player to roll two dice and has an additional effect if that player “rolled doubles.” A player has rolled doubles if the result of each of those rolls is equal to the other."

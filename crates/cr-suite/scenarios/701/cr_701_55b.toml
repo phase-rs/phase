@@ -1,0 +1,5 @@
+rule = "701.55b"
+section = 701
+title = "Keyword Actions - CR 701.55b"
+status = "skeleton"
+text = "While facing a villainous choice, a player may choose an option that is illegal or impossible. In that case, they perform as much of the action as is possible. This is an exception to rule 608.2d."

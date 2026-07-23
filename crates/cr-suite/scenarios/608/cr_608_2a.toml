@@ -1,0 +1,5 @@
+rule = "608.2a"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.2a"
+status = "skeleton"
+text = "If a triggered ability has an intervening “if” clause, it checks whether the clause’s condition is true. If it isn’t, the ability is removed from the stack and does nothing. Otherwise, it continues to resolve. See rule 603.4."

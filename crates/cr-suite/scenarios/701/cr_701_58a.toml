@@ -1,0 +1,5 @@
+rule = "701.58a"
+section = 701
+title = "Keyword Actions - CR 701.58a"
+status = "skeleton"
+text = "To cloak a card, turn it face down. It becomes a 2/2 face-down creature card with ward {2}, no name, no subtypes, and no mana cost. Put that card onto the battlefield face down. That permanent is a cloaked permanent for as long as it remains face down. The effect defining its characteristics works while the card is face down and ends when it’s turned face up."

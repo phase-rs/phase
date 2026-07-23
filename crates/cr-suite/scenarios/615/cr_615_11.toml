@@ -1,0 +1,5 @@
+rule = "615.11"
+section = 615
+title = "Prevention Effects - CR 615.11"
+status = "skeleton"
+text = "Some prevention effects prevent the next N damage that would be dealt to each of a number of untargeted creatures. Such an effect creates a prevention shield for each applicable creature when the spell or ability that generates that effect resolves."

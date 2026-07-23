@@ -1,0 +1,5 @@
+rule = "701.25c"
+section = 701
+title = "Keyword Actions - CR 701.25c"
+status = "skeleton"
+text = "If a player is instructed to surveil 0, no surveil event occurs. Abilities that trigger whenever a player surveils won’t trigger."

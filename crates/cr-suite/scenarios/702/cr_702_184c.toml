@@ -1,0 +1,5 @@
+rule = "702.184c"
+section = 702
+title = "Keyword Abilities - CR 702.184c"
+status = "skeleton"
+text = "Static abilities may modify the result of a station ability by causing it to use a characteristic other than the tapped creature’s power to determine the number of counters placed on the permanent with the station ability."

@@ -1,0 +1,5 @@
+rule = "500.10"
+section = 500
+title = "General (Turn Structure) - CR 500.10"
+status = "skeleton"
+text = "Some effects add a step after a particular phase. In that case, that effect first creates the phase which normally contains that step directly after the specified phase. Any other steps that phase would normally have are skipped (see rule 500.11)."

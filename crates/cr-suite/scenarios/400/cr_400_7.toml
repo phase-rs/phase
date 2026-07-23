@@ -1,0 +1,5 @@
+rule = "400.7"
+section = 400
+title = "General (Zones) - CR 400.7"
+status = "skeleton"
+text = "An object that moves from one zone to another becomes a new object with no memory of, or relation to, its previous existence. This rule has the following exceptions."

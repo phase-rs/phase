@@ -1,0 +1,5 @@
+rule = "700.3a"
+section = 700
+title = "General (Additional Rules) - CR 700.3a"
+status = "skeleton"
+text = "Each of the affected objects must be put into exactly one of those piles, unless the effect specifies otherwise."

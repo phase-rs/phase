@@ -1,0 +1,5 @@
+rule = "702.140f"
+section = 702
+title = "Keyword Abilities - CR 702.140f"
+status = "skeleton"
+text = "Any effect that refers to or modifies the mutating creature spell refers to or modifies the mutated permanent it merges with as it resolves."

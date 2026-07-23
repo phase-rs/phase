@@ -1,0 +1,5 @@
+rule = "712.14a"
+section = 712
+title = "Double-Faced Cards - CR 712.14a"
+status = "skeleton"
+text = "If a spell or ability puts a double-faced card onto the battlefield “transformed” or “converted,” it enters the battlefield with its back face up. If a player is instructed to put a card that isn’t a double-faced card onto the battlefield transformed or converted, that card stays in its current zone."

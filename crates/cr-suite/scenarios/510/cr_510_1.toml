@@ -1,0 +1,5 @@
+rule = "510.1"
+section = 510
+status = "deferred"
+text = "First, the active player announces how each attacking creature assigns its combat damage, then the defending player announces how each blocking creature assigns its combat damage."
+notes = "Deferred: needs attacker/blocker declaration plus a combat-damage runner step. Once wired, assert creature_damage on blockers and player_life on the defending player."

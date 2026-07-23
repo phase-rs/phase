@@ -1,0 +1,5 @@
+rule = "601.6b"
+section = 601
+title = "Casting Spells - CR 601.6b"
+status = "skeleton"
+text = "If the spell instructs its controller and another player to do something at the same time as the spell is being cast, the spell’s controller goes first, then the other player. This is an exception to rule 101.4."

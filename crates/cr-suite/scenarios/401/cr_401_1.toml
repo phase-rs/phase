@@ -1,0 +1,5 @@
+rule = "401.1"
+section = 401
+status = "deferred"
+text = "When a game begins, each player's deck becomes their library."
+notes = "Deferred: the scenario builder's baseline library size for new_n_player is not a stable contract to assert against, and with_library_top adds cards on top of that baseline. Once the runner exposes a deterministic library, assert library_count_equals after seeding; the assertion kind is already wired."

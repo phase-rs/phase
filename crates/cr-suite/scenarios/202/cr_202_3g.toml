@@ -1,0 +1,5 @@
+rule = "202.3g"
+section = 202
+title = "Mana Cost and Color - CR 202.3g"
+status = "skeleton"
+text = "Each Phyrexian mana symbol in a card’s mana cost contributes 1 to its mana value."

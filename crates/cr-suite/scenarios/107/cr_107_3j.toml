@@ -1,0 +1,5 @@
+rule = "107.3j"
+section = 107
+title = "Numbers and Symbols - CR 107.3j"
+status = "skeleton"
+text = "If an object gains an ability, the value of X within that ability is the value defined by that ability, or 0 if that ability doesn’t define a value of X. This is an exception to rule 107.3i. This may occur with ability-adding effects, text-changing effects, or copy effects."

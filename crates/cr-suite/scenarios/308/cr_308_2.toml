@@ -1,0 +1,5 @@
+rule = "308.2"
+section = 308
+title = "Tribals - CR 308.2"
+status = "skeleton"
+text = "Kindred subtypes are usually a single word long and are listed after a long dash: “Kindred Enchantment — Merfolk.” The set of kindred subtypes is the same as the set of creature subtypes; these subtypes are called creature types. Kindreds may have multiple subtypes. See rule 205.3m for the complete list of creature types."

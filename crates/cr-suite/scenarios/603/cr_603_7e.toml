@@ -1,0 +1,5 @@
+rule = "603.7e"
+section = 603
+title = "Handling Triggered Abilities - CR 603.7e"
+status = "skeleton"
+text = "If an activated or triggered ability creates a delayed triggered ability, the source of that delayed triggered ability is the same as the source of that other ability. The controller of that delayed triggered ability is the player who controlled that other ability as it resolved."

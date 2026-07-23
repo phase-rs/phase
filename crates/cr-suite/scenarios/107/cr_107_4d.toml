@@ -1,0 +1,5 @@
+rule = "107.4d"
+section = 107
+title = "Numbers and Symbols - CR 107.4d"
+status = "skeleton"
+text = "The symbol {0} represents zero mana and is used as a placeholder for a cost that can be paid with no resources. (See rule 118.5.)"

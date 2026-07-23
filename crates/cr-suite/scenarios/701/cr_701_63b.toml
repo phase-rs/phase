@@ -1,0 +1,5 @@
+rule = "701.63b"
+section = 701
+title = "Keyword Actions - CR 701.63b"
+status = "skeleton"
+text = "If a permanent is instructed to endure 0, nothing happens. No counters are put on that permanent and no tokens are created."

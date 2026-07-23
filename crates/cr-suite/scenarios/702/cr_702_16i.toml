@@ -1,0 +1,5 @@
+rule = "702.16i"
+section = 702
+title = "Keyword Abilities - CR 702.16i"
+status = "skeleton"
+text = "“Protection from each [set of characteristics, qualities, or players]” is shorthand for “protection from [A],” “protection from [B],” and so on for each characteristic, quality, or player in the set. It behaves as multiple separate protection abilities."

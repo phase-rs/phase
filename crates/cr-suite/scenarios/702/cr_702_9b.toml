@@ -1,0 +1,5 @@
+rule = "702.9b"
+section = 702
+title = "Keyword Abilities - CR 702.9b"
+status = "skeleton"
+text = "A creature with flying can’t be blocked except by creatures with flying and/or reach. A creature with flying can block a creature with or without flying. (See rule 509, “Declare Blockers Step,” and rule 702.17, “Reach.”)"

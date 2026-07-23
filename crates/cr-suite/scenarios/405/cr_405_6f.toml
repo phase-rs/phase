@@ -1,0 +1,5 @@
+rule = "405.6f"
+section = 405
+title = "Stack - CR 405.6f"
+status = "skeleton"
+text = "State-based actions don’t use the stack; they happen automatically when certain conditions are met. See rule 704. They are dealt with before a player would receive priority. See rule 117.5."

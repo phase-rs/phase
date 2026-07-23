@@ -1,0 +1,5 @@
+rule = "710.3"
+section = 710
+title = "Flip Cards - CR 710.3"
+status = "skeleton"
+text = "You must ensure that it’s clear at all times whether a permanent you control is flipped or not, both when it’s untapped and when it’s tapped. Common methods for distinguishing between flipped and unflipped permanents include using coins or dice to mark flipped objects."

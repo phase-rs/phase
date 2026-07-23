@@ -1,0 +1,5 @@
+rule = "106.8"
+section = 106
+title = "Mana - CR 106.8"
+status = "skeleton"
+text = "If an effect would add mana represented by a hybrid mana symbol to a player’s mana pool, that player chooses one half of that symbol. If a colored half is chosen, one mana of that color is added to that player’s mana pool. If a generic half is chosen, an amount of colorless mana represented by that half’s number is added to that player’s mana pool."

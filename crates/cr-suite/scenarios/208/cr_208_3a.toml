@@ -1,0 +1,5 @@
+rule = "208.3a"
+section = 208
+title = "Power/Toughness - CR 208.3a"
+status = "skeleton"
+text = "If an effect would be created that sets the base power and/or toughness of a noncreature permanent, or otherwise modifies its power and/or toughness, that effect is created even though it doesn’t do anything unless that permanent becomes a creature."

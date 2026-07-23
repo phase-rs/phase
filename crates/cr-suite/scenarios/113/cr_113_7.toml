@@ -1,0 +1,5 @@
+rule = "113.7"
+section = 113
+title = "Abilities - CR 113.7"
+status = "skeleton"
+text = "The source of an ability is the object that generated it. The source of an activated ability on the stack is the object whose ability was activated. The source of a triggered ability (other than a delayed triggered ability) on the stack, or one that has triggered and is waiting to be put on the stack, is the object whose ability triggered. To determine the source of a delayed triggered ability, see rules 603.7d–f."

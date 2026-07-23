@@ -1,0 +1,5 @@
+rule = "701.10d"
+section = 701
+title = "Keyword Actions - CR 701.10d"
+status = "skeleton"
+text = "To double a player’s life total, the player gains or loses an amount of life such that their new life total is twice its current value."

@@ -1,0 +1,5 @@
+rule = "114.3"
+section = 114
+title = "Emblems - CR 114.3"
+status = "skeleton"
+text = "An emblem has no characteristics other than the abilities defined by the effect that created it. In particular, an emblem has no types, no mana cost, and no color. Most emblems also have no name."

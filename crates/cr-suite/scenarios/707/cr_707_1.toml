@@ -1,0 +1,5 @@
+rule = "707.1"
+section = 707
+title = "Copying Objects - CR 707.1"
+status = "skeleton"
+text = "Some objects become or turn another object into a “copy” of a spell, permanent, or card. Some effects create a token that’s a copy of another object. (Certain older cards were printed with the phrase “search for a copy.” This section doesn’t cover those cards, which have received new text in the Oracle card reference.)"

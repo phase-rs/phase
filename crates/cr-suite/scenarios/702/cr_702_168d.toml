@@ -1,0 +1,5 @@
+rule = "702.168d"
+section = 702
+title = "Keyword Abilities - CR 702.168d"
+status = "skeleton"
+text = "Any time you have priority, you may turn a face-down permanent you control with a disguise ability face up. This is a special action; it doesn’t use the stack (see rule 116). To do this, show all players what the permanent’s disguise cost would be if it were face up, pay that cost, then turn the permanent face up. (If the permanent wouldn’t have a disguise cost if it were face up, it can’t be turned face up this way.) The disguise effect on it ends, and it regains its normal characteristics. Any abilities relating to the permanent entering the battlefield don’t trigger when it’s turned face up and don’t have any effect, because the permanent has already entered the battlefield."

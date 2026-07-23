@@ -1,0 +1,5 @@
+rule = "702.6a"
+section = 702
+title = "Keyword Abilities - CR 702.6a"
+status = "skeleton"
+text = "Equip is an activated ability of Equipment cards. “Equip [cost]” means “[Cost]: Attach this permanent to target creature you control. Activate only as a sorcery.”"

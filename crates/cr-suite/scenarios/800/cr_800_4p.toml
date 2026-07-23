@@ -1,0 +1,5 @@
+rule = "800.4p"
+section = 800
+title = "General (Multiplayer Rules) - CR 800.4p"
+status = "skeleton"
+text = "In a Planechase game, if the player designated as the planar controller would leave the game, instead the next player in turn order that wouldn’t leave the game becomes the planar controller, then the old planar controller leaves the game. See rule 311.5."

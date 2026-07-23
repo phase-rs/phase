@@ -1,0 +1,6 @@
+rule = "505.1"
+section = 505
+title = "Main Phase — CR 505.1"
+status = "deferred"
+text = "There are two main phases in a turn. In each turn, the first main phase (also called the precombat main phase) and the second main phase (also called the postcombat main phase) are separated by the combat phase."
+notes = "Would only assert a setup-chosen phase. Defer until the runner drives a real turn/phase advance into PreCombatMain."

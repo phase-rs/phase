@@ -1,0 +1,5 @@
+rule = "613.6"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.6"
+status = "skeleton"
+text = "If an effect should be applied in different layers and/or sublayers, the parts of the effect each apply in their appropriate ones. If an effect starts to apply in one layer and/or sublayer, it will continue to be applied to the same set of objects in each other applicable layer and/or sublayer, even if the ability generating the effect is removed during this process."

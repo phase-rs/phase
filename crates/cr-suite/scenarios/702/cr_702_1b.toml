@@ -1,0 +1,5 @@
+rule = "702.1b"
+section = 702
+title = "Keyword Abilities - CR 702.1b"
+status = "skeleton"
+text = "An effect that grants an object a keyword ability may define a variable in that ability based on characteristics of that object or other information about the game state. For these abilities, the value of that variable is constantly reevaluated."

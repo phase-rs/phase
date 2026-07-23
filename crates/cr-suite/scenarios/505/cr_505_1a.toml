@@ -1,0 +1,5 @@
+rule = "505.1a"
+section = 505
+title = "Main Phase - CR 505.1a"
+status = "skeleton"
+text = "Only the first main phase of the turn is a precombat main phase. All other main phases are postcombat main phases. This includes the second main phase of a turn in which the combat phase has been skipped. It is also true of a turn in which an effect has caused an additional combat phase and an additional main phase to be created."

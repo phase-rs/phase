@@ -1,0 +1,5 @@
+rule = "710.2"
+section = 710
+title = "Flip Cards - CR 710.2"
+status = "skeleton"
+text = "In every zone other than the battlefield, and also on the battlefield before the permanent flips, a flip card has only the normal characteristics of the card. Once a permanent is flipped, its normal name, text box, type line, power, and toughness don’t apply and the alternative versions of those characteristics apply instead."

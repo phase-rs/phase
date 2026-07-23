@@ -1,0 +1,5 @@
+rule = "608.2p"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.2p"
+status = "skeleton"
+text = "Once all possible steps described in 608.2c–n are completed, any abilities that trigger when that spell or ability resolves trigger."

@@ -1,0 +1,5 @@
+rule = "701.1"
+section = 701
+title = "Keyword Actions - CR 701.1"
+status = "skeleton"
+text = "Most actions described in a card’s rules text use the standard English definitions of the verbs within, but some specialized verbs are used whose meanings may not be clear. These “keywords” are game terms; sometimes reminder text summarizes their meanings."

@@ -1,0 +1,5 @@
+rule = "727.6"
+section = 727
+title = "Subgames - CR 727.6"
+status = "skeleton"
+text = "If a Magic subgame (see rule 729) is restarted, the main game is unaffected. Main-game effects that refer to the winner or loser of the subgame now refer to the winner or loser of the restarted subgame."

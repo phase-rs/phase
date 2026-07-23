@@ -1,0 +1,5 @@
+rule = "401.3"
+section = 401
+title = "Library - CR 401.3"
+status = "skeleton"
+text = "Any player may count the number of cards remaining in any player’s library at any time."

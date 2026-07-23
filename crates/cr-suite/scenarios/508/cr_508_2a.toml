@@ -1,0 +1,5 @@
+rule = "508.2a"
+section = 508
+title = "Declare Attackers Step - CR 508.2a"
+status = "skeleton"
+text = "Abilities that trigger on a creature attacking trigger only at the point the creature is declared as an attacker. They will not trigger if a creature attacks and then that creature’s characteristics change to match the ability’s trigger condition."

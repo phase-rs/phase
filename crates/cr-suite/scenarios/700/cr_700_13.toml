@@ -1,0 +1,5 @@
+rule = "700.13"
+section = 700
+title = "General (Additional Rules) - CR 700.13"
+status = "skeleton"
+text = "Some cards refer to committing a crime. A player commits a crime as that player casts a spell, activates an ability, or puts a triggered ability on the stack and that spell or ability targets at least one opponent; at least one permanent, spell, or ability an opponent controls; and/or at least one card in an opponent’s graveyard."

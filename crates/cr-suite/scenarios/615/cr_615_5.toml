@@ -1,0 +1,5 @@
+rule = "615.5"
+section = 615
+title = "Prevention Effects - CR 615.5"
+status = "skeleton"
+text = "Some prevention effects also include an additional effect, which may refer to the amount of damage that was prevented. The prevention takes place at the time the original event would have happened; the rest of the effect takes place immediately afterward."

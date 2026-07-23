@@ -1,0 +1,5 @@
+rule = "122.1f"
+section = 122
+title = "Counters - CR 122.1f"
+status = "skeleton"
+text = "If a player has ten or more poison counters, that player loses the game as a state-based action. See rule 704. A player is “poisoned” if they have one or more poison counters. (See rule 810 for additional rules for Two-Headed Giant games.)"

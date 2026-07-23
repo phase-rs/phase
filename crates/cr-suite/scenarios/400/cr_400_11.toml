@@ -1,0 +1,5 @@
+rule = "400.11"
+section = 400
+title = "General (Zones) - CR 400.11"
+status = "skeleton"
+text = "An object is outside the game if it isn’t in any of the game’s zones. Outside the game is not a zone."

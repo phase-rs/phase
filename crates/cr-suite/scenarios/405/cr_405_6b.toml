@@ -1,0 +1,5 @@
+rule = "405.6b"
+section = 405
+title = "Stack - CR 405.6b"
+status = "skeleton"
+text = "Static abilities continuously generate effects and don’t go on the stack. (See rule 604, “Handling Static Abilities.”) This includes characteristic-defining abilities such as “[This object] is red” (see rule 604.3)."

@@ -1,0 +1,5 @@
+rule = "506.4a"
+section = 506
+title = "Combat Phase - CR 506.4a"
+status = "skeleton"
+text = "Once a creature has been declared as an attacking or blocking creature, spells or abilities that would have kept that creature from attacking or blocking don’t remove the creature from combat."

@@ -1,0 +1,5 @@
+rule = "702.174c"
+section = 702
+title = "Keyword Abilities - CR 702.174c"
+status = "skeleton"
+text = "Some effects trigger whenever a player gives a gift. Such an ability triggers whenever an instant or sorcery spell that player controls whose gift cost was paid resolves. It also triggers whenever the gift triggered ability of a permanent that player controls resolves."

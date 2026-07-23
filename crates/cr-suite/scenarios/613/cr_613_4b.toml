@@ -1,0 +1,5 @@
+rule = "613.4b"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.4b"
+status = "skeleton"
+text = "Layer 7b: Effects that set power and/or toughness to a specific number or value are applied. Effects that refer to the base power and/or toughness of a creature apply in this layer."

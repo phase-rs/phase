@@ -1,0 +1,31 @@
+rule = "702.4"
+section = 702
+title = "Keyword Abilities — CR 702.4 (Double Strike)"
+status = "executable"
+text = "Double strike is a static ability; a creature with double strike deals both first-strike and regular combat damage."
+notes = "Presence read via engine has_keyword (multi-word keyword name parses). The two-damage-step proof is deferred."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "double"
+player = 0
+name = "Double Strike Body"
+power = 2
+toughness = 2
+keywords = ["Double Strike"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "double"
+keyword = "Double Strike"

@@ -1,0 +1,5 @@
+rule = "110.2a"
+section = 110
+title = "Permanents - CR 110.2a"
+status = "skeleton"
+text = "If an effect instructs a player to put an object onto the battlefield, that object enters the battlefield under that player’s control unless the effect states otherwise."

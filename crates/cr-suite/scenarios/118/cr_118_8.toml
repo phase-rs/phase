@@ -1,0 +1,5 @@
+rule = "118.8"
+section = 118
+title = "Costs - CR 118.8"
+status = "skeleton"
+text = "Some spells and abilities have additional costs. An additional cost is a cost listed in a spell’s rules text, or applied to a spell or ability from another effect, that its controller must pay at the same time they pay the spell’s mana cost or the ability’s activation cost. Note that some additional costs are listed in keywords; see rule 702."

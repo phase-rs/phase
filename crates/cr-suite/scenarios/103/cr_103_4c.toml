@@ -1,0 +1,5 @@
+rule = "103.4c"
+section = 103
+title = "Starting the Game - CR 103.4c"
+status = "skeleton"
+text = "In a Commander game, each player’s starting life total is 40."

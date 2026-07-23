@@ -1,0 +1,5 @@
+rule = "111.10b"
+section = 111
+title = "Tokens - CR 111.10b"
+status = "skeleton"
+text = "A Food token is a colorless Food artifact token with “{2}, {T}, Sacrifice this token: You gain 3 life.”"

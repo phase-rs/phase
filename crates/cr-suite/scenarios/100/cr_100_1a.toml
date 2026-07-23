@@ -1,0 +1,5 @@
+rule = "100.1a"
+section = 100
+title = "General - CR 100.1a"
+status = "skeleton"
+text = "A two-player game is a game that begins with only two players."

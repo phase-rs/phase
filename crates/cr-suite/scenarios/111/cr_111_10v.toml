@@ -1,0 +1,5 @@
+rule = "111.10v"
+section = 111
+title = "Tokens - CR 111.10v"
+status = "skeleton"
+text = "A Mutagen token is a colorless Mutagen artifact token with “{1}, {T}, Sacrifice this token: Put a +1/+1 counter on target creature. Activate only as a sorcery.”"

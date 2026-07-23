@@ -1,0 +1,5 @@
+rule = "118.7c"
+section = 118
+title = "Costs - CR 118.7c"
+status = "skeleton"
+text = "If a cost is reduced by an amount of colored mana that exceeds its mana component of that color, the cost’s mana component of that color is reduced to nothing and the cost’s generic mana component is reduced by the difference."

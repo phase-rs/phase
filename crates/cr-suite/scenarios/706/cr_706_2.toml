@@ -1,0 +1,5 @@
+rule = "706.2"
+section = 706
+title = "Rolling a Die - CR 706.2"
+status = "skeleton"
+text = "After the roll, the number indicated on the top face of the die before any modifiers is the natural result. The instruction may include modifiers to the roll which add to or subtract from the natural result. Modifiers may also come from other sources. After considering all applicable modifiers, the final number is the result of the die roll."

@@ -1,0 +1,5 @@
+rule = "103.4"
+section = 103
+title = "Starting the Game - CR 103.4"
+status = "skeleton"
+text = "Each player begins the game with a starting life total of 20. Some variant games have different starting life totals."

@@ -1,0 +1,5 @@
+rule = "702.29c"
+section = 702
+title = "Keyword Abilities - CR 702.29c"
+status = "skeleton"
+text = "Some cards with cycling have abilities that trigger when they’re cycled. “When you cycle this card” means “When you discard this card to pay an activation cost of a cycling ability.” These abilities trigger from whatever zone the card winds up in after it’s cycled."

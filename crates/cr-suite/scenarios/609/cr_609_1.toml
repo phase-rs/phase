@@ -1,0 +1,5 @@
+rule = "609.1"
+section = 609
+title = "Effects - CR 609.1"
+status = "skeleton"
+text = "An effect is something that happens in the game as a result of a spell or ability. When a spell, activated ability, or triggered ability resolves, it may create one or more one-shot or continuous effects. Static abilities may create one or more continuous effects. Text itself is never an effect."

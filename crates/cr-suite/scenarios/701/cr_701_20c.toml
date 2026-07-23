@@ -1,0 +1,5 @@
+rule = "701.20c"
+section = 701
+title = "Keyword Actions - CR 701.20c"
+status = "skeleton"
+text = "A card that is currently revealed may be revealed again."

@@ -1,0 +1,5 @@
+rule = "903.4"
+section = 903
+title = "Commander - CR 903.4"
+status = "skeleton"
+text = "The Commander variant uses color identity to determine what cards can be in a deck with a certain commander. The color identity of a card is the color or colors of any mana symbols in that card’s mana cost or rules text, plus any colors defined by its characteristic-defining abilities (see rule 604.3) or color indicator (see rule 204)."

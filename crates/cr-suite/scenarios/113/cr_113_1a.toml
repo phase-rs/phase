@@ -1,0 +1,5 @@
+rule = "113.1a"
+section = 113
+title = "Abilities - CR 113.1a"
+status = "skeleton"
+text = "An ability can be a characteristic an object has that lets it affect the game. An object’s abilities are defined by its rules text or by the effect that created it. Abilities can also be granted to objects by rules or effects. (Effects that grant abilities usually use the words “has,” “have,” “gains,” or “gain.”) Abilities generate effects. (See rule 609, “Effects.”)"

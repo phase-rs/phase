@@ -1,0 +1,35 @@
+rule = "601.2"
+section = 601
+title = "Casting Spells — CR 601.2"
+status = "executable"
+text = "To cast a spell is to take it from where it is (usually the hand), put it on the stack, and pay its costs, so that it will eventually resolve and have its effect."
+notes = "Production path: cast Lightning Bolt but do NOT resolve it. The spell is on the stack (not resolved), so the target's life is unchanged and the game is not over. Discriminates a cast-only step from a cast-and-resolve step."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_player = 1
+
+[[assertions]]
+kind = "player_life"
+player = 1
+life = 20
+
+[[assertions]]
+kind = "game_not_over"

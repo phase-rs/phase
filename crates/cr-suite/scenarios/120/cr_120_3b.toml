@@ -1,0 +1,5 @@
+rule = "120.3b"
+section = 120
+title = "Damage - CR 120.3b"
+status = "skeleton"
+text = "Damage dealt to a player by a source with infect causes that source’s controller to give the player that many poison counters."

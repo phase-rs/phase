@@ -1,0 +1,5 @@
+rule = "702.4d"
+section = 702
+title = "Keyword Abilities - CR 702.4d"
+status = "skeleton"
+text = "Giving double strike to a creature with first strike after it has already dealt combat damage in the first combat damage step will allow the creature to assign combat damage in the second combat damage step."

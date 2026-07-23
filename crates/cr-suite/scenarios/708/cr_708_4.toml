@@ -1,0 +1,5 @@
+rule = "708.4"
+section = 708
+title = "Face-Down Spells and Permanents - CR 708.4"
+status = "skeleton"
+text = "Objects that are cast face down are turned face down before they are put onto the stack, so effects that care about the characteristics of a spell will see only the face-down spell’s characteristics. Any effects or prohibitions that would apply to casting an object with these characteristics (and not the face-up object’s characteristics) are applied to casting this object. The permanent the spell becomes will be a face-down permanent."

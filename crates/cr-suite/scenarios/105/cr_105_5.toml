@@ -1,0 +1,5 @@
+rule = "105.5"
+section = 105
+title = "Colors - CR 105.5"
+status = "skeleton"
+text = "If an effect refers to a color pair, it means exactly two of the five colors. There are ten color pairs: white and blue, white and black, blue and black, blue and red, black and red, black and green, red and green, red and white, green and white, and green and blue."

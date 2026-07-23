@@ -1,0 +1,5 @@
+rule = "205.3a"
+section = 205
+title = "Type Line - CR 205.3a"
+status = "skeleton"
+text = "A card can have one or more subtypes printed on its type line."

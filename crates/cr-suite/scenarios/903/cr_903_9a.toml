@@ -1,0 +1,5 @@
+rule = "903.9a"
+section = 903
+title = "Commander - CR 903.9a"
+status = "skeleton"
+text = "If a commander is in a graveyard or in exile and that object was put into that zone since the last time state-based actions were checked, its owner may put it into the command zone. This is a state-based action. See rule 704."

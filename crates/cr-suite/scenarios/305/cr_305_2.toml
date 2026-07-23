@@ -1,0 +1,5 @@
+rule = "305.2"
+section = 305
+title = "Lands - CR 305.2"
+status = "skeleton"
+text = "A player can normally play one land during their turn; however, continuous effects may increase this number."

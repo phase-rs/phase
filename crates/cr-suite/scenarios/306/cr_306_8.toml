@@ -1,0 +1,5 @@
+rule = "306.8"
+section = 306
+title = "Planeswalkers - CR 306.8"
+status = "skeleton"
+text = "Damage dealt to a planeswalker results in that many loyalty counters being removed from it."

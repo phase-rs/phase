@@ -1,0 +1,5 @@
+rule = "111.10p"
+section = 111
+title = "Tokens - CR 111.10p"
+status = "skeleton"
+text = "A Virtuous Role token is a colorless Aura Role enchantment token named Virtuous with enchant creature and “Enchanted creature gets +1/+1 for each enchantment you control.”"

@@ -1,0 +1,5 @@
+rule = "701.17c"
+section = 701
+title = "Keyword Actions - CR 701.17c"
+status = "skeleton"
+text = "An effect that refers to a milled card can find that card in the zone it moved to from the library, as long as that zone is a public zone."

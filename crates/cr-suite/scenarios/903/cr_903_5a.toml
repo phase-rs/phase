@@ -1,0 +1,5 @@
+rule = "903.5a"
+section = 903
+title = "Commander - CR 903.5a"
+status = "skeleton"
+text = "Each deck must contain exactly 100 cards, including its commander. In other words, the minimum deck size and the maximum deck size are both 100."

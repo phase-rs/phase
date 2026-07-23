@@ -1,0 +1,5 @@
+rule = "707.6"
+section = 707
+title = "Copying Objects - CR 707.6"
+status = "skeleton"
+text = "When copying a permanent, any choices that have been made for that permanent aren’t copied. Instead, if an object enters the battlefield as a copy of another permanent, the object’s controller will get to make any “as [this] enters the battlefield” choices for it."

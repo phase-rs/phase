@@ -1,0 +1,5 @@
+rule = "201.5"
+section = 201
+title = "Name - CR 201.5"
+status = "skeleton"
+text = "Text that refers to the object it’s on by name means just that particular object and not any other objects with that name, regardless of any name changes caused by game effects."

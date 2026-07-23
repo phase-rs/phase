@@ -1,0 +1,5 @@
+rule = "305.1"
+section = 305
+status = "deferred"
+text = "A player who has priority may play a land card from their hand during a main phase of their turn when the stack is empty. Playing a land is a special action; it doesn't use the stack."
+notes = "Deferred: needs a play-land runner step (a special action, not a spell). Once wired, play a land and assert it is on the battlefield with the stack still empty."

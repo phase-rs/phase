@@ -1,0 +1,5 @@
+rule = "702.174b"
+section = 702
+title = "Keyword Abilities - CR 702.174b"
+status = "skeleton"
+text = "On a permanent, the second ability represented by gift is “When this permanent enters, if its gift cost was paid, [effect].” On an instant or sorcery spell, the second ability represented by gift is “If this spell’s gift cost was paid, [effect].” The specific effect is defined by the [something] listed."

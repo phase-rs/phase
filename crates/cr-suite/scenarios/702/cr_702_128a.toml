@@ -1,0 +1,5 @@
+rule = "702.128a"
+section = 702
+title = "Keyword Abilities - CR 702.128a"
+status = "skeleton"
+text = "Embalm is an activated ability that functions while the card with embalm is in a graveyard. “Embalm [cost]” means “[Cost], Exile this card from your graveyard: Create a token that’s a copy of this card, except it’s white, it has no mana cost, and it’s a Zombie in addition to its other types. Activate only as a sorcery.”"

@@ -1,0 +1,5 @@
+rule = "714.3a"
+section = 714
+title = "Saga Cards - CR 714.3a"
+status = "skeleton"
+text = "Each Saga without read ahead has the intrinsic ability “This Saga enters with a lore counter on it.” This ability creates a replacement effect (see rule 614.1c)."

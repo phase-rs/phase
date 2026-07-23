@@ -1,0 +1,5 @@
+rule = "310.8a"
+section = 310
+title = "Battles - CR 310.8a"
+status = "skeleton"
+text = "As a battle enters the battlefield, its controller chooses a player to be its protector. Which players may be chosen as its protector are determined by its battle type (see rule 310.11). If it has no battle types, its controller becomes its protector."

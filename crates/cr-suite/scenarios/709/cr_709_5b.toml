@@ -1,0 +1,5 @@
+rule = "709.5b"
+section = 709
+title = "Split Cards - CR 709.5b"
+status = "skeleton"
+text = "The existence of each half of an object with a shared type line is part of that object’s copiable values, even if that object is a spell on the stack. This is an exception to rule 709.3b."

@@ -1,0 +1,5 @@
+rule = "302.4"
+section = 302
+title = "Creatures - CR 302.4"
+status = "skeleton"
+text = "Power and toughness are characteristics only creatures have."

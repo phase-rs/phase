@@ -1,0 +1,5 @@
+rule = "701.4b"
+section = 701
+title = "Keyword Actions - CR 701.4b"
+status = "skeleton"
+text = "The phrase “if a [quality] was beheld” refers to whether or not the object had that quality at the time the player took that action, regardless of whether or not the revealed card or chosen permanent still has that quality as the spell or ability including that phrase resolves."

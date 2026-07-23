@@ -1,0 +1,5 @@
+rule = "310.8f"
+section = 310
+title = "Battles - CR 310.8f"
+status = "skeleton"
+text = "A battle can have only one protector at a time. A battle’s protector stops being its protector if another player becomes its protector."

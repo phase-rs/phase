@@ -1,0 +1,5 @@
+rule = "108.3"
+section = 108
+title = "Cards - CR 108.3"
+status = "skeleton"
+text = "The owner of a card in the game is the player who started the game with it in their deck. If a card is brought into the game from outside the game rather than starting in a player’s deck, its owner is the player who brought it into the game. If a card starts the game in the command zone, its owner is the player who put it into the command zone to start the game. Legal ownership of a card in the game is irrelevant to the game rules except for the rules for ante. (See rule 407.)"

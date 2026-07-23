@@ -1,0 +1,5 @@
+rule = "702.11f"
+section = 702
+title = "Keyword Abilities - CR 702.11f"
+status = "skeleton"
+text = "“Hexproof from [quality A] and from [quality B]” is shorthand for “hexproof from [quality A]” and “hexproof from [quality B]”; it behaves as two separate hexproof abilities."

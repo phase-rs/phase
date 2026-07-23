@@ -1,0 +1,5 @@
+rule = "118.6a"
+section = 118
+title = "Costs - CR 118.6a"
+status = "skeleton"
+text = "If an unpayable cost is increased by an effect or an additional cost is imposed, the cost is still unpayable. If an alternative cost is applied to an unpayable cost, including an effect that allows a player to cast a spell without paying its mana cost, the alternative cost may be paid."

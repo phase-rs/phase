@@ -1,0 +1,5 @@
+rule = "400.7b"
+section = 400
+title = "General (Zones) - CR 400.7b"
+status = "skeleton"
+text = "Effects from static abilities that grant an ability to a permanent spell that functions on the battlefield continue to apply to the permanent that spell becomes (see rule 611.3d)."

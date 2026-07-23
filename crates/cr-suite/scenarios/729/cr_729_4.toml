@@ -1,0 +1,5 @@
+rule = "729.4"
+section = 729
+title = "Daybound and Nightbound - CR 729.4"
+status = "skeleton"
+text = "All objects in the main game and all cards outside the main game are considered outside the subgame (except those specifically brought into the subgame). All players not currently in the subgame are considered outside the subgame."

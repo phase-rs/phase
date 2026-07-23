@@ -1,0 +1,5 @@
+rule = "731.2a"
+section = 731
+title = "Controlling Another Player - CR 731.2a"
+status = "skeleton"
+text = "If it’s day and the previous turn’s active player didn’t cast any spells during that turn, it becomes night. Multiplayer games using the shared team turns option (see rule 805) use a modified rule: if it’s day and no player from the previous turn’s active team cast a spell during that turn, it becomes night."

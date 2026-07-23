@@ -1,0 +1,5 @@
+rule = "703.4q"
+section = 703
+title = "Turn-Based Actions - CR 703.4q"
+status = "skeleton"
+text = "As each step or phase ends, any unspent mana left in a player’s mana pool empties. See rule 500.5."

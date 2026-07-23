@@ -1,0 +1,5 @@
+rule = "118.3c"
+section = 118
+title = "Costs - CR 118.3c"
+status = "skeleton"
+text = "Activating mana abilities is not mandatory, even if paying a cost is."

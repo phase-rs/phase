@@ -1,0 +1,5 @@
+rule = "400.9"
+section = 400
+title = "General (Zones) - CR 400.9"
+status = "skeleton"
+text = "If a face-up object in the command zone is turned face down, it becomes a new object."

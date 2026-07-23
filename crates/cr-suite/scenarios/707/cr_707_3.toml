@@ -1,0 +1,5 @@
+rule = "707.3"
+section = 707
+title = "Copying Objects - CR 707.3"
+status = "skeleton"
+text = "The copy’s copiable values become the copied information, as modified by the copy’s status (see rule 110.5). Objects that copy the object will use the new copiable values."

@@ -1,0 +1,47 @@
+rule = "702.12"
+section = 702
+title = "Keyword Abilities — CR 702.12 (Indestructible)"
+status = "executable"
+text = "A permanent with indestructible can't be destroyed. Such permanents aren't destroyed by lethal damage and ignore the state-based action that checks for lethal damage."
+notes = "Strong discriminating test: a 2/2 indestructible creature is dealt 3 (lethal) damage by Lightning Bolt, then SBAs run. Per CR 702.12b / CR 704.5g it survives with 3 damage marked. Reverting the indestructible handling would send it to the graveyard."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "wall"
+player = 1
+name = "Indestructible Body"
+power = 2
+toughness = 2
+keywords = ["Indestructible"]
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_creature = "wall"
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "creature_on_battlefield"
+creature = "wall"
+
+[[assertions]]
+kind = "creature_damage"
+creature = "wall"
+damage = 3

@@ -1,0 +1,32 @@
+rule = "702.10"
+section = 702
+title = "Keyword Abilities — CR 702.10 (Haste)"
+status = "executable"
+text = "Haste is a static ability that lets a creature ignore the summoning-sickness rule."
+notes = "CR 702.10 is Haste (NOT 702.23, which is Rampage). Presence read via engine has_keyword; attacking-the-turn-it-enters proof is deferred (needs a DeclareAttackers step)."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "hasty"
+player = 0
+name = "Hasty Body"
+power = 2
+toughness = 2
+keywords = ["Haste"]
+summoning_sickness = true
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "hasty"
+keyword = "Haste"

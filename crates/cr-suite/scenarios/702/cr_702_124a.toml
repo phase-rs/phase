@@ -1,0 +1,5 @@
+rule = "702.124a"
+section = 702
+title = "Keyword Abilities - CR 702.124a"
+status = "skeleton"
+text = "Partner abilities are keyword abilities that modify the rules for deck construction in the Commander variant (see rule 903), and they function before the game begins. Each partner ability allows you to designate two legendary cards as your commander rather than one. Each partner ability has its own requirements for those two commanders. The partner abilities are: partner, partner—[text], partner with [name], choose a Background, and Doctor’s companion."

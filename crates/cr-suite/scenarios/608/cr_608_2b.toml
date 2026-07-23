@@ -1,0 +1,5 @@
+rule = "608.2b"
+section = 608
+status = "deferred"
+text = "If the spell or ability specifies targets, it checks whether the targets are still legal. If all its targets are now illegal, the spell or ability doesn't resolve."
+notes = "Deferred: needs a fizzle setup where the sole target leaves its zone (or becomes illegal) between casting and resolution. The runner has no way to remove the target mid-cast yet; once it does, assert the spell is countered on resolution (no effect applied)."

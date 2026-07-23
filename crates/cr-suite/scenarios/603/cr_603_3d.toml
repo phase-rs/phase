@@ -1,0 +1,5 @@
+rule = "603.3d"
+section = 603
+title = "Handling Triggered Abilities - CR 603.3d"
+status = "skeleton"
+text = "The remainder of the process for putting a triggered ability on the stack is identical to the process for casting a spell listed in rules 601.2c–d. If a choice is required when the triggered ability goes on the stack but no legal choices can be made for it, or if a rule or a continuous effect otherwise makes the ability illegal, the ability is simply removed from the stack."

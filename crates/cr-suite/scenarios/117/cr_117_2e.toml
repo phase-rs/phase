@@ -1,0 +1,5 @@
+rule = "117.2e"
+section = 117
+title = "Timing and Priority - CR 117.2e"
+status = "skeleton"
+text = "Resolving spells and abilities may instruct players to make choices or take actions, or may allow players to activate mana abilities. Even if a player is doing so, no player has priority while a spell or ability is resolving. See rule 608, “Resolving Spells and Abilities.”"

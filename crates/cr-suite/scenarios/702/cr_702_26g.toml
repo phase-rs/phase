@@ -1,0 +1,5 @@
+rule = "702.26g"
+section = 702
+title = "Keyword Abilities - CR 702.26g"
+status = "skeleton"
+text = "When a permanent phases out, any Auras, Equipment, or Fortifications attached to that permanent phase out at the same time. This alternate way of phasing out is known as phasing out “indirectly.” An Aura, Equipment, or Fortification that phased out indirectly won’t phase in by itself, but instead phases in along with the permanent it’s attached to."

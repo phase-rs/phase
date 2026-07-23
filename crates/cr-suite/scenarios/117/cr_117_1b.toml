@@ -1,0 +1,5 @@
+rule = "117.1b"
+section = 117
+title = "Timing and Priority - CR 117.1b"
+status = "skeleton"
+text = "A player may activate an activated ability any time they have priority."

@@ -1,0 +1,5 @@
+rule = "512.1"
+section = 512
+title = "Ending Phase - CR 512.1"
+status = "skeleton"
+text = "The ending phase consists of two steps: end and cleanup."

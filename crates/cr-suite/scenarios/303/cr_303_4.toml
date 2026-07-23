@@ -1,0 +1,5 @@
+rule = "303.4"
+section = 303
+title = "Enchantments - CR 303.4"
+status = "skeleton"
+text = "Some enchantments have the subtype “Aura.” An Aura enters the battlefield attached to an object or player. What an Aura can be attached to is defined by its enchant keyword ability (see rule 702.5, “Enchant”). Other effects can limit what a permanent can be enchanted by."

@@ -1,0 +1,5 @@
+rule = "121.2c"
+section = 121
+title = "Drawing a Card - CR 121.2c"
+status = "skeleton"
+text = "If more than one player is instructed to draw cards, the active player performs all of their draws first, then each other player in turn order does the same."

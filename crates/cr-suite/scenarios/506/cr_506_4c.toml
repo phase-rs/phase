@@ -1,0 +1,5 @@
+rule = "506.4c"
+section = 506
+title = "Combat Phase - CR 506.4c"
+status = "skeleton"
+text = "If a creature is attacking a planeswalker or battle, removing that planeswalker or battle from combat doesn’t remove that creature from combat. It continues to be an attacking creature, although it is not attacking any player, planeswalker, or battle. It may be blocked. If it is unblocked, it will deal no combat damage."

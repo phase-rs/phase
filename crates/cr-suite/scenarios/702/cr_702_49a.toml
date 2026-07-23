@@ -1,0 +1,5 @@
+rule = "702.49a"
+section = 702
+title = "Keyword Abilities - CR 702.49a"
+status = "skeleton"
+text = "Ninjutsu is an activated ability that functions only while the card with ninjutsu is in a player’s hand. “Ninjutsu [cost]” means “[Cost], Reveal this card from your hand, Return an unblocked attacking creature you control to its owner’s hand: Put this card onto the battlefield from your hand tapped and attacking.”"

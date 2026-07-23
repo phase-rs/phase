@@ -1,0 +1,5 @@
+rule = "702.140a"
+section = 702
+title = "Keyword Abilities - CR 702.140a"
+status = "skeleton"
+text = "Mutate appears on some creature cards. It represents a static ability that functions while the spell with mutate is on the stack. “Mutate [cost]” means “You may pay [cost] rather than pay this spell’s mana cost. If you do, it becomes a mutating creature spell and targets a non-Human creature with the same owner as this spell.” Casting a spell using its mutate ability follows the rules for paying alternative costs (see 601.2b and 601.2f–h)."

@@ -1,0 +1,5 @@
+rule = "729.5c"
+section = 729
+title = "Daybound and Nightbound - CR 729.5c"
+status = "skeleton"
+text = "At the end of a subgame of a Commander game, each player moves their commander from the subgame command zone (if it’s there) to the main-game command zone."

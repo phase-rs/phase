@@ -1,0 +1,5 @@
+rule = "120.4"
+section = 120
+status = "deferred"
+text = "Damage is processed in a four-part sequence."
+notes = "CR 120.4 is the ordering of damage processing (not the life-loss result, which is CR 120.3a). Deferred: the four-part ordering is an internal sequence not observable through post-condition state alone; it would need event-trace assertions the runner does not expose."

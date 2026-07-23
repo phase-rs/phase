@@ -1,0 +1,33 @@
+rule = "608.2m"
+section = 608
+title = "Resolving Spells and Abilities — CR 608.2m"
+status = "executable"
+text = "As the final part of an instant or sorcery spell's resolution, the spell is put into its owner's graveyard."
+notes = "After a fully-resolved Lightning Bolt (an instant), the stack is empty (the spell has left it). Discriminates against a resolve that leaves the object on the stack."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_player = 1
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "stack_is_empty"

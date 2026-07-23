@@ -1,0 +1,5 @@
+rule = "509.3e"
+section = 509
+title = "Declare Blockers Step - CR 509.3e"
+status = "skeleton"
+text = "If an ability triggers when a creature blocks or becomes blocked by a particular number of creatures, the ability triggers if the creature blocks or is blocked by that many creatures when blockers are declared. Effects that add or remove blockers can also cause such abilities to trigger. This applies to abilities that trigger on a creature blocking or being blocked by at least a certain number of creatures as well."

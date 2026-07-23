@@ -1,0 +1,5 @@
+rule = "508.7b"
+section = 508
+title = "Declare Attackers Step - CR 508.7b"
+status = "skeleton"
+text = "While reselecting which player, planeswalker, or battle a creature is attacking, that creature isn’t affected by requirements or restrictions that apply to the declaration of attackers."

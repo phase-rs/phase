@@ -1,0 +1,5 @@
+rule = "800.4h"
+section = 800
+title = "General (Multiplayer Rules) - CR 800.4h"
+status = "skeleton"
+text = "If a rule requires a player who has left the game to make a choice, the next player in turn order makes that choice."

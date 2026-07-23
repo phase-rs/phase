@@ -1,0 +1,5 @@
+rule = "702.12b"
+section = 702
+title = "Keyword Abilities - CR 702.12b"
+status = "skeleton"
+text = "A permanent with indestructible can’t be destroyed. Such permanents aren’t destroyed by lethal damage, and they ignore the state-based action that checks for lethal damage (see rule 704.5g)."

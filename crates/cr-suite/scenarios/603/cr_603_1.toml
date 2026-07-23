@@ -1,0 +1,5 @@
+rule = "603.1"
+section = 603
+status = "deferred"
+text = "Triggered abilities have a trigger condition and an effect. They are written as [Trigger condition], [effect], and include (and usually begin with) the word when, whenever, or at."
+notes = "Deferred: needs a permanent with a triggered ability plus a triggering event. The runner has no trigger-driving step yet; once one exists, assert the trigger's resolved effect."

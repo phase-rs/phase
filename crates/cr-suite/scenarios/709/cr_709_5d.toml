@@ -1,0 +1,5 @@
+rule = "709.5d"
+section = 709
+title = "Split Cards - CR 709.5d"
+status = "skeleton"
+text = "A permanent with a shared type line is given the “left half unlocked” designation as it enters the battlefield if its left half was cast as a spell. It is given the “right half unlocked” designation as it enters the battlefield if its right half was a cast as a spell. If it’s entering the battlefield and neither half was cast as a spell, it enters with neither unlocked designation."

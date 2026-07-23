@@ -1,0 +1,5 @@
+rule = "608.3d"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.3d"
+status = "skeleton"
+text = "If the object that’s resolving is a mutating creature spell, the object representing that spell merges with the permanent it is targeting (see rule 730, “Merging with Permanents”)."

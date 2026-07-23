@@ -1,0 +1,5 @@
+rule = "701.66b"
+section = 701
+title = "Keyword Actions - CR 701.66b"
+status = "skeleton"
+text = "An ability that triggers whenever a player earthbends triggers when the delayed triggered ability described in rule 701.66a is created."

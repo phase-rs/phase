@@ -1,0 +1,5 @@
+rule = "104.2a"
+section = 104
+status = "deferred"
+text = "A player still in the game wins the game if that player's opponents have all left the game."
+notes = "CR 104.2a is winning-because-opponents-left (NOT conceding, which is CR 104.3a). Deferred: needs a leave-game / concede action so the last remaining player wins. Once wired, assert game_over with the survivor as winner."

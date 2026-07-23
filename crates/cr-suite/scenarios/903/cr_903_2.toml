@@ -1,0 +1,5 @@
+rule = "903.2"
+section = 903
+title = "Commander - CR 903.2"
+status = "skeleton"
+text = "A Commander game may be a two-player game or a multiplayer game. The default multiplayer setup is the Free-for-All variant with the attack multiple players option and without the limited range of influence option. See rule 806, “Free-for-All Variant.”"

@@ -1,0 +1,5 @@
+rule = "730.3"
+section = 730
+title = "Miscellaneous - CR 730.3"
+status = "skeleton"
+text = "If a merged permanent leaves the battlefield, one permanent leaves the battlefield and each of the individual components are put into the appropriate zone."

@@ -1,0 +1,5 @@
+rule = "113.3d"
+section = 113
+title = "Abilities - CR 113.3d"
+status = "skeleton"
+text = "Static abilities are written as statements. They’re simply true. Static abilities create continuous effects which are active while the permanent with the ability is on the battlefield and has the ability, or while the object with the ability is in the appropriate zone. See rule 604, “Handling Static Abilities.”"

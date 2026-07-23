@@ -1,0 +1,31 @@
+rule = "702.11"
+section = 702
+title = "Keyword Abilities — CR 702.11 (Hexproof)"
+status = "executable"
+text = "Hexproof is a static ability; a permanent with hexproof can't be the target of spells or abilities an opponent controls."
+notes = "Presence read via engine has_keyword. The targeting-restriction proof (CR 115) is deferred."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "warded"
+player = 0
+name = "Hexproof Body"
+power = 2
+toughness = 2
+keywords = ["Hexproof"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "warded"
+keyword = "Hexproof"

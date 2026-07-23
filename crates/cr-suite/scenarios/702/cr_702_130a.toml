@@ -1,0 +1,5 @@
+rule = "702.130a"
+section = 702
+title = "Keyword Abilities - CR 702.130a"
+status = "skeleton"
+text = "Afflict is a triggered ability. “Afflict N” means “Whenever this creature becomes blocked, defending player loses N life.”"

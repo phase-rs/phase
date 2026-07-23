@@ -1,0 +1,5 @@
+rule = "506.3e"
+section = 506
+title = "Combat Phase - CR 506.3e"
+status = "skeleton"
+text = "If an effect would put a creature onto the battlefield blocking but the creature it would block isn’t attacking the entering creature’s controller, a planeswalker that player controls, or a battle that player protects, that creature does enter the battlefield, but it’s never considered to be a blocking creature."

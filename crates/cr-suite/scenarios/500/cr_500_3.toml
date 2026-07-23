@@ -1,0 +1,5 @@
+rule = "500.3"
+section = 500
+title = "General (Turn Structure) - CR 500.3"
+status = "skeleton"
+text = "A step in which no players receive priority ends when all specified actions that take place during that step are completed. The only such steps are the untap step (see rule 502) and certain cleanup steps (see rule 514)."

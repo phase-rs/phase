@@ -1,0 +1,5 @@
+rule = "120.10"
+section = 120
+title = "Damage - CR 120.10"
+status = "skeleton"
+text = "Some triggered abilities check whether a permanent has been dealt excess damage. These abilities check after the permanent has been dealt damage by one or more sources. If those sources together dealt an amount of damage to a creature greater than lethal damage, excess damage equal to the difference was dealt to that creature. If those sources together dealt an amount of damage to a planeswalker greater than that planeswalker’s loyalty before the damage was dealt, excess damage equal to the difference was dealt to that planeswalker. If those sources together dealt an amount of damage to a battle greater than that battle’s defense before the damage was dealt, excess damage equal to the difference was dealt to that battle. If a permanent has multiple card types from among the list of creature, planeswalker, and battle, the excess damage dealt to that permanent is the greatest of the calculated amounts for each of the card types it has."

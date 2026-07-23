@@ -1,0 +1,5 @@
+rule = "701.43c"
+section = 701
+title = "Keyword Actions - CR 701.43c"
+status = "skeleton"
+text = "An object that isn’t on the battlefield can’t be exerted."

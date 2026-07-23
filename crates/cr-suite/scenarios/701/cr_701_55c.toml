@@ -1,0 +1,5 @@
+rule = "701.55c"
+section = 701
+title = "Keyword Actions - CR 701.55c"
+status = "skeleton"
+text = "A replacement effect may replace an instruction to face a villainous choice with an instruction to face that choice some number of additional times. In that case, the entire process described in rule 701.55a is performed for that player the appropriate number of times one at a time."

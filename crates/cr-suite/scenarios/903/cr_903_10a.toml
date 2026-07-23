@@ -1,0 +1,5 @@
+rule = "903.10a"
+section = 903
+title = "Commander - CR 903.10a"
+status = "skeleton"
+text = "A player who’s been dealt 21 or more combat damage by the same commander over the course of the game loses the game. (This is a state-based action. See rule 704.)"

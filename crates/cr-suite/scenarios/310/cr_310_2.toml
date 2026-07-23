@@ -1,0 +1,5 @@
+rule = "310.2"
+section = 310
+title = "Battles - CR 310.2"
+status = "skeleton"
+text = "When a battle spell resolves, its controller puts it onto the battlefield under their control."

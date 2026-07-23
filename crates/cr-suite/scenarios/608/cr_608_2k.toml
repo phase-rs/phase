@@ -1,0 +1,5 @@
+rule = "608.2k"
+section = 608
+title = "Resolving Spells and Abilities - CR 608.2k"
+status = "skeleton"
+text = "If an ability’s effect refers to a specific untargeted object that has been previously referred to by that ability’s cost or trigger condition, it still affects that object even if the object has changed characteristics."

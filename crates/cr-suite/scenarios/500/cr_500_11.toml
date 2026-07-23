@@ -1,0 +1,5 @@
+rule = "500.11"
+section = 500
+title = "General (Turn Structure) - CR 500.11"
+status = "skeleton"
+text = "Some effects can cause a step, phase, or turn to be skipped. To skip a step, phase, or turn is to proceed past it as though it didn’t exist. See rule 614.10."

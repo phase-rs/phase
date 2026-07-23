@@ -1,0 +1,5 @@
+rule = "714.4"
+section = 714
+title = "Saga Cards - CR 714.4"
+status = "skeleton"
+text = "If the number of lore counters on a Saga permanent with one or more chapter abilities is greater than or equal to its final chapter number, and it isn’t the source of a chapter ability that has triggered but not yet left the stack, that Saga’s controller sacrifices it. This state-based action doesn’t use the stack."

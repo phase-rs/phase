@@ -1,0 +1,5 @@
+rule = "602.1"
+section = 602
+status = "deferred"
+text = "Activated abilities have a cost and an effect. They are written as [Cost]: [Effect.] [Activation instructions (if any).]"
+notes = "Deferred: needs a permanent with an activated ability plus an ActivateAbility runner step. The runner only casts Lightning Bolt today; once ability activation is wired, assert the ability's effect (e.g. stack_is_empty after resolve)."

@@ -1,0 +1,5 @@
+rule = "117.1"
+section = 117
+status = "deferred"
+text = "The player with priority may cast spells, activate abilities, and take special actions."
+notes = "Deferred: asserting priority_player at setup is tautological (at_phase sets priority_player = active_player). A discriminating fixture needs a real priority pass/transition; the priority_player assertion kind is wired and covered by an in-code test."

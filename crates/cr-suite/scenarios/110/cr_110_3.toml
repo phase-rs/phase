@@ -1,0 +1,5 @@
+rule = "110.3"
+section = 110
+title = "Permanents - CR 110.3"
+status = "skeleton"
+text = "A nontoken permanent’s characteristics are the same as those printed on its card, as modified by any continuous effects. See rule 613, “Interaction of Continuous Effects.”"

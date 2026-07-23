@@ -1,0 +1,5 @@
+rule = "720.3d"
+section = 720
+title = "Taking Shortcuts - CR 720.3d"
+status = "skeleton"
+text = "As an Omen spell resolves, its controller shuffles it into its owner’s library instead of putting it into its owner’s graveyard as it resolves."

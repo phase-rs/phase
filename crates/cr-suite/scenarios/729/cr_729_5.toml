@@ -1,0 +1,5 @@
+rule = "729.5"
+section = 729
+title = "Daybound and Nightbound - CR 729.5"
+status = "skeleton"
+text = "At the end of a subgame, each player takes all traditional cards they own that are in the subgame other than those in the subgame command zone, puts them into their main-game library, then shuffles them. This includes cards in the subgame’s exile zone and cards that represent phased-out permanents as the subgame ends. Except as specified in rules 729.5a–c, all other objects in the subgame cease to exist, as do the zones created for the subgame. The main game continues from the point at which it was discontinued: First, the spell or ability that created the subgame finishes resolving, even if it was created by a spell card that’s no longer on the stack. Then, if any main-game abilities triggered while the subgame was in progress due to cards being removed from the main game, those abilities are put onto the stack."

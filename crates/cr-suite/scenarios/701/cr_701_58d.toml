@@ -1,0 +1,5 @@
+rule = "701.58d"
+section = 701
+title = "Keyword Actions - CR 701.58d"
+status = "skeleton"
+text = "If a card with disguise is cloaked, its controller may turn that card face up using either the procedure described in rule 702.168d to turn a face-down permanent with disguise face up or the procedure described above to turn a cloaked permanent face up."

@@ -1,0 +1,5 @@
+rule = "606.2"
+section = 606
+title = "Loyalty Abilities - CR 606.2"
+status = "skeleton"
+text = "An activated ability with a loyalty symbol in its cost is a loyalty ability. Normally, only planeswalkers have loyalty abilities."

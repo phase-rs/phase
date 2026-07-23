@@ -1,0 +1,5 @@
+rule = "702.115b"
+section = 702
+title = "Keyword Abilities - CR 702.115b"
+status = "skeleton"
+text = "If a creature has multiple instances of ingest, each triggers separately."

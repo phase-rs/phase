@@ -1,0 +1,5 @@
+rule = "107.15b"
+section = 107
+title = "Numbers and Symbols - CR 107.15b"
+status = "skeleton"
+text = "“{rN1}, {rN2}—[Effect]” is the same as “{rN1}—[Effect]” and “{rN2}—[Effect].”"

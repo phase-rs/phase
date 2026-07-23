@@ -1,0 +1,5 @@
+rule = "301.4"
+section = 301
+title = "Artifacts - CR 301.4"
+status = "skeleton"
+text = "Artifacts have no characteristics specific to their card type. Most artifacts have no colored mana symbols in their mana costs, and are therefore colorless. However, there is no correlation between being colorless and being an artifact: artifacts may be colored, and colorless objects may be card types other than artifact."

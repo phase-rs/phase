@@ -1,0 +1,5 @@
+rule = "109.3"
+section = 109
+title = "Objects - CR 109.3"
+status = "skeleton"
+text = "An object’s characteristics are name, mana cost, color, color indicator, card type, subtype, supertype, rules text, abilities, power, toughness, loyalty, defense, hand modifier, and life modifier. Objects can have some or all of these characteristics. Any other information about an object isn’t a characteristic. For example, characteristics don’t include whether a permanent is tapped, a spell’s target, an object’s owner or controller, what an Aura enchants, and so on."

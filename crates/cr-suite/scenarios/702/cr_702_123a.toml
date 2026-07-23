@@ -1,0 +1,5 @@
+rule = "702.123a"
+section = 702
+title = "Keyword Abilities - CR 702.123a"
+status = "skeleton"
+text = "Fabricate is a triggered ability. “Fabricate N” means “When this permanent enters, you may put N +1/+1 counters on it. If you don’t, create N 1/1 colorless Servo artifact creature tokens.”"

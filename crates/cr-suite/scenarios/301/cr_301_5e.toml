@@ -1,0 +1,5 @@
+rule = "301.5e"
+section = 301
+title = "Artifacts - CR 301.5e"
+status = "skeleton"
+text = "If an effect attempts to put an Equipment that isn’t also an Aura (see rule 303.4i) onto the battlefield attached to either an object it can’t legally equip or an object that is undefined, the Equipment enters the battlefield unattached. If the Equipment is a token, it’s created and enters the battlefield unattached."

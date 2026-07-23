@@ -1,0 +1,31 @@
+rule = "702.7"
+section = 702
+title = "Keyword Abilities — CR 702.7 (First Strike)"
+status = "executable"
+text = "First strike is a static ability; a creature with first strike deals combat damage before creatures without it."
+notes = "Presence read via engine has_keyword (multi-word keyword name parses). The first-combat-damage-step proof (CR 510.5) is deferred."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "striker"
+player = 0
+name = "First Strike Body"
+power = 2
+toughness = 2
+keywords = ["First Strike"]
+
+[[assertions]]
+kind = "creature_has_keyword"
+creature = "striker"
+keyword = "First Strike"

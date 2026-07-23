@@ -1,0 +1,5 @@
+rule = "613.2a"
+section = 613
+title = "Interaction of Continuous Effects - CR 613.2a"
+status = "skeleton"
+text = "Layer 1a: Copiable effects are applied. This includes copy effects (see rule 707, “Copying Objects”) and changes to an object’s characteristics determined by merging an object with a permanent (see rule 730, “Merging with Permanents”). “As . . . enters” and “as . . . is turned face up” abilities generate copiable effects if they set power and toughness, even if they also define other characteristics."

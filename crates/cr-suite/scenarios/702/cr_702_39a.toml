@@ -1,0 +1,5 @@
+rule = "702.39a"
+section = 702
+title = "Keyword Abilities - CR 702.39a"
+status = "skeleton"
+text = "Provoke is a triggered ability. “Provoke” means “Whenever this creature attacks, you may choose to have target creature defending player controls block this creature this combat if able. If you do, untap that creature.”"

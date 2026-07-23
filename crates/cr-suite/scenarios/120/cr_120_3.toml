@@ -1,0 +1,46 @@
+rule = "120.3"
+section = 120
+title = "Damage — CR 120.3"
+status = "executable"
+text = "Damage dealt to a creature or planeswalker doesn't destroy it; instead it's marked on that permanent."
+notes = "Production path: Lightning Bolt deals 3 (nonlethal) to a 4/4 creature; the 3 damage is marked and the creature stays on the battlefield. This is the nonlethal marked-damage path the earlier deferred note asked for — a 4/4 survives a 3-damage bolt, so no direct GameState mutation or a 1-damage spell is needed."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "ogre"
+player = 1
+name = "Sturdy Ogre"
+power = 4
+toughness = 4
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_creature = "ogre"
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "creature_damage"
+creature = "ogre"
+damage = 3
+
+[[assertions]]
+kind = "creature_on_battlefield"
+creature = "ogre"

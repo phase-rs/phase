@@ -1,0 +1,5 @@
+rule = "707.10d"
+section = 707
+title = "Copying Objects - CR 707.10d"
+status = "skeleton"
+text = "Some effects copy a spell or ability for each player or object it “could target.” The copies are put onto the stack with those targets in the order of their controller’s choice. If the spell or ability has more than one target, each of its targets must be the same player or object. If that player or object isn’t a legal target for each instance of the word “target,” a copy isn’t created for that player or object."

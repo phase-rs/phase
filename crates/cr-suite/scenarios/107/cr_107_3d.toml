@@ -1,0 +1,5 @@
+rule = "107.3d"
+section = 107
+title = "Numbers and Symbols - CR 107.3d"
+status = "skeleton"
+text = "If a cost associated with a special action, such as a suspend cost or a morph cost, has an {X} or an X in it, the value of X is chosen by the player taking the special action immediately before they pay that cost."

@@ -1,0 +1,5 @@
+rule = "615.13"
+section = 615
+title = "Prevention Effects - CR 615.13"
+status = "skeleton"
+text = "Some triggered abilities trigger when damage that would be dealt is prevented. Such an ability triggers each time a prevention effect is applied to one or more simultaneous damage events and prevents some or all of that damage."

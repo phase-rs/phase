@@ -1,0 +1,5 @@
+rule = "510.1b"
+section = 510
+title = "Combat Damage Step - CR 510.1b"
+status = "skeleton"
+text = "An unblocked creature assigns its combat damage to the player, planeswalker, or battle it’s attacking. If it isn’t currently attacking anything (if, for example, it was attacking a planeswalker that has left the battlefield), it assigns no combat damage."

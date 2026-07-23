@@ -1,0 +1,5 @@
+rule = "109.4"
+section = 109
+title = "Objects - CR 109.4"
+status = "skeleton"
+text = "Only objects on the stack or on the battlefield have a controller. Objects that are neither on the stack nor on the battlefield aren’t controlled by any player. See rule 108.4. There are six exceptions to this rule:"

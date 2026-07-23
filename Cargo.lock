@@ -481,6 +481,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cr-suite"
+version = "0.1.54"
+dependencies = [
+ "engine",
+ "indexmap 2.14.0",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

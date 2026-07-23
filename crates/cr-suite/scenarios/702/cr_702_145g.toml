@@ -1,0 +1,5 @@
+rule = "702.145g"
+section = 702
+title = "Keyword Abilities - CR 702.145g"
+status = "skeleton"
+text = "Any time a player controls a permanent with nightbound, if it’s neither day nor night and there are no permanents with daybound on the battlefield, it becomes night."

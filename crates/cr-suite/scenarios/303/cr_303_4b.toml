@@ -1,0 +1,5 @@
+rule = "303.4b"
+section = 303
+title = "Enchantments - CR 303.4b"
+status = "skeleton"
+text = "The object or player an Aura is attached to is called enchanted. The Aura is attached to, or “enchants,” that object or player."

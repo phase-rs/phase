@@ -1,0 +1,5 @@
+rule = "509.1e"
+section = 509
+title = "Declare Blockers Step - CR 509.1e"
+status = "skeleton"
+text = "If any of the costs require mana, the defending player then has a chance to activate mana abilities (see rule 605, “Mana Abilities”)."

@@ -1,0 +1,5 @@
+rule = "120.3a"
+section = 120
+status = "deferred"
+text = "Damage dealt to a player by a source without infect causes that player to lose that much life."
+notes = "CR 120.3a is the damage->life-loss rule (NOT CR 120.4, which is the four-part damage processing sequence). The executable version is already covered by cr_405_1 / cr_608_1 (bolt to player: life 20 -> 17). Left deferred here to avoid duplicate coverage of the same production transition."

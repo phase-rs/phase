@@ -1,0 +1,5 @@
+rule = "706.2b"
+section = 706
+title = "Rolling a Die - CR 706.2b"
+status = "skeleton"
+text = "If two or more effects are attempting to modify the natural result, the player who rolled chooses one to apply, following these steps: First, consider any effects that modify the result of a die roll by rerolling that die. Second, consider any effects that modify the result of a die roll by increasing or decreasing that result by a specified amount."

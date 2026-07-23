@@ -1,0 +1,5 @@
+rule = "306.1"
+section = 306
+title = "Planeswalkers - CR 306.1"
+status = "skeleton"
+text = "A player who has priority may cast a planeswalker card from their hand during a main phase of their turn when the stack is empty. Casting a planeswalker as a spell uses the stack. (See rule 601, “Casting Spells.”)"

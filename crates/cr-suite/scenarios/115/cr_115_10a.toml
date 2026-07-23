@@ -1,0 +1,5 @@
+rule = "115.10a"
+section = 115
+title = "Targets - CR 115.10a"
+status = "skeleton"
+text = "Just because an object or player is being affected by a spell or ability doesn’t make that object or player a target of that spell or ability. Unless that object or player is identified by the word “target” in the text of that spell or ability, or the rule for that keyword ability, it’s not a target."

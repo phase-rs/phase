@@ -1,0 +1,5 @@
+rule = "702.94a"
+section = 702
+title = "Keyword Abilities - CR 702.94a"
+status = "skeleton"
+text = "Miracle is a static ability linked to a triggered ability. (See rule 603.11.) “Miracle [cost]” means “You may reveal this card from your hand as you draw it if it’s the first card you’ve drawn this turn. When you reveal this card this way, you may cast it by paying [cost] rather than its mana cost.”"

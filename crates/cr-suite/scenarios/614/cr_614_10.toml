@@ -1,0 +1,5 @@
+rule = "614.10"
+section = 614
+title = "Replacement Effects - CR 614.10"
+status = "skeleton"
+text = "An effect that causes a player to skip an event, step, phase, or turn is a replacement effect. “Skip [something]” is the same as “Instead of doing [something], do nothing.” Once a step, phase, or turn has started, it can no longer be skipped—any skip effects will wait until the next occurrence."

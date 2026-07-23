@@ -1,0 +1,5 @@
+rule = "105.2a"
+section = 105
+title = "Colors - CR 105.2a"
+status = "skeleton"
+text = "A monocolored object is exactly one of the five colors."

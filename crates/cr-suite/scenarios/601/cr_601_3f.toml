@@ -1,0 +1,5 @@
+rule = "601.3f"
+section = 601
+title = "Casting Spells - CR 601.3f"
+status = "skeleton"
+text = "Some effects allow a player to cast a spell with certain qualities from among face-down cards in exile. A player may begin to cast such a spell only if they can look at the face-down card in exile."

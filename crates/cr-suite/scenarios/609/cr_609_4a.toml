@@ -1,0 +1,5 @@
+rule = "609.4a"
+section = 609
+title = "Effects - CR 609.4a"
+status = "skeleton"
+text = "If two effects state that a player may (or a creature can) do the same thing “as though” different conditions were true, both conditions could apply. If one “as though” effect satisfies the requirements for another “as though” effect, then both effects will apply."

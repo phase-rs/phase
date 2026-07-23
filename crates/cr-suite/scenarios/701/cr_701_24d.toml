@@ -1,0 +1,5 @@
+rule = "701.24d"
+section = 701
+title = "Keyword Actions - CR 701.24d"
+status = "skeleton"
+text = "If an effect would cause a player to shuffle a set of objects into a library, that library is shuffled even if there are no objects in that set."

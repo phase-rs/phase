@@ -1,0 +1,5 @@
+rule = "723.3"
+section = 723
+title = "The Monarch - CR 723.3"
+status = "skeleton"
+text = "Only control of the player changes. All objects are controlled by their normal controllers. A player who’s being controlled during their turn is still the active player."

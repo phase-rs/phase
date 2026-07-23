@@ -1,0 +1,5 @@
+rule = "702.22c"
+section = 702
+title = "Keyword Abilities - CR 702.22c"
+status = "skeleton"
+text = "As a player declares attackers, they may declare that one or more attacking creatures with banding and up to one attacking creature without banding (even if it has “bands with other”) are all in a “band.” They may also declare that one or more attacking [quality] creatures with “bands with other [quality]” and any number of other attacking [quality] creatures are all in a band. A player may declare as many attacking bands as they want, but each creature may be a member of only one of them. (Defending players can’t declare bands but may use banding in a different way; see rule 702.22j.)"

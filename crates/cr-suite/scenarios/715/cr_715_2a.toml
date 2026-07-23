@@ -1,0 +1,5 @@
+rule = "715.2a"
+section = 715
+title = "Adventurer Cards - CR 715.2a"
+status = "skeleton"
+text = "If an effect refers to a card, spell, or permanent that “has an Adventure,” it refers to an object that has the alternative characteristics of an Adventure spell, even if the object currently doesn’t use them."

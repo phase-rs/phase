@@ -1,0 +1,5 @@
+rule = "107.18"
+section = 107
+title = "Numbers and Symbols - CR 107.18"
+status = "skeleton"
+text = "The pawprint symbol is {P}. This symbol is used to indicate the modes on some modal spells, and does not represent a cost, mana, counters, or any type of persistent resource. See rule 700.2i."

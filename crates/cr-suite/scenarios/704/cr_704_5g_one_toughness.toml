@@ -1,0 +1,41 @@
+rule = "704.5g"
+section = 704
+title = "State-Based Actions — CR 704.5g (2/1 lethal)"
+status = "executable"
+text = "If a creature has toughness greater than 0, and the total damage marked on it is greater than or equal to its toughness, that creature has been dealt lethal damage and is destroyed."
+notes = "Variant of cr_704_5g: a 2/1 creature takes 3 damage (>= 1 toughness) and dies. Discriminates the lethal-damage SBA at a different toughness than the 2/2 base fixture."
+
+[setup]
+phase = "PreCombatMain"
+seed = 42
+
+[[setup.players]]
+id = 0
+life = 20
+
+[[setup.players]]
+id = 1
+life = 20
+
+[[setup.creatures]]
+id = "lions"
+player = 1
+name = "Savannah Lions"
+power = 2
+toughness = 1
+
+[[setup.lightning_bolts]]
+id = "bolt"
+player = 0
+
+[[steps]]
+action = "cast_lightning_bolt"
+spell = "bolt"
+target_creature = "lions"
+
+[[steps]]
+action = "resolve_top"
+
+[[assertions]]
+kind = "creature_in_graveyard"
+creature = "lions"

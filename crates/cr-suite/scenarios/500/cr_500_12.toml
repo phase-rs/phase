@@ -1,0 +1,5 @@
+rule = "500.12"
+section = 500
+title = "General (Turn Structure) - CR 500.12"
+status = "skeleton"
+text = "No game events can occur between steps, phases, or turns."

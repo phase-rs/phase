@@ -1,0 +1,5 @@
+rule = "122.7"
+section = 122
+title = "Counters - CR 122.7"
+status = "skeleton"
+text = "An ability that triggers “When/Whenever the Nth [kind] counter” is put on an object triggers when one or more counters of the appropriate kind are put on the object such that the object had fewer than N counters on it before the counters were put on it and N or more counters on it after."

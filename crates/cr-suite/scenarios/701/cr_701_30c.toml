@@ -1,0 +1,5 @@
+rule = "701.30c"
+section = 701
+title = "Keyword Actions - CR 701.30c"
+status = "skeleton"
+text = "Each clashing player reveals the top card of their library at the same time. Then those players decide in APNAP order (see rule 101.4) where to put those cards, then those cards move at the same time."

@@ -1,0 +1,5 @@
+rule = "119.9"
+section = 119
+title = "Life - CR 119.9"
+status = "skeleton"
+text = "Some triggered abilities are written, “Whenever [a player] gains life, . . . .” Such abilities are treated as though they are written, “Whenever a source causes [a player] to gain life, . . . .” If a player gains 0 life, no life gain event has occurred, and these abilities won’t trigger."

@@ -1,0 +1,5 @@
+rule = "707.10g"
+section = 707
+title = "Copying Objects - CR 707.10g"
+status = "skeleton"
+text = "If an effect creates a copy of a double-faced permanent spell, the copy is also a double-faced permanent spell that has both a front face and a back face. The characteristics of its front and back face are determined by the copiable values of the same face of the spell it is a copy of, as modified by any other copy effects. If the spell it is a copy of has its back face up, the copy is created with its back face up. The token that’s put onto the battlefield as that spell resolves is a double-faced token."

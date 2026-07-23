@@ -1,0 +1,5 @@
+rule = "707.9e"
+section = 707
+title = "Copying Objects - CR 707.9e"
+status = "skeleton"
+text = "Some replacement effects that generate copy effects include an exception that’s an additional effect rather than a modification of the affected object’s characteristics. If another copy effect is applied to that object after applying the copy effect with that exception, the exception’s effect doesn’t happen."

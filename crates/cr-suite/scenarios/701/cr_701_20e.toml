@@ -1,0 +1,5 @@
+rule = "701.20e"
+section = 701
+title = "Keyword Actions - CR 701.20e"
+status = "skeleton"
+text = "Some effects instruct a player to look at one or more cards. Looking at a card follows the same rules as revealing a card, except that the card is shown only to the specified player."

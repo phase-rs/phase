@@ -1,0 +1,5 @@
+rule = "104.3c"
+section = 104
+title = "Ending the Game - CR 104.3c"
+status = "skeleton"
+text = "If a player is required to draw more cards than are left in their library, they draw the remaining cards and then lose the game the next time a player would receive priority. (This is a state-based action. See rule 704.)"

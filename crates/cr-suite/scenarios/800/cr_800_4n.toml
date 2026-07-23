@@ -1,0 +1,5 @@
+rule = "800.4n"
+section = 800
+title = "General (Multiplayer Rules) - CR 800.4n"
+status = "skeleton"
+text = "When a player leaves the game, objects that player owns in the ante zone do not leave the game. This is an exception to rule 800.4a. See rule 407, “Ante.”"

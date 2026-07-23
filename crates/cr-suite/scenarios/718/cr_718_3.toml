@@ -1,0 +1,5 @@
+rule = "718.3"
+section = 718
+title = "Prototype Cards - CR 718.3"
+status = "skeleton"
+text = "As a player casts a prototype card, the player chooses whether they cast the card normally or cast it as a prototyped spell using the prototype keyword ability (see rule 702.160, “Prototype”)."

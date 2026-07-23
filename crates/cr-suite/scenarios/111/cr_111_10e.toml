@@ -1,0 +1,5 @@
+rule = "111.10e"
+section = 111
+title = "Tokens - CR 111.10e"
+status = "skeleton"
+text = "A Shard token is a colorless Shard enchantment token with “{2}, Sacrifice this token: Scry 1, then draw a card.”"

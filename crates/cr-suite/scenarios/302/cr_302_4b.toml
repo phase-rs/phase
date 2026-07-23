@@ -1,0 +1,5 @@
+rule = "302.4b"
+section = 302
+title = "Creatures - CR 302.4b"
+status = "skeleton"
+text = "A creature’s toughness is the amount of damage needed to destroy it."

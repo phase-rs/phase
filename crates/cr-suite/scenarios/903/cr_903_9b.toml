@@ -1,0 +1,5 @@
+rule = "903.9b"
+section = 903
+title = "Commander - CR 903.9b"
+status = "skeleton"
+text = "If a commander would be put into its owner’s hand or library from anywhere, its owner may put it into the command zone instead. This replacement effect may apply more than once to the same event. This is an exception to rule 614.5."

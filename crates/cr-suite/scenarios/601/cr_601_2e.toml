@@ -1,0 +1,5 @@
+rule = "601.2e"
+section = 601
+title = "Casting Spells - CR 601.2e"
+status = "skeleton"
+text = "The game checks to see if the proposed spell can legally be cast. If the proposed spell is illegal, the game returns to the moment before the casting of that spell was proposed (see rule 733, “Handling Illegal Actions”)."

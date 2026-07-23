@@ -1,0 +1,5 @@
+rule = "702.32a"
+section = 702
+title = "Keyword Abilities - CR 702.32a"
+status = "skeleton"
+text = "Fading is a keyword that represents two abilities. “Fading N” means “This permanent enters with N fade counters on it” and “At the beginning of your upkeep, remove a fade counter from this permanent. If you can’t, sacrifice the permanent.”"

@@ -1,0 +1,5 @@
+rule = "116.2a"
+section = 116
+title = "Special Actions - CR 116.2a"
+status = "skeleton"
+text = "Playing a land is a special action. To play a land, a player puts that land onto the battlefield from the zone it was in (usually that player’s hand). By default, a player can take this action only once during each of their turns. A player can take this action any time they have priority and the stack is empty during a main phase of their turn. See rule 305, “Lands.”"

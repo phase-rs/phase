@@ -1,0 +1,5 @@
+rule = "701.28e"
+section = 701
+title = "Keyword Actions - CR 701.28e"
+status = "skeleton"
+text = "If an activated or triggered ability of a permanent that isn’t a delayed triggered ability of that permanent tries to convert it, the permanent does so only if it hasn’t converted or transformed since the ability was put onto the stack. If a delayed triggered ability of a permanent tries to convert that permanent, the permanent does so only if it hasn’t converted or transformed since that delayed triggered ability was created. In both cases, if the permanent has already transformed or converted, an instruction to do either is ignored."
