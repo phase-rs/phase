@@ -346,6 +346,9 @@ fn make_optional_cost_choice(
     }
 }
 
+/// Printed cards carry at most one Gift keyword. The additional-cost queue is
+/// per-ordinal for uniformity with other origins, but `SpellContext.gift_recipient`
+/// is a single latch — take the last `Keyword::Gift` if multiples ever appear.
 fn gift_kind_for_object(state: &GameState, object_id: ObjectId) -> Option<GiftKind> {
     state.objects.get(&object_id).and_then(|obj| {
         obj.keywords.iter().rev().find_map(|k| match k {
@@ -597,7 +600,14 @@ pub(crate) fn handle_decide_additional_cost(
             .as_ref()
             .is_some_and(|instance| instance.origin == AdditionalCostOrigin::Gift)
     {
-        return continue_after_gift_promised(state, player, updated_pending, cost_to_pay, events);
+        return continue_after_gift_promised(
+            state,
+            player,
+            updated_pending,
+            cost_to_pay,
+            cost_source,
+            events,
+        );
     }
 
     if let Some(cost) = cost_to_pay {
@@ -614,6 +624,7 @@ fn continue_after_gift_promised(
     player: PlayerId,
     mut pending: PendingCast,
     cost_to_pay: Option<AbilityCost>,
+    cost_source: SpellCostSource,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let opponents = crate::game::players::opponents(state, player);
@@ -622,26 +633,20 @@ fn continue_after_gift_promised(
             "Cannot promise a gift with no opponents".to_string(),
         ));
     }
+    // Gift's additional cost is `ManaCost::zero()` — a synthesis sentinel so the
+    // OptionalCostChoice prompt can exist. It is not a real payment: both the
+    // sole-opponent auto-latch and the ≥2 ChooseGiftRecipient path must drop it
+    // the same way and resume via `finish_pending_cost_or_cast` (after latching).
+    // `cost_source` is threaded from the caller for call-site parity with other
+    // additional costs; unused here because nothing is paid.
+    let _ = (cost_to_pay, cost_source);
+
     let gift_kind = gift_kind_for_object(state, pending.object_id);
     if opponents.len() == 1 {
         pending.ability.context.gift_recipient = Some(opponents[0]);
         stamp_pending_ability_context_recursive(&mut pending);
-        if let Some(cost) = cost_to_pay {
-            pay_additional_cost_with_source(
-                state,
-                player,
-                cost,
-                SpellCostSource::Other,
-                pending,
-                events,
-            )
-        } else {
-            finish_pending_cost_or_cast(state, player, pending, events)
-        }
+        finish_pending_cost_or_cast(state, player, pending, events)
     } else {
-        // Mana-zero Gift sentinel is not a real payment to defer — resume via
-        // ChooseGiftRecipient → finish_pending_cost_or_cast after recipient latch.
-        let _ = cost_to_pay;
         Ok(WaitingFor::ChooseGiftRecipient {
             player,
             candidates: opponents,

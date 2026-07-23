@@ -1711,22 +1711,23 @@
     "targetChoice": "diese Zielwahl"
   },
   "giftRecipient": {
-    "title": "Choose Gift Recipient",
-    "subtitle": "Choose which opponent receives the promised gift."
+    "title": "Geschenk-Empfänger wählen",
+    "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
   },
   "optionalCost": {
     "gift": {
-      "title": "Promise a gift?",
-      "pay": "Promise {{gift}}",
-      "decline": "Cast without promising",
+      "title": "Ein Geschenk versprechen?",
+      "pay": "{{gift}} versprechen",
+      "decline": "Wirken ohne zu versprechen",
       "kind": {
-        "card": "a card",
-        "treasure": "a Treasure",
-        "food": "a Food",
-        "tappedFish": "a tapped Fish"
+        "card": "eine Karte",
+        "treasure": "einen Schatz",
+        "food": "eine Nahrung",
+        "tappedFish": "einen getappten Fisch"
       }
     }
-  },  "clashOpponent": {
+  },
+  "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
   },

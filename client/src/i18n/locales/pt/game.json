@@ -1711,22 +1711,23 @@
     "targetChoice": "esta escolha de alvo"
   },
   "giftRecipient": {
-    "title": "Choose Gift Recipient",
-    "subtitle": "Choose which opponent receives the promised gift."
+    "title": "Escolher destinatário do presente",
+    "subtitle": "Escolha qual oponente recebe o presente prometido."
   },
   "optionalCost": {
     "gift": {
-      "title": "Promise a gift?",
-      "pay": "Promise {{gift}}",
-      "decline": "Cast without promising",
+      "title": "Prometer um presente?",
+      "pay": "Prometer {{gift}}",
+      "decline": "Conjurar sem prometer",
       "kind": {
-        "card": "a card",
-        "treasure": "a Treasure",
-        "food": "a Food",
-        "tappedFish": "a tapped Fish"
+        "card": "um card",
+        "treasure": "um Tesouro",
+        "food": "um Alimento",
+        "tappedFish": "um Peixe virado"
       }
     }
-  },  "clashOpponent": {
+  },
+  "clashOpponent": {
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
   },
