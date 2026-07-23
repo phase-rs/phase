@@ -19,8 +19,9 @@ use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
     ManaContribution, ManaProduction, QuantityExpr, SacrificeCost, TargetFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
@@ -260,28 +261,33 @@ fn led_shaped_discard_sacrifice_not_auto_tapped_stays_manual() {
     let spell = draw_spell(&mut scenario);
     scenario.add_card_to_hand(P0, "Spare Card A");
     let mut runner = scenario.build();
-    let _led = make_led_source(runner.state_mut(), 952);
-    let outcome = runner
-        .cast(spell)
-        .try_resolve()
-        .expect("the scenario driver must preserve the manual mana-payment prompt");
+    let led = make_led_source(runner.state_mut(), 952);
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting with only the LED-shaped source must reach manual mana payment");
     assert!(
         matches!(
-            outcome.final_waiting_for(),
+            runner.state().waiting_for,
             WaitingFor::ManaPayment { player, .. } if *player == P0
         ),
         "with only the LED-shaped source, auto payment must pause at manual mana payment, got {:?}",
-        outcome.final_waiting_for()
+        runner.state().waiting_for
     );
     assert!(
         matches!(
-            outcome.state().pending_cast.as_deref(),
+            runner.state().pending_cast.as_deref(),
             Some(pending) if pending.object_id == spell
         ),
         "the manual mana-payment pause must preserve the pending spell cast"
     );
     assert_eq!(
-        outcome.state().objects.get(&_led).map(|object| object.zone),
+        runner.state().objects.get(&led).map(|object| object.zone),
         Some(Zone::Battlefield),
         "the LED-shaped source must remain available for its manual discard-and-sacrifice payment"
     );
