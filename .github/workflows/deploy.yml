@@ -358,7 +358,10 @@ jobs:
       card_data_hash16: ${{ needs.card-data.outputs.card_data_hash16 }}
       draft_pools_sha256: ${{ needs.card-data.outputs.draft_pools_sha256 }}
       draft_pools_hash16: ${{ needs.card-data.outputs.draft_pools_hash16 }}
-    secrets: inherit
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY: ${{ secrets.SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY }}
 
   # ── Frontend + Pages deploy (needs server artifact + card-data + WASM) ──────
   build-pages:
