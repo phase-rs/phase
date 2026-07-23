@@ -11,21 +11,24 @@
 //! graveyard — switching every delirium payoff on — scored exactly the same as
 //! one that put in a redundant fifth creature.
 //!
-//! ## Why the threshold-met branch scores zero
+//! ## When the axis stops rewarding
 //!
-//! Once the count is at or above the deck's highest threshold, every payoff is
-//! already live and additional diversity buys nothing on this axis. Scoring it
-//! anyway would make the AI keep durdling with self-mill after delirium is on,
-//! which is exactly the failure mode this policy exists to avoid. Same
-//! no-progress-no-score backbone as `PoisonClockPolicy`, different resource.
+//! A *threshold* payoff (delirium, descend N) goes live at its threshold; once
+//! the graveyard reaches it, more diversity buys nothing and the branch scores
+//! zero — otherwise the AI would durdle with self-mill after delirium is on. A
+//! *scaling* payoff (Consuming Blob, Tarmogoyf) has no threshold and keeps
+//! wanting a bigger, more diverse graveyard, so it is rewarded continuously
+//! with a diminishing signal. A deck's threshold is modelled as `Option<u32>`
+//! precisely so a scaling-only deck is never handed a fabricated four-type
+//! ceiling. Same no-progress-no-score backbone as `PoisonClockPolicy`.
 //!
 //! ## Performance
 //!
 //! `verdict()` runs per candidate per search node, so predicate order matters.
-//! The card-local AST check (`fills_own_graveyard_parts` over the candidate's
-//! own abilities) runs FIRST and rejects the overwhelming majority of
-//! candidates; only a confirmed graveyard-filler pays for the graveyard scan,
-//! which walks one zone's objects and never touches the battlefield, mana
+//! The card-local AST check (`fills_own_graveyard_parts`, over the action's
+//! authoritative effect chain) runs FIRST and rejects the overwhelming majority
+//! of candidates; only a confirmed graveyard-filler pays for the graveyard
+//! scan, which walks one zone's objects and never touches the battlefield, mana
 //! affordability, or `find_legal_targets`.
 
 use std::collections::HashSet;
@@ -83,61 +86,84 @@ impl TacticalPolicy for GraveyardTypesPolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        // Cheapest discriminator first: a card-local AST walk over just this
-        // candidate's abilities. Everything below is gated behind it.
-        let abilities = match &ctx.candidate.action {
-            GameAction::CastSpell { object_id, .. } => ctx
-                .state
-                .objects
-                .get(object_id)
-                .map(|obj| obj.abilities.as_slice()),
-            GameAction::ActivateAbility {
-                source_id,
-                ability_index,
-            } => ctx
-                .state
-                .objects
-                .get(source_id)
-                .and_then(|obj| obj.abilities.get(*ability_index))
-                .map(std::slice::from_ref),
-            _ => None,
-        };
-        let Some(abilities) = abilities else {
-            return PolicyVerdict::neutral(PolicyReason::new("graveyard_types_na"));
-        };
-        if !fills_own_graveyard_parts(abilities) {
+        // Cheapest discriminator first, and it must inspect exactly the effect
+        // the action performs — via the engine's authoritative ability
+        // enumeration, not every ability sitting on the object.
+        if !candidate_fills_own_graveyard(ctx) {
             return PolicyVerdict::neutral(PolicyReason::new("graveyard_types_na"));
         }
 
-        let threshold = ctx
+        let feature = ctx
             .context
             .session
             .features
             .get(&ctx.ai_player)
-            .map(|f| f.graveyard_types.highest_threshold)
-            .unwrap_or(0);
+            .map(|f| &f.graveyard_types);
+        let threshold = feature.and_then(|f| f.highest_threshold);
+        let has_scaling = feature.is_some_and(|f| f.scaling_payoff_count > 0);
         let current = distinct_graveyard_types(ctx.state, ctx.ai_player);
         let scalar = ctx.config.policy_penalties.graveyard_types_progress;
 
-        // Every payoff is already live — more diversity buys nothing here.
-        if threshold == 0 || current >= threshold {
-            return PolicyVerdict::neutral(
-                PolicyReason::new("graveyard_types_threshold_met")
+        // Below an unmet threshold: race to switch every delirium payoff on.
+        // The last missing type is worth far more than the first — it is what
+        // actually turns the payoffs on. Routes through `PolicyVerdict::score`
+        // so a tuned-up `scalar` auto-bands instead of tripping a band assert.
+        if let Some(threshold) = threshold {
+            if current < threshold {
+                let deficit = threshold - current;
+                let delta = if deficit == 1 {
+                    scalar
+                } else {
+                    scalar / f64::from(deficit)
+                };
+                return PolicyVerdict::score(
+                    delta,
+                    PolicyReason::new("graveyard_types_progress")
+                        .with_fact("graveyard_types", current as i64)
+                        .with_fact("deficit", deficit as i64),
+                );
+            }
+        }
+
+        // At/over the threshold, or no threshold at all: only a SCALING payoff
+        // still wants a bigger, more diverse graveyard. Diminishing (the nth
+        // type matters less than the first) but never zero, so a Tarmogoyf /
+        // Consuming Blob deck keeps being rewarded past four types.
+        if has_scaling {
+            return PolicyVerdict::score(
+                scalar / f64::from(current + 1),
+                PolicyReason::new("graveyard_types_scaling")
                     .with_fact("graveyard_types", current as i64),
             );
         }
 
-        let deficit = threshold - current;
-        let reason = PolicyReason::new("graveyard_types_progress")
-            .with_fact("graveyard_types", current as i64)
-            .with_fact("deficit", deficit as i64);
+        // A threshold-only deck already at its threshold: delirium is on and
+        // nothing scales, so more diversity buys nothing on this axis.
+        PolicyVerdict::neutral(
+            PolicyReason::new("graveyard_types_threshold_met")
+                .with_fact("graveyard_types", current as i64),
+        )
+    }
+}
 
-        // The last missing type is worth far more than the first: it is what
-        // actually switches the payoffs on.
-        if deficit == 1 {
-            PolicyVerdict::strong(scalar, reason)
-        } else {
-            PolicyVerdict::preference(scalar / f64::from(deficit), reason)
-        }
+/// True when the candidate action ACTUALLY fills the AI's own graveyard.
+///
+/// The lookup respects the action's authoritative ability semantics:
+/// * `CastSpell` → the spell's own resolution chain (`CastFacts::primary_effects`,
+///   which is the `AbilityKind::Spell` abilities only). Casting a permanent that
+///   merely *has* an activated self-mill ability does not qualify — the cast
+///   itself fills no graveyard (CR 601.2).
+/// * `ActivateAbility` → the ability at the engine's runtime-enumerated index
+///   (`effective_activated_ability`), which is the correct index space for
+///   runtime-granted abilities where `GameObject::abilities` is not (CR 602.2).
+fn candidate_fills_own_graveyard(ctx: &PolicyContext<'_>) -> bool {
+    match &ctx.candidate.action {
+        GameAction::CastSpell { .. } => ctx
+            .cast_facts()
+            .is_some_and(|facts| fills_own_graveyard_parts(facts.primary_effects.iter().copied())),
+        GameAction::ActivateAbility { .. } => ctx
+            .effective_activated_ability()
+            .is_some_and(|ability| fills_own_graveyard_parts(std::iter::once(&ability))),
+        _ => false,
     }
 }

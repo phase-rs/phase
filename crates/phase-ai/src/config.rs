@@ -466,6 +466,7 @@ pub struct PolicyPenalties {
     /// CR 205.2a: card-equivalent weight for advancing graveyard card-type
     /// diversity toward a delirium/descend threshold. Strong band when the
     /// action supplies the last missing type.
+    #[serde(default = "default_graveyard_types_progress")]
     pub graveyard_types_progress: f64,
 }
 
@@ -531,9 +532,16 @@ impl Default for PolicyPenalties {
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
-            graveyard_types_progress: 2.5,
+            graveyard_types_progress: default_graveyard_types_progress(),
         }
     }
+}
+
+/// CR 205.2a. Shared by `Default` and `#[serde(default)]` so a tuning artifact
+/// written before this field existed still deserializes (`ai_tune` reads the
+/// `policy_penalties` section directly into this struct).
+fn default_graveyard_types_progress() -> f64 {
+    2.5
 }
 
 fn default_wasted_cast_penalty() -> f64 {
@@ -1502,6 +1510,37 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.cycling_patience_penalty, -1.0);
         assert_eq!(p.cycling_needed_land_penalty, -2.0);
+    }
+
+    /// Artifact compatibility: `ai_tune` deserializes a persisted
+    /// `policy_penalties` section straight into `PolicyPenalties`
+    /// (`bin/ai_tune.rs`, `TuneGroup::Penalties`), so an artifact written
+    /// before `graveyard_types_progress` existed must still load — with its own
+    /// tuned values intact and the new field filled from the shared default.
+    #[test]
+    fn policy_penalties_load_pre_graveyard_types_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("graveyard_types_progress")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-graveyard_types_progress artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.graveyard_types_progress,
+            default_graveyard_types_progress(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().graveyard_types_progress,
+            default_graveyard_types_progress(),
+            "Default and serde must share one source of truth"
+        );
     }
 
     #[test]

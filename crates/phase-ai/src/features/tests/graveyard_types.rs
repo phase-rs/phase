@@ -128,7 +128,7 @@ fn detects_static_threshold_payoff() {
         4,
     )]);
     assert_eq!(feature.threshold_payoff_count, 4);
-    assert_eq!(feature.highest_threshold, 4);
+    assert_eq!(feature.highest_threshold, Some(4));
 }
 
 #[test]
@@ -180,7 +180,221 @@ fn descend_eight_tracks_highest_threshold() {
             2,
         ),
     ];
-    assert_eq!(detect(&deck).highest_threshold, 8);
+    assert_eq!(detect(&deck).highest_threshold, Some(8));
+}
+
+/// A scaling-only deck has NO threshold — `highest_threshold` must stay `None`
+/// rather than inventing a four-type ceiling that would make the policy stop
+/// rewarding a payoff that keeps scaling.
+#[test]
+fn scaling_only_deck_has_no_threshold() {
+    let feature = detect(&[
+        entry(scaling_payoff("Consuming Blob"), 4),
+        entry(self_mill_enabler("Stitcher's Supplier"), 4),
+    ]);
+    assert_eq!(feature.scaling_payoff_count, 4);
+    assert_eq!(feature.threshold_payoff_count, 0);
+    assert_eq!(feature.highest_threshold, None);
+}
+
+// ─── comparator / negation / compound threshold semantics (CR 205.2a) ────────
+
+fn static_threshold(comparator: Comparator, lhs: QuantityExpr, rhs: QuantityExpr) -> CardFace {
+    let mut face = creature("Cmp");
+    face.static_abilities = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .condition(StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        })];
+    face
+}
+
+/// `types >= N` and `types > N` are both positive gates; `>` normalizes to the
+/// strict boundary (`> 3` needs four types, same as `>= 4`).
+#[test]
+fn positive_comparators_yield_thresholds() {
+    let ge = detect(&[entry(
+        static_threshold(
+            Comparator::GE,
+            own_graveyard_types(),
+            QuantityExpr::Fixed { value: 4 },
+        ),
+        1,
+    )]);
+    assert_eq!(ge.highest_threshold, Some(4), "types >= 4");
+
+    let gt = detect(&[entry(
+        static_threshold(
+            Comparator::GT,
+            own_graveyard_types(),
+            QuantityExpr::Fixed { value: 3 },
+        ),
+        1,
+    )]);
+    assert_eq!(gt.highest_threshold, Some(4), "types > 3 ⟺ types >= 4");
+}
+
+/// `<`, `<=`, `=`, `!=` reward FEWER or an EXACT number of types — self-mill
+/// toward N is not what they want, so they are not threshold payoffs.
+#[test]
+fn non_positive_comparators_are_not_thresholds() {
+    for comparator in [
+        Comparator::LT,
+        Comparator::LE,
+        Comparator::EQ,
+        Comparator::NE,
+    ] {
+        let feature = detect(&[entry(
+            static_threshold(
+                comparator,
+                own_graveyard_types(),
+                QuantityExpr::Fixed { value: 4 },
+            ),
+            1,
+        )]);
+        assert_eq!(
+            feature.threshold_payoff_count, 0,
+            "{comparator:?} against the graveyard count is not a delirium gate"
+        );
+        assert_eq!(feature.highest_threshold, None);
+    }
+}
+
+/// The mirror orientation `N <= types` / `N < types` reads as the same lower
+/// bound once the comparator is flipped across its operands.
+#[test]
+fn mirrored_orientation_normalizes_to_lower_bound() {
+    let le = detect(&[entry(
+        static_threshold(
+            Comparator::LE,
+            QuantityExpr::Fixed { value: 4 },
+            own_graveyard_types(),
+        ),
+        1,
+    )]);
+    assert_eq!(le.highest_threshold, Some(4), "4 <= types ⟺ types >= 4");
+
+    let lt = detect(&[entry(
+        static_threshold(
+            Comparator::LT,
+            QuantityExpr::Fixed { value: 3 },
+            own_graveyard_types(),
+        ),
+        1,
+    )]);
+    assert_eq!(lt.highest_threshold, Some(4), "3 < types ⟺ types >= 4");
+}
+
+/// CR 205.2a: negating "N or more types" is a "fewer than N" condition — the
+/// opposite of a delirium payoff, so it is not counted.
+#[test]
+fn negated_threshold_is_not_a_payoff() {
+    let mut face = creature("Anti-Delirium");
+    face.static_abilities = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::QuantityComparison {
+                lhs: own_graveyard_types(),
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            }),
+        })];
+    let feature = detect(&[entry(face, 1)]);
+    assert_eq!(feature.threshold_payoff_count, 0);
+    assert_eq!(feature.highest_threshold, None);
+}
+
+/// CR 109.3: an `And` gates on every constraint, so a delirium conjunct is
+/// mandatory and the highest graveyard threshold present is taken.
+#[test]
+fn and_takes_the_highest_mandatory_threshold() {
+    let mut face = creature("Conjunctive");
+    face.static_abilities = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .condition(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: own_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: own_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                },
+            ],
+        })];
+    assert_eq!(detect(&[entry(face, 1)]).highest_threshold, Some(6));
+}
+
+/// An `Or` makes a graveyard threshold a mandatory gate ONLY when every branch
+/// is a graveyard threshold (then the easiest, minimum branch). A single
+/// non-graveyard branch means the payoff can fire without delirium.
+#[test]
+fn or_is_a_gate_only_when_every_branch_is_graveyard() {
+    // Every branch is a graveyard threshold → the minimum is the effective gate.
+    let mut all_gy = creature("All Graveyard Or");
+    all_gy.static_abilities = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .condition(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: own_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: own_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 6 },
+                },
+            ],
+        })];
+    assert_eq!(detect(&[entry(all_gy, 1)]).highest_threshold, Some(4));
+
+    // One non-graveyard branch → not a mandatory delirium gate.
+    let mut mixed = creature("Mixed Or");
+    mixed.static_abilities = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::AddPower { value: 1 }])
+        .condition(StaticCondition::Or {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: own_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: opponent_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                },
+            ],
+        })];
+    assert_eq!(detect(&[entry(mixed, 1)]).threshold_payoff_count, 0);
+}
+
+/// CR 108.3: an all-graveyards payoff must NOT be read as an own-graveyard plan
+/// — the policy would count only the AI's own graveyard, a different quantity.
+#[test]
+fn all_graveyards_scope_is_not_own_graveyard() {
+    let all_scope = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::Zone {
+                zone: ZoneRef::Graveyard,
+                scope: CountScope::All,
+            },
+        },
+    };
+    let feature = detect(&[entry(threshold_payoff("All Graveyards", 4, all_scope), 4)]);
+    assert_eq!(feature.threshold_payoff_count, 0);
 }
 
 #[test]

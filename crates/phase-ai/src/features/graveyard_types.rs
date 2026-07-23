@@ -34,8 +34,8 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, CardTypeSetSource, ControllerRef, CountScope, Effect, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TriggerCondition, ZoneRef,
+    AbilityDefinition, CardTypeSetSource, Comparator, ControllerRef, CountScope, Effect,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 
@@ -45,10 +45,6 @@ use crate::features::commitment;
 /// Commitment at or above which graveyard type-diversity is a real plan rather
 /// than an incidental Goyf. Gates `GraveyardTypesPolicy::activation`.
 pub const GRAVEYARD_TYPES_FLOOR: f32 = 0.35;
-
-/// CR 205.2a: the delirium threshold printed on essentially every card in this
-/// class. Used only as the fallback when a payoff's threshold cannot be read.
-pub const DEFAULT_DELIRIUM_THRESHOLD: u32 = 4;
 
 /// CR 207.2c + CR 205.2a: per-deck graveyard type-diversity classification.
 ///
@@ -65,9 +61,13 @@ pub struct GraveyardTypesFeature {
     /// Cards that put cards into the controller's own graveyard — self-mill,
     /// self-discard, surveil (CR 701.17 / CR 701.25).
     pub enabler_count: u32,
-    /// The highest threshold any payoff in the deck asks for. A descend 8 deck
-    /// must not think it is finished at four card types.
-    pub highest_threshold: u32,
+    /// The highest threshold any *threshold* payoff in the deck asks for, or
+    /// `None` when the deck has no threshold payoff at all. A descend 8 deck
+    /// must not think it is finished at four card types; a scaling-only deck
+    /// (Consuming Blob, Tarmogoyf) has no threshold to "finish" and must keep
+    /// being rewarded for diversity — so absence is modelled distinctly from a
+    /// concrete four, never invented.
+    pub highest_threshold: Option<u32>,
     /// `0.0..=1.0` — how central the axis is. Consumed by
     /// `GraveyardTypesPolicy::activation` as the single scaling knob.
     pub commitment: f32,
@@ -85,7 +85,7 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
     let mut threshold_payoff_count = 0u32;
     let mut scaling_payoff_count = 0u32;
     let mut enabler_count = 0u32;
-    let mut highest_threshold = 0u32;
+    let mut highest_threshold: Option<u32> = None;
     let mut total_nonland = 0u32;
     let mut payoff_names: Vec<String> = Vec::new();
 
@@ -115,7 +115,9 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
 
         if let Some(threshold) = threshold {
             threshold_payoff_count = threshold_payoff_count.saturating_add(entry.count);
-            highest_threshold = highest_threshold.max(threshold);
+            // `Option<u32>` orders `None < Some(_)`, so `max` keeps the highest
+            // real threshold and never regresses to a fabricated default.
+            highest_threshold = highest_threshold.max(Some(threshold));
         } else if scales {
             // Only a payoff with NO threshold is a scaling payoff — otherwise a
             // delirium card would be counted on both axes.
@@ -142,11 +144,8 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
         threshold_payoff_count,
         scaling_payoff_count,
         enabler_count,
-        highest_threshold: if highest_threshold == 0 {
-            DEFAULT_DELIRIUM_THRESHOLD
-        } else {
-            highest_threshold
-        },
+        // No fabricated fallback: `None` when the deck has no threshold payoff.
+        highest_threshold,
         commitment,
         payoff_names,
     }
@@ -184,30 +183,37 @@ fn compute_commitment(
     commitment::geometric_mean(&[payoff_density, enabler_density])
 }
 
-/// CR 205.2a: read the threshold N out of a `QuantityComparison` condition
-/// whose left side counts distinct card types in the controller's graveyard.
+/// CR 205.2a: read the threshold N out of a `StaticCondition` whose comparison
+/// counts distinct card types in the controller's graveyard — but only when the
+/// comparison is a genuine positive "N or more types" gate.
 ///
-/// Returns `None` for any other condition shape, and for an opponent-scoped
-/// count — a card that punishes an OPPONENT's diverse graveyard is not a
-/// payoff for this deck's own plan.
+/// Returns `None` for any other condition shape, for an opponent-scoped count (a
+/// card that punishes an OPPONENT's diverse graveyard is not this deck's plan),
+/// and for a comparison whose truth semantics reward FEWER or an EXACT number of
+/// types (see [`positive_graveyard_threshold`]).
 fn static_graveyard_type_threshold(condition: &StaticCondition) -> Option<u32> {
     match condition {
-        StaticCondition::QuantityComparison { lhs, rhs, .. } => {
-            if !quantity_reads_own_graveyard_types(lhs) {
-                return None;
-            }
-            match rhs {
-                QuantityExpr::Fixed { value } if *value > 0 => Some(*value as u32),
-                _ => None,
-            }
-        }
-        // CR 109.3: a conjunction gates on every constraint, so a delirium
-        // clause nested in an `And`/`Or` still identifies the payoff.
-        StaticCondition::And { conditions } | StaticCondition::Or { conditions } => conditions
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => positive_graveyard_threshold(lhs, *comparator, rhs),
+        // CR 109.3: an `And` gates on EVERY constraint, so a delirium conjunct
+        // is mandatory — take the highest graveyard threshold present.
+        StaticCondition::And { conditions } => conditions
             .iter()
             .filter_map(static_graveyard_type_threshold)
             .max(),
-        StaticCondition::Not { condition } => static_graveyard_type_threshold(condition),
+        // An `Or` is satisfied by ANY branch, so a graveyard threshold is a
+        // mandatory gate only when EVERY branch is one — then the easiest
+        // (minimum) is what self-mill must reach. A single non-graveyard branch
+        // means the payoff can fire without delirium, so it is not our plan.
+        StaticCondition::Or { conditions } => {
+            all_graveyard_thresholds_min(conditions.iter().map(static_graveyard_type_threshold))
+        }
+        // CR 205.2a: negating "N or more types" is a "fewer than N" condition —
+        // it rewards a SMALLER graveyard, the opposite of a delirium payoff.
+        StaticCondition::Not { .. } => None,
         _ => None,
     }
 }
@@ -216,22 +222,100 @@ fn static_graveyard_type_threshold(condition: &StaticCondition) -> Option<u32> {
 /// — Autumnal Gloom carries its delirium clause on the trigger, not the static.
 fn trigger_graveyard_type_threshold(condition: &TriggerCondition) -> Option<u32> {
     match condition {
-        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
-            if !quantity_reads_own_graveyard_types(lhs) {
-                return None;
-            }
-            match rhs {
-                QuantityExpr::Fixed { value } if *value > 0 => Some(*value as u32),
-                _ => None,
-            }
+        TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => positive_graveyard_threshold(lhs, *comparator, rhs),
+        TriggerCondition::And { conditions } => conditions
+            .iter()
+            .filter_map(trigger_graveyard_type_threshold)
+            .max(),
+        TriggerCondition::Or { conditions } => {
+            all_graveyard_thresholds_min(conditions.iter().map(trigger_graveyard_type_threshold))
         }
-        TriggerCondition::Not { condition } => trigger_graveyard_type_threshold(condition),
+        TriggerCondition::Not { .. } => None,
         _ => None,
     }
 }
 
+/// The `Or`-combinator rule shared by both extractors: yield a threshold only
+/// when EVERY disjunct is itself a graveyard threshold, and then the minimum —
+/// the easiest branch self-mill can satisfy. Any `None` child (a branch that
+/// enables the payoff without delirium) collapses the whole `Or` to `None`.
+fn all_graveyard_thresholds_min(children: impl Iterator<Item = Option<u32>>) -> Option<u32> {
+    children
+        .collect::<Option<Vec<u32>>>()
+        .and_then(|thresholds| thresholds.into_iter().min())
+}
+
+/// CR 205.2a: normalize a single `count CMP N` comparison into the delirium
+/// threshold it mandates — the least graveyard-type count that satisfies it — or
+/// `None` when the comparison is not a positive "N or more types" gate.
+///
+/// Handles both orientations (`types >= N`, `N <= types`) and the strict-bound
+/// off-by-one (`types > N` ⟺ `types >= N+1`). Rejects `<`, `<=`, `=`, `!=`
+/// against the graveyard count: those reward FEWER or an EXACT number of types,
+/// so self-milling toward N is not what they want.
+fn positive_graveyard_threshold(
+    lhs: &QuantityExpr,
+    comparator: Comparator,
+    rhs: &QuantityExpr,
+) -> Option<u32> {
+    // Orient so the graveyard-type count is the subject and the constant is the
+    // bound; flip the comparator when the count sits on the right.
+    let (bound, oriented) = if quantity_reads_own_graveyard_types(lhs) {
+        (fixed_quantity_value(rhs)?, comparator)
+    } else if quantity_reads_own_graveyard_types(rhs) {
+        (fixed_quantity_value(lhs)?, flip_comparator(comparator))
+    } else {
+        return None;
+    };
+    // `oriented` now reads `types CMP bound`; a delirium gate is a lower bound.
+    match oriented {
+        // types >= bound → needs `bound` types (a zero bound gates nothing).
+        Comparator::GE if bound > 0 => Some(bound as u32),
+        // types > bound  → needs `bound + 1` types.
+        Comparator::GT if bound >= 0 => Some((bound + 1) as u32),
+        Comparator::GT
+        | Comparator::GE
+        | Comparator::LT
+        | Comparator::LE
+        | Comparator::EQ
+        | Comparator::NE => None,
+    }
+}
+
+/// The `i32` behind a `QuantityExpr::Fixed`, or `None` for any dynamic value.
+fn fixed_quantity_value(expr: &QuantityExpr) -> Option<i32> {
+    match expr {
+        QuantityExpr::Fixed { value } => Some(*value),
+        _ => None,
+    }
+}
+
+/// Reflect a comparator across its operands (`a CMP b` ⟺ `b flip(CMP) a`), so a
+/// `constant CMP count` comparison can be re-read as `count CMP constant`.
+fn flip_comparator(comparator: Comparator) -> Comparator {
+    match comparator {
+        Comparator::GT => Comparator::LT,
+        Comparator::LT => Comparator::GT,
+        Comparator::GE => Comparator::LE,
+        Comparator::LE => Comparator::GE,
+        Comparator::EQ => Comparator::EQ,
+        Comparator::NE => Comparator::NE,
+    }
+}
+
 /// True when a `QuantityExpr` reads distinct card types in the controller's
-/// own graveyard, at any nesting depth (Consuming Blob wraps it in `Offset`).
+/// OWN graveyard, at any nesting depth (Consuming Blob wraps it in `Offset`).
+///
+/// Only own-graveyard scopes qualify. `CountScope::All` is deliberately
+/// excluded: the policy's `distinct_graveyard_types` counts only the AI's owned
+/// objects, so classifying an all-graveyards payoff (Tarmogoyf-class) as an
+/// own-graveyard plan would let an opponent satisfy it while the policy keeps
+/// rewarding self-mill against a different quantity. Opponent- and
+/// iterated-player scopes are likewise not this deck's own plan.
 fn quantity_reads_own_graveyard_types(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Ref { qty } => matches!(
@@ -239,7 +323,9 @@ fn quantity_reads_own_graveyard_types(expr: &QuantityExpr) -> bool {
             QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Zone {
                     zone: ZoneRef::Graveyard,
-                    scope: CountScope::Controller | CountScope::All,
+                    // CR 108.3 + CR 109.5: "your graveyard" — the controller as
+                    // owner over a non-battlefield zone.
+                    scope: CountScope::Controller | CountScope::Owner,
                 },
             }
         ),
@@ -295,8 +381,10 @@ pub(crate) fn modification_quantity(
 /// An opponent-scoped mill is deliberately excluded: filling an opponent's
 /// graveyard does nothing for this deck's threshold (and actively helps a
 /// Goyf-style symmetric count, which this axis does not chase).
-pub(crate) fn fills_own_graveyard_parts(abilities: &[AbilityDefinition]) -> bool {
-    abilities.iter().any(|ability| {
+pub(crate) fn fills_own_graveyard_parts<'a>(
+    abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
+) -> bool {
+    abilities.into_iter().any(|ability| {
         collect_chain_effects(ability)
             .iter()
             .any(|effect| match effect {
