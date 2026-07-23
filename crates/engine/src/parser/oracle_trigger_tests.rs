@@ -25280,7 +25280,7 @@ fn mutable_pupa_full_trigger_builds_twelve_independent_keyword_mirrors() {
         nodes.len()
     );
     for (i, (node, kw)) in nodes.iter().zip(expected.iter()).enumerate() {
-        match &node.effect {
+        match &*node.effect {
             Effect::ApplyPerpetual {
                 modification: PerpetualModification::GrantKeywords { keywords },
                 ..
