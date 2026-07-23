@@ -1009,11 +1009,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
 
         let original_ability = ResolvedAbility::new(
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 3 },
-                target: TargetFilter::Any,
-                damage_source: None,
-                excess: None,
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: None,
+                target: None,
             },
             vec![],
             ObjectId(10),
