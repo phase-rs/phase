@@ -257,7 +257,13 @@
     "youPlayFirst": "You play first",
     "playerPlaysFirst": "{{name}} plays first",
     "heads": "Heads",
-    "tails": "Tails"
+    "tails": "Tails",
+    "coinFlip": "Coin flip",
+    "wonCoinFlip": "{{name}} won the flip",
+    "lostCoinFlip": "{{name}} lost the flip",
+    "turnOrder": "Turn order",
+    "turnOrderItem": "Turn {{turn}}: {{name}}",
+    "youTakeTurn": "You take turn {{turn}}"
   },
   "chrome": {
     "back": "Back",
