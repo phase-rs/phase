@@ -8074,11 +8074,12 @@ fn candidate_materiality(
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
             // `enter_with_counters`, so they never conflict. `Effect::Choose`
-            // (the as-enters color choice) runs after the ZoneChange and
-            // touches no shared event field. Both are explicitly recognized as
-            // order-independent so they do NOT fall through to the conservative
-            // material default below.
-            Effect::PutCounter { .. } | Effect::Choose { .. } => {}
+            // (the as-enters color choice) and `Effect::ChoosePermanent` (the
+            // as-enters object choice — Metamorphic Alteration) run after the
+            // ZoneChange and touch no shared event field. Both are explicitly
+            // recognized as order-independent so they do NOT fall through to
+            // the conservative material default below.
+            Effect::PutCounter { .. } | Effect::Choose { .. } | Effect::ChoosePermanent { .. } => {}
             // CR 614.1a + CR 111.1: Full token substitution on a CreateToken
             // event rewrites `CreateToken::spec` in the applier. Two different
             // substitutions on one event are last-applied-wins and stay

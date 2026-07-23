@@ -1224,20 +1224,92 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         );
                     }
                     // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
-                    // Siege protector / Tribute opponent-choice prompt that was stashed
-                    // by `apply_single_replacement` while resolving this ZoneChange).
-                    // Sets `state.waiting_for` to the resulting prompt, if any — the
-                    // caller's post-stack resolution checks waiting_for before returning
-                    // priority. Without this drain the choice would be silently dropped.
+                    // Siege protector / Tribute opponent-choice prompt, or Metamorphic
+                    // Alteration's ChoosePermanent CopyTargetChoice) that were stashed
+                    // by `apply_single_replacement` while resolving this ZoneChange.
+                    // `CallerEpilogue` skipped the DeliveryTail drain above, so this
+                    // site owns the prompt. The waiting_for MUST be applied — discarding
+                    // it silently drops mid-entry choices and lets Aura attach proceed
+                    // without the copy (spell-path Metamorphic regression).
                     if state.has_post_replacement_drain() {
                         state.clear_post_replacement_source();
-                        let _ = super::engine_replacement::apply_pending_post_replacement_effect(
-                            state,
-                            Some(entry.id),
-                            None,
-                            Some(crate::types::replacements::ReplacementEvent::Moved),
-                            events,
-                        );
+                        if let Some(wf) =
+                            super::engine_replacement::apply_pending_post_replacement_effect(
+                                state,
+                                Some(entry.id),
+                                None,
+                                Some(crate::types::replacements::ReplacementEvent::Moved),
+                                events,
+                            )
+                        {
+                            if !matches!(wf, WaitingFor::Priority { .. }) {
+                                // CR 608.3c + CR 400.7d: stash PendingSpellResolution so
+                                // the choice-answer resume can complete Aura attachment /
+                                // cast-link stamps — mirrors the delivery NeedsChoice arm
+                                // and ReplacementResult::NeedsChoice arm above.
+                                let cast_from_zone = ability
+                                    .as_ref()
+                                    .and_then(|a| a.context.cast_from_zone)
+                                    .or_else(|| {
+                                        state.objects.get(&entry.id).and_then(|o| o.cast_from_zone)
+                                    });
+                                let kickers_paid = ability
+                                    .as_ref()
+                                    .map(|a| a.context.kickers_paid.clone())
+                                    .unwrap_or_else(|| {
+                                        state
+                                            .objects
+                                            .get(&entry.id)
+                                            .map(|o| o.kickers_paid.clone())
+                                            .unwrap_or_default()
+                                    });
+                                let additional_cost_payment_count = ability
+                                    .as_ref()
+                                    .map(|a| a.context.additional_cost_payment_count)
+                                    .unwrap_or_else(|| {
+                                        state
+                                            .objects
+                                            .get(&entry.id)
+                                            .map(|o| o.additional_cost_payment_count)
+                                            .unwrap_or_default()
+                                    });
+                                let additional_cost_payments = ability
+                                    .as_ref()
+                                    .map(|a| a.context.additional_cost_payments.clone())
+                                    .unwrap_or_else(|| {
+                                        state
+                                            .objects
+                                            .get(&entry.id)
+                                            .map(|o| o.additional_cost_payments.clone())
+                                            .unwrap_or_default()
+                                    });
+                                state.push_spell_resolution(
+                                    crate::types::game_state::PendingSpellResolution {
+                                        object_id: entry.id,
+                                        controller: entry.controller,
+                                        casting_variant,
+                                        cast_from_zone,
+                                        cast_controller: Some(entry.controller),
+                                        cast_timing_permission,
+                                        spell_targets: spell_targets.clone(),
+                                        actual_mana_spent,
+                                        kickers_paid,
+                                        additional_cost_payment_count,
+                                        additional_cost_payments,
+                                        convoked_creatures: convoked_creatures.clone(),
+                                    },
+                                );
+                                state.waiting_for = wf;
+                                events.push(GameEvent::StackResolved {
+                                    object_id: entry.id,
+                                });
+                                state.current_trigger_event = None;
+                                state.current_trigger_events.clear();
+                                state.current_trigger_match_count = None;
+                                state.die_result_this_resolution = None;
+                                return;
+                            }
+                        }
                     }
                 }
                 super::replacement::ReplacementResult::Prevented => {
