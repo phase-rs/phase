@@ -280,7 +280,7 @@ mod tests {
             "Expected ManifestDreadChoice, got {:?}",
             state.waiting_for
         );
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
 
         // Submit selection
         use crate::game::engine::apply_as_current;

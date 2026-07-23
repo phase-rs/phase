@@ -4,7 +4,7 @@ use nom::bytes::complete::{tag, take_till, take_until};
 use nom::character::complete::{one_of, space0, space1};
 use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value};
 use nom::error::ParseError;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::counter::{
@@ -502,9 +502,11 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
 ///
 /// Dispatch order:
 /// 1. Literal N (`parse_number` succeeds) → `QuantityExpr::Fixed`.
-/// 2. `"x, where X is the number of <kind> counters <possessor>"` →
-///    `QuantityExpr::Ref { qty: QuantityRef::PlayerCounter { … } }`.
-/// 3. Bare `"x"` (no tail) → `QuantityExpr::Ref { qty: Variable { "X" } }`,
+/// 2. Recognized `"x, where X is <dynamic quantity>"` clauses →
+///    `QuantityExpr::Ref { … }` (player counters, object counts, and event
+///    context quantities). An unrecognized present where-clause returns `None`
+///    so the caller can emit an honest `Effect::unimplemented` gap.
+/// 3. Bare `"x"` (no where-clause) → `QuantityExpr::Ref { qty: Variable { "X" } }`,
 ///    matching the spell-cost X resolution path.
 /// 4. None of the above → `Fixed { value: 0 }` with the default target,
 ///    preserving the prior behaviour for unsupported text shapes.
@@ -522,37 +524,67 @@ pub(super) fn parse_earthbend_params(text: &str, lower_rest: &str) -> (TargetFil
 pub(super) fn parse_earthbend_count_expr(
     text: &str,
     lower_rest: &str,
-) -> (TargetFilter, QuantityExpr) {
+) -> Option<(TargetFilter, QuantityExpr)> {
     if let Ok((rem, n)) = nom_primitives::parse_number.parse(lower_rest) {
         let target_text = rem.trim_start();
         let target = resolve_earthbend_target(text, target_text, true);
-        return (target, QuantityExpr::Fixed { value: n as i32 });
+        return Some((target, QuantityExpr::Fixed { value: n as i32 }));
     }
     if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(lower_rest) {
-        // CR 122.1: "X, where X is the number of <kind> counters <possessor>".
-        if let Ok((rem2, qty)) = preceded(
-            tag::<_, _, OracleError<'_>>(", where x is "),
-            crate::parser::oracle_nom::quantity::parse_the_number_of_player_counters,
-        )
-        .parse(rem)
-        {
-            let target_text = rem2.trim_start();
-            let target = resolve_earthbend_target(text, target_text, true);
-            return (target, QuantityExpr::Ref { qty });
+        // CR 701.66a + CR 107.3: "X, where X is <dynamic quantity>" — the general
+        // where-clause binding. Earthbend N puts N +1/+1 counters on the land
+        // (CR 701.66a); the "where X is …" clause is the ability defining the
+        // value of X (CR 107.3), evaluated against live game state, so it must
+        // route through the shared quantity parsers rather than a single-shape
+        // special case:
+        //   - player-counter counts (Toph-style "the number of experience
+        //     counters you have"),
+        //   - object counts with restrictions (The Boulder: "the number of
+        //     creatures you control with power 4 or greater"; Rockalanche: "the
+        //     number of Forests you control") — handled by `parse_quantity_ref`,
+        //   - mana spent to cast the source (Toph, Greatest Earthbender: "the
+        //     amount of mana spent to cast her") — handled by
+        //     `parse_event_context_quantity`.
+        // Before this, only player-counter counts were recognized; every other
+        // shape fell through to the bare-X branch below, which bound X to
+        // `Variable{X}` (resolves to 0 for a triggered ability) AND mis-read the
+        // trailing "where X is …" text as an explicit target, degrading it to
+        // `TargetFilter::Any` (issue #4729). The where-clause is a quantity
+        // definition that consumes the entire tail — earthbend has no explicit
+        // target in templated text — so `default_earthbend_target` ("target land
+        // you control", CR 701.66a) is the correct, invariant target.
+        //
+        // A recognized where-body binds its typed quantity against the default
+        // target. An UNRECOGNIZED where-body returns `None` (strict failure):
+        // accepting the clause with a fabricated `Variable{X}` (→ 0 for a
+        // triggered ability) would report the card as supported while applying
+        // the wrong counter count — a well-typed lie. The caller
+        // (`try_parse_earthbend_clause`) turns that `None` into an honest
+        // `Effect::unimplemented` gap so coverage counts the card as unsupported.
+        // (matthewevans review, PR #5881.)
+        if let Ok((where_body, _)) = tag::<_, _, OracleError<'_>>(", where x is ").parse(rem) {
+            let count = crate::parser::oracle_quantity::parse_quantity_ref(where_body)
+                .map(|qty| QuantityExpr::Ref { qty })
+                .or_else(|| {
+                    crate::parser::oracle_quantity::parse_event_context_quantity(where_body)
+                })?;
+            return Some((default_earthbend_target(), count));
         }
-        // CR 107.3a + CR 601.2b: bare X resolves through the spell-cost path.
+        // CR 107.3a + CR 601.2b: bare X (no where-clause) resolves through the
+        // spell-cost path — this is a genuine `{X}` announced at cast time, not an
+        // ability-defined value, so `Variable{X}` is correct here.
         let target_text = rem.trim_start();
         let target = resolve_earthbend_target(text, target_text, true);
-        return (
+        return Some((
             target,
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),
                 },
             },
-        );
+        ));
     }
-    (default_earthbend_target(), QuantityExpr::Fixed { value: 0 })
+    Some((default_earthbend_target(), QuantityExpr::Fixed { value: 0 }))
 }
 
 /// Shared target-text reduction for earthbend parsing. Distinguishes between
@@ -2121,11 +2153,20 @@ pub(super) fn parse_targeted_action_ast(
             .parse(input)
         })
         .is_some();
-        let (target_text, _) = super::strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: Preserve the "up to N target" count instead of discarding
+        // it. `strip_optional_target_prefix` already parses the quantifier; the
+        // spec was previously dropped here, so "gain control of up to two target
+        // creatures" collapsed to a single optional slot and only one creature
+        // could be chosen (issue #6205).
+        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
-        return Some(TargetedImperativeAst::GainControl { target, all });
+        return Some(TargetedImperativeAst::GainControl {
+            target,
+            all,
+            multi_target,
+        });
     }
     // Earthbend: "[you ]earthbend [N] [target <type>]". The optional "you "
     // subject (Fatal Fissure's delayed trigger "you earthbend 4") names the
@@ -2348,7 +2389,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             subject: TargetFilter::SelfRef,
         },
-        TargetedImperativeAst::GainControl { target, all } => {
+        TargetedImperativeAst::GainControl { target, all, .. } => {
             if all {
                 Effect::GainControlAll { target }
             } else {
@@ -3884,6 +3925,13 @@ fn try_parse_choose_owned_by_voter(
 ///
 /// The optional "at random" qualifier sets [`CardSelectionMode::Random`]
 /// (CR 608.2d override): the game selects, the controller does not.
+///
+/// The chooser prefix follows `parse_choose_anaphoric`'s CR 608.2d convention:
+/// "an opponent chooses" → [`Chooser::Opponent`] (Plargg and Nassari: "An
+/// opponent chooses a nonland card exiled this way"), bare "choose" /
+/// "you choose" → [`Chooser::Controller`]. The targeted form ("target
+/// opponent chooses") is not accepted — it must bind the chooser to the
+/// chosen target slot, so it falls through honestly.
 fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
     type E<'a> = OracleError<'a>;
 
@@ -3911,12 +3959,25 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
         }
     }
 
-    // "choose " / "you choose ", then the singular card anaphor "a [type] card" /
+    // Chooser prefix, then the singular card anaphor "a [type] card" /
     // "one [type] card". The optional card-type qualifier (Koh, the Face Stealer's
-    // "a creature card exiled with ~") narrows the choice; the bare "a card" form
-    // leaves it untyped. The type is intersected with the linked-exile set below.
-    let (rest_after, card_type) = preceded(
-        alt((tag::<_, _, E>("choose "), tag("you choose "))),
+    // "a creature card exiled with ~"; Plargg and Nassari's "a nonland card
+    // exiled this way") narrows the choice; the bare "a card" form leaves it
+    // untyped. The type is intersected with the linked-exile set below.
+    // CR 608.2d: "an opponent chooses" delegates the selection to an opponent
+    // (mirrors `parse_choose_anaphoric`'s chooser alternation). The targeted
+    // form ("target opponent chooses") is deliberately NOT accepted here: it
+    // must bind the chooser to the chosen target slot, and no printed card
+    // pairs it with an "exiled this way" anaphor, so the fall-through stays
+    // honest rather than collapsing target identity into `Chooser::Opponent`.
+    let (rest_after, (chooser, card_type)) = pair(
+        alt((
+            value(Chooser::Opponent, tag::<_, _, E>("an opponent chooses ")),
+            value(
+                Chooser::Controller,
+                alt((tag::<_, _, E>("you choose "), tag("choose "))),
+            ),
+        )),
         preceded(
             alt((tag("a "), tag("one "))),
             parse_choose_card_type_qualifier,
@@ -3931,18 +3992,41 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
         Err(_) => (rest_after, CardSelectionMode::Chosen),
     };
 
-    // "exiled this way" — the chain tracked set. Only the untyped form is attested
-    // (impulse-exile reductions choose from the whole chain set); a typed
-    // restriction here would need `TrackedSetFiltered`, so fall through honestly.
-    if card_type.is_none() {
-        if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
-            if tail.is_empty() {
-                return Some(ChooseImperativeAst::FromTrackedSet {
+    // "exiled this way" — two referents, split on the type qualifier:
+    // * Untyped ("choose a card exiled this way") — the chain's tracked set
+    //   (impulse-exile reductions choose from the whole chain set; End-Blaze
+    //   Epiphany). Unchanged.
+    // * Typed ("choose a nonland card exiled this way" — Plargg and Nassari,
+    //   Author of Shadows) — the source's linked-exile set. CR 607.2a defines
+    //   "exiled this way" by linkage to the exiling instruction, exactly like
+    //   "exiled with ~" below, and `parse_target`'s suffix arm already maps
+    //   the bare participle "exiled this way" to `TargetFilter::ExiledBySource`
+    //   (oracle_target.rs). Lower to the same `FromZone { Exile, AllOwners,
+    //   And { Typed, ExiledBySource } }` shape as the Koh arm so the runtime
+    //   scans the shared exile zone (CR 400.1) and linkage does all scoping.
+    if let Ok((tail, _)) = tag::<_, _, E>(" exiled this way").parse(rest_after) {
+        if tail.is_empty() {
+            return Some(match card_type {
+                None => ChooseImperativeAst::FromTrackedSet {
                     count: 1,
-                    chooser: Chooser::Controller,
+                    chooser,
                     selection,
-                });
-            }
+                },
+                Some(tf) => ChooseImperativeAst::FromZone {
+                    count: 1,
+                    zones: vec![Zone::Exile],
+                    zone_owner: ZoneOwner::AllOwners,
+                    filter: TargetFilter::And {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(tf)),
+                            TargetFilter::ExiledBySource,
+                        ],
+                    },
+                    chooser,
+                    up_to: false,
+                    selection,
+                },
+            });
         }
     }
 
@@ -3974,7 +4058,7 @@ fn try_parse_choose_exiled_anaphor(lower: &str) -> Option<ChooseImperativeAst> {
                 zones: vec![Zone::Exile],
                 zone_owner: ZoneOwner::AllOwners,
                 filter,
-                chooser: Chooser::Controller,
+                chooser,
                 up_to: false,
                 selection,
             });
@@ -4039,28 +4123,34 @@ fn try_parse_choose_suspended_card(lower: &str) -> Option<ChooseImperativeAst> {
 }
 
 /// CR 205.2a: Parse the card-type qualifier of a singular card anaphor — one card
-/// type word followed by " card" (→ `Some(type)`), or the bare "card" (→ `None`).
-/// Used by [`try_parse_choose_exiled_anaphor`] for "choose a [type] card exiled
-/// with ~". A single type covers the attested class (Koh's "creature card");
-/// multi-type qualifiers ("artifact creature card") are not yet attested.
+/// type word followed by " card" (→ `Some(type)`), a negated "non<type>" form
+/// (→ `Some(Non(type))`, CR 205.2b — Plargg and Nassari's "nonland card"), or
+/// the bare "card" (→ `None`). Used by [`try_parse_choose_exiled_anaphor`] for
+/// "choose a [type] card exiled with ~ / exiled this way". A single (possibly
+/// negated) type covers the attested class (Koh's "creature card", Plargg's
+/// "nonland card"); multi-type qualifiers ("artifact creature card") are not
+/// yet attested.
 fn parse_choose_card_type_qualifier(input: &str) -> OracleResult<'_, Option<TypeFilter>> {
+    let card_type_word = || {
+        alt((
+            value(TypeFilter::Creature, tag("creature")),
+            value(TypeFilter::Artifact, tag("artifact")),
+            value(TypeFilter::Enchantment, tag("enchantment")),
+            value(TypeFilter::Land, tag("land")),
+            value(TypeFilter::Planeswalker, tag("planeswalker")),
+            value(TypeFilter::Instant, tag("instant")),
+            value(TypeFilter::Sorcery, tag("sorcery")),
+            value(TypeFilter::Battle, tag("battle")),
+        ))
+    };
     alt((
+        // CR 205.2b: "non" + card type — an object that doesn't have the
+        // stated type ("nonland card", "noncreature card").
         map(
-            terminated(
-                alt((
-                    value(TypeFilter::Creature, tag("creature")),
-                    value(TypeFilter::Artifact, tag("artifact")),
-                    value(TypeFilter::Enchantment, tag("enchantment")),
-                    value(TypeFilter::Land, tag("land")),
-                    value(TypeFilter::Planeswalker, tag("planeswalker")),
-                    value(TypeFilter::Instant, tag("instant")),
-                    value(TypeFilter::Sorcery, tag("sorcery")),
-                    value(TypeFilter::Battle, tag("battle")),
-                )),
-                tag(" card"),
-            ),
-            Some,
+            terminated(preceded(tag("non"), card_type_word()), tag(" card")),
+            |tf| Some(TypeFilter::Non(Box::new(tf))),
         ),
+        map(terminated(card_type_word(), tag(" card")), Some),
         value(None, tag("card")),
     ))
     .parse(input)
@@ -4557,21 +4647,52 @@ fn parse_choose_anaphoric(lower: &str) -> Option<(u32, Chooser, CardSelectionMod
 pub(super) fn parse_category_and_sacrifice_rest_pub(
     rest_lower: &str,
 ) -> Option<ChooseImperativeAst> {
-    parse_category_and_sacrifice_rest(rest_lower).map(|ast| match ast {
-        ChooseImperativeAst::CategoryAndSacrificeRest {
-            categories,
-            choose_filter,
-            sacrifice_filter,
-            total_power_cap,
-            ..
-        } => ChooseImperativeAst::CategoryAndSacrificeRest {
-            categories,
-            chooser_scope: CategoryChooserScope::ControllerForAll,
-            choose_filter,
-            sacrifice_filter,
-            total_power_cap,
-        },
-        other => other,
+    parse_single_category_and_sacrifice_rest(rest_lower)
+        .or_else(|| parse_category_and_sacrifice_rest(rest_lower))
+        .map(|ast| match ast {
+            ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                choose_filter,
+                sacrifice_filter,
+                total_power_cap,
+                ..
+            } => ChooseImperativeAst::CategoryAndSacrificeRest {
+                categories,
+                chooser_scope: CategoryChooserScope::ControllerForAll,
+                choose_filter,
+                sacrifice_filter,
+                total_power_cap,
+            },
+            other => other,
+        })
+}
+
+/// CR 608.2d + CR 701.21a: Parse the single-category form specific to the
+/// "for each player, you choose" entry point: "a <type> [they/you/that player]
+/// control[s]". Keeping this arm outside the generic `choose` parser prevents
+/// ordinary target-selection text such as "choose a creature they control" from
+/// being misclassified as a choose-and-sacrifice-rest effect.
+fn parse_single_category_and_sacrifice_rest(rest_lower: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = OracleError<'a>;
+
+    let (rest, core_type) = parse_category_item(rest_lower).ok()?;
+    alt((
+        tag::<_, _, E>(" they control"),
+        tag(" you control"),
+        tag(" that player controls"),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let filter = TargetFilter::Typed(TypedFilter::new(
+        super::conditions::core_type_to_type_filter(core_type),
+    ));
+    Some(ChooseImperativeAst::CategoryAndSacrificeRest {
+        categories: vec![core_type],
+        chooser_scope: CategoryChooserScope::EachPlayerSelf,
+        choose_filter: filter.clone(),
+        sacrifice_filter: filter,
+        total_power_cap: None,
     })
 }
 
@@ -5658,6 +5779,15 @@ fn parse_prevent_effect(text: &str, parent_target_available: bool) -> Effect {
         } else {
             TargetFilter::Any
         }
+    } else if let Some(permanent_type) = parse_compound_you_and_permanents(text, &lower) {
+        // CR 615 + CR 614.1a: "to you and [<type>] permanents you control" — a
+        // compound player+permanent recipient (Comeuppance's "you and
+        // planeswalkers you control"; Channel Harm's "you and permanents you
+        // control"). Checked BEFORE the bare "to you" scan (which this phrase
+        // also contains) so the permanent leg is not dropped. Lowered to the
+        // dedicated `DamageTargetFilter::PlayerOrPermanentsControlledBy` at
+        // shield creation — never to a bare `Or` that would leak to `valid_card`.
+        TargetFilter::ControllerAndControlledPermanents { permanent_type }
     } else if nom_primitives::scan_contains(rest, "to you")
         || nom_primitives::scan_contains(rest, "to its controller")
     {
@@ -5717,23 +5847,48 @@ fn parse_prevent_that_would_deal_source_filter(text: &str, lower: &str) -> Optio
     }
 }
 
-/// CR 615.1: Optional trailing "by [source-filter]" on prevent clauses
-/// (Arachnogenesis: "by non-Spider creatures").
-fn parse_prevent_damage_source_filter(text: &str, lower: &str) -> Option<TargetFilter> {
-    let (_, filter_text) = nom_on_lower(text, lower, |input| {
-        value(
-            (),
-            (take_until::<_, _, OracleError<'_>>(" by "), tag(" by ")),
-        )
-        .parse(input)
-    })?;
-    let filter_text = filter_text.trim().trim_end_matches('.');
-    let (filter, rem) = parse_type_phrase(filter_text);
-    if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-        Some(filter)
-    } else {
-        None
-    }
+/// CR 615 + CR 614.1a: Recognize the compound damage recipient "you and
+/// [`<type>`] permanents you control". Returns the permanent-leg type
+/// restriction — `Some(Some(Planeswalker))` for Comeuppance's "you and
+/// planeswalkers you control", `Some(None)` for Channel Harm's bare "you and
+/// permanents you control", and `None` when the phrase is absent. Nom
+/// combinators only — the plural type word is a single `alt()` axis.
+fn parse_compound_you_and_permanents(text: &str, lower: &str) -> Option<Option<CoreType>> {
+    let region = TextPair::new(text, lower).strip_after("to you and ")?;
+    let (_, permanent_type) = you_and_controlled_permanent_type(region.lower).ok()?;
+    Some(permanent_type)
+}
+
+/// CR 614.1a: "`<plural-type>` you control" tail of the compound recipient. Maps
+/// the plural permanent-type word to its `CoreType` restriction; bare
+/// "permanents" carries no restriction (`None`).
+fn you_and_controlled_permanent_type(input: &str) -> OracleResult<'_, Option<CoreType>> {
+    let (input, permanent_type) = alt((
+        value(Some(CoreType::Planeswalker), tag("planeswalkers")),
+        value(Some(CoreType::Creature), tag("creatures")),
+        value(Some(CoreType::Artifact), tag("artifacts")),
+        value(Some(CoreType::Enchantment), tag("enchantments")),
+        value(Some(CoreType::Land), tag("lands")),
+        value(None, tag("permanents")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" you control").parse(input)?;
+    Ok((input, permanent_type))
+}
+
+/// CR 615.1 + CR 609.7b: Optional trailing "by [source-filter]" on
+/// prevent clauses. Routes the "by " remainder through the shared replacement-
+/// side source-noun grammar (`parse_damage_source_subject_filter`) so the
+/// prevent path and the "instead"/no-"instead" replacement paths share ONE
+/// source grammar. Covers typed sources (Arachnogenesis: "by non-Spider
+/// creatures") and controller-axis sources (Comeuppance: "by sources you don't
+/// control"; Channel Harm: "by sources you don't control"). The `_text` slice is
+/// unused here — the shared grammar consumes lowercase, matching the replacement
+/// side — but is retained for signature parity with the sibling extractors.
+fn parse_prevent_damage_source_filter(_text: &str, lower: &str) -> Option<TargetFilter> {
+    let (_, (_, after_by)) = nom_primitives::split_once_on(lower, " by ").ok()?;
+    let subject = after_by.trim().trim_end_matches('.').trim();
+    crate::parser::oracle_replacement::parse_damage_source_subject_filter(subject)
 }
 
 /// CR 609.7 + CR 615.2: Detect the source-scoped prevent form — "prevent
@@ -7594,6 +7749,146 @@ fn parse_exile_count_from_your_graveyard(lower: &str) -> Option<QuantityExpr> {
     rest.trim().is_empty().then_some(qty)
 }
 
+/// CR 608.2c: Resolve the count expression of a dynamic-count top-of-library
+/// exile ("that many" / "equal to <expr>"). Mirrors the
+/// `resolve_exile_top_where_x_binding` chain — the event-context quantity grammar
+/// first ("its power/toughness/mana value", "the damage prevented/excess damage
+/// dealt this way"), then the general quantity-ref grammar (differently-named
+/// token counts, etc.). FAIL-CLOSED: an unbindable expression returns `None` so
+/// the caller declines the arm and the clause falls through to the generic path
+/// unchanged — it NEVER fabricates a `Fixed { 1 }` default.
+fn resolve_dynamic_exile_count(qty_text: &str) -> Option<QuantityExpr> {
+    let t = qty_text.trim().trim_end_matches(['.', ',']).trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(expr) = crate::parser::oracle_quantity::parse_event_context_quantity(t) {
+        return Some(expr);
+    }
+    crate::parser::oracle_quantity::parse_quantity_ref(t).map(|qty| QuantityExpr::Ref { qty })
+}
+
+/// CR 401.1 + CR 115.1: Recognize the "from the top of <owner>'s library" source
+/// suffix of a dynamic-count top-of-library exile and map the possessive owner to
+/// its library-owner `TargetFilter`.
+///
+/// R7 zero-touch: this is a self-contained 6-owner table deliberately kept
+/// separate from `parse_library_player_suffix` (whose surface is the different
+/// "card[s] of <owner>'s library" form). Each entry is matched as the full
+/// "<owner> library" phrase, so no shorter alternative can prefix-shadow a longer
+/// one. Returns the post-library tail plus the resolved owner filter:
+/// - "your library" → `Controller`
+/// - "that player's" / "their" library → the relative player from `ctx`
+/// - "target opponent's library" → `Typed{controller: Opponent}`
+/// - "target player's library" → `Player`
+/// - "each player's library" → `ScopedPlayer`
+fn parse_from_top_of_library_owner<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, TargetFilter)> {
+    // Requires the "of <owner> library" qualifier. The bare "from the top" form
+    // (no "of <owner> library" — Vault 112: Sadistic Simulation's "shuffle your
+    // library, then exile that many cards from the top") DECLINES here. That is a
+    // SEPARATE, outside-`parse_exile_ast` root cause: the exile clause is lost
+    // after the preceding Shuffle in the chain (Magus of the Mind shares this), not
+    // a missing owner. Pinned by the `bare_from_the_top_*` tripwire test.
+    let (after_prefix, _) = tag::<_, _, OracleError<'_>>("from the top of ")
+        .parse(input)
+        .ok()?;
+    let that_player = that_player_library_filter(ctx);
+    for (pattern, player) in [
+        ("your library", TargetFilter::Controller),
+        ("that player's library", that_player.clone()),
+        ("their library", that_player.clone()),
+        (
+            "target opponent's library",
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+        ),
+        ("target player's library", TargetFilter::Player),
+        ("each player's library", TargetFilter::ScopedPlayer),
+    ] {
+        if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>(pattern).parse(after_prefix) {
+            return Some((tail, player));
+        }
+    }
+    // DEFERRED (honest gap): "its owner's library" (Dead Man's Chest — "exile cards
+    // equal to its power from the top of its owner's library") needs an
+    // anaphoric-object-owner → player `TargetFilter` that does not exist yet
+    // (add-engine-variant Stage-2/3). ROOT CAUSE: the closed owner table above has
+    // no "its owner" possessive, so this recognizer declines and Dead Man's Chest
+    // stays a count-less `ChangeZone`. Pinned by the `dead_mans_chest_*` tripwire;
+    // adding the owner variant flips it to `ExileTop`.
+    None
+}
+
+/// CR 701.13 + CR 401.1 + CR 608.2c: Recognize the dynamic-count top-of-library
+/// exile class — "exile [dynamic count] cards from the top of <owner>'s library"
+/// — that the generic `ChangeZone(Library→Exile)` fallback below lowers
+/// count-less. Composes two axes with nom combinators (never string dispatch):
+///   * count-position — Form A "that many cards …" (`EventContextAmount`);
+///     Form B' "cards equal to <expr> from the top of …" (count clause BEFORE the
+///     library source — Rakdos, the Muscle); Form B "[a number of ]cards from the
+///     top of … equal to <expr>" (count clause AFTER the source).
+///   * owner — `parse_from_top_of_library_owner` (6 possessive owners).
+///
+/// Form B' is tried before Form B because Form B's leading `tag("cards ")` would
+/// partially consume Rakdos's "cards equal to …" and then fail the owner match,
+/// masking it. Form B' bounds the `<expr>` with `take_until("from the top of ")`
+/// so it can never swallow the library source phrase.
+///
+/// FAIL-CLOSED: an unbindable "equal to <expr>" (or an unrecognized owner)
+/// returns `None`, so the caller declines and the clause falls through unchanged
+/// — never a `Fixed { 1 }` default. Returns `(post_library_tail, owner, count)`;
+/// the tail feeds the shared `strip_exile_top_face_down` epilogue.
+fn parse_dynamic_exile_from_top<'a>(
+    rest_lower: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, TargetFilter, QuantityExpr)> {
+    // Form A: "that many cards from the top of <owner>'s library"
+    if let Ok((after_noun, _)) = tag::<_, _, OracleError<'_>>("that many cards ").parse(rest_lower)
+    {
+        let (after_lib, player) = parse_from_top_of_library_owner(after_noun, ctx)?;
+        return Some((
+            after_lib,
+            player,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+        ));
+    }
+
+    // Form B': "cards equal to <expr> from the top of <owner>'s library"
+    if let Ok((after_eq, _)) = tag::<_, _, OracleError<'_>>("cards equal to ").parse(rest_lower) {
+        if let Ok((before_source, expr_text)) =
+            take_until::<_, _, OracleError<'_>>("from the top of ").parse(after_eq)
+        {
+            let count = resolve_dynamic_exile_count(expr_text)?;
+            let (after_lib, player) = parse_from_top_of_library_owner(before_source, ctx)?;
+            return Some((after_lib, player, count));
+        }
+    }
+
+    // Form B: "[a number of ]cards from the top of <owner>'s library equal to <expr>"
+    if let Ok((after_noun, _)) = (
+        opt(tag::<_, _, OracleError<'_>>("a number of ")),
+        tag::<_, _, OracleError<'_>>("cards "),
+    )
+        .parse(rest_lower)
+    {
+        if let Some((after_lib, player)) = parse_from_top_of_library_owner(after_noun, ctx) {
+            if let Ok((expr_text, _)) = tag::<_, _, OracleError<'_>>(" equal to ").parse(after_lib)
+            {
+                let count = resolve_dynamic_exile_count(expr_text)?;
+                // The <expr> runs to the clause end; no post-library tail remains
+                // for the face-down epilogue (no Form B card is exiled face down).
+                return Some(("", player, count));
+            }
+        }
+    }
+
+    None
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
@@ -7749,6 +8044,22 @@ pub(super) fn parse_exile_ast(
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
 
+    // CR 608.2c + CR 115.10a: an anaphoric ALTERNATIVE referent — "… or the
+    // chosen creature/permanent" — composes this exile with an object chosen
+    // by an EARLIER instruction in the same ability ("choose target opponent
+    // and up to one target creature they control. … You may exile a nonland
+    // card from their hand or the chosen creature …", Cloak and Dagger,
+    // Entwined — issue #4235 review). No object-anaphor filter exists to
+    // represent that alternative yet, and every arm below would silently
+    // narrow the choice to its own operand (the hand-card leg), making the
+    // card look supported while dropping the printed alternative entirely.
+    // Decline the whole imperative so the clause stays an honest
+    // `Effect::Unimplemented` strict failure until the chosen-object anaphor
+    // is representable.
+    if nom_primitives::scan_contains(rest_lower, "or the chosen ") {
+        return None;
+    }
+
     // CR 701.13a: "exile a card from the top of your library" — synonymous with
     // "exile the top card of your library". Without ExileTop lowering the generic
     // path emits ChangeZone(Library→Exile) with a library-wide EffectZoneChoice
@@ -7763,6 +8074,38 @@ pub(super) fn parse_exile_ast(
         let count = parse_exile_card_from_top_for_each_suffix(after_lib);
         return Some(ZoneCounterImperativeAst::ExileTop {
             player: TargetFilter::Controller,
+            count,
+            face_down,
+        });
+    }
+
+    // CR 701.13 + CR 401.1: "exile [dynamic count] cards from the top of
+    // <owner>'s library" — a plural top-of-library exile whose count the generic
+    // ChangeZone(Library→Exile) fallback below drops entirely. The count is
+    // defined by the ability: "that many" = the triggering-event amount
+    // (EventContextAmount); "equal to <expr>" resolves through the shared
+    // quantity combinators (its power / mana value, excess or prevented damage,
+    // differently-named token count).
+    // CR 608.2c: a trailing "equal to <expr>" is later text defining the earlier
+    // "exile cards" count (Archaic's Agony / End-Blaze Epiphany / Neriv / Bone
+    // Mask); Rakdos, the Muscle places the "equal to <expr>" BEFORE the source.
+    // Ordered after the singular path (b) above — those match "a card from the
+    // top" (singular); this arm requires the plural "cards" of the dynamic class,
+    // so it never shadows (a)/(b) and declines (returns None) on anything that is
+    // not exactly "[dynamic count] cards from the top of <owner>'s library".
+    //
+    // DEFERRED (honest gap): this arm fixes only the exile COUNT and library
+    // OWNER. Rakdos, the Muscle's trailing "mana of any type can be spent to cast
+    // those spells" rider is a SEPARATE `PlayFromExile.mana_spend_permission` grant
+    // concern the exile parser never touches — it remains dropped
+    // (`mana_spend_permission: None`), not upgraded to a false-supported `Some(..)`.
+    // The `rakdos_*` runtime drive asserts that drop stays fail-closed.
+    if let Some((after_lib, player, count)) = parse_dynamic_exile_from_top(rest_lower, ctx) {
+        // CR 406.3: honor a trailing "face down" suffix (Flamewar) exactly as the
+        // qualified top-of-library patterns above.
+        let (_after_fd, face_down) = strip_exile_top_face_down(after_lib);
+        return Some(ZoneCounterImperativeAst::ExileTop {
+            player,
             count,
             face_down,
         });
@@ -8984,6 +9327,17 @@ pub(super) fn parse_imperative_family_ast(
         return Some(ImperativeFamilyAst::GainKeyword(effect));
     }
 
+    // CR 614.1a + CR 614.12 + CR 707.2: One-shot "the next time one or more
+    // creatures or planeswalkers enter this turn, they enter as copies of the
+    // chosen creature" replacement (Mystic Reflection). Like the damage/draw
+    // one-shot replacements, this starts with "the next time" rather than an
+    // imperative verb, so it must be intercepted before first-word dispatch.
+    if let Some(effect) =
+        crate::parser::oracle_replacement::parse_oneshot_enter_as_copy_replacement(lower)
+    {
+        return Some(ImperativeFamilyAst::GainKeyword(effect));
+    }
+
     // CR 708.5: "[Until end of turn,] you may look at face-down [permanents] you
     // don't control any time" (Lumbering Laundry's `{2}:` activated ability).
     // This is the duration-bound form of Found Footage's continuous look
@@ -9445,6 +9799,9 @@ pub(super) fn parse_imperative_family_ast(
                     target: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
                     from_zone: Some(Zone::Hand),
+                    // CR 110.2a: the imperative "you" subject cloaks, so the
+                    // card enters under the instruction controller's control.
+                    enters_under: Some(ControllerRef::You),
                 })
             } else {
                 let that_player_target = that_player_library_filter(ctx);
@@ -9482,6 +9839,13 @@ pub(super) fn parse_imperative_family_ast(
                         target,
                         count,
                         from_zone: None,
+                        // CR 110.2a: both library-top surfaces are imperative
+                        // "you" subjects — the cloaker controls the face-down
+                        // entry even when the source is "that player's library"
+                        // (Etrata, Deadly Fugitive). Same stamping as
+                        // `parse_direct_manifest_clause`, where `Some(You)` is a
+                        // semantic no-op for "your library".
+                        enters_under: Some(ControllerRef::You),
                     })
                 } else {
                     None
@@ -11121,6 +11485,34 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.multi_target = multi_target;
             clause
         }
+        // CR 115.1d + CR 601.2c: "gain control of up to N target …" (The Super
+        // Hero Civil War, Jace, Ingenious Mind-Mage). Same shape as the
+        // Tap/Untap arm above: the bare-Effect lowering cannot carry a target
+        // count, so a GainControl AST that captured one is lowered here and the
+        // count is threaded onto the clause. Only the TARGETED form can carry
+        // it — the mass "gain control of all/each" (`all: true`) has no target
+        // slots. Destructured by value (rather than the `ast @ …` + re-match
+        // used above) so the count moves out without a clone and the pattern
+        // stays exhaustive; the variant is rebuilt with `multi_target: None` so
+        // lowering still flows through the single authority
+        // (`lower_targeted_action_ast`) instead of duplicating `Effect::GainControl`.
+        ImperativeFamilyAst::Structured(ImperativeAst::Targeted(
+            TargetedImperativeAst::GainControl {
+                target,
+                all: false,
+                multi_target: Some(multi_target),
+            },
+        )) => {
+            let mut clause = parsed_clause(lower_targeted_action_ast(
+                TargetedImperativeAst::GainControl {
+                    target,
+                    all: false,
+                    multi_target: None,
+                },
+            ));
+            clause.multi_target = Some(multi_target);
+            clause
+        }
         // CR 115.1d + CR 601.2c: "return up to N cards from your graveyard to
         // your hand" (Ill-Gotten Gains) or "return that many cards …"
         // (dynamic count) captured a `multi_target` on a non-targeted
@@ -11294,6 +11686,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             count,
             from_zone: Some(zone),
+            enters_under,
         } => {
             let mut clause = parsed_clause(Effect::ChooseFromZone {
                 count: 1,
@@ -11312,6 +11705,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     target,
                     count,
                     object_source: Some(TargetFilter::ParentTarget),
+                    enters_under,
                 },
             )));
             clause
@@ -11422,10 +11816,16 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         // CR 701.58a: Cloak the top card(s) of a library (face-down 2/2 + ward
         // {2}). The from-hand form (`from_zone: Some`) is intercepted upstream in
         // `lower_imperative_family_ast`; only the library-top source reaches here.
-        ImperativeFamilyAst::Cloak { target, count, .. } => Effect::Cloak {
+        ImperativeFamilyAst::Cloak {
+            target,
+            count,
+            enters_under,
+            ..
+        } => Effect::Cloak {
             target,
             count,
             object_source: None,
+            enters_under,
         },
         // CR 406.3: Turn the exiled card(s) face up (Imprint flip cards).
         ImperativeFamilyAst::TurnFaceUp { target } => Effect::TurnFaceUp { target },
@@ -12243,18 +12643,20 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
     None
 }
 
-/// CR 701.15a + CR 701.15b: Recognize the verbatim goad *definition* —
+/// CR 508.1d + CR 701.15b: Recognize the printed goad *requirement pair* —
 /// "attack[s] each combat if able and attack[s] a player other than you if able".
-/// This compound is precisely what goad does (CR 701.15a: must attack each combat
-/// if able; CR 701.15b: must attack a player other than the goading player),
-/// printed in full on cards that grant the effect without the "goad" keyword
-/// (Maximum Carnage chapter I). Mapping it to the goad mechanic is the correct
-/// class reuse: the goading player is the resolving controller ("you"), so the
-/// subject's own creatures are forced onto opponents, and `goaded_by` cleanup at
-/// the goading player's next turn matches the card's "Until your next turn"
-/// duration (CR 701.15a). Returns the bare marker; `subject.rs` binds the affected
-/// set to `Effect::GoadAll`.
-pub(super) fn try_parse_goad_equivalent(lower: &str) -> bool {
+/// CR 701.15b attaches exactly these two combat requirements to a goaded
+/// creature; two cards print them in full without the "goad" keyword (Kardur,
+/// Doomscourge; Maximum Carnage chapter I).
+///
+/// This compound does NOT lower to the goad mechanic. CR 701.15a: only a spell
+/// or ability that *goads* a creature makes it goaded, and the official Maximum
+/// Carnage ruling (2025-09-19) is explicit — "Although the effects of the first
+/// chapter ability are the same as the goad keyword action, that ability doesn't
+/// cause any creatures to become goaded. Effects that refer to 'goaded
+/// creatures' won't apply." Returns the bare marker; `subject.rs` binds the
+/// affected set to a `MustAttack` + `MustAttackAwayFromSource` static grant.
+pub(super) fn try_parse_attack_away_requirement(lower: &str) -> bool {
     let trimmed = lower.trim_end_matches('.').trim();
     let parsed: Result<(&str, ()), nom::Err<OracleError<'_>>> = (
         alt((tag("attacks"), tag("attack"))),
@@ -12337,6 +12739,40 @@ pub(super) fn must_attack_static_definition() -> StaticDefinition {
     StaticDefinition::new(StaticMode::MustAttack).modifications(vec![
         ContinuousModification::AddStaticMode {
             mode: StaticMode::MustAttack,
+        },
+    ])
+}
+
+/// CR 508.1d + CR 701.15b: Build the transient `StaticDefinition` for the printed
+/// goad-requirement compound ("… attacks each combat if able and attacks a player
+/// other than you if able"). CR 701.15b attaches TWO requirements to a goaded
+/// creature; a card that prints them in full creates the same two requirements
+/// and NO goaded designation (CR 701.15a — only a spell or ability that *goads*
+/// makes a creature goaded; official Maximum Carnage ruling 2025-09-19).
+///
+/// Both requirements ride ONE definition so `register_transient_effect` sees them
+/// in a single `modifications` vec and keeps the affected filter intact for both
+/// (CR 611.2c — the set stays dynamic). `mode` carries the away-from requirement
+/// so the coverage/registry surface classifies the def by its distinguishing
+/// mode; `mode` is otherwise inert for transient grants
+/// (`snapshot_transient_modifications` reads only `modifications`), which is why
+/// both modes are also listed explicitly.
+pub(super) fn must_attack_away_static_definition() -> StaticDefinition {
+    use crate::types::statics::StaticMode;
+    // DELIBERATE GAP (plan §5.9): keying `mode` on the away-from requirement also
+    // excludes this def from `is_mass_coerce_static` (oracle_effect/mod.rs), which
+    // publishes the chain tracked set only for `MustAttack`/`MustAttackPlayer`. A
+    // future card printing this compound followed by a "those creatures" anaphor
+    // (CR 608.2c) would therefore not publish the set, unlike the plain-`MustAttack`
+    // sibling above. Unreachable today and not a regression: neither card-data key
+    // carrying this compound has a following anaphor, and the `Effect::GoadAll` path
+    // this replaces never published the set either.
+    StaticDefinition::new(StaticMode::MustAttackAwayFromSource).modifications(vec![
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::MustAttack,
+        },
+        ContinuousModification::AddStaticMode {
+            mode: StaticMode::MustAttackAwayFromSource,
         },
     ])
 }
@@ -14836,7 +15272,8 @@ mod tests {
     /// CR 122.1: literal-N earthbend keeps the `Fixed` count path intact.
     #[test]
     fn earthbend_count_expr_literal_n() {
-        let (target, count) = parse_earthbend_count_expr("2", "2");
+        let (target, count) =
+            parse_earthbend_count_expr("2", "2").expect("literal-N earthbend parses");
         assert_eq!(count, QuantityExpr::Fixed { value: 2 });
         assert_eq!(target, default_earthbend_target());
     }
@@ -14846,7 +15283,8 @@ mod tests {
     #[test]
     fn earthbend_count_expr_x_with_player_counter_tail() {
         let tail = "x, where x is the number of experience counters you have";
-        let (_, count) = parse_earthbend_count_expr(tail, tail);
+        let (_, count) =
+            parse_earthbend_count_expr(tail, tail).expect("player-counter where-clause parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -14862,7 +15300,7 @@ mod tests {
     /// to the spell-cost X resolution path (Variable("X")), not Fixed 0.
     #[test]
     fn earthbend_count_expr_bare_x_falls_through_to_variable() {
-        let (_, count) = parse_earthbend_count_expr("x", "x");
+        let (_, count) = parse_earthbend_count_expr("x", "x").expect("bare earthbend X parses");
         assert_eq!(
             count,
             QuantityExpr::Ref {
@@ -14870,6 +15308,119 @@ mod tests {
                     name: "X".to_string(),
                 },
             }
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: "earthbend X, where X is the number of creatures
+    /// you control with power 4 or greater" (The Boulder, Ready to Rumble —
+    /// issue #4729). The object-count where-clause must bind X to a typed
+    /// `ObjectCount` (preserving the "power 4 or greater" restriction) and the
+    /// earthbend target must stay "target land you control" — before the fix
+    /// this class fell through to the bare-X branch, degrading X to
+    /// `Variable{X}` (resolves to 0) and the target to `TargetFilter::Any`.
+    #[test]
+    fn earthbend_count_expr_object_count_with_power_restriction() {
+        use crate::types::ability::{
+            Comparator, ControllerRef, FilterProp, PtStat, TargetFilter, TypeFilter,
+        };
+        let tail = "x, where x is the number of creatures you control with power 4 or greater";
+        let (target, count) =
+            parse_earthbend_count_expr(tail, tail).expect("object-count where-clause parses");
+        assert_eq!(
+            target,
+            default_earthbend_target(),
+            "earthbend target must stay 'target land you control', not degrade to Any"
+        );
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("expected an ObjectCount quantity, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected a Typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert_eq!(tf.type_filters, vec![TypeFilter::Creature]);
+        assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::PtComparison {
+                    stat: PtStat::Power,
+                    comparator: Comparator::GE,
+                    ..
+                }
+            )),
+            "the 'power 4 or greater' restriction must be preserved: {:?}",
+            tf.properties
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: "earthbend X, where X is the number of Forests you
+    /// control" (Rockalanche) binds X to a subtype-restricted `ObjectCount`,
+    /// exercising the same general where-clause path as The Boulder for a
+    /// land-subtype count rather than a P/T-restricted creature count.
+    #[test]
+    fn earthbend_count_expr_object_count_subtype() {
+        use crate::types::ability::{ControllerRef, TargetFilter, TypeFilter};
+        let tail = "x, where x is the number of forests you control";
+        let (target, count) =
+            parse_earthbend_count_expr(tail, tail).expect("subtype-count where-clause parses");
+        assert_eq!(target, default_earthbend_target());
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = count
+        else {
+            panic!("expected an ObjectCount quantity, got {count:?}");
+        };
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected a Typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Forest".to_string())]
+        );
+    }
+
+    /// CR 701.66a + CR 107.3: "earthbend X, where X is the amount of mana spent
+    /// to cast her" (Toph, Greatest Earthbender) binds X to a
+    /// `ManaSpentToCast` ref via the event-context quantity parser — the
+    /// non-object-count arm of the general where-clause handler. Before the fix
+    /// this fell through to the bare-X branch (Variable{X} → 0) with an Any
+    /// target.
+    #[test]
+    fn earthbend_count_expr_mana_spent_to_cast() {
+        let tail = "x, where x is the amount of mana spent to cast her";
+        let (target, count) =
+            parse_earthbend_count_expr(tail, tail).expect("mana-spent where-clause parses");
+        assert_eq!(target, default_earthbend_target());
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast { .. }
+                }
+            ),
+            "expected a ManaSpentToCast quantity, got {count:?}"
+        );
+    }
+
+    /// CR 107.3: an "earthbend X, where X is …" clause whose quantity shape is
+    /// not yet recognized must be a STRICT FAILURE (`None`), not a silent
+    /// acceptance. Binding X to `Variable{X}` (→ 0 for a triggered ability) would
+    /// report the card as supported while applying the wrong counter count — a
+    /// well-typed lie. The caller turns this `None` into an honest
+    /// `Effect::unimplemented` gap so coverage counts the card as unsupported.
+    /// (matthewevans review, PR #5881.) The genuine bare-`earthbend X` spell-cost
+    /// path is unaffected — see `earthbend_count_expr_bare_x_falls_through_to_variable`.
+    #[test]
+    fn earthbend_count_expr_unrecognized_where_clause_is_strict_failure() {
+        let tail = "x, where x is the number of glorbs you frobnicate";
+        assert_eq!(
+            parse_earthbend_count_expr(tail, tail),
+            None,
+            "an unrecognized where-clause quantity must fail strictly, not bind a fake Variable{{X}}"
         );
     }
 
@@ -16428,6 +16979,97 @@ mod tests {
         }
     }
 
+    /// CR 607.2a + CR 608.2d: "choose a nonland card exiled this way" (Author of
+    /// Shadows; Plargg and Nassari post-subject-strip) — the TYPED exiled-this-way
+    /// anaphor routes to the linked-exile `FromZone { Exile, AllOwners }` shape
+    /// (same as the Koh "exiled with ~" arm), carrying the negated type qualifier
+    /// intersected with `ExiledBySource`.
+    #[test]
+    fn parse_choose_nonland_card_exiled_this_way() {
+        let text = "choose a nonland card exiled this way";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                count,
+                zones,
+                zone_owner,
+                filter,
+                chooser,
+                up_to,
+                ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(zones, vec![Zone::Exile]);
+                assert_eq!(zone_owner, ZoneOwner::AllOwners);
+                assert_eq!(chooser, Chooser::Controller);
+                assert!(!up_to);
+                let TargetFilter::And { filters } = filter else {
+                    panic!("expected And{{Typed, ExiledBySource}}, got {filter:?}");
+                };
+                assert!(filters.contains(&TargetFilter::ExiledBySource));
+                let typed = filters
+                    .iter()
+                    .find_map(|f| match f {
+                        TargetFilter::Typed(tf) => Some(tf),
+                        _ => None,
+                    })
+                    .expect("And must carry a Typed leg");
+                assert!(typed
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land)));
+            }
+            other => panic!("Expected FromZone, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2d: "an opponent chooses a nonland card exiled this way" (Plargg
+    /// and Nassari's middle sentence, reachable inline through the anaphoric
+    /// choose entry) — same linked-exile shape with the selection delegated to
+    /// an opponent.
+    #[test]
+    fn parse_opponent_chooses_nonland_card_exiled_this_way() {
+        let text = "an opponent chooses a nonland card exiled this way";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromZone {
+                count,
+                zones,
+                zone_owner,
+                filter,
+                chooser,
+                ..
+            }) => {
+                assert_eq!(count, 1);
+                assert_eq!(zones, vec![Zone::Exile]);
+                assert_eq!(zone_owner, ZoneOwner::AllOwners);
+                assert_eq!(chooser, Chooser::Opponent);
+                assert!(matches!(&filter, TargetFilter::And { filters }
+                    if filters.contains(&TargetFilter::ExiledBySource)));
+            }
+            other => panic!("Expected FromZone with Opponent chooser, got {other:?}"),
+        }
+    }
+
+    /// Untyped-referent regression guard: the bare "choose a card exiled this
+    /// way" impulse reduction (End-Blaze Epiphany) must keep reading the chain's
+    /// tracked set — the new typed arm must not claim it.
+    #[test]
+    fn parse_choose_card_exiled_this_way_still_tracked_set() {
+        let text = "choose a card exiled this way";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(ChooseImperativeAst::FromTrackedSet { count, chooser, .. }) => {
+                assert_eq!(count, 1);
+                assert_eq!(chooser, Chooser::Controller);
+            }
+            other => panic!("Expected FromTrackedSet, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_choose_up_to_two_of_them() {
         let text = "choose up to two of them";
@@ -17660,6 +18302,55 @@ mod tests {
             multi_target,
             Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 3 })),
             "the 'up to three target cards' count must surface as a MultiTargetSpec"
+        );
+    }
+
+    /// Issue #5898 — Settle the Wreckage: "That player may search their library
+    /// for that many basic land cards …". The "for that many" anaphoric count
+    /// (CR 608.2c, = the number of creatures exiled by the prior instruction)
+    /// without an "up to" prefix previously fell through to the `for N` number
+    /// parser, which rejected "that many" and defaulted the search to
+    /// `count: Fixed 1` with a dropped type filter (`Any`) — so it searched for a
+    /// single card of any type ("functioning as Chaos Warp"). The count must
+    /// surface as `EventContextAmount` and the "basic land cards" type phrase must
+    /// still reach the filter.
+    #[test]
+    fn settle_the_wreckage_for_that_many_basic_lands_binds_event_count() {
+        fn find_search(def: &AbilityDefinition) -> Option<(QuantityExpr, TargetFilter)> {
+            if let Effect::SearchLibrary { filter, count, .. } = &*def.effect {
+                return Some((count.clone(), filter.clone()));
+            }
+            def.sub_ability.as_deref().and_then(find_search)
+        }
+
+        let def = super::super::parse_effect_chain(
+            "That player may search their library for that many basic land cards, put those cards onto the battlefield tapped, then shuffle.",
+            AbilityKind::Spell,
+        );
+        let (count, filter) = find_search(&def)
+            .unwrap_or_else(|| panic!("expected a SearchLibrary link in the chain, got {def:?}"));
+        assert_eq!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            },
+            "'for that many' must bind the anaphoric event count, not default to Fixed 1"
+        );
+        let TargetFilter::Typed(basic_land) = filter else {
+            panic!("expected typed basic-land filter, got {filter:?}");
+        };
+        assert!(
+            basic_land.type_filters.contains(&TypeFilter::Land),
+            "the search filter must preserve the Land type, got {basic_land:?}"
+        );
+        assert!(
+            basic_land.properties.iter().any(|property| matches!(
+                property,
+                FilterProp::HasSupertype {
+                    value: crate::types::card_type::Supertype::Basic
+                }
+            )),
+            "the search filter must preserve the Basic supertype, got {basic_land:?}"
         );
     }
 
@@ -19134,6 +19825,80 @@ mod tests {
                 "wrong prevention_duration for {text:?}"
             );
         }
+    }
+
+    /// CR 615 + CR 614.1a: "to you and planeswalkers you control" lowers to the
+    /// compound `ControllerAndControlledPermanents { Planeswalker }` recipient,
+    /// NOT a bare `Controller` that would silently drop the planeswalker leg
+    /// (Comeuppance). "you and permanents you control" carries no type
+    /// restriction (Channel Harm).
+    #[test]
+    fn prevent_compound_recipient_you_and_controlled_permanents() {
+        use crate::types::card_type::CoreType;
+
+        let planeswalker_text =
+            "Prevent all damage that would be dealt to you and planeswalkers you control this turn.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(planeswalker_text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: Some(CoreType::Planeswalker)
+            }
+        );
+
+        let permanents_text =
+            "Prevent all damage that would be dealt to you and permanents you control this turn.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(permanents_text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(
+            target,
+            TargetFilter::ControllerAndControlledPermanents {
+                permanent_type: None
+            }
+        );
+    }
+
+    /// CR 615: the plain "to you" recipient must remain `Controller` — the
+    /// compound-recipient recognizer must not over-trigger on the bare form.
+    #[test]
+    fn prevent_plain_to_you_recipient_stays_controller() {
+        let text = "Prevent all damage that would be dealt to you this turn.";
+        let Effect::PreventDamage { target, .. } = parse_prevent_effect(text, false) else {
+            panic!("expected PreventDamage");
+        };
+        assert_eq!(target, TargetFilter::Controller);
+    }
+
+    /// CR 609.7b: "by sources you don't control" lowers to a
+    /// controller-axis source filter (`ControllerRef::Opponent`) via the shared
+    /// replacement-side source grammar — a self source (you control) is NOT
+    /// matched (Comeuppance / Channel Harm).
+    #[test]
+    fn prevent_by_sources_you_dont_control_source_filter() {
+        use crate::types::ability::ControllerRef;
+
+        let text = "Prevent all damage that would be dealt to you and planeswalkers you control \
+                    this turn by sources you don't control.";
+        let Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } = parse_prevent_effect(text, false)
+        else {
+            panic!("expected PreventDamage");
+        };
+        let Some(TargetFilter::Typed(tf)) = damage_source_filter else {
+            panic!("expected Typed source filter, got {damage_source_filter:?}");
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.type_filters.is_empty(),
+            "\"sources\" carries no type restriction"
+        );
     }
 
     /// CR 119.3 + CR 608.2c: Kaya's Wrath lifegain (issue #2943) must parse

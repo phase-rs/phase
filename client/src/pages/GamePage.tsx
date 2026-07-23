@@ -11,12 +11,20 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 
-import type { DeckCardCount, GameFormat, MatchConfig, ObjectId, SerializedAbilityCost } from "../adapter/types";
+import type {
+  CompanionRevealChoice,
+  DeckCardCount,
+  GameFormat,
+  MatchConfig,
+  ObjectId,
+  SerializedAbilityCost,
+} from "../adapter/types";
 import { useDraftStore } from "../stores/draftStore";
 import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
+import { useGameViewportLock } from "../hooks/useGameViewportLock.ts";
 import { FlexEditOverlay } from "../components/flexlayout/FlexEditOverlay.tsx";
 import { DraggableWidget } from "../components/flexlayout/DraggableWidget.tsx";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
@@ -44,6 +52,7 @@ import { CardReportDialog } from "../components/card/CardReportDialog.tsx";
 import { ActionButton } from "../components/board/ActionButton.tsx";
 import { FullControlToggle } from "../components/controls/FullControlToggle.tsx";
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
+import { MobilePhaseChip } from "../components/controls/MobilePhaseChip.tsx";
 import { MayTriggerAutoChoiceList } from "../components/board/MayTriggerAutoChoiceList.tsx";
 import { PriorityYieldList } from "../components/board/PriorityYieldList.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
@@ -90,7 +99,9 @@ import { useModalPeek } from "../components/modal/useModalPeek.ts";
 import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.tsx";
 import { AssistChoosePlayerModal } from "../components/modal/AssistChoosePlayerModal.tsx";
 import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
+import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChooserModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
+import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -296,6 +307,7 @@ export function GamePage() {
               : rawMode === "ai"
                 ? "ai"
                 : "local";
+  const isOnlineMode = mode === "online" || mode === "spectate";
 
   const [showCardDataMissing, setShowCardDataMissing] = useState(false);
 
@@ -399,6 +411,7 @@ export function GamePage() {
         if (hasConcededRef.current) break;
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -481,6 +494,11 @@ export function GamePage() {
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
+        // Native engine sockets emit an error before close; the provider disposes
+        // that terminal adapter, so no reconnectFailed event follows.
+        if (!isOnlineMode) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "deckRejected":
         navigate("/multiplayer", {
@@ -492,7 +510,7 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode, t]);
+  }, [gameId, navigate, joinCode, isOnlineMode, t]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -601,6 +619,7 @@ export function GamePage() {
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.winner } },
@@ -686,7 +705,7 @@ export function GamePage() {
       roomName={roomNameParam ?? undefined}
       source={sourceParam}
       draftId={draftIdParam}
-      onWsEvent={mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
+      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
       }
@@ -702,7 +721,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
-        isOnlineMode={mode === "online" || mode === "spectate"}
+        isOnlineMode={isOnlineMode}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -802,6 +821,7 @@ function GamePageContent({
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
   const isMobile = useIsMobile();
+  useGameViewportLock();
   const focusedGridTemplateRows = useResolvedGridRows();
   const splitGridTemplateRows = useResolvedSplitGridRows();
   const gameState = useGameStore((s) => s.gameState);
@@ -1084,8 +1104,15 @@ function GamePageContent({
   }, [viewingZone]);
 
   const handleDeclareCompanion = useCallback(
-    (cardIndex: number | null) => {
-      dispatch({ type: "DeclareCompanion", data: { card_index: cardIndex } });
+    (choice: CompanionRevealChoice | null) => {
+      dispatch({
+        type: "DeclareCompanion",
+        data: {
+          choice: choice
+            ? { type: "Reveal", data: choice }
+            : { type: "Decline" },
+        },
+      });
     },
     [dispatch],
   );
@@ -1304,20 +1331,23 @@ function GamePageContent({
           gridTemplateColumns: "1fr",
         }}
       >
-        {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
+        {/* Row 1: Opponent hand + zone piles. Equal flexible side tracks keep
+            the focused hand centered on the viewport while the piles remain
+            right-aligned; split layouts render their hands inside seat panes. */}
         <div
-          className={`relative z-20 min-w-0 flex w-full ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
+          className={`relative z-20 min-w-0 w-full ${renderFocusedOpponentTopRow ? "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]" : "flex"} ${splitBoardActive ? "overflow-hidden" : "overflow-visible"}`}
           data-flex-zone="opp-row"
         >
           {renderFocusedOpponentTopRow && (
             <>
-              <div className="min-w-0 flex-1">
+              <div aria-hidden />
+              <div className="min-w-0">
                 <OpponentHand showCards={showAiHand} />
               </div>
               <DraggableWidget
                 target={{ kind: "widget", key: "opponentPiles" }}
                 flexZone="opponentPiles"
-                className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+                className="flex items-start justify-self-end gap-1.5 px-1 py-1"
                 style={playerZoneRailStyle}
               >
                 {activeOpponentId != null ? (
@@ -1428,7 +1458,7 @@ function GamePageContent({
             className="hidden flex-col gap-1 max-lg:portrait:flex max-lg:portrait:min-w-0"
           >
             <div className="flex flex-col gap-1 max-lg:gap-1">
-              <CombatPhaseIndicator />
+              <MobilePhaseChip className="w-full" />
               <HandBadge className="w-full" />
             </div>
             <div className="flex items-center gap-1.5">
@@ -1456,6 +1486,9 @@ function GamePageContent({
                 <TurnStatusLine />
               </div>
               <div className="hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex">
+                {/* <lg only: desktop conveys phase via the PhaseDot strips in
+                    PlayerHud, which are hidden on mobile. */}
+                <MobilePhaseChip className="lg:hidden" />
                 <TurnStatusLine />
                 <HandBadge />
                 {/* CR 117.3d: standing priority-yield summary chip, beside the
@@ -1705,7 +1738,9 @@ function GamePageContent({
         <MeldChoiceModal />
         <AssistChoosePlayerModal />
         <ClashOpponentModal />
+        <ZoneOpponentChooserModal />
         <PileOpponentModal />
+        <AnnouncingOpponentModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />
@@ -2289,8 +2324,8 @@ function MulliganDecisionPrompt({
 }
 
 interface CompanionRevealPromptProps {
-  eligibleCompanions: [string, number][];
-  onChoose: (cardIndex: number | null) => void;
+  eligibleCompanions: CompanionRevealChoice[];
+  onChoose: (choice: CompanionRevealChoice | null) => void;
 }
 
 function CompanionRevealPrompt({
@@ -2318,17 +2353,17 @@ function CompanionRevealPrompt({
             >
               <button
                 onClick={() => onChoose(null)}
-                className="rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white lg:min-h-11 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
+                className="min-h-11 rounded-[10px] border border-white/12 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 transition hover:bg-white/8 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 active:bg-white/12 lg:rounded-[16px] lg:px-5 lg:py-3 lg:text-base"
               >
                 {t("gamePage.companion.decline")}
               </button>
-              {eligibleCompanions.map(([name], i) => (
+              {eligibleCompanions.map((choice) => (
                 <button
-                  key={name}
-                  onClick={() => onChoose(i)}
-                  className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 sm:text-base"
+                  key={`${choice.name}-${choice.source.type}`}
+                  onClick={() => onChoose(choice)}
+                  className="min-h-11 rounded-[16px] bg-amber-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_14px_34px_rgba(245,158,11,0.28)] transition hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200 active:bg-amber-300 sm:text-base"
                 >
-                  {t("gamePage.companion.reveal", { name })}
+                  {t("gamePage.companion.reveal", { name: choice.name })}
                 </button>
               ))}
             </motion.div>
@@ -2347,9 +2382,9 @@ function CompanionRevealPrompt({
       >
         <div className="w-full overflow-x-auto">
           <div className="mx-auto flex w-max min-w-full items-center justify-center px-2 sm:px-4">
-            {eligibleCompanions.map(([name], index) => (
+            {eligibleCompanions.map((choice, index) => (
               <motion.div
-                key={name}
+                key={`${choice.name}-${choice.source.type}`}
                 className="flex-shrink-0 rounded-[18px] transition-shadow duration-200 hover:z-50 hover:shadow-[0_0_24px_rgba(245,158,11,0.22)]"
                 style={{
                   marginLeft: index === 0 ? 0 : "clamp(-26px, -3vw, -16px)",
@@ -2368,7 +2403,7 @@ function CompanionRevealPrompt({
                 }}
               >
                 <CardImage
-                  cardName={name}
+                  cardName={choice.name}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />

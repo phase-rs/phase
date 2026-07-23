@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Blockiert",
+    "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
+    "cantActivateDuring": "Kann derzeit nicht aktiviert werden",
+    "prohibited": "Das Aktivieren dieser Fähigkeit ist verboten"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -321,7 +327,7 @@
     "assignRemaining_other": "Noch {{count}} zuweisen",
     "confirmDistribute_one": "{{count}} Angreifer erklären",
     "confirmDistribute_other": "{{count}} Angreifer erklären",
-    "mustAttackPlayer": "{{creature}} muss {{player}} angreifen"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Kontrolle",
@@ -367,7 +373,14 @@
     "scopeOwnTurn": "Stoppt nur in deinen Zügen.",
     "scopeOpponentsTurns": "Stoppt nur in den Zügen der Gegner.",
     "tooltipCurrentPhase": "Aktuelle Phase.",
-    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phasenstopp: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Aktuelle Phase: {{phase}}. Phasenstopp-Einstellungen öffnen.",
+    "sheetTitle": "Zugphasen",
+    "sheetSubtitle": "Tippe auf einen Schritt, um festzulegen, wann das automatische Passen dort stoppt.",
+    "scopeShortOff": "Aus",
+    "scopeShortAllTurns": "Alle Züge",
+    "scopeShortOwnTurn": "Deine Züge",
+    "scopeShortOpponentsTurns": "Gegnerzüge"
   },
   "phaseTracker": {
     "turn": "Zug {{number}}"
@@ -407,6 +420,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}}-Marke\n{{description}}",
     "summary_other": "{{count}} {{label}}-Marken\n{{description}}",
+    "summaryUnbounded": "∞ {{label}}-Marken\n{{description}}",
     "descriptions": {
       "p1p1": "Jede +1/+1-Marke gibt der bleibenden Karte +1/+1.",
       "m1m1": "Jede -1/-1-Marke gibt der bleibenden Karte -1/-1.",
@@ -485,13 +499,22 @@
     "clickToFocus": "zum Fokussieren klicken"
   },
   "manaPool": {
+    "onlyForSpell": "Nur zum Wirken von Zaubersprüchen ausgeben",
     "onlyForSpellType": "Nur zum Wirken von Zaubersprüchen eines bestimmten Typs ausgeben",
     "onlyForCreatureType": "Nur zum Wirken eines Kreaturenzauberspruchs des gewählten Typs ausgeben",
     "onlyForTypeSpellsOrAbilities": "Nur für Zaubersprüche oder Fähigkeiten eines bestimmten Typs ausgeben",
+    "onlyForTaggedActivation": "Nur zum Aktivieren von Fähigkeiten einer bestimmten Art ausgeben",
     "onlyForSpellWithKeywordKind": "Nur zum Wirken von Zaubersprüchen mit einem bestimmten Schlüsselwort ausgeben",
     "onlyForSpellWithKeywordKindFromZone": "Nur zum Wirken von Schlüsselwort-Zaubersprüchen aus einem Friedhof ausgeben",
+    "onlyForSpellWithManaValue": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Anforderung an den Manabetrag erfüllen",
+    "onlyForSpellMatchingCostCriteria": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Kostenanforderung erfüllen",
+    "onlyForSpellWithColorCount": "Nur zum Wirken von Zaubersprüchen ausgeben, die eine Anforderung an die Anzahl der Farben erfüllen",
+    "onlyForSpellFromZone": "Nur zum Wirken von Zaubersprüchen aus einer erlaubten Zone ausgeben",
+    "onlyForFaceDownSpell": "Nur zum Wirken verdeckter Zaubersprüche ausgeben",
     "onlyForActivation": "Nur zum Aktivieren von Fähigkeiten ausgeben",
     "onlyForXCosts": "Nur für Kosten ausgeben, die {X} enthalten",
+    "onlyForAny": "Nur für eine der aufgeführten Verwendungen ausgeben",
+    "onlyForSpecialAction": "Nur für eine bestimmte Sonderaktion ausgeben",
     "convokePayment": "Beschwörbeitrag-Bezahlung",
     "grantsProperty": "Verleiht dem Zauberspruch eine Eigenschaft",
     "grantCantBeCountered": "Für diesen Zauberspruch ausgeben, damit er nicht neutralisiert werden kann"
@@ -506,6 +529,11 @@
     "castCommander": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
     "castCommanderTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "ninjutsuCommander": "Kommandeur-Ninjutsu: {{name}} — klicken, um einen ungeblockten Angreifer auf die Hand zurückzunehmen und diesen Kommandeur getappt und angreifend ins Spiel zu bringen",
+    "signatureSpell": "Signaturzauber",
+    "signatureSpellTitle": "Signaturzauber: {{name}}",
+    "signatureSpellTitleTax": "Signaturzauber: {{name}} (Steuer: +{{tax}})",
+    "castSignatureSpell": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
+    "castSignatureSpellTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "tax": "Steuer: +{{tax}}",
     "companion": "Gefährte",
     "companionTitle": "Gefährte: {{name}}",
@@ -565,6 +593,15 @@
     "resourceMana": "Mana",
     "resourceCounters": "Marken",
     "resourceSpeed": "Tempo",
+    "loopCollapseTitleTokens": "Wähle, wie viele Spielsteine erzeugt werden",
+    "loopCollapseTitleCounters": "Wähle, wie oft Marken hinzugefügt werden",
+    "loopCollapseTitleLife": "Wähle, wie oft Leben dazugewonnen wird",
+    "loopCollapseTitleMixed": "Wähle, wie oft die Schleife wiederholt wird",
+    "loopCollapseAmountTokens_one": "{{count}} Spielstein erzeugen",
+    "loopCollapseAmountTokens_other": "{{count}} Spielsteine erzeugen",
+    "loopCollapseAmountCounters": "Marken hinzufügen {{value}}×",
+    "loopCollapseAmountLife": "Leben dazugewinnen {{value}}×",
+    "loopCollapseAmountMixed": "Schleife wiederholen {{value}}×",
     "manualMana": "Manuell",
     "manualManaTooltip": "Manuelles Mana — nur für dieses Spiel. Tippe deine eigenen Länder und dein Mana an, um zu bezahlen.",
     "spendHint": "Klicke auf dein Mana, um es für diese Kosten einzusetzen",
@@ -628,8 +665,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "{{amount}} Kampfschaden zuteilen",
@@ -713,6 +748,7 @@
     "confirmTap": "Tappen bestätigen ({{selected}}/{{count}})",
     "keepCurrentTargets": "Aktuelle Ziele behalten",
     "skip": "Überspringen",
+    "opponentChoice": "(nach Wahl des Gegners)",
     "chooseNewTarget": "Wähle das neue Ziel des Zauberspruchs",
     "chooseNewTargetForSpell": "Wähle ein neues Ziel für {{spell}}",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1667,9 +1703,20 @@
     "battleFallback": "Schlacht",
     "subtitle": "{{name}} benötigt einen neuen Beschützer. Wähle, welcher Gegner sie verteidigt."
   },
+  "announcingOpponent": {
+    "title": "Ansagenden Gegner wählen ({{current}} von {{total}})",
+    "subtitle": "Wähle, welcher Gegner {{target}} ansagt ({{current}} von {{total}}).",
+    "targetLand": "das Länderziel",
+    "targetCreature": "das Kreaturenziel",
+    "targetChoice": "diese Zielwahl"
+  },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
     "subtitle": "Wähle, welcher Gegner mit dir kämpft."
+  },
+  "zoneOpponentChooser": {
+    "title": "Gegner wählen",
+    "subtitle": "Wähle, welcher Gegner die Wahl trifft."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1748,6 +1795,13 @@
     "variantBestow": "Mit Verleihen wirken",
     "variantFreerunning": "Mit Freerunning wirken",
     "variantFuse": "Mit Verschmelzen wirken",
+    "variantMutate": "Mit Mutate wirken",
+    "variantAwaken": "Mit Erwecken wirken",
+    "variantCleave": "Mit Abspalten wirken",
+    "variantImpending": "Mit Drohend wirken",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Mit Prototyp wirken",
+    "variantFaceDown": "Verdeckt wirken",
     "variantFallback": "Mit {{type}} wirken"
   },
   "categoryChoice": {
@@ -2040,6 +2094,7 @@
     "fromSideboard": "Aus dem Sideboard"
   },
   "phaseName": {
+    "Untap": "Enttappen",
     "Upkeep": "Versorgung",
     "Draw": "Ziehen",
     "PreCombatMain": "Hauptphase 1",

@@ -9,6 +9,7 @@ use super::ability::{
     AbilityCost, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter, QuantityExpr,
     QuantityRef, TargetFilter,
 };
+use super::events::ActivatedAbilityKind;
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
@@ -693,9 +694,10 @@ pub enum BlockExceptionKind {
 
 /// CR 601.2f: Direction/semantic axis for mana-cost modification statics.
 /// All three modes are applied in the CR 601.2f cost-locking step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum CostModifyMode {
     /// Subtractive — reduce generic mana (floor: 0).
+    #[default]
     Reduce,
     /// Additive — increase generic mana. Thalia, Guardian of Thraben class.
     Raise,
@@ -711,10 +713,17 @@ fn cost_modify_mode_reduce() -> CostModifyMode {
     CostModifyMode::Reduce
 }
 
+/// Serde `skip_serializing_if` for [`CostModifyMode::Reduce`] defaults on
+/// directional cost-modification fields (self `CostReduction`, ability statics).
+pub(crate) fn is_cost_modify_mode_reduce(mode: &CostModifyMode) -> bool {
+    matches!(mode, CostModifyMode::Reduce)
+}
+
 /// CR 116.2: Stable registry string for a [`SpecialAction`], used by the
 /// `StaticMode::ReduceActionCost` Display/FromStr round-trip.
 fn special_action_registry_str(action: SpecialAction) -> &'static str {
     match action {
+        SpecialAction::CompanionToHand => "CompanionToHand",
         SpecialAction::Plot => "Plot",
         SpecialAction::UnlockDoor => "UnlockDoor",
         SpecialAction::TurnFaceUp => "TurnFaceUp",
@@ -725,6 +734,7 @@ fn special_action_registry_str(action: SpecialAction) -> &'static str {
 /// Inverse of [`special_action_registry_str`].
 fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
     match s {
+        "CompanionToHand" => Some(SpecialAction::CompanionToHand),
         "Plot" => Some(SpecialAction::Plot),
         "UnlockDoor" => Some(SpecialAction::UnlockDoor),
         "TurnFaceUp" => Some(SpecialAction::TurnFaceUp),
@@ -871,11 +881,22 @@ pub enum StaticMode {
     /// (CR 605.1a). Pithing Needle emits `ActivationExemption::ManaAbilities`;
     /// Phyrexian Revoker, Sorcerous Spyglass, and the standard Chalice/Karn
     /// family use `ActivationExemption::None`.
+    ///
+    /// `kind` narrows by the ability-KIND axis (CR 606.2), orthogonal to
+    /// `exemption`'s "unless it's a mana ability" bypass axis:
+    /// - `None` — any activated ability (Chalice/Karn/Pithing Needle class).
+    /// - `Some(Loyalty)` — only loyalty abilities (The Immortal Sun,
+    ///   "Players can't activate planeswalkers' loyalty abilities").
+    /// - `Some(Normal)` — only ordinary activated abilities (symmetric future
+    ///   class). Classification routes through the single-authority
+    ///   `is_loyalty_ability_cost` (CR 606.2: loyalty symbol in the cost).
     CantBeActivated {
         who: ProhibitionScope,
         source_filter: TargetFilter,
         #[serde(default)]
         exemption: ActivationExemption,
+        #[serde(default)]
+        kind: Option<ActivatedAbilityKind>,
     },
     /// CR 701.23 + CR 609.3: "Spells and abilities <scope> can't cause their controller
     /// to search their library." E.g., Ashiok, Dream Render's first static ability.
@@ -898,6 +919,13 @@ pub enum StaticMode {
     RestrictLibrarySearchToTop {
         who: ProhibitionScope,
         count: u32,
+    },
+    /// CR 723.1a + CR 723.5: The newest applicable player-controlling effect
+    /// makes decisions for scoped players while they search their own
+    /// libraries. This is a non-layer static consumed when a library search is
+    /// prepared, before hidden information and decision authority are latched.
+    ControlPlayersDuringOwnLibrarySearch {
+        who: ProhibitionScope,
     },
     /// CR 603.2 + CR 609.3: "Triggered abilities <scope> can't cause you to
     /// sacrifice or exile <affected>." E.g., The Master, Multiplied — triggered
@@ -1353,8 +1381,9 @@ pub enum StaticMode {
         /// CR 609.4b: Optional payment concession riding alongside the cast
         /// permission — "Mana of any type can be spent to cast those spells."
         /// (Azula, Cunning Usurper). `None` (default) preserves the existing
-        /// shapes (Maralen, The Matrix of Time). `Some(AnyTypeOrColor)` scopes
-        /// the any-type-mana spend to spells cast via this permission, mirroring
+        /// shapes (Maralen, The Matrix of Time). `AnyColor` and
+        /// `AnyTypeOrColor` remain distinct while sharing the colored-payment
+        /// relaxation for spells cast via this permission, mirroring
         /// the per-card `CastingPermission::PlayFromExile.mana_spend_permission`
         /// for the persistent-static seam. Consulted in
         /// `casting::player_can_spend_as_any_color_for_spell`.
@@ -1673,6 +1702,24 @@ pub enum StaticMode {
     /// The source controller is the goading player for the "attack another
     /// player if able" requirement.
     Goaded,
+    /// CR 508.1d + CR 701.15b: This creature attacks each combat if able AND
+    /// attacks a player other than the *granting effect's* controller if able —
+    /// the two combat requirements CR 701.15b attaches to goad, WITHOUT the
+    /// goaded designation.
+    ///
+    /// CR 701.15a: only a spell or ability that *goads* a creature makes it
+    /// goaded, so a card that prints the requirements in full creates no
+    /// designation. Official Maximum Carnage ruling (2025-09-19): "Although the
+    /// effects of the first chapter ability are the same as the goad keyword
+    /// action, that ability doesn't cause any creatures to become goaded.
+    /// Effects that refer to 'goaded creatures' won't apply." Kardur,
+    /// Doomscourge and Maximum Carnage chapter I are the two printed members.
+    ///
+    /// The avoided player is `StaticDefinition::source_controller`, snapshotted
+    /// at graft time: CR 109.5 fixes "you" in a resolving ability to that
+    /// ability's controller. Nullary and registry-registered (mirrors [`Goaded`]);
+    /// runtime enforcement lives in `combat.rs`.
+    MustAttackAwayFromSource,
     /// CR 506.5 + CR 508.1c + CR 509.1b: Parameterized "alone" combat
     /// restriction.  `action` selects whether it applies to attacking or
     /// blocking; `requirement` selects the polarity:
@@ -1993,6 +2040,7 @@ pub enum StaticModeKind {
     CantBeActivated,
     CantSearchLibrary,
     RestrictLibrarySearchToTop,
+    ControlPlayersDuringOwnLibrarySearch,
     CantCauseSacrificeOrExile,
     CastWithFlash,
     GrantsExtraVote,
@@ -2063,6 +2111,7 @@ pub enum StaticModeKind {
     MustBeBlocked,
     MustBeBlockedByAll,
     Goaded,
+    MustAttackAwayFromSource,
     CombatAlone,
     CantCrew,
     CantPhaseIn,
@@ -2123,6 +2172,9 @@ impl StaticMode {
             StaticMode::CantSearchLibrary { .. } => StaticModeKind::CantSearchLibrary,
             StaticMode::RestrictLibrarySearchToTop { .. } => {
                 StaticModeKind::RestrictLibrarySearchToTop
+            }
+            StaticMode::ControlPlayersDuringOwnLibrarySearch { .. } => {
+                StaticModeKind::ControlPlayersDuringOwnLibrarySearch
             }
             StaticMode::CantCauseSacrificeOrExile { .. } => {
                 StaticModeKind::CantCauseSacrificeOrExile
@@ -2202,6 +2254,7 @@ impl StaticMode {
             StaticMode::MustBeBlocked { .. } => StaticModeKind::MustBeBlocked,
             StaticMode::MustBeBlockedByAll { .. } => StaticModeKind::MustBeBlockedByAll,
             StaticMode::Goaded => StaticModeKind::Goaded,
+            StaticMode::MustAttackAwayFromSource => StaticModeKind::MustAttackAwayFromSource,
             StaticMode::CombatAlone { .. } => StaticModeKind::CombatAlone,
             StaticMode::CantCrew => StaticModeKind::CantCrew,
             StaticMode::CantPhaseIn => StaticModeKind::CantPhaseIn,
@@ -2399,10 +2452,9 @@ impl Hash for StaticMode {
                 pool.hash(state);
                 timing.hash(state);
                 cost.hash(state);
-                // `ManaSpendPermission` does not derive `Hash` (mirrors the
-                // `TopOfLibraryCastPermission.alt_cost` treatment above) — hash
-                // its presence so the two payment-concession shapes don't collide.
-                mana_spend_permission.is_some().hash(state);
+                // CR 609.4b: Hash the typed concession so None, AnyColor, and
+                // AnyTypeOrColor remain distinct static definitions.
+                mana_spend_permission.hash(state);
                 grants_flash.hash(state);
                 // `AbilityCost` (inside `CastExtraCost`) lacks `Hash` — hash the
                 // mode marker only so the alternative/additional shapes differ.
@@ -2447,6 +2499,7 @@ impl Hash for StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantActivateDuring { .. }
             | StaticMode::CantSearchLibrary { .. }
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
             // CR 614.1c: data-carrying (CounterType + count); consumed by direct
             // match in change_zone.rs, never used as a HashMap key.
@@ -2495,6 +2548,7 @@ impl StaticMode {
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantSearchLibrary { .. }
             | StaticMode::RestrictLibrarySearchToTop { .. }
+            | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
             | StaticMode::CantCauseSacrificeOrExile { .. }
             | StaticMode::CastWithFlash
             | StaticMode::GrantsExtraVote
@@ -2554,6 +2608,7 @@ impl StaticMode {
             | StaticMode::MustBeBlocked { .. }
             | StaticMode::MustBeBlockedByAll { .. }
             | StaticMode::Goaded
+            | StaticMode::MustAttackAwayFromSource
             | StaticMode::CombatAlone { .. }
             | StaticMode::CantCrew
             | StaticMode::CantPhaseIn
@@ -2622,6 +2677,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
             StaticMode::RestrictLibrarySearchToTop { who, count } => {
                 write!(f, "RestrictLibrarySearchToTop({who},{count})")
+            }
+            StaticMode::ControlPlayersDuringOwnLibrarySearch { who } => {
+                write!(f, "ControlPlayersDuringOwnLibrarySearch({who})")
             }
             StaticMode::CantCauseSacrificeOrExile { cause } => {
                 write!(f, "CantCauseSacrificeOrExile({cause})")
@@ -2802,8 +2860,14 @@ impl fmt::Display for StaticMode {
                 if matches!(timing, ExileCastTiming::YourTurnOnly) {
                     write!(f, ",timing={timing}")?;
                 }
-                if mana_spend_permission.is_some() {
-                    write!(f, ",anymana")?;
+                match mana_spend_permission {
+                    Some(crate::types::ability::ManaSpendPermission::AnyColor) => {
+                        write!(f, ",anycolor")?;
+                    }
+                    Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor) => {
+                        write!(f, ",anymana")?;
+                    }
+                    None => {}
                 }
                 if *grants_flash {
                     write!(f, ",flash")?;
@@ -2913,6 +2977,7 @@ impl fmt::Display for StaticMode {
                 write!(f, "MustBeBlockedByAll:By({filter:?})")
             }
             StaticMode::Goaded => write!(f, "Goaded"),
+            StaticMode::MustAttackAwayFromSource => write!(f, "MustAttackAwayFromSource"),
             StaticMode::CombatAlone {
                 action,
                 requirement,
@@ -3059,6 +3124,9 @@ impl FromStr for StaticMode {
                 // CR 605.1a: Default to no exemption — legacy serialized form predates
                 // the mana-ability exemption field.
                 exemption: ActivationExemption::None,
+                // CR 606.2: Legacy serialized form predates the ability-kind axis;
+                // `None` = any activated ability, preserving pre-widening behavior.
+                kind: None,
             },
             "CastWithFlash" => StaticMode::CastWithFlash,
             "ReduceCost" => StaticMode::ModifyCost {
@@ -3331,6 +3399,10 @@ impl FromStr for StaticMode {
                         // CR 609.4b: any-type-mana spend concession.
                         mana_spend_permission =
                             Some(crate::types::ability::ManaSpendPermission::AnyTypeOrColor);
+                    } else if seg == "anycolor" {
+                        // CR 609.4b: any-color-only spend concession.
+                        mana_spend_permission =
+                            Some(crate::types::ability::ManaSpendPermission::AnyColor);
                     } else if seg == "flash" {
                         // CR 601.3b: cast-as-though-flash concession.
                         grants_flash = true;
@@ -3386,6 +3458,7 @@ impl FromStr for StaticMode {
             "CantPhaseIn" => StaticMode::CantPhaseIn,
             "MustBeBlockedByAll" => StaticMode::MustBeBlockedByAll { blockers: None },
             "Goaded" => StaticMode::Goaded,
+            "MustAttackAwayFromSource" => StaticMode::MustAttackAwayFromSource,
             "CombatAlone(Attack,NeedsCompanion)" => StaticMode::CombatAlone {
                 action: CombatAloneAction::Attack,
                 requirement: CombatAloneRequirement::NeedsCompanion,
@@ -3484,6 +3557,9 @@ impl FromStr for StaticMode {
                             // CR 605.1a: Display round-trip is diagnostic-only; the
                             // exemption field is data-carrying and defaults to `None`.
                             exemption: ActivationExemption::None,
+                            // CR 606.2: Display round-trip is diagnostic-only; the
+                            // kind field is data-carrying and defaults to `None`.
+                            kind: None,
                         });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
@@ -3508,6 +3584,15 @@ impl FromStr for StaticMode {
                         ) {
                             return Ok(StaticMode::RestrictLibrarySearchToTop { who, count });
                         }
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("ControlPlayersDuringOwnLibrarySearch(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    // CR 723.5: Round-trip of the controlled-player scope.
+                    if let Ok(who) = ProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::ControlPlayersDuringOwnLibrarySearch { who });
                     }
                     return Ok(StaticMode::Other(other.to_string()));
                 } else if let Some(inner) = other
@@ -3821,6 +3906,84 @@ fn deserialize_legacy_modify_cost_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn static_mode_hash(mode: &StaticMode) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        mode.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn exile_cast_mode_with_spend_permission(
+        mana_spend_permission: Option<crate::types::ability::ManaSpendPermission>,
+    ) -> StaticMode {
+        StaticMode::ExileCastPermission {
+            frequency: CastFrequency::Unlimited,
+            play_mode: CardPlayMode::Cast,
+            cost: ExileCastCost::PayNormalCost,
+            pool: ExileCardPool::Persistent,
+            timing: ExileCastTiming::YourTurnOnly,
+            mana_spend_permission,
+            grants_flash: false,
+            extra_cost: None,
+            enters_with_counter: None,
+        }
+    }
+
+    /// CR 609.4b + CR 106.1a + CR 106.1b: diagnostic static strings preserve the narrow
+    /// `anycolor` marker while the historical `anymana` marker remains mapped
+    /// to the broader `AnyTypeOrColor` concession.
+    #[test]
+    fn exile_cast_permission_spend_markers_roundtrip_distinctly() {
+        let any_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyColor,
+        ));
+        let any_type_or_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+        ));
+
+        let any_color_text = any_color.to_string();
+        let any_type_text = any_type_or_color.to_string();
+        assert!(any_color_text.contains(",anycolor"), "{any_color_text}");
+        assert!(any_type_text.contains(",anymana"), "{any_type_text}");
+        assert_eq!(StaticMode::from_str(&any_color_text).unwrap(), any_color);
+        assert_eq!(
+            StaticMode::from_str(&any_type_text).unwrap(),
+            any_type_or_color
+        );
+
+        let legacy_anymana =
+            "ExileCastPermission(Cast,unlimited,pool=persistent,timing=your_turn_only,anymana)";
+        assert_eq!(
+            StaticMode::from_str(legacy_anymana).unwrap(),
+            any_type_or_color,
+            "the historical anymana marker must remain backward-compatible"
+        );
+    }
+
+    /// CR 609.4b: custom static hashing must distinguish absent, any-color,
+    /// and any-type-or-color concessions so state-analysis keys cannot collide.
+    #[test]
+    fn exile_cast_permission_hash_distinguishes_spend_permission() {
+        let none = exile_cast_mode_with_spend_permission(None);
+        let any_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyColor,
+        ));
+        let any_type_or_color = exile_cast_mode_with_spend_permission(Some(
+            crate::types::ability::ManaSpendPermission::AnyTypeOrColor,
+        ));
+
+        assert_ne!(static_mode_hash(&none), static_mode_hash(&any_color));
+        assert_ne!(
+            static_mode_hash(&none),
+            static_mode_hash(&any_type_or_color)
+        );
+        assert_ne!(
+            static_mode_hash(&any_color),
+            static_mode_hash(&any_type_or_color)
+        );
+    }
 
     #[test]
     fn legacy_block_restriction_string_deserializes_with_flying_filter() {
@@ -3984,6 +4147,10 @@ mod tests {
                 action: CombatAloneAction::Attack,
                 requirement: CombatAloneRequirement::MustBeSole,
             },
+            // CR 508.1d + CR 701.15b: nullary requirement leaf — `Display` and
+            // `FromStr` must stay symmetric (Kardur, Doomscourge; Maximum
+            // Carnage chapter I).
+            StaticMode::MustAttackAwayFromSource,
             StaticMode::CantCrew,
             StaticMode::MayLookAtTopOfLibrary,
             // CR 702.170a grant + CR 702.170f permission — nullary plot-from-
@@ -4145,6 +4312,7 @@ mod tests {
             StaticMode::CantBeBlocked,
             StaticMode::Flying,
             StaticMode::MustBeBlocked { by: None },
+            StaticMode::MustAttackAwayFromSource,
             StaticMode::GrantsExtraVote,
             // CR 118.9: data-carrying ManaCost — serde must preserve {0} and {WUBRG}.
             StaticMode::CastWithAlternativeCost {
@@ -4382,6 +4550,7 @@ mod tests {
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
             exemption: ActivationExemption::None,
+            kind: None,
         };
         assert_eq!(mode.to_string(), "CantBeActivated(all_players)");
 
@@ -4431,6 +4600,7 @@ mod tests {
                 who: ProhibitionScope::AllPlayers,
                 source_filter: TargetFilter::SelfRef,
                 exemption: ActivationExemption::None,
+                kind: None,
             }
         );
     }

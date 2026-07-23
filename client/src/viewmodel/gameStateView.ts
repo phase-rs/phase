@@ -354,6 +354,9 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "ManaAbility") {
     return (data.resume.ManaAbility as { source_id?: ObjectId } | undefined)?.source_id;
   }
+  if (data.resume.type === "Resolution") {
+    return undefined;
+  }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
 
@@ -805,12 +808,20 @@ export function buildPlayerBattlefieldView(
       (id): id is ObjectId => id != null,
     ),
   );
-  return buildPlayerBattlefieldViewFromObjects(playerObjects, ringBearerIds);
+  // CR 732.2a: engine-authored ∞-pile membership (accepted object-growth loop).
+  // Read exactly like ring_bearer — the adapter attaches `derived` onto gameState.
+  const unboundedPileIds = new Set(gameState.derived?.unbounded_pile ?? []);
+  return buildPlayerBattlefieldViewFromObjects(
+    playerObjects,
+    ringBearerIds,
+    unboundedPileIds,
+  );
 }
 
 export function buildPlayerBattlefieldViewFromObjects(
   playerObjects: GameObject[],
   ringBearerIds: ReadonlySet<ObjectId> = new Set(),
+  unboundedPileIds: ReadonlySet<ObjectId> = new Set(),
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -820,11 +831,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds),
-    lands: groupByName(resolveObjects(partition.lands), ringBearerIds),
-    support: groupByName(resolveObjects(partition.support), ringBearerIds),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds),
-    other: groupByName(resolveObjects(partition.other), ringBearerIds),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds),
   };
 }
 

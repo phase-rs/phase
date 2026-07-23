@@ -1488,17 +1488,17 @@ pub fn parse_target_with_syntax<'a>(
     }
 
     // CR 608.2c: "each of them" is a plural-pronoun anaphor that refers back to
-    // the parent ability's chosen targets. Centralising the binding here means
-    // every sibling effect parser (destroy, exile, bounce, tap, etc.) benefits
+    // the parent ability's chosen targets or batched event objects — NEVER the
+    // single-object `TriggeringSource` that `resolve_pronoun_target` would emit
+    // for a typed trigger subject. Centralising the binding here means every
+    // sibling effect parser (destroy, exile, bounce, tap, etc.) benefits
     // automatically instead of each site adding its own special case. A word-
-    // boundary guard via `parse_word_bounded` excludes "themselves". Resolution
-    // delegates to `resolve_pronoun_target` which applies the same trigger-
-    // subject vs. compound-anaphor dispatch as the bare "them" pronoun arm above.
+    // boundary guard via `parse_word_bounded` excludes "themselves".
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
         let (i, ()) = value((), tag::<_, _, OracleError<'_>>("each of ")).parse(input)?;
         parse_word_bounded(i, "them")
     }) {
-        return (resolve_pronoun_target(ctx, "them"), rest, syntax);
+        return (TargetFilter::ParentTarget, rest, syntax);
     }
 
     // CR 601.2c: "each of <count> target <type>" is an exact-count multi-target
@@ -2130,6 +2130,21 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // GAP B (DEFERRED — strict-failure tag, DynQty subgroup D follow-up): the leading
+    // adjective handlers here run as a fixed positional cascade (combat-status →
+    // enchanted/equipped → modified → renowned → goaded → historic → … → nontoken at
+    // ~:2310). A phrase whose adjectives appear in a different order — notably "nontoken
+    // attacking creature" (Sophina, Spearsage Deserter) — is only partly stripped:
+    // "nontoken" leads, so THIS combat-status loop never sees "attacking"; by the time
+    // "nontoken " is consumed further down, the combat-status loop has already passed, so
+    // "attacking creature" fails the type parse and `parse_for_each_clause` returns None
+    // (NO false lift — Sophina's Investigate stays bare and coverage stays honestly RED).
+    // The fix is to collapse this cascade into a single order-free many0-style property
+    // loop, but that is the hottest shared parser path (high CI-regression blast radius)
+    // and is out of scope here. Tripwire: the Sophina branch of
+    // `object_for_each_investigate_is_lifted` asserts the bare-Investigate state and
+    // FLIPS to fail when this gap is closed.
+    //
     // CR 509.1h: Consume combat status prefixes (unblocked, attacking, blocking).
     // Handles "or" compound as a property disjunction: "attacking or blocking
     // creature" means attacking creature OR blocking creature, not both.
@@ -2199,6 +2214,17 @@ pub fn parse_type_phrase_with_ctx<'a>(
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(&lower[pos..]) {
         if starts_with_type_phrase_lead(rest) {
             properties.push(FilterProp::Renowned);
+            pos += lower[pos..].len() - rest.len();
+        }
+    }
+
+    // CR 701.15b/c: "goaded" is a permanent designation used as an adjective in
+    // filters like "goaded creature you control". Mirrors the "renowned" strip:
+    // only consume when a type word follows, so the "goad target creature" verb
+    // path is untouched.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("goaded ").parse(&lower[pos..]) {
+        if starts_with_type_phrase_lead(rest) {
+            properties.push(FilterProp::Goaded);
             pos += lower[pos..].len() - rest.len();
         }
     }
@@ -3069,6 +3095,31 @@ pub fn parse_type_phrase_with_ctx<'a>(
         }
     }
 
+    // CR 202.3 + CR 608.2c + CR 115.2: a mana-value clause may TRAIL a zone clause
+    // ("target creature card in your graveyard with mana value X/4 or less/less than
+    // or equal to the number of permanent cards in your graveyard" — Lazav the
+    // Multifarious, Likeness Looter, Squirming Emergence, Too Evil to Stay Dead's
+    // narrow branch). The pre-zone parse_mana_value_suffix pass above only catches
+    // the clause when it precedes the zone; this second pass catches the
+    // zone-then-mana-value ordering so the full source-filter phrase is consumed
+    // (a leftover would trip the clone-replacement guard) and FilterProp::Cmc reaches
+    // the target filter. Mirrors the zone->counter and zone->without second passes below.
+    //
+    // RESOLVED (finding #1, follow-up to the engine gap this fix originally
+    // unmasked): correctly narrowing Too Evil to Stay Dead's BASE branch to
+    // `Cmc{LE, Fixed 4}` had exposed that its teamwork "instead" broad
+    // override was not applied at cast-time target selection — only kicker
+    // propagated `additional_cost_paid` there. That cast-time propagation is
+    // now generalized from kicker to every `AdditionalCost`-"instead" with a
+    // non-empty effective queue (parameterize-don't-proliferate). See
+    // `game/ability_utils.rs`: `collect_target_slots_inner` +
+    // `additional_cost_instead_spell_has_legal_targets`; `game/casting.rs`'s
+    // pre-target deferral gates.
+    if let Some((prop, consumed)) = parse_mana_value_suffix(&lower[pos..], ctx) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // CR 122.1 + CR 400.1: A counter-presence clause may TRAIL a zone clause
     // ("a creature card in exile with a takeover counter on it" — The Master,
     // Formed Anew). The pre-zone `parse_counter_suffix` pass above only catches
@@ -3253,6 +3304,35 @@ pub fn parse_type_phrase_with_ctx<'a>(
             }
             break;
         }
+    }
+
+    // CR 601.2c: the controller normally announces every target; this card text
+    // overrides the announcer for THIS slot — "of an opponent's choice" (Volcanic
+    // Offering). The announcing player is an opponent of the controller (CR 102.3);
+    // the slot is still a target of the controller's spell (CR 115.1). In 3+ player
+    // games the controller picks which opponent announces before target selection
+    // (see `ChooseAnnouncingOpponent`).
+    let remaining_opp_choice = lower[pos..].trim_start();
+    let opp_choice_offset = lower[pos..].len() - remaining_opp_choice.len();
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("of an opponent's choice").parse(remaining_opp_choice)
+    {
+        pos += opp_choice_offset + (remaining_opp_choice.len() - rest.len());
+        ctx.target_chooser = Some(TargetFilter::Opponent);
+    }
+
+    // CR 601.2c + CR 109.4: A target's announcing-player qualifier can precede
+    // its controller restriction ("target creature of an opponent's choice you
+    // don't control", Volcanic Offering). The primary controller-suffix pass
+    // runs before choice qualifiers, so re-run it here to consume that trailing
+    // restriction without letting it leak into a following effect clause.
+    if controller.is_none() {
+        pos += parse_ownership_or_controller_suffix(
+            &lower[pos..],
+            &mut properties,
+            &mut controller,
+            ctx,
+        );
     }
 
     // CR 201.2: "named [card name]" suffix — filter by exact card name.
@@ -3893,6 +3973,8 @@ pub(crate) fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
         FilterProp::Modified
             // CR 702.112b: "renowned [type]" adjective prefix.
             | FilterProp::Renowned
+            // CR 701.15b/c: "goaded [type]" adjective prefix.
+            | FilterProp::Goaded
             // CR 700.6: "historic [type]" adjective prefix.
             | FilterProp::Historic
             | FilterProp::NotHistoric
@@ -6078,6 +6160,22 @@ fn parse_shared_quality_reference<'a>(
         return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
     }
 
+    // CR 608.2k: a singular demonstrative back-reference ("that creature" /
+    // "that permanent" / "that card" / "that token") to the trigger subject resolves to the
+    // triggering object exactly like the bare pronoun "it" above — Conjurer's
+    // Mantle ("Whenever equipped creature attacks, ... reveal a card that shares
+    // a creature type with that creature"). Route through the same ctx-aware
+    // resolver so it binds to `TriggeringSource` when a non-source trigger
+    // subject exists and stays `ParentTarget` (chosen-target anaphor) otherwise.
+    // Restricted to the singular object demonstratives so a fresh noun phrase
+    // ("a creature you control") still parses as its own filter below.
+    for demonstrative in ["that creature", "that permanent", "that card", "that token"] {
+        if let Ok((rest, ())) = parse_word_bounded(input, demonstrative) {
+            let mut ctx_mut = ctx.clone();
+            return Ok((rest, resolve_pronoun_target(&mut ctx_mut, "it")));
+        }
+    }
+
     let (filter, rest) = parse_target(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -6485,6 +6583,9 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             "was dealt damage this turn",
             FilterProp::WasDealtDamageThisTurn,
         ),
+        // CR 120.1: active voice — the creature dealt damage (was the source),
+        // distinct from the passive "was dealt damage" above (Red Guardian).
+        ("dealt damage this turn", FilterProp::DealtDamageThisTurn),
         (
             "entered the battlefield this turn",
             FilterProp::EnteredThisTurn,
@@ -8344,6 +8445,25 @@ mod tests {
         );
     }
 
+    /// CR 601.2c + CR 109.4: The announcing-player qualifier and controller
+    /// restriction both bind to one target phrase, even when the qualifier comes
+    /// first (Volcanic Offering's printed template).
+    #[test]
+    fn opponent_choice_target_consumes_trailing_controller_restriction() {
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_target_with_ctx(
+            "target creature of an opponent's choice you don't control",
+            &mut ctx,
+        );
+
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent))
+        );
+        assert_eq!(rest, "");
+        assert_eq!(ctx.target_chooser, Some(TargetFilter::Opponent));
+    }
+
     #[test]
     fn time_lord_target_keeps_subtype_and_controller() {
         // CR 205.3m + CR 115.1: "target Time Lord you control" must keep both the
@@ -8905,6 +9025,29 @@ mod tests {
         let (f, rest) = parse_target_with_ctx("it", &mut ctx);
         assert_eq!(f, TargetFilter::TriggeringSource);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn shared_quality_that_token_with_typed_trigger_subject_binds_to_triggering_source() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+            ..Default::default()
+        };
+        let (filter, rest) =
+            parse_target_with_ctx("a card that shares a card type with that token", &mut ctx);
+        assert_eq!(rest, "");
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed card filter");
+        };
+        let reference = filter
+            .properties
+            .iter()
+            .find_map(|property| match property {
+                FilterProp::SharesQuality { reference, .. } => reference.as_deref(),
+                _ => None,
+            })
+            .expect("expected shared-quality reference");
+        assert_eq!(reference, &TargetFilter::TriggeringSource);
     }
 
     #[test]
@@ -10724,6 +10867,24 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 608.2c (issue #5949): even with a typed trigger subject on the parse
+    /// context, "each of them" is a batch distributive anaphor — NOT the
+    /// singular `TriggeringSource` that bare "them" carries.
+    #[test]
+    fn each_of_them_stays_parent_target_with_typed_trigger_subject() {
+        let mut ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .subtype("Insect".into()),
+            )),
+            ..Default::default()
+        };
+        let (filter, rest) = parse_target_with_ctx("each of them", &mut ctx);
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
     /// Word-boundary guard: "each of themselves" must NOT match the
     /// "each of them" arm — the trailing "selves" suffix makes it a distinct
     /// word that the word-boundary check (`parse_word_bounded`) must reject.
@@ -12072,6 +12233,61 @@ mod tests {
             )
         );
         assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn goaded_adjective_creates_filter_prop() {
+        // CR 701.15b/c: "goaded creature" is a designation adjective (Gap A, site 15).
+        // This is the exact path Serene Sleuth's "goaded creature you control" takes.
+        let (f, rest) = parse_type_phrase("goaded creature you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Goaded])
+            )
+        );
+        assert_eq!(rest.trim(), "");
+    }
+
+    #[test]
+    fn goad_verb_is_not_a_goaded_filter_prop() {
+        // Negative sibling: the Goad verb ("goad target creature") must NOT be
+        // misread as the `FilterProp::Goaded` designation. The adjective strip is
+        // `tag("goaded ")` guarded on a trailing type word, so the bare verb "goad "
+        // never fires it.
+        let (f, _rest) = parse_type_phrase("goad target creature");
+        let has_goaded = match &f {
+            TargetFilter::Typed(t) => t.properties.contains(&FilterProp::Goaded),
+            _ => false,
+        };
+        assert!(
+            !has_goaded,
+            "the Goad verb must not produce a FilterProp::Goaded designation: {f:?}"
+        );
+    }
+
+    #[test]
+    fn goaded_is_registered_as_leg_local_adjective_prefix() {
+        // Site 13 (`is_adjective_prefix_prop`) — the silent-break registration and the
+        // review's headline miss. This predicate is the single leg-locality registry for
+        // both disjunctive grammars; an unregistered adjective prop is wrongly
+        // distributed across earlier `Or` legs (the #2892 class bug).
+        //
+        // This is a DIRECT unit guard rather than a behavioral multi-leg parse: I
+        // measured that the natural "goaded X or Y" disjunction does not route through
+        // `parse_type_phrase`'s Or distributor — `parse_type_phrase("goaded creature or
+        // an artifact")` leaves " or an artifact" unconsumed (no in-repo grammar emits a
+        // goaded disjunction), which the plan anticipated as the fallback case. The
+        // direct guard is nonetheless a genuine revert-probe: dropping the
+        // `| FilterProp::Goaded` arm from `is_adjective_prefix_prop` flips this to false
+        // and FAILS, so the silent class bug cannot ship undetected.
+        assert!(
+            is_adjective_prefix_prop(&FilterProp::Goaded),
+            "FilterProp::Goaded must register as a leg-local adjective prefix, or it \
+             distributes across earlier Or legs and silently breaks 'goaded X or Y' filters"
+        );
     }
 
     #[test]
@@ -13981,6 +14197,37 @@ mod tests {
             rest.trim().is_empty(),
             "expected empty remainder, got: {rest:?}"
         );
+    }
+
+    // CR 120.1: active-voice "that dealt damage this turn" (creature is the damage
+    // source) must parse to `DealtDamageThisTurn`, NOT the passive
+    // `WasDealtDamageThisTurn` (creature is the damage recipient). Red Guardian,
+    // Super-Soldier: "destroy target creature an opponent controls that dealt
+    // damage this turn."
+    #[test]
+    fn that_dealt_damage_this_turn_is_active_voice() {
+        let (filter, rest) =
+            parse_target("target creature an opponent controls that dealt damage this turn");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::DealtDamageThisTurn)),
+            "Expected DealtDamageThisTurn (active), got: {:?}",
+            tf.properties
+        );
+        assert!(
+            !tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::WasDealtDamageThisTurn)),
+            "must NOT collapse to the passive WasDealtDamageThisTurn: {:?}",
+            tf.properties
+        );
+        assert!(rest.trim().is_empty(), "expected empty remainder: {rest:?}");
     }
 
     #[test]

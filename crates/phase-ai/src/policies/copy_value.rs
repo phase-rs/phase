@@ -381,9 +381,14 @@ fn legal_copy_targets(
 }
 
 fn target_has_etb_value(object: &engine::game::game_object::GameObject) -> bool {
-    object.trigger_definitions.iter_unchecked().any(|trigger| {
-        trigger.mode == TriggerMode::ChangesZone && trigger.destination == Some(Zone::Battlefield)
-    })
+    object
+        .trigger_definitions
+        .iter_unchecked()
+        .map(|entry| &entry.definition)
+        .any(|trigger| {
+            trigger.mode == TriggerMode::ChangesZone
+                && trigger.destination == Some(Zone::Battlefield)
+        })
 }
 
 fn strengthens_supported_plan(
@@ -537,10 +542,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 0 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -553,10 +555,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 2 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -608,10 +607,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 0 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -624,10 +620,7 @@ mod tests {
             decision: &decision,
             candidate: &CandidateAction {
                 action: GameAction::ChooseX { value: 3 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -662,10 +655,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(small)),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),
@@ -680,10 +670,7 @@ mod tests {
                 action: GameAction::ChooseTarget {
                     target: Some(TargetRef::Object(large)),
                 },
-                metadata: ActionMetadata {
-                    actor: Some(PlayerId(0)),
-                    tactical_class: TacticalClass::Selection,
-                },
+                metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
             },
             ai_player: PlayerId(0),
             config: &crate::config::AiConfig::default(),

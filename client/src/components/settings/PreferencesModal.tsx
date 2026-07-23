@@ -44,6 +44,7 @@ import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
 import { downloadBackup, importBackupFromFile, type ImportMode } from "../../services/backup.ts";
+import { isTauri } from "../../services/platform.ts";
 import { useCloudSyncStore } from "../../stores/cloudSyncStore.ts";
 import { DiscordIcon, GoogleIcon } from "../ui/ProviderIcons";
 
@@ -162,6 +163,7 @@ export function PreferencesModal({
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
+  const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
   const animationSpeedMultiplier = usePreferencesStore((s) => s.animationSpeedMultiplier);
@@ -173,6 +175,7 @@ export function PreferencesModal({
   const setLogDefaultState = usePreferencesStore((s) => s.setLogDefaultState);
   const setMultiplayerBoardLayout = usePreferencesStore((s) => s.setMultiplayerBoardLayout);
   const setSpellPaymentMode = usePreferencesStore((s) => s.setSpellPaymentMode);
+  const setPriorityPassingMode = usePreferencesStore((s) => s.setPriorityPassingMode);
   const setBoardBackground = usePreferencesStore((s) => s.setBoardBackground);
   const customBackgroundUrl = usePreferencesStore((s) => s.customBackgroundUrl);
   const setCustomBackgroundUrl = usePreferencesStore((s) => s.setCustomBackgroundUrl);
@@ -189,6 +192,8 @@ export function PreferencesModal({
   const setSfxVolume = usePreferencesStore((s) => s.setSfxVolume);
   const setMusicVolume = usePreferencesStore((s) => s.setMusicVolume);
   const setAnimationSpeedMultiplier = usePreferencesStore((s) => s.setAnimationSpeedMultiplier);
+  const nativeEngineEnabled = usePreferencesStore((s) => s.nativeEngineEnabled);
+  const setNativeEngineEnabled = usePreferencesStore((s) => s.setNativeEngineEnabled);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const setShowKeywordStrip = usePreferencesStore((s) => s.setShowKeywordStrip);
   const battlefieldPeekOnHover = usePreferencesStore((s) => s.battlefieldPeekOnHover) ?? true;
@@ -197,6 +202,8 @@ export function PreferencesModal({
   const setCardPreviewMode = usePreferencesStore((s) => s.setCardPreviewMode);
   const cardPreviewHoverDelayMs = usePreferencesStore((s) => s.cardPreviewHoverDelayMs) ?? 0;
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
+  const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
+  const setShowCardPreviewFooter = usePreferencesStore((s) => s.setShowCardPreviewFooter);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -363,6 +370,27 @@ export function PreferencesModal({
                     />
                   </SettingGroup>
 
+                  <SettingGroup label={t("gameplay.autoPass")}>
+                    <label className="flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={priorityPassingMode === "SkipLowUseWindows"}
+                        onChange={(event) => {
+                          setPriorityPassingMode(
+                            event.target.checked ? "SkipLowUseWindows" : "Standard",
+                          );
+                        }}
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("gameplay.skipLowUsePriorityWindows")}
+                        <span className="mt-0.5 block text-xs leading-relaxed text-slate-400">
+                          {t("gameplay.skipLowUsePriorityWindowsDescription")}
+                        </span>
+                      </span>
+                    </label>
+                  </SettingGroup>
+
                   <SettingGroup label={t("gameplay.commandZone")}>
                     <SegmentedControl
                       options={COMMAND_ZONE_DISPLAYS}
@@ -410,6 +438,23 @@ export function PreferencesModal({
                       <span className="text-sm text-slate-200">{t("gameplay.manualManaPayment")}</span>
                     </label>
                   </SettingGroup>
+
+                  {isTauri() && (
+                    <label className="mt-1 flex min-h-11 items-start gap-2">
+                      <input
+                        type="checkbox"
+                        checked={nativeEngineEnabled}
+                        onChange={(e) => setNativeEngineEnabled(e.target.checked)}
+                        className="mt-1 accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("gameplay.nativeEngine")}
+                        <span className="mt-0.5 block text-xs text-slate-400">
+                          {t("gameplay.nativeEngineDescription")}
+                        </span>
+                      </span>
+                    </label>
+                  )}
 
                   <div
                     ref={boardBackgroundRef}
@@ -527,6 +572,23 @@ export function PreferencesModal({
                       </p>
                     </SettingGroup>
                   )}
+
+                  <SettingGroup label={t("visual.cardPreviewFooter")}>
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={showCardPreviewFooter}
+                        onChange={(e) => setShowCardPreviewFooter(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("visual.showCardPreviewFooter")}
+                      </span>
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.cardPreviewFooterHint")}
+                    </p>
+                  </SettingGroup>
 
                   <SettingGroup label={t("visual.cardArtPreferences")}>
                     <ArtChainEditor
@@ -1175,7 +1237,7 @@ function MultiplierSlider({
           onChange={(e) => onChange(Number(e.target.value))}
           onDoubleClick={() => onChange(defaultValue)}
           aria-label={label}
-          className="flex-1 accent-cyan-500"
+          className="h-2 flex-1 cursor-pointer rounded-full bg-slate-700 accent-cyan-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-200 focus-visible:outline-offset-2 focus-visible:ring-2 focus-visible:ring-cyan-400/70"
         />
         <button
           type="button"

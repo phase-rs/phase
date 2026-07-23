@@ -188,9 +188,16 @@ function ActiveDeckCard() {
   const count = randomDeckSelected ? 0 : getDeckCardCount(name);
   const colors = randomDeckSelected ? [] : getDeckColorIdentity(name);
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => navigate("/my-decks")}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          navigate("/my-decks");
+        }
+      }}
       className="group flex cursor-pointer flex-col overflow-hidden rounded-card border border-hairline surface-card text-left transition-colors hover:border-hairline-hover"
     >
       {/* Art header: representative card art with the section label and the
@@ -219,7 +226,7 @@ function ActiveDeckCard() {
           <span className="text-xs text-fg-muted tabular-nums">{t("home.dashboard.cards", { count })}</span>
         )}
       </div>
-    </button>
+    </div>
   );
 }
 

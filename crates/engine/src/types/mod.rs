@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod action_stable_order;
 pub mod actions;
 pub mod attribution;
 pub mod card;
@@ -9,6 +10,7 @@ pub mod events;
 pub mod format;
 pub mod game_state;
 pub mod identifiers;
+pub mod interaction;
 pub mod keywords;
 pub mod layers;
 pub mod log;
@@ -19,6 +21,8 @@ pub mod player;
 pub mod proposed_event;
 pub mod replacements;
 pub mod replay;
+pub mod resolution;
+pub mod resolved_commands;
 pub mod statics;
 pub mod stickers;
 pub mod triggers;
@@ -42,18 +46,24 @@ pub use format::{DeckCopyLimit, FormatConfig, GameFormat};
 pub use game_state::{
     ActionResult, BattlefieldEntryRecord, CommanderDamageEntry, CostResume, GameState, LKISnapshot,
     LandPlayRecord, NextSpellModifier, PayCostKind, PendingNextSpellModifier, PendingReplacement,
-    PendingSpellCostReduction, PlayerDeckPool, ScheduledTurnControl, SpellCastRecord, StackEntry,
-    StackEntryKind, TransientContinuousEffect, WaitingFor, ZoneChangeRecord,
+    PendingSpellCostReduction, PlayerDeckPool, PriorityPassingMode, ScheduledTurnControl,
+    SpellCastRecord, StackEntry, StackEntryKind, TransientContinuousEffect, WaitingFor,
+    ZoneChangeRecord,
 };
 pub use identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, ObjectProvenance,
     LEGACY_INCARNATION,
 };
+pub use interaction::{
+    ActiveInteractionSlot, InteractionChoiceId, InteractionId, InteractionSessionId,
+    InteractionSlotKind, PreviewRequestId, ViewerInteraction,
+};
 pub use keywords::{Keyword, PartnerType, ProtectionTarget};
 pub use layers::{ActiveContinuousEffect, Layer};
 pub use log::{GameLogEntry, LogCategory, LogSegment};
 pub use mana::{
-    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaType, ManaUnit, SpellMeta,
+    ManaColor, ManaCost, ManaCostShard, ManaPool, ManaRestriction, ManaSourcePenalty,
+    ManaSourceSelection, ManaType, ManaUnit, SpellMeta, TapsForManaSelection,
 };
 pub use match_config::{
     BetweenGamesPrompt, DeckCardCount, MatchConfig, MatchPhase, MatchScore, MatchType,
@@ -62,7 +72,30 @@ pub use phase::Phase;
 pub use player::{Player, PlayerId};
 pub use proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
 pub use replacements::ReplacementEvent;
-pub use replay::{RecordedAction, ReplayHeader, ReplayLog};
+pub use replay::{RecordedAction, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION};
+pub use resolution::{
+    AbilityContinuationFrame, ChangeZoneFrame, DirectChoiceGate, FrameGate, FrameKind,
+    MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame,
+    ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
+    RESOLUTION_STATE_WIRE_VERSION,
+};
+pub use resolved_commands::{
+    ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedLedgerEdit, ResolvedLedgerEditCommand,
+    ResolvedLedgerEditReplayInvariantError, ResolvedLibraryShuffleCommand,
+    ResolvedLibraryShuffleReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedManaSpentUnit,
+    ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
+    ResolvedObjectCounterReplayInvariantError, ResolvedObjectStatus, ResolvedObjectStatusCommand,
+    ResolvedObjectStatusReplayInvariantError, ResolvedOncePerTurnPermission, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
+    ResolvedRulesJournalError, ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
+    ResolvedTriggerCollectionReplayInvariantError, ResolvedTriggerLedgerEdit,
+    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
+    SpentManaUnit,
+};
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};

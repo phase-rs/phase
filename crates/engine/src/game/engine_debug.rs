@@ -10,6 +10,7 @@ use crate::types::game_state::{ActionResult, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::resolved_commands::ResolvedPlayerEdit;
 use crate::types::zones::Zone;
 
 use super::effects::attach::{attach_to, attach_to_player};
@@ -81,6 +82,7 @@ pub fn apply_debug_action(
                 }
             }
 
+            // allow-raw-zone: debug-only object deletion forces state, not a CR zone-change event (CR 400.1).
             zones::remove_from_zone(state, object_id, zone, owner);
             state.objects.remove(&object_id);
             crate::game::layers::mark_layers_full(state);
@@ -242,7 +244,14 @@ pub fn apply_debug_action(
         }
 
         DebugAction::SetTapped { object_id, tapped } => {
-            validate_object_mut(state, object_id)?.tapped = tapped;
+            // CR 701.26a-b: Debug actions use the same checked status authority.
+            crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                object_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                tapped,
+            )
+            .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
         }
 
         DebugAction::SetPrepared {
@@ -365,9 +374,21 @@ pub fn apply_debug_action(
         }
 
         DebugAction::SetLife { player_id, life } => {
+            // CR 119.5: Setting life gains or loses the required semantic delta.
             validate_player(state, player_id)?;
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                player.life = life;
+            let current_life = state
+                .players
+                .iter()
+                .find(|player| player.id == player_id)
+                .expect("the validated debug player must remain present")
+                .life;
+            if current_life != life {
+                let delta = life.checked_sub(current_life).ok_or_else(|| {
+                    EngineError::InvalidAction("Debug: life delta is not representable".to_string())
+                })?;
+                state
+                    .resolve_and_apply_player_edit(player_id, ResolvedPlayerEdit::Life { delta })
+                    .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
             }
         }
 
@@ -393,7 +414,7 @@ pub fn apply_debug_action(
                 // produced mana. A bare `mana_pool.add` leaves the unstamped
                 // sentinel (`ManaPipId(0)`) on every unit, which makes all of
                 // them pin/unpin together in the manual-payment UI.
-                state.add_mana_to_pool(
+                let _ = state.add_mana_to_pool(
                     player_id,
                     crate::types::mana::ManaUnit::new(mana_type, ObjectId(0), false, vec![]),
                 );
@@ -405,9 +426,14 @@ pub fn apply_debug_action(
             if enabled {
                 // Delegate to the single write authority; record the six Mana axes.
                 state.mark_unbounded_loop(player_id, &super::mana_payment::INFINITE_MANA_AXES);
+                // CR 500.5 debug exemption marker: tag this player's Mana axes as the debug
+                // toggle so the end-of-step keep-gate suppresses the empty for them only (a
+                // loop-backed Mana axis, absent from this set, drains and de-realizes instead).
+                state.debug_infinite_mana.insert(player_id);
                 // Seed immediately so the pool reads full before the next probe.
                 super::mana_payment::refill_infinite_mana(state);
             } else {
+                state.debug_infinite_mana.remove(&player_id);
                 state.clear_unbounded_loop(player_id);
             }
         }
@@ -587,6 +613,8 @@ pub fn apply_debug_action(
     })
 }
 
+/// CR 122.1: Apply a final debug-selected player-counter delta through the
+/// same scalar authority as ordinary rules actions.
 fn apply_player_counter_delta(
     state: &mut GameState,
     player_id: PlayerId,
@@ -594,18 +622,33 @@ fn apply_player_counter_delta(
     delta: i32,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+    let Some(before) = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .map(|player| player.player_counter(&counter_kind))
+    else {
         return;
     };
-    let before = player.player_counter(&counter_kind);
-    if delta > 0 {
-        player.add_player_counters(&counter_kind, delta as u32);
-    } else if delta < 0 {
-        player.remove_player_counters(&counter_kind, delta.unsigned_abs());
-    }
-    let after = player.player_counter(&counter_kind);
-    let actual_delta = after as i32 - before as i32;
+    let after = if delta.is_positive() {
+        before
+            .checked_add(delta as u32)
+            .expect("debug counter addition must not overflow")
+    } else {
+        before.saturating_sub(delta.unsigned_abs())
+    };
+    let actual_delta = i32::try_from(i64::from(after) - i64::from(before))
+        .expect("a requested i32 counter delta must remain representable");
     if actual_delta != 0 {
+        state
+            .resolve_and_apply_player_edit(
+                player_id,
+                ResolvedPlayerEdit::Counter {
+                    kind: counter_kind,
+                    delta: actual_delta,
+                },
+            )
+            .expect("the computed debug counter delta must satisfy its resolved precondition");
         events.push(GameEvent::PlayerCounterChanged {
             player: player_id,
             counter_kind,
@@ -614,24 +657,40 @@ fn apply_player_counter_delta(
     }
 }
 
+/// CR 107.14 + CR 122.1: Apply a final debug-selected energy-counter delta
+/// through the same scalar authority as ordinary rules actions.
 fn apply_energy_delta(
     state: &mut GameState,
     player_id: PlayerId,
     delta: i32,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) else {
+    let Some(before) = state
+        .players
+        .iter()
+        .find(|player| player.id == player_id)
+        .map(|player| player.energy)
+    else {
         return;
     };
-    let before = player.energy;
-    if delta > 0 {
-        player.energy += delta as u32;
-    } else if delta < 0 {
-        player.energy = player.energy.saturating_sub(delta.unsigned_abs());
-    }
-    let after = player.energy;
-    let actual_delta = after as i32 - before as i32;
+    let after = if delta.is_positive() {
+        before
+            .checked_add(delta as u32)
+            .expect("debug energy addition must not overflow")
+    } else {
+        before.saturating_sub(delta.unsigned_abs())
+    };
+    let actual_delta = i32::try_from(i64::from(after) - i64::from(before))
+        .expect("a requested i32 energy delta must remain representable");
     if actual_delta != 0 {
+        state
+            .resolve_and_apply_player_edit(
+                player_id,
+                ResolvedPlayerEdit::Energy {
+                    delta: actual_delta,
+                },
+            )
+            .expect("the computed debug energy delta must satisfy its resolved precondition");
         events.push(GameEvent::EnergyChanged {
             player: player_id,
             delta: actual_delta,
@@ -701,6 +760,7 @@ pub fn route_debug_create_to_battlefield(
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        enter_as_copy: None,
         applied: HashSet::new(),
     };
 
@@ -926,7 +986,7 @@ mod tests {
             "SOS Pest preset must install its attack-life trigger"
         );
         assert_eq!(
-            obj.trigger_definitions[0].mode,
+            obj.trigger_definitions[0].definition.mode,
             crate::types::triggers::TriggerMode::Attacks
         );
         assert!(
@@ -1666,7 +1726,7 @@ mod tests {
             watcher
                 .trigger_definitions
                 .iter_all()
-                .any(|t| t.mode == TriggerMode::Drawn),
+                .any(|t| t.definition.mode == TriggerMode::Drawn),
             "sanity: watcher carries a Drawn trigger"
         );
     }

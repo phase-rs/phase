@@ -42,15 +42,53 @@ export type DiceRollPayload =
       context: "startingPlayer" | "ability";
     };
 
+/** Direct-manipulation state for the mobile hand's held-card preview. The
+ * engine-authored action set determines `playable` / whether `castReady` may
+ * ever become true; offsets and the release threshold are presentation only. */
+export interface MobileHandGesture {
+  objectId: ObjectId;
+  phase: "preview" | "drag";
+  sourceOrigin: {
+    bottom: number;
+    centerX: number;
+    height: number;
+    rotation: number;
+    top: number;
+    width: number;
+  };
+  offsetX: number;
+  offsetY: number;
+  playable: boolean;
+  castReady: boolean;
+}
+
 // Guard against spurious mouseleave events caused by Framer Motion layout
 // recalculations or pointer-events-auto overlays stealing focus from the card.
 // Clears are deferred — if the cursor is still over a card/preview element
 // when the timer fires, the clear is suppressed.
 let pendingClearTimer: ReturnType<typeof setTimeout> | null = null;
-// Deferred-show timer for the configurable hover latency (cardPreviewHoverDelayMs).
-// Holds the pending "set inspectedObjectId" so a hover-out before the delay
-// elapses cancels it — the preview only appears once the cursor rests on a card.
-let pendingShowTimer: ReturnType<typeof setTimeout> | null = null;
+// Deferred show for the configurable hover latency (cardPreviewHoverDelayMs).
+// A leave is verified after the existing 50ms layout-shift grace period before
+// this is cancelled. That distinction matters for animated card surfaces: a
+// transient leave can arrive while the pointer is still over the same card.
+interface PendingPreviewShow {
+  timer: ReturnType<typeof setTimeout> | null;
+  ready: boolean;
+  apply: () => void;
+}
+let pendingShow: PendingPreviewShow | null = null;
+
+function cancelPendingShow(): void {
+  if (pendingShow?.timer != null) clearTimeout(pendingShow.timer);
+  pendingShow = null;
+}
+
+function flushPendingShow(): void {
+  if (!pendingShow?.ready) return;
+  const apply = pendingShow.apply;
+  pendingShow = null;
+  apply();
+}
 let lastPointer = { x: 0, y: 0 };
 if (typeof window !== "undefined") {
   window.addEventListener("pointermove", (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, { passive: true });
@@ -152,6 +190,7 @@ interface UiStoreState {
    *  use the modal AttachmentsDialog). Cleared by `clearPromptOverlayState`. */
   attachmentFanHostId: ObjectId | null;
   mobileHandOpen: boolean;
+  mobileHandGesture: MobileHandGesture | null;
   /** Ephemeral hide-filter for the player's own hand (display-only). Lives here
    *  rather than in `preferencesStore` so it resets each game (cleared by
    *  `clearPromptOverlayState`) — a per-game focus aid, not a durable
@@ -240,6 +279,7 @@ interface UiStoreActions {
   setEnchantmentsDialogPlayer: (id: number | null) => void;
   setAttachmentFanHost: (id: ObjectId | null) => void;
   setMobileHandOpen: (open: boolean) => void;
+  setMobileHandGesture: (gesture: MobileHandGesture | null) => void;
   setHandFilter: (filter: FilterKey) => void;
   toggleDebugPanel: () => void;
   setDebugPanelTab: (tab: "console" | "actions") => void;
@@ -296,6 +336,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   enchantmentsDialogPlayer: null,
   attachmentFanHostId: null,
   mobileHandOpen: false,
+  mobileHandGesture: null,
   handFilter: "none",
   debugPanelOpen: false,
   debugPanelTab: "console",
@@ -325,10 +366,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         clearTimeout(pendingClearTimer);
         pendingClearTimer = null;
       }
-      if (pendingShowTimer != null) {
-        clearTimeout(pendingShowTimer);
-        pendingShowTimer = null;
-      }
+      cancelPendingShow();
       const applyInspect = () =>
         set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 });
       // Configurable hover latency (cardPreviewHoverDelayMs). The delay gates only
@@ -349,31 +387,50 @@ export const useUiStore = create<UiStore>()((set, get) => ({
           ? prefs.cardPreviewHoverDelayMs
           : 0;
       if (delay > 0) {
-        pendingShowTimer = setTimeout(() => {
-          pendingShowTimer = null;
+        const show: PendingPreviewShow = {
+          timer: null,
+          ready: false,
+          apply: applyInspect,
+        };
+        show.timer = setTimeout(() => {
+          show.timer = null;
+          if (pendingShow !== show) return;
+          // A leave inside the 50ms layout-shift grace period is still being
+          // verified. Mark the delay complete and let that verification either
+          // reveal the preview or cancel it, avoiding a one-frame flash.
+          if (pendingClearTimer != null) {
+            show.ready = true;
+            return;
+          }
+          pendingShow = null;
           applyInspect();
         }, delay);
+        pendingShow = show;
       } else {
         applyInspect();
       }
     } else {
-      // Clearing: drop any pending delayed-show so a hover-out before the latency
-      // elapses never pops the preview.
-      if (pendingShowTimer != null) {
-        clearTimeout(pendingShowTimer);
-        pendingShowTimer = null;
-      }
       // Defer the clear so spurious mouseleave from re-render-induced layout shifts
-      // is cancelled if a new inspectObject(id) arrives in the same frame.
+      // is cancelled if a new inspectObject(id) arrives in the same frame. Keep a
+      // delayed show pending until this check resolves: cancelling it immediately
+      // made a configured hover delay uniquely vulnerable to transient leaves.
       if (pendingClearTimer != null) return; // already scheduled
       pendingClearTimer = setTimeout(() => {
         pendingClearTimer = null;
-        // Suppress clear only if cursor is over the preview panel itself, so Alt-mode
-        // reading of the parsed abilities panel isn't dismissed when mousing onto it.
-        // We intentionally do NOT suppress when cursor is over another card-hover: the
-        // next card's onMouseEnter already cancels this timer via the id != null branch.
+        // Alt PINS the preview (frozen in place — see CardPreview's cursor-follow
+        // effect). While pinned, a mouseleave must not dismiss it, so the user can
+        // traverse the gap from the card to the panel and click "Report a Problem"
+        // or scroll rulings. Toggling Alt off (or a click outside) still dismisses.
+        if (get().altHeld) return;
         const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
-        if (el?.closest("[data-card-preview]")) return;
+        // Keep the preview (and finish a delay that already elapsed) when the
+        // pointer is still over an inspectable card or the preview panel. This
+        // makes stale leaves from Framer Motion layout updates harmless.
+        if (el?.closest("[data-card-hover], [data-card-preview]")) {
+          flushPendingShow();
+          return;
+        }
+        cancelPendingShow();
         set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
       }, 50);
     }
@@ -384,11 +441,14 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       clearTimeout(pendingClearTimer);
       pendingClearTimer = null;
     }
-    if (pendingShowTimer != null) {
-      clearTimeout(pendingShowTimer);
-      pendingShowTimer = null;
-    }
-    set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
+    cancelPendingShow();
+    set({
+      inspectedObjectId: null,
+      inspectedFaceIndex: 0,
+      previewSticky: false,
+      altHeld: false,
+      mobileHandGesture: null,
+    });
   },
 
   addSelectedCard: (cardId) =>
@@ -548,6 +608,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setEnchantmentsDialogPlayer: (id) => set({ enchantmentsDialogPlayer: id }),
   setAttachmentFanHost: (id) => set({ attachmentFanHostId: id }),
   setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
+  setMobileHandGesture: (gesture) => set({ mobileHandGesture: gesture }),
   setHandFilter: (filter) => set({ handFilter: filter }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setDebugPanelTab: (tab) => set({ debugPanelTab: tab }),

@@ -18,6 +18,7 @@ use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AdditionalCost, AdditionalCostOrigin,
     Comparator, Effect, SpellCastingOptionKind, TapCreaturesAggregateStat, TapCreaturesRequirement,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -446,6 +447,152 @@ fn resolve_stack(runner: &mut GameRunner) {
             break;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Finding #1 — Cruel Alliance broad-filter cast-time legality (Teamwork 2).
+//
+// Body: "Exile target creature with mana value 3 or less. If this spell was
+// cast using teamwork, instead exile target creature and you gain 3 life."
+//
+// The narrow (no-teamwork) branch restricts legal targets to MV<=3; the broad
+// "instead" branch (teamwork paid) drops that restriction entirely. This test
+// pins that the broad filter is in effect AT the first target-selection
+// window (cast-time target legality), not merely reachable after resolving
+// with an MV<=3 pick — `cruel_alliance_with_teamwork_gains_three_life` above
+// only exercises a single MV0 victim, which is legal under EITHER filter and
+// so cannot discriminate the cast-time filter swap; this test is the
+// dedicated discriminator (do not fold it back into that test).
+// ---------------------------------------------------------------------------
+
+/// Finding #1 (generalized kicker->all AdditionalCost-"instead" cast-time
+/// propagation): WITH teamwork paid, the BROAD "instead" filter must be in
+/// effect at the FIRST target-selection window. Before finding #1's engine
+/// generalization, only Kicker-"instead" spells propagated
+/// `additional_cost_paid = true` to cast-time target-slot construction, so
+/// this cast would incorrectly halt at the narrow MV<=3 filter (the MV5
+/// creature excluded) even though teamwork was paid.
+///
+/// REVERT-PROBE (measured): with the Edit-3 else-if commented out, this
+/// test's `legal.contains(&TargetRef::Object(mv5))` assertion FAILS — the
+/// cast halts at the narrow `{filler_a, filler_b}` set instead.
+#[test]
+fn cruel_alliance_paying_teamwork_broad_filter_includes_high_mv() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P0's tap creature (power 2 >= Teamwork 2).
+    let tapper = scenario.add_creature(P0, "Tapper", 2, 2).id();
+    // Two MV<=3 fillers keep the narrow-branch target slot interactive (no
+    // sole-legal-target auto-pick even pre-fix); the MV5 creature is the
+    // discriminator.
+    let mut filler_a = scenario.add_creature(PlayerId(1), "Filler A", 2, 2);
+    filler_a.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    });
+    let filler_a = filler_a.id();
+    let mut filler_b = scenario.add_creature(PlayerId(1), "Filler B", 2, 2);
+    filler_b.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 2,
+    });
+    let filler_b = filler_b.id();
+    let mut mv5 = scenario.add_creature(PlayerId(1), "Big Threat", 6, 6);
+    mv5.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 5,
+    });
+    let mv5 = mv5.id();
+
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Cruel Alliance", false, CRUEL_ALLIANCE);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![],
+        generic: 0,
+    });
+    let spell = builder.id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    let life_before = runner.state().players[0].life;
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Cruel Alliance must be accepted");
+
+    // Pay teamwork, then halt at the FIRST target selection to inspect legality.
+    let mut legal = None;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("paying teamwork must be accepted");
+            }
+            WaitingFor::PayCost {
+                kind: PayCostKind::TapCreatures { .. },
+                ..
+            } => {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![tapper],
+                    })
+                    .expect("tapping the teamwork creature must be accepted");
+            }
+            WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                legal = Some(target_slots[selection.current_slot].legal_targets.clone());
+                break;
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("finalizing {0} cost must be accepted");
+            }
+            _ => break,
+        }
+    }
+    let legal = legal.expect("cast must halt at target selection after paying teamwork");
+
+    // Non-vacuous positive reach-guard: both MV<=3 fillers remain legal in the
+    // broad branch too (the broad filter is a superset of the narrow one).
+    assert!(
+        legal.contains(&TargetRef::Object(filler_a)),
+        "filler A must remain legal in the broad (teamwork-paid) branch, got {legal:?}"
+    );
+    assert!(
+        legal.contains(&TargetRef::Object(filler_b)),
+        "filler B must remain legal in the broad (teamwork-paid) branch, got {legal:?}"
+    );
+    // Discriminator: the broad "instead" branch has no mana-value restriction.
+    assert!(
+        legal.contains(&TargetRef::Object(mv5)),
+        "the MV5 creature must be legal in the broad (teamwork-paid) branch, got {legal:?}"
+    );
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(mv5)),
+        })
+        .expect("choosing the MV5 creature must be accepted");
+    resolve_stack(&mut runner);
+
+    assert!(
+        !runner.state().battlefield.contains(&mv5),
+        "the teamwork 'instead' path exiles the targeted creature"
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before + 3,
+        "the teamwork 'instead' path must gain 3 life"
+    );
 }
 
 // ===========================================================================

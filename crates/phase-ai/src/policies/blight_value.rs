@@ -163,10 +163,7 @@ mod tests {
         // Score blighting the 3/1 — dies to the -1/-1 counter.
         let small_candidate = CandidateAction {
             action: GameAction::SelectCards { cards: vec![small] },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let small_ctx = PolicyContext {
             state: &state,
@@ -183,10 +180,7 @@ mod tests {
         // Score blighting the 3/5 — survives, loses ~1/5 of its value.
         let big_candidate = CandidateAction {
             action: GameAction::SelectCards { cards: vec![big] },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let big_ctx = PolicyContext {
             state: &state,
@@ -248,10 +242,7 @@ mod tests {
             action: GameAction::SelectCards {
                 cards: vec![glass_cannon],
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -299,10 +290,7 @@ mod tests {
             action: GameAction::SelectCards {
                 cards: vec![ObjectId(1)],
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Selection),
         };
         let ctx = PolicyContext {
             state: &state,

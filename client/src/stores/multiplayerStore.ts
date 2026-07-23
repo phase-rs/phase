@@ -10,7 +10,11 @@ import type {
   PlayerId,
 } from "../adapter/types";
 import { FORMAT_REGISTRY } from "../data/formatRegistry";
-import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
+import {
+  LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
@@ -40,6 +44,12 @@ import {
   isOfficialMultiplayerServerUrl,
 } from "../config/multiplayerServer";
 import { saveActiveGame, useGameStore } from "./gameStore";
+import { usePreferencesStore } from "./preferencesStore";
+import {
+  canAttemptNativeEngine,
+  ensureNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
 import type { P2PHostAdapter } from "../adapter/p2p-adapter";
 import {
   ServerDraftAdapter,
@@ -65,6 +75,7 @@ let activeBroker: BrokerClient | null = null;
 let activeBrokerGameCode: string | null = null;
 let activeP2PHostAdapter: P2PHostAdapter | null = null;
 let activeP2PHostGameId: string | null = null;
+let p2pHostingAttempt = 0;
 
 function asDeckPayload(deck: HostingDeck): {
   main_deck: string[];
@@ -487,7 +498,8 @@ export function isLobbyEntryCompatible(
 /** True when the client's wire-protocol can speak to the server's advertised mode. */
 export function isServerCompatible(info: ServerInfo | null): boolean {
   if (!info) return false;
-  const minProtocol = info.mode === "LobbyOnly" ? PROTOCOL_VERSION - 1 : PROTOCOL_VERSION;
+  const minProtocol =
+    info.mode === "LobbyOnly" ? LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL : PROTOCOL_VERSION;
   return info.protocolVersion >= minProtocol && info.protocolVersion <= PROTOCOL_VERSION;
 }
 
@@ -919,6 +931,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       cancelHosting: () => {
+        p2pHostingAttempt += 1;
         closeHostWebSocket();
         disposeActiveP2PHost();
         if (activeBroker) {
@@ -976,6 +989,8 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       startP2PHostingSession: async (settings, deck, opts) => {
+        const attempt = ++p2pHostingAttempt;
+        const isCurrentAttempt = () => p2pHostingAttempt === attempt;
         const aiSeats = effectiveAiSeats(settings);
         closeHostWebSocket();
         clearWsSession();
@@ -983,6 +998,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         hostReconnectAttempt = 0;
 
         const resetFailedHosting = () => {
+          if (!isCurrentAttempt()) return;
           set({
             hostIsPublic: false,
             hostingStatus: "idle",
@@ -1007,12 +1023,35 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         let broker: BrokerClient | null = null;
         let brokerGameCode: string | null = null;
         let destroyHostedRoom: (() => void) | null = null;
+        let adapter: P2PHostAdapter | null = null;
+        const releaseAttempt = () => {
+          if (adapter) {
+            if (activeP2PHostAdapter === adapter) {
+              disposeActiveP2PHost();
+            } else {
+              adapter.dispose();
+            }
+          } else {
+            destroyHostedRoom?.();
+          }
+          if (broker) {
+            if (brokerGameCode) {
+              void broker.unregister(brokerGameCode).catch(() => {});
+            }
+            broker.close();
+            if (activeBroker === broker) {
+              activeBroker = null;
+              activeBrokerGameCode = null;
+            }
+          }
+        };
 
         try {
           const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
             import("../network/connection"),
             import("../adapter/p2p-adapter"),
           ]);
+          if (!isCurrentAttempt()) return false;
 
           if (activeP2PHostAdapter) {
             activeP2PHostAdapter.dispose();
@@ -1020,10 +1059,37 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             activeP2PHostGameId = null;
           }
 
+          let nativeP2P: { expectedServerVersion?: string } | undefined;
+          const nativeEngineKey = nativeEngineKeyForCurrentOrigin();
+          if (
+            nativeEngineKey
+            && canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+          ) {
+            try {
+              await ensureNativeEngine(nativeEngineKey);
+              if (!isCurrentAttempt()) return false;
+              nativeP2P = {
+                expectedServerVersion:
+                  "release" in nativeEngineKey ? nativeEngineKey.release.version : undefined,
+              };
+            } catch (err) {
+              console.warn("[P2P] native engine unavailable; using WASM host", err);
+            }
+          }
+          if (!isCurrentAttempt()) return false;
+
           const host = await hostRoom(undefined, {});
           destroyHostedRoom = () => host.destroy();
+          if (!isCurrentAttempt()) {
+            releaseAttempt();
+            return false;
+          }
           if (opts.useBroker) {
             broker = await openBrokerClient(get().serverAddress);
+            if (!isCurrentAttempt()) {
+              releaseAttempt();
+              return false;
+            }
             const registered = await broker.registerHost({
               hostPeerId: host.peer.id,
               deck: asDeckPayload(deck),
@@ -1044,12 +1110,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               ranked: settings.ranked,
             });
             brokerGameCode = registered.gameCode;
+            if (!isCurrentAttempt()) {
+              releaseAttempt();
+              return false;
+            }
             activeBroker = broker;
             activeBrokerGameCode = registered.gameCode;
           }
 
           const gameId = crypto.randomUUID();
-          const adapter = new P2PHostAdapter(
+          const p2pAdapter = new P2PHostAdapter(
             {
               player: asDeckPayload(deck),
               opponent: { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] },
@@ -1069,11 +1139,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               roomCode: host.roomCode,
               hostDisplayName: get().displayName || undefined,
             },
+            nativeP2P,
           );
+          adapter = p2pAdapter;
 
-          adapter.onEvent((event) => {
+          p2pAdapter.onEvent((event) => {
+            if (!isCurrentAttempt()) return;
             if (event.type === "playerSlotsUpdated" || event.type === "lobbyProgress") {
-              set({ playerSlots: adapter.getPlayerSlots() });
+              set({ playerSlots: p2pAdapter.getPlayerSlots() });
             } else if (event.type === "playerIdentity") {
               const names = new Map<number, string>();
               for (const [playerId, name] of Object.entries(event.playerNames ?? {})) {
@@ -1093,10 +1166,14 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             }
           });
 
-          activeP2PHostAdapter = adapter;
+          activeP2PHostAdapter = p2pAdapter;
           activeP2PHostGameId = gameId;
 
-          await adapter.initialize();
+          await p2pAdapter.initialize();
+          if (!isCurrentAttempt()) {
+            releaseAttempt();
+            return false;
+          }
           destroyHostedRoom = null;
 
           set({
@@ -1108,7 +1185,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               timerSeconds: settings.timerSeconds,
               matchType: settings.matchType,
             },
-            playerSlots: adapter.getPlayerSlots(),
+            playerSlots: p2pAdapter.getPlayerSlots(),
             // P2P/broker hosting has no advertised game-server URL. Clear any
             // serverInfo left by a prior online-host session so the P2P share
             // string is the bare room code, never a stale `code@<old-server>`.
@@ -1116,7 +1193,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           });
 
           for (const seat of aiSeats) {
-            await adapter.applySeatMutation({
+            await p2pAdapter.applySeatMutation({
               type: "SetKind",
               data: {
                 seatIndex: seat.seatIndex,
@@ -1129,27 +1206,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 },
               },
             });
+            if (!isCurrentAttempt()) {
+              releaseAttempt();
+              return false;
+            }
           }
 
           return true;
         } catch (err) {
-          if (activeP2PHostAdapter) {
-            activeP2PHostAdapter.dispose();
-            activeP2PHostAdapter = null;
-            activeP2PHostGameId = null;
-          } else {
-            destroyHostedRoom?.();
-          }
-          if (broker) {
-            if (brokerGameCode) {
-              await broker.unregister(brokerGameCode).catch(() => {});
-            }
-            broker.close();
-            if (activeBroker === broker) {
-              activeBroker = null;
-              activeBrokerGameCode = null;
-            }
-          }
+          releaseAttempt();
+          if (!isCurrentAttempt()) return false;
           console.error("[startP2PHostingSession] failed:", err);
           resetFailedHosting();
           return false;

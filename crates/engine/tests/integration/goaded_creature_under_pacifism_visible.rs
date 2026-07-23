@@ -89,7 +89,10 @@ fn goaded_creature_under_pacifism_is_visible_as_cant_attack_not_must_attack() {
     );
     assert_eq!(
         constraints.get(&pacified),
-        Some(&CombatRequirement::CantAttack),
+        // CR 508.1c: intrinsic SelfRef Pacifism → carrier is the creature itself.
+        Some(&CombatRequirement::CantAttack {
+            sources: vec![pacified]
+        }),
         "a goaded creature under Pacifism is CantAttack, not MustAttack"
     );
 
@@ -135,12 +138,20 @@ fn goaded_creature_under_pacifism_is_visible_as_cant_attack_not_must_attack() {
     );
     assert_eq!(
         constraints.get(&unencumbered),
-        Some(&CombatRequirement::MustAttack { players: vec![] }),
+        // CR 701.15b: direct player-goad (`goaded_by`) carries no object source →
+        // EMPTY sources. This is the documented player-level goad row.
+        Some(&CombatRequirement::MustAttack {
+            players: vec![],
+            sources: vec![]
+        }),
         "an unencumbered goaded creature must surface as MustAttack with no specific-player constraint"
     );
     assert_eq!(
         constraints.get(&pacified),
-        Some(&CombatRequirement::CantAttack),
+        // CR 508.1c: intrinsic SelfRef Pacifism → carrier is the creature itself.
+        Some(&CombatRequirement::CantAttack {
+            sources: vec![pacified]
+        }),
         "the pacified creature stays CantAttack even with a sibling must-attacker present"
     );
 }

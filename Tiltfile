@@ -90,14 +90,20 @@ local_resource('caddy',
     labels = ['serve'],
 )
 
-TAURI_SRC = ['client/src-tauri/src/']
-SIDECAR_DEST = 'client/src-tauri/binaries/phase-server-' + str(local('rustc -vV | sed -n "s/host: //p" | tr -d "\\n"', quiet = True))
-
+# Thin-shell dev loop. `tauri dev` starts vite itself (beforeDevCommand) and
+# points the window at devUrl http://localhost:5173, so the shell hosts the
+# LOCAL frontend instead of the production bootstrap->remote-origin flow —
+# that is why `frontend` sets auto_init = 'tauri' not in enabled (both would
+# bind :5173). The shell crate is workspace-excluded and self-contained, and
+# `tauri dev` watches client/src-tauri/src/ and rebuilds on its own; Tilt only
+# restarts the loop when the Tauri config or crate manifest changes. The old
+# phase-server sidecar build is gone with the thin shell: production shells
+# download their native engine via signed manifests, and local multiplayer
+# testing talks to the `server` resource on :9374.
 local_resource('tauri',
-    cmd = 'cargo build -p phase-server && mkdir -p client/src-tauri/binaries && cp target/debug/phase-server ' + SIDECAR_DEST,
     serve_cmd = 'pnpm tauri:dev',
     serve_dir = 'client',
-    deps = ENGINE_SRC + AI_SRC + WASM_SRC + TAURI_SRC + ['crates/server-core/src/', 'crates/phase-server/src/'],
+    deps = ['client/src-tauri/tauri.conf.json', 'client/src-tauri/Cargo.toml'],
     ignore = TMP_IGNORE,
     auto_init = 'tauri' in enabled,
     labels = ['serve'],
@@ -109,7 +115,7 @@ SERVER_SRC = ENGINE_SRC + AI_SRC + [
 ]
 
 local_resource('server',
-    cmd = 'cargo build --bin phase-server',
+    cmd = 'cargo build -p phase-server --bin phase-server',
     serve_cmd = './target/debug/phase-server',
     serve_env = {'PHASE_DATA_DIR': 'data'},
     deps = SERVER_SRC,
@@ -184,8 +190,8 @@ local_resource('test-frontend',
 # also gives it its own build lock, so it never queues behind the native test
 # builds. Cost: a second debug tree on disk (reclaimed by cargo-sweep).
 local_resource('clippy',
-    cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings',
-    deps = ['crates/'],
+    cmd = 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check',
+    deps = ['crates/', 'client/src/adapter/generated/interaction/index.ts', 'scripts/check-interaction-bindings.sh'],
     ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
     allow_parallel = True,
@@ -209,7 +215,18 @@ local_resource('check-frontend',
 local_resource('card-data',
     cmd = './scripts/gen-card-data.sh',
     deps = ENGINE_SRC,
-    ignore = TMP_IGNORE,
+    # gen-card-data.sh promotes these tracked files under crates/engine/data/, which is
+    # in ENGINE_SRC (deps). Watching card-data's own generated outputs makes every
+    # promote re-trigger card-data -> an infinite regen loop. The script already stages
+    # via a `.tmp.` infix (covered by TMP_IGNORE), but the final promote writes the real
+    # tracked file, which TMP_IGNORE can't mask. Ignoring the outputs here breaks the
+    # self-trigger without touching the engine resources, which still watch
+    # crates/engine/data/ in full so a genuine data change still rebuilds the engine.
+    ignore = TMP_IGNORE + [
+        'crates/engine/data/known-tokens.toml',
+        'crates/engine/data/oracle-subtypes.json',
+        'crates/engine/data/mtgjson-vintage',
+    ],
     auto_init = True,
     labels = ['data'],
 )

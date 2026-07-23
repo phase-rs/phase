@@ -37,6 +37,9 @@ import init, {
   replay_seek_js,
   clear_replay_playback,
   preview_mana_payment_js,
+  get_card_face_data,
+  get_card_parse_details,
+  get_card_rulings,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -45,7 +48,7 @@ import type { BracketDeckRequest } from "../types/bracketEstimate";
 // ── Message Protocol ─────────────────────────────────────────────────────
 
 type EngineRequest =
-  | { type: "init" }
+  | { type: "init"; id: number }
   | { type: "loadCardDb"; id: number; cardDataText: string }
   | {
       type: "initializeGame";
@@ -86,6 +89,9 @@ type EngineRequest =
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
+  | { type: "getCardFaceData"; id: number; cardName: string }
+  | { type: "getCardParseDetails"; id: number; cardName: string }
+  | { type: "getCardRulings"; id: number; cardName: string }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -103,7 +109,6 @@ type EngineRequest =
   | { type: "clearReplayPlayback"; id: number };
 
 type EngineResponse =
-  | { type: "ready" }
   | { type: "result"; id: number; data: unknown }
   | { type: "error"; id: number; message: string; bracketViolation?: true };
 
@@ -135,8 +140,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
   try {
     switch (msg.type) {
       case "init": {
-        await init();
-        respond({ type: "ready" });
+        if (__ENGINE_WASM_URL__) {
+          await init({ module_or_path: __ENGINE_WASM_URL__ });
+        } else {
+          await init();
+        }
+        result(msg.id, null);
         break;
       }
 
@@ -183,6 +192,21 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         }
         const data = evaluate_deck_compatibility_js(msg.request);
         result(msg.id, data);
+        break;
+      }
+
+      case "getCardFaceData": {
+        result(msg.id, get_card_face_data(msg.cardName));
+        break;
+      }
+
+      case "getCardParseDetails": {
+        result(msg.id, get_card_parse_details(msg.cardName));
+        break;
+      }
+
+      case "getCardRulings": {
+        result(msg.id, get_card_rulings(msg.cardName));
         break;
       }
 
@@ -493,7 +517,6 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
     }
   } catch (err) {
-    const id = "id" in msg ? (msg as { id: number }).id : -1;
-    error(id, err instanceof Error ? err.message : String(err));
+    error(msg.id, err instanceof Error ? err.message : String(err));
   }
 };

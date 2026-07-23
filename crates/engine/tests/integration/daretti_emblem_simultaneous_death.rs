@@ -178,10 +178,10 @@ fn daretti_emblem_simultaneous_artifact_death_produces_n_returns() {
             .first()
             .expect("emblem must have at least one trigger definition");
         assert!(
-            trig.trigger_zones.contains(&Zone::Command),
+            trig.definition.trigger_zones.contains(&Zone::Command),
             "CR 114.4: emblem trigger must have trigger_zones containing Command, \
              got {:?}",
-            trig.trigger_zones
+            trig.definition.trigger_zones
         );
     }
 

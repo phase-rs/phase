@@ -1,0 +1,409 @@
+name: Shell Release
+
+on:
+  push:
+    tags: ["shell-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Shell release tag to recover, e.g. shell-v1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shell-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve-shell-ref:
+    name: Resolve Shell Release Ref
+    if: github.repository == 'phase-rs/phase'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_sha: ${{ steps.resolve.outputs.release_sha }}
+      shell_version: ${{ steps.resolve.outputs.shell_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag and commit
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$PUSH_TAG"
+          fi
+
+          if ! [[ "$TAG" =~ ^shell-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::shell release tag must be like shell-v1.0.0"
+            exit 1
+          fi
+
+          git fetch --force --tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          SHA=$(git rev-list -n 1 "$TAG")
+
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "shell_version=${TAG#shell-v}" >> "$GITHUB_OUTPUT"
+
+  shell-preflight:
+    name: Shell Preflight
+    needs: [resolve-shell-ref]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
+      SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: Stamp shell version
+        run: |
+          python3 - "$SHELL_VERSION" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          config_path = Path("client/src-tauri/tauri.conf.json")
+          config = json.loads(config_path.read_text())
+          config["version"] = version
+          config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+          cargo_path = Path("client/src-tauri/Cargo.toml")
+          cargo = cargo_path.read_text()
+          cargo, replacements = re.subn(
+              r'^version = "[^"]+"$', f'version = "{version}"', cargo, count=1,
+              flags=re.MULTILINE,
+          )
+          if replacements != 1:
+              raise SystemExit("expected exactly one phase-tauri package version")
+          cargo_path.write_text(cargo)
+
+          # Cargo.lock records phase-tauri's own version; without this the
+          # stamped manifest fails `cargo check --locked`.
+          lock_path = Path("client/src-tauri/Cargo.lock")
+          lock = lock_path.read_text()
+          lock, replacements = re.subn(
+              r'(\[\[package\]\]\nname = "phase-tauri"\nversion = ")[^"]+(")',
+              rf'\g<1>{version}\g<2>', lock, count=1,
+          )
+          if replacements != 1:
+              raise SystemExit("expected exactly one phase-tauri lockfile entry")
+          lock_path.write_text(lock)
+          PY
+
+      - name: Assert shell version stamping
+        run: |
+          set -euo pipefail
+          test "$(jq -r '.version' client/src-tauri/tauri.conf.json)" = "$SHELL_VERSION"
+          test "$(sed -nE 's/^version = "([^"]+)"/\1/p' client/src-tauri/Cargo.toml | head -1)" = "$SHELL_VERSION"
+          test "$(awk '/^name = "phase-tauri"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' client/src-tauri/Cargo.lock)" = "$SHELL_VERSION"
+
+      - name: Validate Tauri JSON configs
+        run: |
+          set -euo pipefail
+          jq empty client/src-tauri/tauri.conf.json
+          for f in client/src-tauri/capabilities/*.json; do
+            jq empty "$f"
+          done
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-shell-preflight
+
+      - name: Install Linux Tauri build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      - name: Stub bootstrap dist for tauri::generate_context!
+        # phase-tauri's build script validates frontendDist. The shell's real
+        # bootstrap is not needed for a Rust-only compile check.
+        run: |
+          mkdir -p client/bootstrap/dist
+          echo '<!doctype html><html></html>' > client/bootstrap/dist/index.html
+
+      - name: cargo check phase-tauri
+        # phase-tauri is excluded from the root workspace, so this must run
+        # against its standalone manifest after version stamping.
+        run: cargo check --locked --manifest-path client/src-tauri/Cargo.toml
+
+  build-shell:
+    name: Build Shell (${{ matrix.os }})
+    needs: [resolve-shell-ref, shell-preflight]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
+      SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            artifact: shell-tauri-linux
+          - os: macos
+            runner: macos-latest
+            artifact: shell-tauri-macos
+          - os: windows
+            runner: windows-latest
+            artifact: shell-tauri-windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-shell-${{ matrix.os }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Stamp shell version
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const version = process.env.SHELL_VERSION;
+          const configPath = "client/src-tauri/tauri.conf.json";
+          const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+          config.version = version;
+          fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+
+          const cargoPath = "client/src-tauri/Cargo.toml";
+          const cargo = fs.readFileSync(cargoPath, "utf8");
+          const cargoPattern = /^version = "[^"]+"$/m;
+          if (!cargoPattern.test(cargo)) {
+            throw new Error("expected a phase-tauri package version to stamp");
+          }
+          fs.writeFileSync(cargoPath, cargo.replace(cargoPattern, `version = "${version}"`));
+
+          // Cargo.lock records phase-tauri's own version; keep it in sync so
+          // the build never resolves against a stale locked version.
+          const lockPath = "client/src-tauri/Cargo.lock";
+          const lock = fs.readFileSync(lockPath, "utf8");
+          const lockPattern = /(\[\[package\]\]\nname = "phase-tauri"\nversion = ")[^"]+(")/;
+          if (!lockPattern.test(lock)) {
+            throw new Error("expected a phase-tauri lockfile entry to stamp");
+          }
+          fs.writeFileSync(lockPath, lock.replace(lockPattern, `$1${version}$2`));
+          NODE
+
+      - name: Assert shell version stamping
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p "require('./client/src-tauri/tauri.conf.json').version")" = "$SHELL_VERSION"
+          test "$(sed -nE 's/^version = "([^"]+)"/\1/p' client/src-tauri/Cargo.toml | head -1)" = "$SHELL_VERSION"
+          test "$(awk '/^name = "phase-tauri"$/ { getline; sub(/^version = "/, ""); sub(/"$/, ""); print }' client/src-tauri/Cargo.lock)" = "$SHELL_VERSION"
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install bootstrap dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      # Tauri selects its macOS signing path by the presence of these vars. Export
+      # only non-empty secrets so an unavailable certificate keeps the ad-hoc path.
+      - name: Configure macOS signing
+        if: matrix.os == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            echo "No APPLE_CERTIFICATE secret; ad-hoc self-signing the macOS bundle."
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "APPLE_CERTIFICATE found; signing with the Developer ID certificate."
+          {
+            echo "APPLE_CERTIFICATE<<__EOF__"
+            echo "$APPLE_CERTIFICATE"
+            echo "__EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          for var in APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -n "${!var:-}" ]; then
+              echo "$var=${!var}" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: Build shell
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # beforeBuildCommand runs only pnpm build:bootstrap. SHELL_REMOTE_ORIGIN
+          # is intentionally unset so release shells use https://phase-rs.dev.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: client
+
+      - name: Stage shell artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          find client/src-tauri/target/release/bundle \
+            -maxdepth 2 \
+            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.AppImage.sig' \
+               -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.app.tar.gz.sig' \
+               -o -name '*.exe' -o -name '*.exe.sig' \) \
+            -exec cp {} staging/ \;
+
+          rename_artifact() {
+            local pattern="$1"
+            local destination="$2"
+            local source
+            source=$(find staging -maxdepth 1 -type f -name "$pattern" -print -quit)
+            [ -n "$source" ] || return 0
+            mv "$source" "staging/$destination"
+            if [ -f "$source.sig" ]; then
+              mv "$source.sig" "staging/$destination.sig"
+            fi
+          }
+
+          rename_artifact '*-setup.exe' 'Phase-Desktop-Windows-x64-Setup.exe'
+          rename_artifact '*.dmg' 'Phase-Desktop-macOS-Apple-Silicon.dmg'
+          rename_artifact '*.app.tar.gz' 'Phase-Desktop-macOS-Apple-Silicon.app.tar.gz'
+          rename_artifact '*.AppImage' 'Phase-Desktop-Linux-x86_64.AppImage'
+          rename_artifact '*.deb' 'Phase-Desktop-Linux-x86_64.deb'
+          ls -la staging/
+
+      - name: Upload shell artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: staging/*
+          retention-days: 90
+
+  release-shell:
+    name: Create Shell Release
+    needs: [resolve-shell-ref, build-shell]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHELL_TAG: ${{ needs.resolve-shell-ref.outputs.release_tag }}
+      SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate updater manifest
+        run: |
+          set -euo pipefail
+
+          TAG="$SHELL_TAG"
+          REPO="${GITHUB_REPOSITORY}"
+          shopt -s nullglob
+
+          first_match() {
+            local pattern="$1"
+            local match
+            match=$(compgen -G "$pattern" | sort | head -1 || true)
+            printf '%s' "$match"
+          }
+
+          artifact_url() {
+            local path="$1"
+            local name
+            name=$(basename "$path")
+            printf 'https://github.com/%s/releases/download/%s/%s' \
+              "$REPO" "$TAG" "$(jq -rn --arg value "$name" '$value | @uri')"
+          }
+
+          LINUX_PAYLOAD=$(first_match "artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage")
+          MACOS_PAYLOAD=$(first_match "artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz")
+          WINDOWS_PAYLOAD=$(first_match "artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe")
+
+          LINUX_SIG=""
+          MACOS_SIG=""
+          WINDOWS_SIG=""
+          if [ -n "$LINUX_PAYLOAD" ] && [ -f "$LINUX_PAYLOAD.sig" ]; then LINUX_SIG=$(cat "$LINUX_PAYLOAD.sig"); fi
+          if [ -n "$MACOS_PAYLOAD" ] && [ -f "$MACOS_PAYLOAD.sig" ]; then MACOS_SIG=$(cat "$MACOS_PAYLOAD.sig"); fi
+          if [ -n "$WINDOWS_PAYLOAD" ] && [ -f "$WINDOWS_PAYLOAD.sig" ]; then WINDOWS_SIG=$(cat "$WINDOWS_PAYLOAD.sig"); fi
+
+          missing=0
+          if [ -z "$LINUX_PAYLOAD" ] || [ -z "$LINUX_SIG" ]; then echo "::error::Missing Linux updater payload/signature"; missing=1; fi
+          if [ -z "$MACOS_PAYLOAD" ] || [ -z "$MACOS_SIG" ]; then echo "::error::Missing macOS updater payload/signature"; missing=1; fi
+          if [ -z "$WINDOWS_PAYLOAD" ] || [ -z "$WINDOWS_SIG" ]; then echo "::error::Missing Windows updater payload/signature"; missing=1; fi
+          [ "$missing" = "0" ]
+
+          PLATFORMS="{"
+          LINUX_URL=$(artifact_url "$LINUX_PAYLOAD")
+          PLATFORMS="${PLATFORMS}\"linux-x86_64\":{\"signature\":\"${LINUX_SIG}\",\"url\":\"${LINUX_URL}\"}"
+          MACOS_URL=$(artifact_url "$MACOS_PAYLOAD")
+          PLATFORMS="${PLATFORMS},\"darwin-aarch64\":{\"signature\":\"${MACOS_SIG}\",\"url\":\"${MACOS_URL}\"}"
+          WINDOWS_URL=$(artifact_url "$WINDOWS_PAYLOAD")
+          PLATFORMS="${PLATFORMS},\"windows-x86_64\":{\"signature\":\"${WINDOWS_SIG}\",\"url\":\"${WINDOWS_URL}\"}}"
+
+          echo "{\"version\":\"${SHELL_VERSION}\",\"notes\":\"Shell release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
+            | jq . > artifacts/update.json
+          test -s artifacts/update.json
+
+      - name: Create shell release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.SHELL_TAG }}
+          name: Phase Desktop v${{ env.SHELL_VERSION }}
+          body: |
+            ## Install Phase Desktop
+
+            Download the installer for your platform:
+
+            - **Windows:** `Phase-Desktop-Windows-x64-Setup.exe`
+            - **macOS (Apple Silicon):** `Phase-Desktop-macOS-Apple-Silicon.dmg`
+            - **Linux:** `Phase-Desktop-Linux-x86_64.deb` or `Phase-Desktop-Linux-x86_64.AppImage`
+
+            This is the official desktop app for [phase-rs.dev](https://phase-rs.dev).
+            `update.json` is used by automatic updates; it is not a manual download.
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.deb
+            artifacts/shell-tauri-linux/Phase-Desktop-Linux-x86_64.AppImage
+            artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.dmg
+            artifacts/shell-tauri-macos/Phase-Desktop-macOS-Apple-Silicon.app.tar.gz
+            artifacts/shell-tauri-windows/Phase-Desktop-Windows-x64-Setup.exe
+            artifacts/update.json

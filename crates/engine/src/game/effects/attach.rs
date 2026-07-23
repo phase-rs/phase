@@ -69,6 +69,55 @@ pub fn resolve(
         return Ok(());
     }
 
+    // CR 701.3a + CR 614.1a: Route the attach through the replacement pipeline
+    // so an "as it becomes attached, choose …" definition on the attachment
+    // (`ReplacementEvent::Attached`, Psychic Paper) can bind its choice as the
+    // attachment resolves — the attach-time analogue of "as ~ enters, choose".
+    let proposed = crate::types::proposed_event::ProposedEvent::Attach {
+        attachment_id,
+        target_id,
+        applied: Default::default(),
+    };
+    match crate::game::replacement::replace_event(state, proposed, events) {
+        crate::game::replacement::ReplacementResult::Execute(_) => {
+            if let Some(waiting_for) =
+                deliver_attach(state, attachment_id, target_id, source_id, events)
+            {
+                state.waiting_for = waiting_for;
+            }
+        }
+        crate::game::replacement::ReplacementResult::Prevented => {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id,
+                subject: None,
+            });
+        }
+        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            // CR 616.1: multiple "becomes attached" replacements apply — park
+            // for the ordering choice. `handle_replacement_choice`'s
+            // `ProposedEvent::Attach` arm resumes via `deliver_attach` once
+            // the player orders them.
+            crate::game::replacement::park_waiting_for(state, player);
+        }
+    }
+
+    Ok(())
+}
+
+/// CR 701.3a + CR 614.1a: Perform the attach mutation and, if the attachment
+/// carries an "as it becomes attached, choose …" replacement, drain its
+/// stashed continuation (`ReplacementEvent::Attached`). Single authority for
+/// completing an attach after the replacement pipeline consult — used both by
+/// the immediate `resolve()` path and by `handle_replacement_choice`'s
+/// post-ordering-choice resume, so the two paths cannot drift apart.
+pub(crate) fn deliver_attach(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    source_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
     if let Some(old_target) = attach_to(state, attachment_id, target_id) {
         events.push(GameEvent::Unattached {
             attachment_id,
@@ -77,12 +126,18 @@ pub fn resolve(
     }
 
     events.push(GameEvent::EffectResolved {
-        kind: EffectKind::from(&ability.effect),
+        kind: EffectKind::Attach,
         source_id,
         subject: None,
     });
 
-    Ok(())
+    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state,
+        Some(attachment_id),
+        None,
+        Some(crate::types::replacements::ReplacementEvent::Attached),
+        events,
+    )
 }
 
 /// CR 701.3d: Unattach each matching Equipment from the matched host, leaving
@@ -224,10 +279,22 @@ fn prompt_resolution_attachment_choice(
         _ => {
             // Replace any stale continuation (e.g. a deferred optional sub stashed
             // by the parent chain walker) with this exact attach instruction.
-            state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            let continuation = crate::types::game_state::PendingContinuation::new(
                 Box::new(ability.clone()),
                 state,
-            ));
+            );
+            if state.active_ability_continuation().is_some() {
+                state
+                    .replace_active_ability_continuation(
+                        crate::types::resolution::AbilityContinuationFrame {
+                            pending: continuation,
+                            choose_zone_trigger_context: None,
+                        },
+                    )
+                    .expect("attach prompt replaces its active continuation");
+            } else {
+                state.park_ability_continuation(continuation);
+            }
             state.waiting_for = WaitingFor::EffectZoneChoice {
                 player: ability.controller,
                 cards: eligible,
@@ -251,6 +318,7 @@ fn prompt_resolution_attachment_choice(
                 library_position: None,
                 is_cost_payment: false,
                 enters_modified_if: None,
+                duration: None,
             };
             Ok(true)
         }
@@ -1428,11 +1496,19 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert!(cards.contains(&first));
         assert!(cards.contains(&second));
-        assert!(state.pending_continuation.is_some());
+        assert!(state.active_ability_continuation().is_some());
 
-        let cont = state.pending_continuation.take().unwrap();
-        complete_resolution_attachment_choice(&mut state, *cont.chain, &[second], &mut events)
+        let frame = state
+            .take_active_ability_continuation()
+            .expect("attachment fixture cannot consume a buried continuation")
             .unwrap();
+        complete_resolution_attachment_choice(
+            &mut state,
+            *frame.pending.chain,
+            &[second],
+            &mut events,
+        )
+        .unwrap();
 
         assert_eq!(
             state.objects.get(&second).unwrap().attached_to,
@@ -1721,7 +1797,7 @@ mod tests {
             state.waiting_for
         );
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "no continuation should be stashed for a no-op attach"
         );
         assert!(state.objects.get(&host).unwrap().attachments.is_empty());
@@ -2200,17 +2276,19 @@ mod tests {
         let old_equipment = spawn_with_subtype(&mut state, "Old Sword", "Equipment");
         let new_equipment = spawn_with_subtype(&mut state, "New Sword", "Equipment");
 
-        state.zone_changes_this_turn.push(ZoneChangeRecord {
+        state.zone_changes_this_turn.push_back(ZoneChangeRecord {
             attachments: vec![AttachmentSnapshot {
                 object_id: old_equipment,
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Equipment,
             }],
             ..ZoneChangeRecord::test_minimal(zack, Some(Zone::Battlefield), Zone::Graveyard)
         });
-        state.zone_changes_this_turn.push(ZoneChangeRecord {
+        state.zone_changes_this_turn.push_back(ZoneChangeRecord {
             attachments: vec![AttachmentSnapshot {
                 object_id: new_equipment,
+                identity: None,
                 controller: PlayerId(0),
                 kind: AttachmentKind::Equipment,
             }],

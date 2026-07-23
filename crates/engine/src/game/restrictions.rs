@@ -213,31 +213,7 @@ pub fn record_spell_cast(
     );
 }
 
-/// CR 117.1 + CR 202.3d + CR 702.102b: The single authority for projecting a
-/// spell object into a [`SpellCastRecord`]. Every consumer — spell-cast history
-/// (`record_spell_cast_from_zone`), live cost-modifier / cast-prohibition filters
-/// (`spell_record_for_restrictions`, `spell_cast_record_from_object`), and
-/// per-turn cast-limit filters — routes through here so the spell's mana value and
-/// colors come from the split-aware `spell_mana_value`/`spell_colors` authority. A
-/// FUSED split spell therefore records the COMBINED value of both halves rather
-/// than its front half, so `Cmc`/`HasColor`/`ColorCount`/multicolored filters see
-/// the fused spell (CR 709.4d). `spell_mana_value` honors announced X on the stack
-/// for non-fused spells (CR 202.3e).
-pub(crate) fn spell_cast_record(
-    obj: &GameObject,
-    from_zone: Zone,
-    cast_variant: crate::types::game_state::CastingVariant,
-) -> SpellCastRecord {
-    // CR 702.102b: A spell is fused when the persisted `fused_split_spell` marker
-    // is set (payment-time / on-stack casts) OR the caller is projecting a
-    // pre-payment `CastingVariant::Fuse` cast whose marker is not yet set (option
-    // enumeration / cast preparation on an immutable `&GameState`). Both must
-    // present the COMBINED characteristics of the two halves.
-    let fused = cast_variant == crate::types::game_state::CastingVariant::Fuse;
-    spell_cast_record_for(obj, from_zone, cast_variant, fused)
-}
-
-/// Fuse-aware sibling of [`spell_cast_record`]. `fused_hint` is the caller's
+/// The single fuse-aware authority for spell-cast record projection. `fused_hint` is the caller's
 /// pre-payment determination that the projected spell is a fused split spell
 /// (CR 702.102b), for seams that know the `CastingVariant::Fuse` intent before the
 /// `fused_split_spell` marker is set. The effective fused-ness is `fused_hint` OR
@@ -271,6 +247,10 @@ pub(crate) fn spell_cast_record_for(
         cast_variant,
         // CR 702.33d: Kicker-paid state captured at cast time.
         was_kicked: !obj.kickers_paid.is_empty(),
+        // CR 400.7: stable storage id of the cast object — the canonical
+        // history record carries provenance so own-cast exclusion (CR 601.2i)
+        // can identify a permanent's own pending cast positionally.
+        spell_object_id: Some(obj.id),
     }
 }
 
@@ -281,23 +261,10 @@ pub fn record_spell_cast_from_zone(
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
 ) {
-    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
-    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
-    let record = spell_cast_record(obj, from_zone, cast_variant);
-    state
-        .spells_cast_this_turn_by_player
-        .entry(player)
-        .or_default()
-        .push_back(record.clone());
-    // CR 117.1: Game-scope history mirror — not cleared between turns so
-    // "named {LITERAL} this game" conditions (Approach of the Second Sun)
-    // can see all prior casts.
-    state
-        .spells_cast_this_game_by_player
-        .entry(player)
-        .or_default()
-        .push_back(record);
+    let record = spell_cast_record_for(obj, from_zone, cast_variant, false);
+    crate::game::ledger::record_spell_cast(state, player, record)
+        .expect("finalized spell cast must have a valid ledger prefix");
 }
 
 /// CR 702.185c: True when any player cast a spell using `variant` this turn.
@@ -371,7 +338,7 @@ pub fn record_token_created(state: &mut crate::types::game_state::GameState, obj
             .insert(obj.controller);
         state
             .created_tokens_this_turn
-            .push(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
+            .push_back(obj.snapshot_for_zone_change(object_id, None, Zone::Battlefield));
     }
 }
 
@@ -385,7 +352,11 @@ pub fn record_sacrifice(
     };
     state
         .sacrificed_permanents_this_turn
-        .push(obj.snapshot_for_zone_change(object_id, Some(Zone::Battlefield), Zone::Graveyard));
+        .push_back(obj.snapshot_for_zone_change(
+            object_id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        ));
     if obj.card_types.core_types.contains(&CoreType::Artifact) {
         state
             .players_who_sacrificed_artifact_this_turn
@@ -433,7 +404,11 @@ fn entry_controller_matches(
     }
 }
 
-fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &TypeFilter) -> bool {
+fn entry_type_filter_matches(
+    record: &BattlefieldEntryRecord,
+    type_filter: &TypeFilter,
+    all_creature_types: &[String],
+) -> bool {
     match type_filter {
         TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => record.core_types.contains(&CoreType::Land),
@@ -453,17 +428,32 @@ fn entry_type_filter_matches(record: &BattlefieldEntryRecord, type_filter: &Type
             )
         }),
         TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !entry_type_filter_matches(record, inner),
-        TypeFilter::Subtype(subtype) => record
-            .subtypes
-            .iter()
-            .any(|record_subtype| record_subtype.eq_ignore_ascii_case(subtype)),
+        TypeFilter::Non(inner) => !entry_type_filter_matches(record, inner, all_creature_types),
+        // CR 702.73a + CR 205.3m: a Changeling entrant is every creature type. The entry
+        // snapshot is taken pre-layer (`record_zone_change`, `:616`), so `record.subtypes`
+        // is NOT layer-expanded — but `record.keywords` carries Changeling, which is all the
+        // single authority needs. Mirrors `zone_change_record_matches_type_filter`
+        // (`game/filter.rs:2871-2878`), the same helper over the sibling snapshot type.
+        TypeFilter::Subtype(subtype) => {
+            crate::game::filter::subtype_matches_with_changeling(
+                subtype,
+                &record.subtypes,
+                &record.keywords,
+                all_creature_types,
+            ) || crate::game::filter::subtype_matches_host_supertype(subtype, &record.supertypes)
+        }
         TypeFilter::AnyOf(filters) => filters
             .iter()
-            .any(|inner| entry_type_filter_matches(record, inner)),
+            .any(|inner| entry_type_filter_matches(record, inner, all_creature_types)),
         // CR 308.1: Kindred type check.
         TypeFilter::Kindred => record.core_types.contains(&CoreType::Kindred),
-        _ => false,
+        // CR 403.3: permanents exist only on the battlefield, so a battlefield-entry
+        // record is never an instant or a sorcery. `false` is the correct verdict here,
+        // not a fail-closed one, and `Non(Instant)` correctly inverts to `true`.
+        // Exhaustive on purpose: a new `TypeFilter` variant must fail to compile rather
+        // than silently join this arm while `ledger_filter_is_evaluable` (`:570-572`)
+        // keeps reporting type filters evaluable.
+        TypeFilter::Instant | TypeFilter::Sorcery => false,
     }
 }
 
@@ -475,6 +465,9 @@ pub(crate) fn battlefield_entry_matches_filter(
     record: &BattlefieldEntryRecord,
     filter: &TargetFilter,
     player: PlayerId,
+    // CR 702.73a: runtime creature-type catalog, for Changeling subtype expansion
+    // against the pre-layer entry snapshot.
+    all_creature_types: &[String],
     // CR 109.1: the ability source for the "another" exclusion. `None` on the
     // player-attribute count paths that carry no ability source — there
     // `FilterProp::Another` excludes nothing it could match (stays `false`),
@@ -489,11 +482,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                     return false;
                 }
             }
-            if !typed
-                .type_filters
-                .iter()
-                .all(|type_filter| entry_type_filter_matches(record, type_filter))
-            {
+            if !typed.type_filters.iter().all(|type_filter| {
+                entry_type_filter_matches(record, type_filter, all_creature_types)
+            }) {
                 return false;
             }
             typed.properties.iter().all(|prop| match prop {
@@ -513,6 +504,85 @@ pub(crate) fn battlefield_entry_matches_filter(
                 _ => false,
             })
         }
+        // CR 608.2i: the entry ledger is a look-back-in-time read, so a permanent that has
+        // since left still counts. The connective recursion below is engine plumbing, not a
+        // rules construct — only the MONOTONE connectives are supported. `any`/`all` are monotone
+        // in the leaf verdict, so an unsupported leaf's fail-closed `false` can
+        // only make the result more `false` — never a false positive.
+        //
+        // KNOWN COST of that monotonicity: under `Or`, an unsupported leaf turns
+        // what is today a LOUD constant 0 into a SILENT PARTIAL COUNT — the
+        // supported leaves still match and the dropped leaf is invisible.
+        // Measured: `Or[Typed(Mount), Typed(Vehicle+Tapped)]` reads 0 today and
+        // would read 1 post-change with one leaf silently dropped. Accepted here
+        // because 0/5 migrating cards carry an unsupported `FilterProp` in a leaf
+        // (`Another` IS supported), so there is no live undercount; a future card
+        // that does needs the tri-state refactor below, not another connective.
+        //
+        // `TargetFilter::Not` is ANTI-monotone: it would invert an unsupported
+        // leaf's fail-closed `false` into a false POSITIVE, so it stays in the
+        // fail-closed arm until this matcher becomes tri-state (`Option<bool>`
+        // with the callers failing closed on `None`). No printed card in the
+        // class uses a top-level `Not` (measured: 0/34).
+        TargetFilter::Or { filters } => filters.iter().any(|inner| {
+            battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|inner| {
+            battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
+        }),
+        _ => false,
+    }
+}
+
+/// CR 403.3 + CR 608.2h: can [`battlefield_entry_matches_filter`] actually answer this filter
+/// against a `BattlefieldEntryRecord`?
+///
+/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
+/// supertypes / colors / keywords / controller` (`types/game_state.rs:1586-1606`). Every other
+/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
+/// matcher fails closed at `:517` and the whole tally reads a silent constant 0. Measured: 98
+/// `FilterProp` variants exist (`types/ability.rs:3609-4251`); the matcher answers 4.
+///
+/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
+/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
+/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
+/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
+/// The list must name exactly the props the matcher answers at `:504-516`; the binder is
+/// `ledger_guard_agrees_with_matcher` (test, below).
+///
+/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
+/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
+/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+///
+/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
+/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
+/// `true` for every permanent.
+pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => {
+            // CR 109.5: `entry_controller_matches` (`:408-418`) answers only these two.
+            typed
+                .controller
+                .as_ref()
+                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
+                && typed.properties.iter().all(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::HasColor { .. }
+                            | FilterProp::InZone { .. }
+                            | FilterProp::WithKeyword { .. }
+                            | FilterProp::Another
+                    )
+                })
+        }
+        // CR 608.2i: mirrors the matcher's monotone connectives (`:540-545`); every leaf must be
+        // answerable, otherwise the composite silently drops one.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(ledger_filter_is_evaluable)
+        }
+        // Everything else is the matcher's `_ => false` at `:546`, including the anti-monotone
+        // `TargetFilter::Not`.
         _ => false,
     }
 }
@@ -527,7 +597,7 @@ pub fn record_zone_change(
     let to_zone = record.to_zone;
     let turn_zone_change_index = state.zone_changes_this_turn.len();
     record.turn_zone_change_index = turn_zone_change_index;
-    state.zone_changes_this_turn.push(record);
+    state.zone_changes_this_turn.push_back(record);
 
     if to_zone == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
@@ -750,13 +820,19 @@ pub(crate) fn tap_permanent_for_cost(
             "This permanent can't become tapped".to_string(),
         ));
     }
-    if let Some(obj) = state.objects.get_mut(&id) {
-        obj.tapped = true;
+    if crate::game::object_state::resolve_and_apply_object_edit(
+        state,
+        id,
+        crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+        true,
+    )
+    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        events.push(GameEvent::PermanentTapped {
+            object_id: id,
+            caused_by: None,
+        });
     }
-    events.push(GameEvent::PermanentTapped {
-        object_id: id,
-        caused_by: None,
-    });
     Ok(())
 }
 
@@ -767,9 +843,8 @@ pub fn record_ability_activation(
     source_id: ObjectId,
     ability_index: usize,
 ) {
-    let key = (source_id, ability_index);
-    *state.activated_abilities_this_turn.entry(key).or_insert(0) += 1;
-    *state.activated_abilities_this_game.entry(key).or_insert(0) += 1;
+    crate::game::ledger::record_ability_activation(state, source_id, ability_index)
+        .expect("activated ability must have a valid ledger prefix");
 }
 
 /// CR 702.142b: Compute the effective per-turn activation limit for an ability.
@@ -1115,6 +1190,9 @@ fn casting_restriction_applies(
         CastingRestriction::RequiresCondition { condition } => condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // Not a timing gate: "can't spend mana" restricts how the cost is paid,
+        // never when. Always satisfied here; enforced in the mana-payment path.
+        CastingRestriction::CantSpendMana => true,
     }
 }
 
@@ -1497,7 +1575,13 @@ pub(crate) fn evaluate_condition(
                 .battlefield_entries_this_turn
                 .iter()
                 .filter(|record| {
-                    battlefield_entry_matches_filter(record, filter, player, Some(source_id))
+                    battlefield_entry_matches_filter(
+                        record,
+                        filter,
+                        player,
+                        &state.all_creature_types,
+                        Some(source_id),
+                    )
                 })
                 .count() as u32
                 >= *count
@@ -1512,7 +1596,18 @@ pub(crate) fn evaluate_condition(
         }
         // CR 602.5b: "Activate only if [player condition]" — count matching non-eliminated players.
         ParsedCondition::PlayerCountAtLeast { filter, minimum } => {
-            crate::game::quantity::resolve_player_count(state, filter, player, source_id) as usize
+            crate::game::quantity::resolve_player_count(
+                state,
+                filter,
+                player,
+                crate::game::quantity::QuantityContext {
+                    entering: None,
+                    source: source_id,
+                    trigger_source: None,
+                    recipient: None,
+                    scoped_player: None,
+                },
+            ) as usize
                 >= *minimum
         }
         // CR 702.131c: The city's blessing is a player designation that effects
@@ -1628,24 +1723,21 @@ fn target_filter_accepts_player(filter: &crate::types::ability::TargetFilter) ->
 
 fn target_ref_matches_spell_targets_filter(
     state: &crate::types::game_state::GameState,
-    context_source_id: crate::types::identifiers::ObjectId,
     target: &crate::types::ability::TargetRef,
     filter: &crate::types::ability::TargetFilter,
+    context: &super::filter::FilterContext,
 ) -> bool {
     use crate::types::ability::{TargetFilter, TargetRef};
     match target {
         TargetRef::Player(_) => target_filter_accepts_player(filter),
-        TargetRef::Object(object_id) => {
-            let ctx = super::filter::FilterContext::from_source(state, context_source_id);
-            match filter {
+        TargetRef::Object(object_id) => match filter {
+            TargetFilter::Player => false,
+            TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
                 TargetFilter::Player => false,
-                TargetFilter::Or { filters } => filters.iter().any(|branch| match branch {
-                    TargetFilter::Player => false,
-                    branch => super::filter::matches_target_filter(state, *object_id, branch, &ctx),
-                }),
-                _ => super::filter::matches_target_filter(state, *object_id, filter, &ctx),
-            }
-        }
+                branch => super::filter::matches_target_filter(state, *object_id, branch, context),
+            }),
+            _ => super::filter::matches_target_filter(state, *object_id, filter, context),
+        },
     }
 }
 
@@ -1703,21 +1795,21 @@ pub(crate) fn triggering_spell_targets(
 /// CR 608.2c + CR 603.2: Evaluate `TriggeringSpellTargetsFilter` against the
 /// triggering spell's committed targets at resolution time.
 ///
-/// `context_source_id` scopes filter-relative terms like `FilterProp::Another`:
-/// use the triggering spell id for `AbilityCondition`, and the trigger source id
-/// for `TriggerCondition` (Orvar — "other permanents you control").
+/// `context` scopes filter-relative terms like `FilterProp::Another`: an
+/// `AbilityCondition` uses its triggering spell, while a `TriggerCondition`
+/// carries the exact trigger source (Orvar — "other permanents you control").
 pub(crate) fn triggering_spell_targets_filter(
     state: &crate::types::game_state::GameState,
     spell_id: crate::types::identifiers::ObjectId,
     filter: &crate::types::ability::TargetFilter,
-    context_source_id: crate::types::identifiers::ObjectId,
+    context: &super::filter::FilterContext,
 ) -> bool {
     let Some(targets) = spell_cast_targets(state, spell_id) else {
         return false;
     };
-    targets.iter().any(|target| {
-        target_ref_matches_spell_targets_filter(state, context_source_id, target, filter)
-    })
+    targets
+        .iter()
+        .any(|target| target_ref_matches_spell_targets_filter(state, target, filter, context))
 }
 
 /// CR 601.3d + CR 702.8a: Validate, post-target, that every target-dependent
@@ -2445,6 +2537,242 @@ mod tests {
         state.battlefield_entries_this_turn.clear();
         enter_creature(&mut state, 4, opponent, &[Keyword::Flying]);
         assert!(!evaluate_condition(&state, player, source_id, &condition));
+    }
+
+    /// T24 (Step 8). CR 702.73a: a Changeling entrant is every creature type, so an
+    /// entry-ledger `TypeFilter::Subtype` read must route through the single authority
+    /// `subtype_matches_with_changeling` (`game/filter.rs:2719`) rather than a bare
+    /// `eq_ignore_ascii_case` over the pre-layer snapshot. Mirrors the sibling
+    /// `zone_change_record_matches_type_filter` (`game/filter.rs:2871-2878`). Drives the
+    /// production `evaluate_condition` → `battlefield_entry_matches_filter` seam.
+    ///
+    /// REVERT-PROBE: restoring the bare `eq_ignore_ascii_case` Subtype arm flips (a)
+    /// `true→false`. Cases (b)/(c)/(d)/(g) pass in BOTH builds and are the vacuity
+    /// controls — (a) and (b) differ ONLY in the subtype string, so the type/controller/
+    /// prop conjuncts are held constant and no discriminator is dominated by an upstream
+    /// conjunct. (e) flips if the host disjunct is dropped; (f) flips if `Another` is
+    /// bypassed, and its paired reach-guard proves the Changeling leg really matched.
+    #[test]
+    fn changeling_entry_ledger_matches_expanded_subtype() {
+        use crate::types::ability::TypedFilter;
+        use crate::types::card_type::Supertype;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+        // CR 205.3m: the runtime creature-type namespace Changeling expands into.
+        // "Equipment" is an artifact type and is deliberately absent.
+        state.all_creature_types = vec![
+            "Goblin".to_string(),
+            "Human".to_string(),
+            "Shapeshifter".to_string(),
+        ];
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Bbfu10 Ledger Reader".to_string(),
+            Zone::Battlefield,
+        );
+
+        let enter_creature = |state: &mut crate::types::game_state::GameState,
+                              card: u64,
+                              controller: PlayerId,
+                              subtypes: &[&str],
+                              supertypes: &[Supertype],
+                              keywords: &[Keyword]| {
+            let id = create_object(
+                state,
+                CardId(card),
+                controller,
+                "Bbfu10 Entrant".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes = subtypes.iter().map(|s| (*s).to_string()).collect();
+            obj.card_types.supertypes = supertypes.to_vec();
+            obj.keywords = keywords.to_vec();
+            record_battlefield_entry(state, id);
+            id
+        };
+
+        let condition = |subtype: &str, ctrl: ControllerRef, properties: Vec<FilterProp>| {
+            ParsedCondition::BattlefieldEntriesThisTurn {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .subtype(subtype.to_string())
+                        .controller(ctrl)
+                        .properties(properties),
+                ),
+                count: 1,
+            }
+        };
+
+        // Changeling entrant, printed subtype Shapeshifter only.
+        enter_creature(
+            &mut state,
+            2,
+            player,
+            &["Shapeshifter"],
+            &[],
+            &[Keyword::Changeling],
+        );
+
+        // (a) THE CLAIM — CR 702.73a expands the entry snapshot to every creature type.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(a) a Changeling entrant is a Goblin for the entry ledger (CR 702.73a)"
+        );
+        // (b) VACUITY CONTROL — differs from (a) only in the subtype string.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Shapeshifter", ControllerRef::You, vec![])
+            ),
+            "(b) the printed subtype must still match in both builds"
+        );
+        // (c) CR 205.3m gate — Changeling confers creature types only.
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Equipment", ControllerRef::You, vec![])
+            ),
+            "(c) Equipment is not in the creature-type catalog (CR 205.3m)"
+        );
+
+        // (d) negative sibling — no Changeling keyword, no expansion.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 3, player, &["Human"], &[], &[]);
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(d) a non-Changeling Human entrant is not a Goblin"
+        );
+
+        // (e) pins the `subtype_matches_host_supertype` disjunct: "Host" is a supertype,
+        // absent from both the record subtypes and the creature-type catalog.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(&mut state, 4, player, &[], &[Supertype::Host], &[]);
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Host", ControllerRef::You, vec![])
+            ),
+            "(e) Supertype::Host answers the `Host` subtype filter"
+        );
+
+        // (f) multi-authority: the new Subtype arm must compose with `FilterProp::Another`
+        // (CR 109.1), not short-circuit it. The Changeling entrant IS the source.
+        state.battlefield_entries_this_turn.clear();
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes = vec!["Shapeshifter".to_string()];
+            obj.keywords = vec![Keyword::Changeling];
+        }
+        record_battlefield_entry(&mut state, source_id);
+        enter_creature(&mut state, 5, player, &["Human"], &[], &[]);
+        // Reach-guard: without `Another`, the Changeling source DOES satisfy the Goblin leg,
+        // so the negative below is the `Another` exclusion firing, not a dead fixture.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(f-guard) the Changeling source itself matches Goblin when `Another` is absent"
+        );
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![FilterProp::Another])
+            ),
+            "(f) `Another` excludes the source, and the Human entrant is not a Goblin"
+        );
+
+        // (g) multi-authority: the controller gate (CR 109.5) still applies.
+        state.battlefield_entries_this_turn.clear();
+        enter_creature(
+            &mut state,
+            6,
+            opponent,
+            &["Shapeshifter"],
+            &[],
+            &[Keyword::Changeling],
+        );
+        // Reach-guard: the same record DOES match under `Opponent`.
+        assert!(
+            evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::Opponent, vec![])
+            ),
+            "(g-guard) the opponent's Changeling entrant matches under ControllerRef::Opponent"
+        );
+        assert!(
+            !evaluate_condition(
+                &state,
+                player,
+                source_id,
+                &condition("Goblin", ControllerRef::You, vec![])
+            ),
+            "(g) `ControllerRef::You` rejects an opponent-controlled entrant"
+        );
+    }
+
+    /// T25 (Step 8c). CR 403.3: permanents exist only on the battlefield, so a
+    /// battlefield-entry record is never an instant or a sorcery — `false` is the
+    /// CORRECT verdict there, not a fail-closed one, and `Non(Instant)` correctly
+    /// inverts to `true`. `entry_type_filter_matches` is now exhaustive, so the
+    /// compiler is the drift gate; this pins the semantics that justify the arm and
+    /// the doc claim at `ledger_filter_is_evaluable`.
+    ///
+    /// REVERT-PROBE: changing the arm to `true` flips both assertions.
+    #[test]
+    fn entry_type_filter_answers_instant_false_per_cr_403_3() {
+        let record = BattlefieldEntryRecord {
+            object_id: ObjectId(10),
+            name: "Bbfu10 Permanent".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+            controller: PlayerId(0),
+        };
+
+        assert!(
+            !entry_type_filter_matches(&record, &TypeFilter::Instant, &[]),
+            "CR 403.3: a battlefield-entry record is never an instant"
+        );
+        assert!(
+            entry_type_filter_matches(
+                &record,
+                &TypeFilter::Non(Box::new(TypeFilter::Instant)),
+                &[]
+            ),
+            "CR 403.3: `Non(Instant)` is correctly true for every permanent"
+        );
     }
 
     /// MSH Wave 2 (Fixer, Techno Terror): the elided "[type] entered under your
@@ -3196,7 +3524,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Grizzly Bears".to_string(),
                 core_types: vec![CoreType::Creature],
                 ..crate::types::game_state::ZoneChangeRecord::test_minimal(
@@ -3231,6 +3559,7 @@ mod tests {
                 from_zone: Zone::Hand,
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
+                spell_object_id: None,
             }]),
         );
 
@@ -3266,6 +3595,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -3279,6 +3609,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -3292,6 +3623,7 @@ mod tests {
                     from_zone: Zone::Hand,
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
+                    spell_object_id: None,
                 },
             ]),
         );
@@ -3315,7 +3647,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Skeleton".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Skeleton".to_string()],
@@ -3336,7 +3668,7 @@ mod tests {
 
         state
             .zone_changes_this_turn
-            .push(crate::types::game_state::ZoneChangeRecord {
+            .push_back(crate::types::game_state::ZoneChangeRecord {
                 name: "Vampire".to_string(),
                 core_types: vec![CoreType::Creature],
                 subtypes: vec!["Vampire".to_string()],
@@ -3390,7 +3722,7 @@ mod tests {
         for i in 0..3 {
             state
                 .zone_changes_this_turn
-                .push(crate::types::game_state::ZoneChangeRecord {
+                .push_back(crate::types::game_state::ZoneChangeRecord {
                     name: format!("Card {}", i),
                     ..crate::types::game_state::ZoneChangeRecord::test_minimal(
                         ObjectId(100 + i),
@@ -4538,5 +4870,118 @@ mod tests {
             Phase::DeclareBlockers,
             Phase::CombatDamage,
         );
+    }
+
+    /// T23 — the ANTI-DRIFT BINDER for [`ledger_filter_is_evaluable`]'s allow-list.
+    /// It replaces a 98-arm exhaustive `match`: the two functions are driven AS A
+    /// PAIR against one record that positively satisfies every allowed prop, so a
+    /// prop in the allow-list that the matcher does not actually answer fails here.
+    ///
+    /// REVERT-PROBES, both measured:
+    /// - add `FilterProp::NonToken` to the allow-list → the paired matcher drive
+    ///   returns `false` while the guard says `true` → FAIL.
+    /// - delete an allowed prop from the list → its paired row FAILS on the guard side.
+    #[test]
+    fn ledger_guard_agrees_with_matcher() {
+        let player = PlayerId(0);
+        let source_id = ObjectId(99);
+        // Positively satisfies all four answerable props: green, on the
+        // battlefield, flying, and not the ability source. Also legendary and
+        // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
+        let record = BattlefieldEntryRecord {
+            object_id: ObjectId(10),
+            name: "Bbfu10 Binder Entrant".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![],
+            supertypes: vec![Supertype::Legendary],
+            colors: vec![ManaColor::Green],
+            keywords: vec![Keyword::Flying],
+            controller: player,
+        };
+        let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
+            TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller,
+                properties,
+            })
+        };
+
+        // ALLOWED — the guard says yes AND the matcher really answers yes.
+        for prop in [
+            FilterProp::HasColor {
+                color: ManaColor::Green,
+            },
+            FilterProp::InZone {
+                zone: Zone::Battlefield,
+            },
+            FilterProp::WithKeyword {
+                value: Keyword::Flying,
+            },
+            FilterProp::Another,
+        ] {
+            let filter = typed(vec![prop.clone()], None);
+            assert!(
+                ledger_filter_is_evaluable(&filter),
+                "{prop:?} is answered by the matcher, so the allow-list must name it"
+            );
+            assert!(
+                battlefield_entry_matches_filter(&record, &filter, player, &[], Some(source_id)),
+                "{prop:?} must MATCH this record — otherwise the allow-list claims an \
+                 evaluability the matcher does not have"
+            );
+        }
+
+        // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
+        // refuse. (The record IS legendary and nontoken, so the matcher's `false`
+        // for those is the fail-closed arm, not a genuine mismatch.)
+        for prop in [
+            FilterProp::NonToken,
+            FilterProp::Token,
+            FilterProp::Tapped,
+            FilterProp::FaceDown,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ] {
+            assert!(
+                !ledger_filter_is_evaluable(&typed(vec![prop.clone()], None)),
+                "{prop:?} is not answerable from a BattlefieldEntryRecord"
+            );
+        }
+
+        // Structure: monotone connectives recurse; every leaf must be answerable.
+        let bare = typed(vec![], None);
+        let green = typed(
+            vec![FilterProp::HasColor {
+                color: ManaColor::Green,
+            }],
+            None,
+        );
+        let nontoken = typed(vec![FilterProp::NonToken], None);
+        let tapped = typed(vec![FilterProp::Tapped], None);
+        assert!(ledger_filter_is_evaluable(&TargetFilter::Any));
+        assert!(ledger_filter_is_evaluable(&TargetFilter::Or {
+            filters: vec![bare.clone(), green]
+        }));
+        assert!(!ledger_filter_is_evaluable(&TargetFilter::Or {
+            filters: vec![bare.clone(), nontoken]
+        }));
+        assert!(!ledger_filter_is_evaluable(&TargetFilter::And {
+            filters: vec![bare.clone(), tapped]
+        }));
+        // CR 608.2i: `Not` is anti-monotone and stays fail-closed at the matcher.
+        assert!(!ledger_filter_is_evaluable(&TargetFilter::Not {
+            filter: Box::new(bare)
+        }));
+
+        // Controller: `entry_controller_matches` answers exactly You / Opponent.
+        assert!(ledger_filter_is_evaluable(&typed(
+            vec![],
+            Some(ControllerRef::You)
+        )));
+        assert!(ledger_filter_is_evaluable(&typed(
+            vec![],
+            Some(ControllerRef::Opponent)
+        )));
     }
 }

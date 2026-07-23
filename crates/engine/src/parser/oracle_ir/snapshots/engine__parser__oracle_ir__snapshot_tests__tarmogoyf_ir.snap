@@ -22,31 +22,16 @@ expression: "&ir"
         "fragment": "~'s power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "Continuous",
-          "affected": {
-            "type": "SelfRef"
-          },
-          "modifications": [
-            {
-              "type": "SetDynamicPower",
-              "value": {
-                "type": "Ref",
-                "qty": {
-                  "type": "DistinctCardTypes",
-                  "source": {
-                    "type": "Zone",
-                    "zone": "Graveyard",
-                    "scope": "All"
-                  }
-                }
-              }
+        "Static": {
+          "definition": {
+            "mode": "Continuous",
+            "affected": {
+              "type": "SelfRef"
             },
-            {
-              "type": "SetDynamicToughness",
-              "value": {
-                "type": "Offset",
-                "inner": {
+            "modifications": [
+              {
+                "type": "SetDynamicPower",
+                "value": {
                   "type": "Ref",
                   "qty": {
                     "type": "DistinctCardTypes",
@@ -56,17 +41,36 @@ expression: "&ir"
                       "scope": "All"
                     }
                   }
-                },
-                "offset": 1
+                }
+              },
+              {
+                "type": "SetDynamicToughness",
+                "value": {
+                  "type": "Offset",
+                  "inner": {
+                    "type": "Ref",
+                    "qty": {
+                      "type": "DistinctCardTypes",
+                      "source": {
+                        "type": "Zone",
+                        "zone": "Graveyard",
+                        "scope": "All"
+                      }
+                    }
+                  },
+                  "offset": 1
+                }
               }
-            }
-          ],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": true,
-          "description": "~'s power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1."
+            ],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": true,
+            "description": "~'s power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1."
+          },
+          "source_text": "~'s power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.",
+          "body_ir": null
         }
       }
     }

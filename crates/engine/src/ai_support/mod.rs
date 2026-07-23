@@ -19,7 +19,8 @@ use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind, PendingMulliganAction, WaitingFor,
+    AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, PayCostKind,
+    PendingMulliganAction, PriorityPassingMode, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -27,6 +28,7 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
@@ -51,12 +53,34 @@ pub fn validated_candidate_actions(state: &GameState) -> Vec<CandidateAction> {
     validated_candidate_actions_with_probe(state, None)
 }
 
+/// Return legal candidates owned by one semantic decision-maker. Candidates
+/// without an actor remain shared; actor-bearing candidates are validated as
+/// that owner's authorized submitter before this filter is applied.
+pub fn validated_candidate_actions_for_semantic_owner(
+    state: &GameState,
+    semantic_owner: PlayerId,
+) -> Vec<CandidateAction> {
+    let pipeline = FilterPipeline::default_pipeline();
+    let mut actions = pipeline.apply(
+        state,
+        candidates::candidate_actions_for_semantic_owner_with_probe(state, semantic_owner, None),
+    );
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
+}
+
 pub fn validated_candidate_actions_with_probe(
     state: &GameState,
     probe: Option<&crate::game::casting::PriorityCastProbe>,
 ) -> Vec<CandidateAction> {
     let pipeline = FilterPipeline::default_pipeline();
-    pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe)
+    let mut actions =
+        pipeline.apply_with_probe(state, candidate_actions_with_probe(state, probe), probe);
+    // Issue #4878: candidate enumeration must not depend on HashSet/HashMap
+    // iteration order leaking into AI tie-breaking downstream. Ordered via the
+    // allocation-free `GameAction::cmp_stable` total order (not `Debug` strings).
+    actions.sort_by(|a, b| a.action.cmp_stable(&b.action));
+    actions
 }
 
 /// CR 702.51a / 702.66a / 702.126a: During `ManaPayment`, every structurally
@@ -144,7 +168,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::Transform { object_id })
         | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
-        | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::TapLandForMana {
+                selection:
+                    crate::types::mana::ManaSourceSelection {
+                        source: crate::types::identifiers::ObjectIncarnationRef { object_id, .. },
+                        ..
+                    },
+            },
+        )
         | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
         | (
             WaitingFor::Priority { .. },
@@ -346,6 +379,10 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
+        | (
+            WaitingFor::ChooseFromZoneOpponentChooser { .. },
+            GameAction::ChooseZoneOpponentChooser { .. },
+        )
         | (WaitingFor::ClashCardPlacement { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::OptionalCostChoice { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::SpliceOffer { .. }, GameAction::RespondToSpliceOffer { .. })
@@ -413,8 +450,16 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         (
             WaitingFor::ScryChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, None),
+        (
+            WaitingFor::ArrangePlanarDeckTopChoice {
+                player: _,
+                cards,
+                keep_on_top,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => selection_mismatch(chosen, cards, Some(*keep_on_top)),
+        (
             WaitingFor::SurveilChoice { player: _, cards },
             GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, None),
@@ -520,10 +565,11 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             },
             GameAction::SelectCards { .. },
         ) => true,
-        // CR 118.3: Sacrifice honors the [min_count, count] range.
+        // CR 118.3: Sacrifice and optional zone-exile costs honor the
+        // [min_count, count] range.
         (
             WaitingFor::PayCost {
-                kind: PayCostKind::Sacrifice,
+                kind: PayCostKind::Sacrifice | PayCostKind::ExileFromZone { .. },
                 choices,
                 count,
                 min_count,
@@ -628,15 +674,33 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _, cards, ..
             },
             GameAction::SelectCards { cards: chosen },
-        )
-        | (
+        ) => selection_mismatch(chosen, cards, Some(1)),
+        (
             WaitingFor::WardSacrificeChoice {
                 player: _,
                 permanents: cards,
+                min_total_power,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
-        ) => selection_mismatch(chosen, cards, Some(1)),
+        ) => {
+            selection_mismatch(
+                chosen,
+                cards,
+                if min_total_power.is_some() {
+                    None
+                } else {
+                    Some(1)
+                },
+            ) || min_total_power.is_some_and(|threshold| {
+                chosen
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .map(|object| object.power.unwrap_or(0))
+                    .sum::<i32>()
+                    < threshold
+            })
+        }
         (
             WaitingFor::ManifestDreadChoice {
                 player: _, cards, ..
@@ -750,7 +814,8 @@ fn activate_ability_is_meaningful_priority(
     state.objects.get(&source_id).is_some_and(|obj| {
         obj.abilities.get(ability_index).is_some_and(|ability| {
             !mana_abilities::is_mana_ability(ability)
-                || mana_sources::mana_ability_penalty(ability).is_meaningful_priority_activation()
+                || mana_sources::object_mana_ability_penalty(state, source_id, ability)
+                    .is_meaningful_priority_activation()
         })
     })
 }
@@ -779,10 +844,10 @@ fn resolve_mana_option_for_trigger_probe(
     let mut probe = state.clone();
     let mut events = Vec::new();
 
-    for (aura_id, override_value) in &option.taps_for_mana_overrides {
+    for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
         probe
             .pending_taps_for_mana_overrides
-            .insert(*aura_id, override_value.clone());
+            .insert(trigger_ref.clone(), override_value.clone());
     }
 
     if let Some(ability_index) = option.ability_index {
@@ -912,14 +977,14 @@ fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
     let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
 
-    activatable_object_mana_actions_for_player(state, player)
+    mana_sources::activatable_mana_actions_for_player(state, player)
         .iter()
         .any(|action| match action {
-            GameAction::TapLandForMana { object_id } => {
+            GameAction::TapLandForMana { selection } => {
                 tap_land_action_would_queue_non_mana_trigger(
                     state,
                     player,
-                    *object_id,
+                    selection.source.object_id,
                     &aura_sources,
                     &mana_activation_gates,
                 )
@@ -1119,7 +1184,7 @@ fn sacrifice_for_mana_enables_followup(state: &GameState, player: PlayerId) -> b
         let case3 = obj
             .trigger_definitions
             .iter_all()
-            .any(trigger_fires_on_leaving_battlefield);
+            .any(|entry| trigger_fires_on_leaving_battlefield(entry.definition()));
         case2 || case3
     })
 }
@@ -1181,7 +1246,7 @@ fn beneficial_mana_tap_trigger_hold(
         // component is trivially satisfied); an `ActivateAbility` may be a
         // non-tap mana ability, so consult the ability's cost.
         let mana_source = match action {
-            GameAction::TapLandForMana { object_id } => *object_id,
+            GameAction::TapLandForMana { selection } => selection.source.object_id,
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
@@ -1203,7 +1268,9 @@ fn beneficial_mana_tap_trigger_hold(
             let Some(obj) = state.objects.get(&trigger_source) else {
                 return false;
             };
+            let source_context = triggers::trigger_source_context_for_latch(state, obj);
             obj.trigger_definitions.iter_all().any(|trigger| {
+                let trigger = trigger.definition();
                 if !mana_sources::is_non_mana_tap_trigger(trigger)
                     || !mana_sources::trigger_chain_benefits_controller(trigger)
                 {
@@ -1220,12 +1287,12 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             mana_source,
-                            trigger_source,
+                            &source_context,
                         ) && crate::game::trigger_matchers::valid_player_matches(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     // CR 605.1b: a `ManaAdded` trigger has no card filter
@@ -1237,7 +1304,7 @@ fn beneficial_mana_tap_trigger_hold(
                             trigger,
                             state,
                             player,
-                            trigger_source,
+                            &source_context,
                         )
                     }
                     _ => false,
@@ -1274,6 +1341,10 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         WaitingFor::Priority { player } => *player,
         _ => return false,
     };
+    // CR 723.5: a player controlling another player makes that player's
+    // decisions. Preferences belong to the authenticated decision maker, while
+    // rules-facing priority checks continue to use the semantic priority seat.
+    let mode_owner = crate::game::turn_control::authorized_submitter_for_player(state, player);
 
     // Lazy, compute-once locals shared across rungs (§C):
     //  - `cast_probe`: one `PriorityCastProbe` built when the first castability
@@ -1288,19 +1359,18 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     let mut grouped_mana_priority: Option<bool> = None;
 
     // A phase stop on the current phase (empty stack = initial priority window)
-    // means the player asked to pause here — never recommend auto-pass. Moved
+    // means the authorized decision maker asked to pause here — never recommend
+    // auto-pass. Moved
     // from the frontend so the engine is the single authority. Disjoint from the
     // CR 117.3d yield short-circuit below, which requires a NON-empty stack
     // (`stack.back()` is `Some`); this branch requires an EMPTY stack.
     //
-    // Seat note: this gate keys on the `WaitingFor::Priority` player bound
-    // above; the frontend gate it replaced keyed on `state.priority_player`.
-    // CR 723.5: while controlling another player, one player makes all of that
-    // player's choices — so the priority holder and `priority_player` can be
-    // different seats. With an empty stack those two seats diverge only in that
-    // turn-control case, and this divergence is accepted (the checked seat is
-    // the one actually being asked to act).
-    if state.stack.is_empty() && state.phase_stop_hit(player) {
+    // CR 723.5: while controlling another player, the controller makes the
+    // controlled player's choices. Preference ownership therefore follows the
+    // same authorized submitter as `PriorityPassingMode`; consulting the
+    // controlled seat here would both honor the wrong user's preference and
+    // reveal it through the viewer-scoped recommendation bit.
+    if state.stack.is_empty() && state.phase_stop_hit(mode_owner) {
         return false;
     }
 
@@ -1315,6 +1385,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
         .is_some_and(|top| state.is_priority_yielded(player, top))
     {
         return true;
+    }
+
+    if state.priority_passing_mode(mode_owner) == PriorityPassingMode::SkipLowUseWindows {
+        // CR 117.3a + CR 503.1 + CR 504.2 + CR 513.1: the active player gets
+        // the ordinary priority window in these steps after turn-based actions
+        // and beginning-of-step triggers have been handled. This opt-in mode is
+        // opt-in pre-commitment to pass these empty-stack windows even when a
+        // meaningful instant-speed action exists. CR 117.3d/117.4 remain
+        // authoritative because the frontend still submits PassPriority.
+        if state.stack.is_empty()
+            && player == state.active_player
+            && matches!(state.phase, Phase::Upkeep | Phase::Draw | Phase::End)
+        {
+            return true;
+        }
     }
 
     // Rung 4 — MTGA-style: auto-pass when the player's own spell/ability is on
@@ -1372,9 +1457,7 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // `activatable_object_mana_actions` proxy while dropping the false HOLD.
     // Meaningful non-mana activated abilities, grouped mana that would queue
     // non-mana triggers, and issue #544 sac-for-mana on an opponent's turn are
-    // still held below by the meaningful-action/sac gates; a dedicated
-    // `has_feasibly_activatable_ability` opponent-turn seam (the ability
-    // analogue of this predicate) is deferred as future work.
+    // held below by the same engine-authoritative legality predicates.
     if state.active_player != player {
         let probe: &_ = cast_probe.get_or_insert_with(|| {
             crate::game::casting::PriorityCastProbe::from_flushed_state(state.clone(), player)
@@ -1452,6 +1535,21 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     }
 
     false
+}
+
+/// Viewer-scoped auto-pass recommendation for transport adapters.
+///
+/// CR 117.1 + CR 723.5: only a viewer authorized to submit the current
+/// semantic player's decision may receive a positive recommendation. The
+/// authoritative helper still resolves which player's standing preference
+/// applies, including turn-control redirection.
+pub fn auto_pass_recommended_for_viewer(
+    state: &GameState,
+    viewer: PlayerId,
+    actions: &[GameAction],
+) -> bool {
+    crate::game::turn_control::is_authorized_submitter(state, viewer)
+        && auto_pass_recommended(state, actions)
 }
 
 /// Returns the legal actions for the current game state.
@@ -1579,8 +1677,29 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         _ => (state, None),
     };
 
-    let actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
+    let mut actions: Vec<GameAction> = target_selection_actions_without_simulation(state)
         .unwrap_or_else(|| flat_priority_actions_with_probe(state, priority_probe));
+
+    // This preference-setting action is intentionally excluded from AI candidate
+    // generation: it changes future prompt behavior rather than making a tactical
+    // game decision. It remains a legal player action, however, and must be present
+    // in the engine snapshot so a queued UI choice is not discarded as stale.
+    if matches!(
+        &state.waiting_for,
+        WaitingFor::OptionalEffectChoice {
+            may_trigger_key: Some(_),
+            ..
+        }
+    ) {
+        actions.extend([
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Accept,
+            },
+            GameAction::DecideOptionalEffectAndRemember {
+                choice: AutoMayChoice::Decline,
+            },
+        ]);
+    }
 
     // Build spell costs map. The frontend display layer needs the
     // engine-effective cost (after Affinity / ReduceCost / commander tax / etc.)
@@ -1642,6 +1761,34 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     }
 
     (actions, spell_costs, grouped)
+}
+
+/// Engine-authored action sequence for the "tap all lands" mana-payment shortcut.
+///
+/// This is presentation policy, not a new game action: preserve battlefield order
+/// and include a source only when it has exactly one legal land-mana action. A
+/// source with multiple legal mana rows is deliberately omitted because choosing
+/// among them is a player decision, not a deterministic shortcut.
+pub fn mana_payment_shortcut_actions(
+    state: &GameState,
+    legal_actions_by_object: &HashMap<ObjectId, Vec<GameAction>>,
+) -> Vec<GameAction> {
+    if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+        return Vec::new();
+    }
+
+    state
+        .battlefield
+        .iter()
+        .filter_map(|object_id| {
+            let mut options = legal_actions_by_object
+                .get(object_id)?
+                .iter()
+                .filter(|action| matches!(action, GameAction::TapLandForMana { .. }));
+            let action = options.next()?;
+            options.next().is_none().then(|| action.clone())
+        })
+        .collect()
 }
 
 /// Returns `legal_actions_full` scoped to a specific viewer. Empty tuple if
@@ -1743,113 +1890,7 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    activatable_object_mana_actions_for_player(state, player)
-}
-
-fn can_use_tap_land_shortcut(
-    state: &GameState,
-    object_id: ObjectId,
-    option: &mana_sources::ManaSourceOption,
-) -> bool {
-    if option.atomic_combination.is_some() {
-        return false;
-    }
-    let Some(ability_index) = option.ability_index else {
-        return true;
-    };
-    state
-        .objects
-        .get(&object_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
-        .is_some_and(|ability| mana_abilities::mana_sub_cost_of(&ability.cost).is_none())
-}
-
-pub(super) fn activatable_object_mana_actions_for_player(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<GameAction> {
-    // Loop-invariant hoist: the TapsForMana trigger-source list is identical for
-    // every land in this board-global sweep, so compute it once instead of
-    // re-scanning the whole battlefield per land inside `land_mana_options`.
-    let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
-    let mut actions = Vec::new();
-    for &obj_id in &state.battlefield {
-        let Some(obj) = state.objects.get(&obj_id) else {
-            continue;
-        };
-        if obj.controller != player {
-            continue;
-        }
-
-        let mut handled_indices = HashSet::new();
-        if obj.card_types.core_types.contains(&CoreType::Land) {
-            let options = mana_sources::activatable_land_mana_options_indexed_gated(
-                state,
-                obj_id,
-                player,
-                &aura_sources,
-                &mana_activation_gates,
-            );
-            if options.len() == 1
-                && options
-                    .first()
-                    .is_some_and(|option| can_use_tap_land_shortcut(state, obj_id, option))
-            {
-                actions.push(GameAction::TapLandForMana { object_id: obj_id });
-                if let Some(ability_index) = options[0].ability_index {
-                    handled_indices.insert(ability_index);
-                }
-            } else {
-                for option in options {
-                    if let Some(ability_index) = option.ability_index {
-                        if handled_indices.insert(ability_index) {
-                            actions.push(GameAction::ActivateAbility {
-                                source_id: obj_id,
-                                ability_index,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        for (idx, ability) in obj.abilities.iter().enumerate() {
-            if handled_indices.contains(&idx) {
-                continue;
-            }
-            if ability.kind != AbilityKind::Activated || !mana_abilities::is_mana_ability(ability) {
-                continue;
-            }
-            // CR 302.6 + CR 602.5a: Only tap-cost abilities are gated by tapped state and
-            // summoning sickness. Free or mana-cost-only mana abilities are always
-            // activatable. The summoning-sickness check honors the
-            // CanActivateAbilitiesAsThoughHaste static (Tyvar) via the shared predicate.
-            if mana_sources::has_tap_component(&ability.cost)
-                && (obj.tapped
-                    || crate::game::restrictions::summoning_sick_for_tap_ability(state, obj))
-            {
-                continue;
-            }
-            // CR 605.3b: Activation restrictions still apply to mana abilities.
-            if mana_sources::activation_condition_satisfied(state, player, obj_id, idx, ability)
-                && mana_abilities::can_activate_mana_ability_now_gated(
-                    state,
-                    player,
-                    obj_id,
-                    idx,
-                    ability,
-                    &mana_activation_gates,
-                )
-            {
-                actions.push(GameAction::ActivateAbility {
-                    source_id: obj_id,
-                    ability_index: idx,
-                });
-            }
-        }
-    }
-    actions
+    mana_sources::activatable_mana_actions_for_player(state, player)
 }
 
 #[cfg(test)]
@@ -1875,8 +1916,8 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{
         CastingVariant, ConvokeMode, DistributionUnit, GameState, MulliganDecisionEntry,
-        MulliganDecisionPhase, PendingCast, PendingMulliganAction, StackEntry, StackEntryKind,
-        WaitingFor,
+        MulliganDecisionPhase, PendingCast, PendingMulliganAction, PriorityPassingMode, StackEntry,
+        StackEntryKind, WaitingFor,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::{Keyword, KeywordKind};
@@ -1907,6 +1948,129 @@ mod tests {
         state
     }
 
+    fn meaningful_priority_actions() -> Vec<GameAction> {
+        vec![
+            GameAction::PassPriority,
+            GameAction::TurnFaceUp {
+                object_id: ObjectId(999),
+                x: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn low_use_window_mode_fast_passes_only_own_empty_upkeep_draw_and_end() {
+        for phase in [Phase::Upkeep, Phase::Draw, Phase::End] {
+            let mut state = setup_priority();
+            state.phase = phase;
+            let actions = meaningful_priority_actions();
+
+            assert!(
+                !super::auto_pass_recommended(&state, &actions),
+                "Standard must preserve the meaningful-action hold in {phase:?}"
+            );
+            state
+                .priority_passing_modes
+                .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+            assert!(
+                super::auto_pass_recommended(&state, &actions),
+                "the low-use-window mode should pass the active player's empty {phase:?} window"
+            );
+        }
+
+        let mut precombat = setup_priority();
+        precombat.phase = Phase::PreCombatMain;
+        precombat
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &precombat,
+            &meaningful_priority_actions()
+        ));
+
+        let mut opponent_turn = setup_opponent_priority(Phase::End);
+        opponent_turn
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &opponent_turn,
+            &meaningful_priority_actions()
+        ));
+
+        let mut non_priority = setup_priority();
+        non_priority.waiting_for = WaitingFor::GameOver {
+            winner: Some(PlayerId(0)),
+        };
+        non_priority
+            .priority_passing_modes
+            .insert(PlayerId(0), PriorityPassingMode::SkipLowUseWindows);
+        assert!(!super::auto_pass_recommended(
+            &non_priority,
+            &meaningful_priority_actions()
+        ));
+    }
+
+    #[test]
+    fn low_use_window_mode_uses_only_the_authorized_submitters_phase_stops() {
+        let stop = PhaseStop {
+            phase: Phase::End,
+            scope: PhaseStopScope::AllTurns,
+        };
+        let mut state = setup_priority();
+        state.phase = Phase::End;
+        state.turn_decision_controller = Some(PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+        let actions = meaningful_priority_actions();
+
+        assert!(super::auto_pass_recommended(&state, &actions));
+        state.phase_stops.insert(PlayerId(0), vec![stop]);
+        assert!(
+            super::auto_pass_recommended(&state, &actions),
+            "the controlled seat's private stop must not affect its controller"
+        );
+        state.phase_stops.clear();
+        state.phase_stops.insert(PlayerId(1), vec![stop]);
+        assert!(
+            !super::auto_pass_recommended(&state, &actions),
+            "the authorized controller's stop must suppress the recommendation"
+        );
+        state.phase_stops.clear();
+        state.phase_stops.insert(PlayerId(2), vec![stop]);
+        assert!(super::auto_pass_recommended(&state, &actions));
+    }
+
+    #[test]
+    fn viewer_wrapper_reaches_low_use_window_mode_only_for_authorized_submitter() {
+        let mut state = setup_priority();
+        state.phase = Phase::End;
+        state.turn_decision_controller = Some(PlayerId(1));
+        state.priority_player = PlayerId(1);
+        state
+            .priority_passing_modes
+            .insert(PlayerId(1), PriorityPassingMode::SkipLowUseWindows);
+        let actions = meaningful_priority_actions();
+
+        assert!(super::auto_pass_recommended(&state, &actions));
+        assert!(super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(1),
+            &actions
+        ));
+        assert!(!super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(0),
+            &actions
+        ));
+        assert!(!super::auto_pass_recommended_for_viewer(
+            &state,
+            PlayerId(2),
+            &actions
+        ));
+    }
+
     fn create_land(state: &mut GameState, name: &str, subtypes: &[&str]) -> ObjectId {
         let id = create_object(
             state,
@@ -1921,6 +2085,18 @@ mod tests {
             .subtypes
             .extend(subtypes.iter().map(|subtype| (*subtype).to_string()));
         id
+    }
+
+    fn bucket_has_tap_land(
+        grouped: &HashMap<ObjectId, Vec<GameAction>>,
+        object_id: ObjectId,
+    ) -> bool {
+        grouped.get(&object_id).is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == object_id)
+            })
+        })
     }
 
     fn add_fixed_mana_ability(
@@ -2212,6 +2388,7 @@ mod tests {
             player: PlayerId(1),
             valid_attacker_ids: Vec::new(),
             valid_attack_targets: Vec::new(),
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
         // Acting player gets the full result (matches `legal_actions_full`).
@@ -2556,41 +2733,27 @@ mod tests {
         let (flat, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            !bucket_has(
-                &grouped,
-                fetch,
-                &GameAction::TapLandForMana { object_id: fetch },
-            ),
+            !bucket_has_tap_land(&grouped, fetch),
             "fetch land with no mana-producing subtype or explicit mana ability must not be tappable"
         );
         assert!(
-            bucket_has(
-                &grouped,
-                forest,
-                &GameAction::TapLandForMana { object_id: forest },
-            ),
+            bucket_has_tap_land(&grouped, forest),
             "subtype-only basic land fallback must remain tappable"
         );
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: blue_idx,
-            },
-        ));
-        assert!(bucket_has(
-            &grouped,
-            dual,
-            &GameAction::ActivateAbility {
-                source_id: dual,
-                ability_index: black_idx,
-            },
-        ));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(blue_idx))
+        )));
+        assert!(grouped.get(&dual).is_some_and(|actions| actions.iter().any(
+            |action| matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == dual
+                    && selection.ability_index == Some(black_idx))
+        )));
         assert!(
             !flat
                 .iter()
-                .any(|action| matches!(action, GameAction::TapLandForMana { object_id } if *object_id == forest)),
+                .any(|action| matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == forest)),
             "flat legal actions stay free of land mana actions"
         );
         assert!(
@@ -2599,6 +2762,33 @@ mod tests {
                 .any(|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == dual)),
             "flat legal actions stay free of explicit mana abilities"
         );
+    }
+
+    #[test]
+    fn mana_payment_shortcut_preserves_battlefield_order_and_omits_ambiguous_sources() {
+        let mut state = setup_priority();
+        let forest = create_land(&mut state, "Forest", &["Forest"]);
+        let dual = create_land(&mut state, "Underground Sea", &[]);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Blue);
+        add_fixed_mana_ability(&mut state, dual, ManaColor::Black);
+        let mountain = create_land(&mut state, "Mountain", &["Mountain"]);
+        set_dummy_pending_cast(&mut state);
+        state.waiting_for = WaitingFor::ManaPayment {
+            player: PlayerId(0),
+            convoke_mode: None,
+        };
+
+        let (_, _, grouped) = legal_actions_full(&state);
+        let shortcut = super::mana_payment_shortcut_actions(&state, &grouped);
+        let sources: Vec<_> = shortcut
+            .iter()
+            .map(|action| match action {
+                GameAction::TapLandForMana { selection } => selection.source.object_id,
+                other => panic!("unexpected shortcut action: {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(sources, vec![forest, mountain]);
     }
 
     #[test]
@@ -2714,14 +2904,11 @@ mod tests {
         let (_, _, grouped) = legal_actions_full(&state);
 
         assert!(
-            bucket_has(
-                &grouped,
-                skycloud,
-                &GameAction::ActivateAbility {
-                    source_id: skycloud,
-                    ability_index: 0,
-                },
-            ),
+            grouped.get(&skycloud).is_some_and(|actions| actions.iter().any(
+                |action| matches!(action, GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == skycloud
+                        && selection.ability_index == Some(0))
+            )),
             "Skycloud Expanse should be manually activatable when another mana source can pay its {{1}} cost",
         );
     }
@@ -2838,11 +3025,7 @@ mod tests {
             let (_, _, grouped) = legal_actions_full(&state);
 
             assert!(
-                bucket_has(
-                    &grouped,
-                    forest,
-                    &GameAction::TapLandForMana { object_id: forest },
-                ),
+                bucket_has_tap_land(&grouped, forest),
                 "mana actions must be exposed during {:?}",
                 state.waiting_for
             );
@@ -2913,6 +3096,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2), ObjectId(3)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2952,6 +3136,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -2982,6 +3167,7 @@ mod tests {
         let choices = vec![ObjectId(1), ObjectId(2)];
         state.waiting_for = WaitingFor::SearchChoice {
             player: PlayerId(0),
+            library_owner: None,
             cards: choices.clone(),
             count: 2,
             reveal: false,
@@ -3334,6 +3520,104 @@ mod tests {
                 &super::flat_priority_actions(runner.state())
             ),
             "castable instant on your own turn → hold via own-turn castability rung"
+        );
+    }
+
+    /// Issue #4387: The Unbeatable Squirrel Girl's controller-owned,
+    /// mana-costed non-mana activated ability is a meaningful opponent-turn
+    /// priority action. The production action surfaces must expose it, auto-pass
+    /// must hold from that exposed action, and the submitted activation must
+    /// resolve through the public pipeline.
+    #[test]
+    fn squirrel_girl_activation_submits_and_resolves_on_opponents_turn() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        const SQUIRREL_GIRL_ORACLE: &str = "Do You Like Squirrels? — Whenever The Unbeatable Squirrel Girl enters or attacks, create a 1/1 green Squirrel creature token.\nI LOVE Squirrels! — {1}{G}{G}{G}: Create X 1/1 green Squirrel creature tokens, where X is the number of Squirrels you control.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let source = scenario
+            .add_creature(P0, "The Unbeatable Squirrel Girl", 4, 4)
+            .as_legendary()
+            .with_subtypes(vec!["Squirrel", "Human", "Hero"])
+            .from_oracle_text(SQUIRREL_GIRL_ORACLE)
+            .id();
+
+        let mut runner = scenario.build();
+        let ability_index = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Squirrel Girl must parse its activated ability");
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+
+        let action = GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+        };
+        let flat = super::flat_priority_actions(runner.state());
+        assert!(
+            flat.contains(&action),
+            "controller-owned Squirrel Girl activation must appear in the flat action list"
+        );
+        assert!(
+            bucket_has(&legal_actions_full(runner.state()).2, source, &action),
+            "controller-owned Squirrel Girl activation must appear in legal_actions_by_object"
+        );
+        assert!(
+            !super::auto_pass_recommended(runner.state(), &flat),
+            "mana-costed non-mana activation on opponent's turn -> hold"
+        );
+
+        let before = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        let outcome = runner.activate(source, ability_index).resolve();
+        let after = outcome
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.zone == Zone::Battlefield
+                    && object.controller == P0
+                    && object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Squirrel")
+            })
+            .count();
+        assert_eq!(
+            after,
+            before + 1,
+            "submitted opponent-turn activation must resolve and create one Squirrel token"
         );
     }
 
@@ -4523,6 +4807,7 @@ mod tests {
                 ),
                 attack_defended: None,
                 source_controller: None,
+                source_object: None,
                 bypass_beneficiary: None,
             };
             obj.static_definitions = vec![def].into();
@@ -4597,6 +4882,134 @@ mod tests {
         );
     }
 
+    /// CR 118.9a + decision D1: the frontend's `spellCosts` map (from
+    /// `legal_actions_full`) must report a hand spell as `NoCost` while Omniscience
+    /// is on the battlefield, so the UI can overlay a {0} pip. The cost overlay is
+    /// the CHEAPEST-legal-cast floor (Display mode), independent of whether the
+    /// printed cost is affordable — the free-vs-printed election lives in the
+    /// `CastingVariantChoice` menu at cast time, not in the overlay. This test pins
+    /// both the zero-mana case and (as the discriminating extension) the ample-mana
+    /// case, so the Display-mode floor cannot silently regress to the printed cost
+    /// once a real cast becomes affordable.
+    #[test]
+    fn spell_costs_report_nocost_for_hand_spell_under_omniscience() {
+        use crate::types::ability::{AbilityKind, Effect, TargetFilter};
+        use crate::types::mana::ManaCostShard;
+        use crate::types::statics::{CastFreeOrigin, CastFrequency, StaticMode};
+        use crate::types::StaticDefinition;
+
+        let mut state = setup_priority();
+
+        let omniscience_id = create_object(
+            &mut state,
+            CardId(4200),
+            PlayerId(0),
+            "Omniscience".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&omniscience_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            let def = StaticDefinition {
+                mode: StaticMode::CastFromHandFree {
+                    frequency: CastFrequency::Unlimited,
+                    origin: CastFreeOrigin::Hand,
+                },
+                affected: Some(TargetFilter::Any),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some(
+                    "You may cast spells from your hand without paying their mana costs."
+                        .to_string(),
+                ),
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+            };
+            obj.static_definitions = vec![def].into();
+        }
+
+        // A 7UUU spell in hand — the exact class the display overlay should zero.
+        let spell_id = create_object(
+            &mut state,
+            CardId(4201),
+            PlayerId(0),
+            "Test Spell".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Blue,
+                ],
+                generic: 7,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("Test Spell", "test spell"),
+            ));
+        }
+
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience must display the hand spell as NoCost, got {displayed:?}"
+        );
+
+        // Discriminating extension (decision D1): give the caster ample mana to
+        // afford the printed {7}{U}{U}{U}. The Display-mode overlay must STILL floor
+        // to NoCost — the affordable printed cost is only surfaced as a menu option
+        // at cast time, never in the overlay. Under the Actual-mode election logic
+        // this same board would offer {Normal(printed), HandPermission({0})}; the
+        // overlay deliberately does not.
+        for _ in 0..7 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..3 {
+            state.players[0].mana_pool.add(ManaUnit {
+                color: ManaType::Blue,
+                source_id: ObjectId(0),
+                pip_id: crate::types::mana::ManaPipId(0),
+                supertype: None,
+                source_could_produce_two_or_more_colors: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        let (_actions, spell_costs, _grouped) = legal_actions_full(&state);
+        let displayed = spell_costs
+            .get(&spell_id)
+            .expect("spell_costs must surface the Omniscience free-cast hand spell");
+        assert!(
+            matches!(displayed, ManaCost::NoCost),
+            "Omniscience overlay must stay NoCost even when the printed cost is \
+             affordable (Display-mode floor), got {displayed:?}"
+        );
+    }
+
     /// Issue #1542: Emergence Zone must expose TapLandForMana alongside its
     /// sacrifice-for-flash activated ability.
     #[test]
@@ -4650,7 +5063,8 @@ mod tests {
         assert!(
             land_actions.iter().any(|action| matches!(
                 action,
-                GameAction::TapLandForMana { object_id } if *object_id == land_id
+                GameAction::TapLandForMana { selection }
+                    if selection.source.object_id == land_id
             )),
             "expected TapLandForMana in grouped actions, got {land_actions:?}"
         );
@@ -4672,11 +5086,16 @@ mod tests {
         );
         assert_eq!(state.objects[&land_id].abilities.len(), 2);
 
-        apply_as_current(
-            &mut state,
-            GameAction::TapLandForMana { object_id: land_id },
-        )
-        .expect("TapLandForMana must succeed when flash ability is also legal");
+        let tap_action = land_actions
+            .iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection }
+                if selection.source.object_id == land_id)
+            })
+            .cloned()
+            .expect("land must expose semantic mana action");
+        apply_as_current(&mut state, tap_action)
+            .expect("TapLandForMana must succeed when flash ability is also legal");
         assert!(
             state.objects[&land_id].tapped,
             "Emergence Zone should be tapped after TapLandForMana"
@@ -4703,7 +5122,7 @@ mod tests {
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },
             options: vec![],
-            source_id: None,
+            source: None,
             persist_player: None,
         };
 
@@ -4833,6 +5252,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target.clone()],
                 optional: false,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4883,6 +5303,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: targets.clone(),
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -4985,6 +5406,7 @@ mod tests {
             target_slots: vec![crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![target],
                 optional: true,
+                chooser: None,
             }],
             mode_labels: Vec::new(),
             selection: crate::types::game_state::TargetSelectionProgress {
@@ -5096,6 +5518,66 @@ mod tests {
         );
     }
 
+    /// Issue #4878: `validated_candidate_actions` must return candidates in the
+    /// canonical `GameAction::cmp_stable` order, independent of the upstream
+    /// enumeration order (which walks `state.objects`, an `im::HashMap`, in
+    /// hash order — not sorted for this id set). Reverting the
+    /// `sort_by(cmp_stable)` guard returns the candidates in that hash order,
+    /// which differs from the canonical order below, flipping this assertion.
+    #[test]
+    fn validated_candidates_are_cmp_stable_sorted() {
+        let mut state = setup_priority();
+        // CR 305.2 + CR 505: land drop available in the precombat main phase so
+        // each land in hand survives the simulation filter as a `PlayLand`.
+        state.phase = Phase::PreCombatMain;
+        state.lands_played_this_turn = 0;
+        for _ in 0..10 {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Forest".to_string(),
+                Zone::Hand,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+        }
+
+        let actions: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+
+        // Reach guard: the scenario must actually offer several distinct actions
+        // (multiple `PlayLand` + `PassPriority`), otherwise a single-element list
+        // would be trivially "sorted" and the assertion vacuous.
+        assert!(
+            actions.len() >= 3,
+            "expected several candidate actions to canonicalize, got {}",
+            actions.len()
+        );
+
+        // Canonical order: identical to an independent `cmp_stable` sort.
+        let mut expected = actions.clone();
+        expected.sort_by(|a, b| a.cmp_stable(b));
+        assert_eq!(
+            actions, expected,
+            "validated_candidate_actions must emit cmp_stable-canonical order"
+        );
+
+        // Determinism: a second call over the same state yields the same order.
+        let again: Vec<GameAction> = validated_candidate_actions(&state)
+            .iter()
+            .map(|c| c.action.clone())
+            .collect();
+        assert_eq!(actions, again, "candidate order must be deterministic");
+    }
+
     /// CR 117.3d: a matching priority yield for the top-of-stack trigger makes
     /// `auto_pass_recommended` return `true`, overriding the meaningful-action
     /// hold that would otherwise keep the window open. Reverting the yield short-
@@ -5114,8 +5596,7 @@ mod tests {
             source,
             PlayerId(1),
         );
-        ability.source_incarnation = Some(2);
-        ability.source_card_id = Some(CardId(77));
+        ability.set_test_trigger_source_recursive(2, CardId(77));
         state.stack.push_back(StackEntry {
             id: ObjectId(600),
             source_id: source,

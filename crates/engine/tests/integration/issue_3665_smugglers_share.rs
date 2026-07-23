@@ -84,9 +84,10 @@ fn smugglers_share_from_oracle_text_parses_dynamic_draw_count() {
         .trigger_definitions
         .as_slice()
         .iter()
-        .find(|t| t.phase == Some(Phase::End))
+        .find(|t| t.definition.phase == Some(Phase::End))
         .expect("parsed end-step trigger");
     let execute = trigger
+        .definition
         .execute
         .as_ref()
         .expect("end-step trigger must have execute ability");

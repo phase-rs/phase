@@ -102,6 +102,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "StationTarget",
     "SaddleMount",
     "ScryChoice",
+    "ArrangePlanarDeckTopChoice",
     "CoinFlipKeepChoice",
     "DigChoice",
     "SurveilChoice",
@@ -122,6 +123,10 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     "SpellbookDraft",
     "ManifestDreadChoice",
     "ClashChooseOpponent",
+    // CR 608.2d: "an opponent chooses" from a zone — the controller picks the
+    // choosing opponent (ZoneOpponentChooserModal).
+    "ChooseFromZoneOpponentChooser",
+    "ChooseAnnouncingOpponent",
     "ClashCardPlacement",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).

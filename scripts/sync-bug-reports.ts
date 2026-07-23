@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import type {
   PublishedThread,
@@ -60,6 +60,7 @@ const REPORT_ITEMS_PATH = "triage/report-items.jsonl";
 const TRIAGE_ITEMS_PATH = "triage/triage-items.jsonl";
 const TRIAGE_DELTA_PATH = "triage/triage-delta.jsonl";
 const DASHBOARD_PATH = "triage/dashboard.md";
+const PUBLISH_LOCK_PATH = "triage/.publish.lock";
 const LEGACY_EXPORT_PATH = "tmp/discord-thread-messages.json";
 const CARD_DATA_PATH = "client/public/card-data.json";
 const DISCORD_EPOCH_MS = 1420070400000n;
@@ -81,6 +82,26 @@ async function loadSyncState(): Promise<SyncState> {
 
 async function saveSyncState(state: SyncState): Promise<void> {
   await Bun.write(SYNC_STATE_PATH, JSON.stringify(state, null, 2) + "\n");
+}
+
+function acquirePublishLock(): () => void {
+  let descriptor: number;
+  try {
+    descriptor = openSync(PUBLISH_LOCK_PATH, "wx");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error(
+        `Another bug-report publish is in progress (${PUBLISH_LOCK_PATH} exists). Wait for it to finish before retrying.`,
+      );
+    }
+    throw error;
+  }
+
+  writeSync(descriptor, `${process.pid}\n`);
+  return () => {
+    closeSync(descriptor);
+    unlinkSync(PUBLISH_LOCK_PATH);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +818,17 @@ function hasDiscordWriteBack(record: PublishedThread): boolean {
   );
 }
 
+interface DiscordForumChannel {
+  available_tags?: Array<{ id: string; name: string }>;
+}
+
+async function isDiscordThreadHandled(threadId: string): Promise<boolean> {
+  const thread = await discordGet<DiscordThread>(`/channels/${threadId}`);
+  const forum = await discordGet<DiscordForumChannel>(`/channels/${thread.parent_id}`);
+  const handledTag = forum.available_tags?.find((tag) => tag.name === "Handled");
+  return handledTag !== undefined && thread.applied_tags?.includes(handledTag.id) === true;
+}
+
 async function cmdMarkHandled(): Promise<void> {
   //  --thread=<id>[,<id>...]      tag specific threads (e.g. "dup of #406")
   // Stores a sentinel record so `pending` never resurfaces the thread.
@@ -983,6 +1015,15 @@ async function cmdReadThread(): Promise<void> {
 }
 
 async function cmdPublish(): Promise<void> {
+  const release = acquirePublishLock();
+  try {
+    await cmdPublishLocked();
+  } finally {
+    release();
+  }
+}
+
+async function cmdPublishLocked(): Promise<void> {
   // Mechanics only: the LLM driving this script has decided which threads to
   // publish and lists them via --thread. No verdicts, no sweeping, no
   // candidate scoring. The script's job: create the GH issue and write back to
@@ -999,21 +1040,18 @@ async function cmdPublish(): Promise<void> {
   );
 
   if (targets.size === 0) {
-    console.error(
+    throw new Error(
       "Usage: publish --thread=<id>[,<id>...] [--dry-run]\n" +
         "publish takes an explicit list of thread ids decided by the operator.",
     );
-    process.exit(1);
   }
 
   const items = readJsonl<TriageItem>(TRIAGE_ITEMS_PATH);
   if (items.length === 0) {
-    console.error(`No triage items at ${TRIAGE_ITEMS_PATH}. Run 'triage' first.`);
-    process.exit(1);
+    throw new Error(`No triage items at ${TRIAGE_ITEMS_PATH}. Run 'triage' first.`);
   }
   if (Bun.env.DISCORD_BOT_TOKEN === undefined) {
-    console.error("Error: DISCORD_BOT_TOKEN must be set in .env");
-    process.exit(1);
+    throw new Error("Error: DISCORD_BOT_TOKEN must be set in .env");
   }
 
   const state = await loadSyncState();
@@ -1029,11 +1067,38 @@ async function cmdPublish(): Promise<void> {
   let created = 0;
   let repairedDiscordWriteBacks = 0;
   let skippedAlreadyPublished = 0;
+  let skippedHandled = 0;
   let skippedNoItems = 0;
   let failed = 0;
 
   for (const threadId of targets) {
     const existing = published[threadId];
+    let isHandled = false;
+    try {
+      isHandled = await isDiscordThreadHandled(threadId);
+    } catch (err) {
+      console.error(`    failed (discord-handled-check): ${(err as Error).message}`);
+      failed++;
+      continue;
+    }
+    if (isHandled) {
+      if (existing === undefined && !dryRun) {
+        published[threadId] = {
+          issue_number: 0,
+          issue_url: "",
+          reacted_message_id: "",
+          reply_message_id: "",
+          published_at: new Date().toISOString(),
+          mode: "reconciled",
+          notes: "Discord Handled tag",
+        };
+        state.published_threads = published;
+        await saveSyncState(state);
+      }
+      console.log(`  [skip] ${threadId} — Discord thread is tagged Handled`);
+      skippedHandled++;
+      continue;
+    }
     if (existing !== undefined) {
       if (existing.issue_number > 0 && existing.issue_url !== "" && !hasDiscordWriteBack(existing)) {
         console.log(`  [repair] ${threadId} — issue #${existing.issue_number} exists, Discord write-back is incomplete`);
@@ -1123,6 +1188,7 @@ async function cmdPublish(): Promise<void> {
   console.log(`  Created:                    ${created}`);
   console.log(`  Repaired Discord write-back: ${repairedDiscordWriteBacks}`);
   console.log(`  Skipped (already published): ${skippedAlreadyPublished}`);
+  console.log(`  Skipped (Discord Handled):   ${skippedHandled}`);
   console.log(`  Skipped (no triage items):   ${skippedNoItems}`);
   console.log(`  Failed:                     ${failed}`);
   if (!dryRun) {

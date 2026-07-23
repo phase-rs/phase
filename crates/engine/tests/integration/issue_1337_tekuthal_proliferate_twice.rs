@@ -18,6 +18,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::proposed_event::ProposedEvent;
 use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::ResolutionStateWire;
 
 const TEKUTHAL: &str = "If you would proliferate, proliferate twice instead.";
 const TEKUTHAL_FULL: &str = "Flying\nIf you would proliferate, proliferate twice instead.\n{1}{U/P}{U/P}, Remove three counters from among other artifacts, creatures, and planeswalkers you control: Put an indestructible counter on Tekuthal. ({U/P} can be paid with either {U} or 2 life.)";
@@ -115,6 +116,21 @@ fn tekuthal_proliferate_opens_two_choices_and_adds_two_counters() {
         ),
         "first proliferate choice should open"
     );
+    assert!(
+        runner.state().active_proliferate_frame().is_some(),
+        "the typed proliferate frame owns the first real target-choice prompt"
+    );
+    let v2 = serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+        .expect("real proliferate prompt serializes as v2");
+    assert_eq!(v2["resolution_state_version"], 2);
+    assert!(v2.get("pending_proliferate_actions").is_none());
+    let restored: ResolutionStateWire =
+        serde_json::from_value(v2).expect("v2 proliferate prompt round-trips");
+    *runner.state_mut() = restored.into_game_state();
+    assert!(
+        runner.state().active_proliferate_frame().is_some(),
+        "the v2 round-trip preserves the prompt-owning proliferate frame"
+    );
 
     let first = runner
         .act(GameAction::SelectTargets {
@@ -128,6 +144,10 @@ fn tekuthal_proliferate_opens_two_choices_and_adds_two_counters() {
             WaitingFor::ProliferateChoice { .. }
         ),
         "Tekuthal must open a second proliferate choice"
+    );
+    assert!(
+        runner.state().active_proliferate_frame().is_some(),
+        "the remaining proliferate action re-parks a new top frame"
     );
     assert_eq!(
         proliferate_action_count(&first.events),
@@ -149,6 +169,10 @@ fn tekuthal_proliferate_opens_two_choices_and_adds_two_counters() {
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
         "both proliferate actions should complete"
+    );
+    assert!(
+        runner.state().active_proliferate_frame().is_none(),
+        "the final target choice releases the proliferate frame"
     );
     assert_eq!(
         proliferate_action_count(&second.events),

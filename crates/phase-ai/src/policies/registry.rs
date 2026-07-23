@@ -10,6 +10,7 @@ use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::cycling_discipline::CyclingDisciplinePolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
@@ -117,6 +118,7 @@ pub enum PolicyId {
     LandSequencing,
     ConditionGatedActivation,
     ControlChangeAwareness,
+    CyclingDiscipline,
     XValue,
     LandAnimation,
     MillTargeting,
@@ -362,6 +364,7 @@ impl Default for PolicyRegistry {
             Box::new(super::spellskite_priority::SpellskitePriorityPolicy),
             Box::new(super::land_sequencing::LandSequencingPolicy),
             Box::new(super::condition_gated_activation::ConditionGatedActivationPolicy),
+            Box::new(CyclingDisciplinePolicy),
             Box::new(XValuePolicy),
             Box::new(XCastGatePolicy),
             Box::new(super::control_change_awareness::ControlChangeAwarenessPolicy),
@@ -661,10 +664,7 @@ mod shared_invariant_tests {
     fn candidate(action: GameAction, tactical_class: TacticalClass) -> CandidateAction {
         CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), tactical_class),
         }
     }
 

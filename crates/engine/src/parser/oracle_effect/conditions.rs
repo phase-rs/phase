@@ -53,9 +53,10 @@ fn maybe_negate(cond: AbilityCondition, negated: bool) -> AbilityCondition {
 
 /// CR 702.171b: The runtime filter matching the saddled designation. Shared by
 /// the affirmative and negated `SourceIsSaddled` bridges in
-/// `static_condition_to_ability_condition` so both compose the same
-/// `SourceMatchesFilter { Typed([IsSaddled]) }` shape.
-fn source_saddled_filter() -> TargetFilter {
+/// `static_condition_to_ability_condition`, and by the `SourceIsSaddled` arm of
+/// `static_condition_to_trigger_condition` (oracle_trigger.rs), so all three
+/// compose the same `SourceMatchesFilter { Typed([IsSaddled]) }` shape.
+pub(crate) fn source_saddled_filter() -> TargetFilter {
     TargetFilter::Typed(TypedFilter {
         properties: vec![FilterProp::IsSaddled],
         ..Default::default()
@@ -275,7 +276,21 @@ pub(crate) fn strip_leading_general_conditional(
         .unwrap_or(&condition_fragment)
         .trim();
 
-        if let Some(condition) = try_nom_condition_as_ability_condition(cond_text, ctx)
+        let body_lower = body.to_lowercase();
+        let player_damage_scry = tag::<_, _, OracleError<'_>>("scry ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_previous_effect_player_damage_condition(cond_text))
+            .flatten();
+        let effect_discard_drain = tag::<_, _, OracleError<'_>>("each opponent loses ")
+            .parse(body_lower.as_str())
+            .is_ok()
+            .then(|| parse_effect_discard_instant_or_sorcery_condition(cond_text))
+            .flatten();
+
+        if let Some(condition) = player_damage_scry
+            .or(effect_discard_drain)
+            .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
             .or_else(|| parse_condition_text(cond_text))
             .or_else(|| parse_control_count_as_ability_condition(cond_text))
             .or_else(|| parse_and_conjunction_condition(cond_text, ctx))
@@ -907,6 +922,24 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
                 text[offset..].to_string(),
             );
         }
+        // CR 603.12 + CR 701.16a: active-voice "you exile[d] a[n] X this way,
+        // [body]" — the reflexive gate created by a preceding "exile [target]
+        // X" instruction. Runs under BOTH prefixes because the printed idiom
+        // appears in both tenses: past "If you exiled a card this way, …"
+        // (Ardyn, the Usurper's actual Oracle text, issue #5989) and present
+        // "When you exile a card this way, …". The exile's move into the
+        // (public, CR 400.2) exile zone publishes the card into
+        // `state.last_zone_changed_ids`, which `ZoneChangedThisWay` checks.
+        if let Ok((after_clause, (filter, _negated))) =
+            nom_cond::parse_you_exile_this_way_clause(rest)
+        {
+            let body_lower = strip_reflexive_conditional_body_separator(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                text[offset..].to_string(),
+            );
+        }
         if let Ok((after_clause, (filter, _negated))) =
             nom_cond::parse_zone_changed_this_way_clause(rest)
         {
@@ -1156,7 +1189,7 @@ fn type_filter_to_core_type(tf: &TypeFilter) -> Option<CoreType> {
 /// Inverse of [`type_filter_to_core_type`]: map a `CoreType` to the `TypeFilter`
 /// the engine uses to gate a present-target filter. Total over the card-type
 /// `CoreType` set; mirrors the explicit arms of `type_filter_to_core_type`.
-fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
+pub(super) fn core_type_to_type_filter(core: CoreType) -> TypeFilter {
     match core {
         CoreType::Creature => TypeFilter::Creature,
         CoreType::Land => TypeFilter::Land,
@@ -4124,7 +4157,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
     }
 
     let body_rest_lower = body_rest.to_lowercase();
-    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest)?;
+    let alt_continuation = parse_dig_from_among(&body_rest_lower, &body_rest, ctx)?;
     let ContinuationAst::DigFromAmong {
         quantity: alt_quantity,
         filter: alt_filter,
@@ -4782,6 +4815,7 @@ pub(crate) fn ability_condition_to_static_condition(
         | AbilityCondition::SpellCastWithVariantThisTurn { .. }
         | AbilityCondition::SourceIsTapped
         | AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
         | AbilityCondition::DayNightIs { .. }
         | AbilityCondition::ControllerControlsMatching { .. }
         | AbilityCondition::And { .. }
@@ -6320,6 +6354,53 @@ fn parse_previous_effect_excess_damage_condition(lower: &str) -> Option<AbilityC
         comparator: Comparator::GT,
         rhs: QuantityExpr::Fixed { value: 0 },
         channel: DamageChannel::Excess,
+    })
+}
+
+/// CR 120.3 + CR 608.2c: "a player is dealt damage this way" gates a rider
+/// on both the recipient and the damage event emitted by the preceding
+/// instruction. Deal-damage targets are either players or permanents, so a
+/// player target is represented by the negated permanent match; the total
+/// channel prevents the rider from firing when all damage was prevented.
+fn parse_previous_effect_player_damage_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "a player is dealt damage this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::And {
+        conditions: vec![
+            AbilityCondition::PreviousEffectAmount {
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+                channel: DamageChannel::Total,
+            },
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::TargetMatchesFilter {
+                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+                    use_lki: true,
+                    subject_slot: None,
+                }),
+            },
+        ],
+    })
+}
+
+/// CR 701.8a + CR 608.2c: Vohar's drain checks the card discarded by the
+/// preceding effect, not an object paid as an additional cost. The discard
+/// publishes its hand-to-graveyard move in the resolution-local zone-change
+/// ledger, which preserves the discarded card's types for this rider.
+fn parse_effect_discard_instant_or_sorcery_condition(lower: &str) -> Option<AbilityCondition> {
+    all_consuming(tag::<_, _, OracleError<'_>>(
+        "you discarded an instant or sorcery card this way",
+    ))
+    .parse(lower)
+    .ok()?;
+    Some(AbilityCondition::ZoneChangedThisWay {
+        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
+            TypeFilter::Instant,
+            TypeFilter::Sorcery,
+        ]))),
     })
 }
 

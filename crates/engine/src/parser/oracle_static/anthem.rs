@@ -23,6 +23,27 @@ pub(crate) fn parse_typed_you_control(
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
             let after_prefix = &after.original[" creatures you control ".len()..];
+            // CR 611.3: "X creatures you control and Y ..." — "you control" here
+            // ends only the FIRST conjunct of a compound subject, not the whole
+            // subject. A well-formed single-subject predicate always starts with
+            // a verb (get/gets/has/have/gain/gains) right after "you control ",
+            // never the conjunction "and" — so a leading "and " means this
+            // positional split guessed wrong and the real subject is compound
+            // (Dune Chanter: "Lands you control and land cards you own that
+            // aren't on the battlefield are Deserts..."). Decline so dispatch
+            // falls through to a handler that resolves the whole compound
+            // subject correctly (`parse_contextual_continuous_subject_static` for
+            // get/has predicates, `parse_subject_additive_type_static` for
+            // are/is predicates) instead of treating the second conjunct as
+            // unparsed predicate noise that `parse_continuous_gets_has`'s lenient
+            // `parse_additive_type_clause_modifications` fallback can scan past
+            // and silently drop.
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
+                return None;
+            }
             let full_subject = tp.original[..creatures_pos + " creatures you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes ("Attacking Ninja" → props=[Attacking], subtype="Ninja")
             let mut extra_props = Vec::new();
@@ -104,8 +125,52 @@ pub(crate) fn parse_typed_you_control(
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
+                // CR 105.1 + CR 205.4a: a compound color/supertype descriptor
+                // ("Black legendary", "Legendary black", ...) — the Legends
+                // banding-land cycle (Unholy Citadel, Seafarer's Quay,
+                // Adventurers' Guildhouse, Cathedral of Serra, Mountain
+                // Stronghold): "<Color> legendary creatures you control have
+                // \"bands with other legendary creatures.\"" (issue #6332).
+                // None of the bespoke arms above recognize a compound
+                // descriptor, so delegate the full subject to
+                // `parse_type_phrase` — the general subject-filter grammar
+                // that already composes a color prefix and a supertype prefix
+                // in either order (see its leading and post-negation
+                // supertype/color passes in `oracle_target.rs`) — rather than
+                // growing a second bespoke color+supertype combinator here.
+                //
+                // Accept ONLY when the fully-consumed result carries BOTH a
+                // `HasColor` and a `HasSupertype` property — i.e. genuinely a
+                // color+supertype compound, not merely "some descriptor
+                // `parse_type_phrase` happens to accept." A full-consumption
+                // check alone is not narrow enough: descriptors this function
+                // has no OTHER arm for (e.g. Saryth, the Viper's Fang / Augusta,
+                // Dean of Order's "Other tapped creatures you control .../Other
+                // untapped creatures you control ...") also fully consume
+                // through `parse_type_phrase`, and unconditionally accepting
+                // them here would silently reroute cards that are unrelated to
+                // this fix onto a different (and untested, for them) filter
+                // path. Requiring both properties scopes acceptance to exactly
+                // the class this fix targets.
                 } else {
-                    return None;
+                    let subject_and_type = tp.original[..creatures_pos + " creatures".len()].trim();
+                    let (compound_filter, remainder) = parse_type_phrase(subject_and_type);
+                    match compound_filter {
+                        TargetFilter::Typed(typed)
+                            if remainder.trim().is_empty()
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasColor { .. }))
+                                && typed
+                                    .properties
+                                    .iter()
+                                    .any(|p| matches!(p, FilterProp::HasSupertype { .. })) =>
+                        {
+                            TargetFilter::Typed(typed.controller(ControllerRef::You))
+                        }
+                        _ => return None,
+                    }
                 }
             } else if desc_remaining.eq_ignore_ascii_case("commander") {
                 // CR 903.3d: Combat-status prefix + "Commander creature" — same
@@ -162,6 +227,14 @@ pub(crate) fn parse_typed_you_control(
         let descriptor = before.original.trim();
         if !descriptor.is_empty() {
             let after_prefix = &after.original[" you control ".len()..];
+            // CR 611.3: same compound-subject guard as the "creatures you
+            // control" branch above — see its comment for the full rationale.
+            if tag::<_, _, OracleError<'_>>("and ")
+                .parse(after_prefix.trim_start())
+                .is_ok()
+            {
+                return None;
+            }
             let full_subject = tp.original[..yc_pos + " you control".len()].trim();
             // CR 509.1h: Strip combat-status prefixes
             let mut extra_props = Vec::new();
@@ -989,7 +1062,7 @@ pub(crate) fn parse_continuous_gets_has(
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
             if let Some(quantity) =
-                super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
+                super::oracle_quantity::parse_for_each_clause_expr_deferred(for_each_clause)
             {
                 let mut modifications = Vec::new();
                 push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
@@ -1054,7 +1127,7 @@ pub(crate) fn parse_dynamic_for_each_pt_modifications(
     let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
         .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
     let (power, toughness) = parse_pt_mod(pt_source)?;
-    let quantity = super::oracle_quantity::parse_for_each_clause_expr(
+    let quantity = super::oracle_quantity::parse_for_each_clause_expr_deferred(
         strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
     )?;
 

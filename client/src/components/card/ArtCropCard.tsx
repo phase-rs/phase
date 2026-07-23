@@ -1,4 +1,4 @@
-import { memo, useMemo, type CSSProperties } from "react";
+import { memo, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PTColor } from "../../viewmodel/cardProps";
@@ -12,6 +12,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
+import { CardArtFallback } from "./CardArtFallback.tsx";
 import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./cardFrame.ts";
 
 interface ArtCropCardProps {
@@ -24,9 +25,19 @@ const PT_COLORS: Record<PTColor, string> = {
   white: "text-[#111]",
 };
 
+// Stable empty ref so the unbounded-counter selector returns the same value when
+// absent, avoiding a spurious re-render every state tick (mirrors PermanentCard).
+const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
+
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
+  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
+  // counter-growth loop) for this object. Same channel PermanentCard's full-card pill
+  // reads — both battlefield display modes must agree, or the ∞ silently drops in one.
+  const unboundedCounterTypes = useGameStore(
+    (s) => s.gameState?.derived?.unbounded_counters?.[String(objectId)] ?? EMPTY_UNBOUNDED_COUNTERS,
+  );
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();
@@ -48,6 +59,14 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     oracleId: obj?.face_down ? undefined : imageLookup.oracleId,
     faceName: obj?.face_down ? undefined : imageLookup.faceName,
   });
+
+  // A resolved URL can still 404 (future-dated sets not yet on the CDN, stale
+  // token image refs). Without this the default battlefield renderer would show
+  // the browser's broken-image glyph — the same visual defect issue #6156
+  // reports — while `CardImage` recovered. Reset on src change so a new face
+  // re-tries; mirrors `CardImage.tsx`.
+  const [artError, setArtError] = useState(false);
+  useEffect(() => setArtError(false), [cardSrc]);
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
     if (!obj) return { frameGradient: "", lightText: false, ptDisplay: null };
@@ -83,7 +102,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  if (!obj.face_down && (isLoading || !src)) {
+  // Genuinely still resolving art — pulse until the async lookup settles.
+  if (!obj.face_down && isLoading) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -160,12 +180,25 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           {/* 4. ART AREA */}
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
-              <img
-                src={renderedSrc}
-                alt={cardName}
-                draggable={false}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
+              {/* Issue #6156: a token with no official paper printing (Kibo,
+                  Uktabi Prince's Banana) resolves to a null src, as does any
+                  card whose art fetch is rejected. Swapping only the art —
+                  rather than returning a bare tile before the frame — keeps the
+                  header name, P/T box, counters and loyalty badge on screen, so
+                  an artless permanent loses its picture but never its game
+                  state. `src` is non-null for face-down cards (CARD_BACK_URL),
+                  so those still render the card back here. */}
+              {src && !artError ? (
+                <img
+                  src={renderedSrc}
+                  alt={cardName}
+                  draggable={false}
+                  onError={() => setArtError(true)}
+                  className="absolute inset-0 w-full h-full object-cover"
+                />
+              ) : (
+                <CardArtFallback name={cardName} variant="artCrop" className="absolute inset-0 w-full h-full" />
+              )}
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />
 
@@ -176,16 +209,26 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               {/* Top-right overlay stack: counter badges kept clear of the
                   bottom P/T and loyalty badges. */}
               <div className="absolute top-0.5 right-0.5 z-[60] flex flex-col items-end gap-0.5">
-                {counters.map(([type, count]) => (
-                  <CounterTooltip key={type} type={type} count={count}>
-                    <span
-                      className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
-                      style={counterStyle}
+                {counters.map(([type, count]) => {
+                  // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+                  // counter unboundedly — render ∞ instead of the (still-finite) real count.
+                  const isUnbounded = unboundedCounterTypes.includes(type);
+                  return (
+                    <CounterTooltip
+                      key={type}
+                      type={type}
+                      count={count}
+                      isUnbounded={isUnbounded}
                     >
-                      {count}
-                    </span>
-                  </CounterTooltip>
-                ))}
+                      <span
+                        className={`rounded-full flex items-center justify-center font-bold text-white shadow-md border border-black/50 ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
+                        style={counterStyle}
+                      >
+                        {isUnbounded ? "∞" : count}
+                      </span>
+                    </CounterTooltip>
+                  );
+                })}
               </div>
 
               {hasDfc && (

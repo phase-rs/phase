@@ -22,18 +22,22 @@ expression: "&ir"
         "fragment": "This spell can't be countered."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": "CantBeCountered",
-          "affected": {
-            "type": "SelfRef"
+        "Static": {
+          "definition": {
+            "mode": "CantBeCountered",
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "This spell can't be countered."
           },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "This spell can't be countered."
+          "source_text": "This spell can't be countered.",
+          "body_ir": null
         }
       }
     },
@@ -55,40 +59,44 @@ expression: "&ir"
         "fragment": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it."
       },
       "node": {
-        "PreLoweredReplacement": {
-          "event": "Moved",
-          "execute": {
-            "kind": "Spell",
-            "effect": {
-              "type": "PutCounter",
-              "counter_type": "P1P1",
-              "count": {
-                "type": "Fixed",
-                "value": 1
+        "Replacement": {
+          "definition": {
+            "event": "Moved",
+            "execute": {
+              "kind": "Spell",
+              "effect": {
+                "type": "PutCounter",
+                "counter_type": "P1P1",
+                "count": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "target": {
+                  "type": "SelfRef"
+                }
               },
-              "target": {
-                "type": "SelfRef"
-              }
+              "cost": null,
+              "sub_ability": null,
+              "duration": null,
+              "description": null,
+              "target_prompt": null,
+              "condition": null,
+              "optional_targeting": false,
+              "optional": false,
+              "forward_result": false
             },
-            "cost": null,
-            "sub_ability": null,
-            "duration": null,
-            "description": null,
-            "target_prompt": null,
+            "mode": {
+              "type": "Mandatory"
+            },
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
             "condition": null,
-            "optional_targeting": false,
-            "optional": false,
-            "forward_result": false
+            "destination_zone": "Battlefield"
           },
-          "mode": {
-            "type": "Mandatory"
-          },
-          "valid_card": {
-            "type": "SelfRef"
-          },
-          "description": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
-          "condition": null,
-          "destination_zone": "Battlefield"
+          "source_text": "The next creature spell you cast this turn can be cast as though it had flash. That spell can't be countered. That creature enters with an additional +1/+1 counter on it.",
+          "execute_ir": null
         }
       }
     }

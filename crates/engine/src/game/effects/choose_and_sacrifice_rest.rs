@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PendingPlayerScopeSacrificeCompletion, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -145,10 +145,6 @@ pub fn resolve(
 
     // If all categories are empty for all players, skip directly to sacrifice.
     if eligible.iter().all(|e| e.is_empty()) && remaining_players.is_empty() {
-        // CR 603.10a: the permanents this sweep sacrifices left the battlefield
-        // together — stamp the sub-slice so a co-departing leaves-the-battlefield
-        // observer among them observes the rest.
-        let before = events.len();
         sacrifice_unchosen(
             state,
             &[],
@@ -157,13 +153,7 @@ pub fn resolve(
             ability.source_id,
             ability.controller,
             events,
-        );
-        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseAndSacrificeRest,
-            source_id: ability.source_id,
-            subject: None,
-        });
+        )?;
         return Ok(());
     }
 
@@ -188,9 +178,6 @@ pub fn resolve(
     if let Some(auto_choices) = try_auto_resolve(&eligible) {
         let kept: Vec<ObjectId> = auto_choices.iter().filter_map(|&opt| opt).collect();
         if remaining_players.is_empty() {
-            // CR 603.10a: co-departing observer among the sacrificed group
-            // observes the rest — stamp the sweep's sub-slice.
-            let before = events.len();
             sacrifice_unchosen(
                 state,
                 &kept,
@@ -199,13 +186,7 @@ pub fn resolve(
                 ability.source_id,
                 ability.controller,
                 events,
-            );
-            crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-            events.push(GameEvent::EffectResolved {
-                kind: EffectKind::ChooseAndSacrificeRest,
-                source_id: ability.source_id,
-                subject: None,
-            });
+            )?;
             return Ok(());
         }
         return advance_to_next_player(
@@ -324,9 +305,6 @@ pub(crate) fn step_total_power(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let Some((&current_player, rest)) = players_remaining.split_first() else {
-        // CR 603.10a: all choices made — sacrifice the unchosen as one event so a
-        // co-departing leaves-the-battlefield observer among them sees the rest.
-        let before = events.len();
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -335,13 +313,7 @@ pub(crate) fn step_total_power(
             source_id,
             source_controller,
             events,
-        );
-        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseAndSacrificeRest,
-            source_id,
-            subject: None,
-        });
+        )?;
         return Ok(());
     };
 
@@ -420,30 +392,15 @@ pub(crate) fn step_exact_count(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let Some((&target_player, rest)) = players_remaining.split_first() else {
-        let selections = unchosen_sacrifice_selections(
+        sacrifice_unchosen(
             state,
             &all_kept,
             scoped_players,
             sacrifice_filter,
             source_id,
             source_controller,
-        );
-        match super::perform_collected_player_scope_sacrifices(
-            state,
-            source_id,
-            source_controller,
-            selections,
             events,
-        )? {
-            super::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice
-            | super::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {}
-            super::PendingPlayerScopeSacrificeOutcome::Completed { .. } => {}
-        }
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseAndSacrificeRest,
-            source_id,
-            subject: None,
-        });
+        )?;
         return Ok(());
     };
 
@@ -529,9 +486,6 @@ pub(crate) fn advance_to_next_player(
 ) -> Result<(), EffectError> {
     dedupe_object_ids(&mut all_kept);
     if remaining.is_empty() {
-        // CR 603.10a: terminal APNAP sweep — the sacrificed group left the
-        // battlefield together, so stamp this sub-slice for co-departing observers.
-        let before = events.len();
         sacrifice_unchosen(
             state,
             &all_kept,
@@ -540,13 +494,7 @@ pub(crate) fn advance_to_next_player(
             source_id,
             controller,
             events,
-        );
-        crate::game::zones::stamp_simultaneous_from_slice(state, &mut events[before..]);
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::ChooseAndSacrificeRest,
-            source_id,
-            subject: None,
-        });
+        )?;
         return Ok(());
     }
 
@@ -627,7 +575,7 @@ pub(crate) fn sacrifice_unchosen_from_handler(
     source_id: ObjectId,
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EffectError> {
     sacrifice_unchosen(
         state,
         kept,
@@ -636,7 +584,7 @@ pub(crate) fn sacrifice_unchosen_from_handler(
         source_id,
         source_controller,
         events,
-    );
+    )
 }
 
 /// CR 701.21a: Sacrifice all permanents on the battlefield that were not chosen.
@@ -648,7 +596,7 @@ fn sacrifice_unchosen(
     source_id: ObjectId,
     source_controller: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EffectError> {
     // CR 701.21a: Sacrifice each permanent NOT chosen, restricted to the
     // permanents controlled by the players within `player_scope`. A player
     // outside the effect's scope (e.g. Liliana's controller, scope = Opponent)
@@ -665,59 +613,27 @@ fn sacrifice_unchosen(
     } else {
         scoped_players.to_vec()
     };
-    // Collect all battlefield permanents not in the kept set, controlled by a
-    // player within scope.
-    for (controller, cards) in unchosen_sacrifice_selections_for_scope(
+    let selections = unchosen_sacrifice_selections_for_scope(
         state,
         kept,
         &effective_scope,
         sacrifice_filter,
         source_id,
         source_controller,
-    ) {
-        for obj_id in cards {
-            // Use the sacrifice primitive directly — single authority for sacrifice.
-            match crate::game::sacrifice::sacrifice_permanent(state, obj_id, controller, events) {
-                Ok(crate::game::sacrifice::SacrificeOutcome::Complete) => {}
-                Ok(crate::game::sacrifice::SacrificeOutcome::NeedsReplacementChoice(player)) => {
-                    state.waiting_for =
-                        crate::game::replacement::replacement_choice_waiting_for(player, state);
-                    // Replacement choice will resume; remaining sacrifices happen after.
-                    return;
-                }
-                Err(_) => {
-                    // Object may have left the battlefield; skip silently.
-                }
-            }
-        }
-    }
-}
-
-/// CR 701.21a: Build the exact per-controller sacrifice selections for the
-/// reusable APNAP/replacement-safe sacrifice executor. The selection is based
-/// on the post-choice battlefield snapshot, but the actual moves remain queued
-/// until every choosing player has committed their keep set.
-pub(crate) fn unchosen_sacrifice_selections(
-    state: &GameState,
-    kept: &[ObjectId],
-    scoped_players: &[PlayerId],
-    sacrifice_filter: &TargetFilter,
-    source_id: ObjectId,
-    source_controller: PlayerId,
-) -> Vec<(PlayerId, Vec<ObjectId>)> {
-    let effective_scope = if scoped_players.is_empty() {
-        players::apnap_order(state)
-    } else {
-        scoped_players.to_vec()
+    );
+    let completion = PendingPlayerScopeSacrificeCompletion {
+        effect_kind: Some(EffectKind::ChooseAndSacrificeRest),
+        ..Default::default()
     };
-    unchosen_sacrifice_selections_for_scope(
+    let _ = super::perform_collected_player_scope_sacrifices_with_completion(
         state,
-        kept,
-        &effective_scope,
-        sacrifice_filter,
         source_id,
         source_controller,
-    )
+        selections,
+        completion,
+        events,
+    )?;
+    Ok(())
 }
 
 fn unchosen_sacrifice_selections_for_scope(
@@ -728,9 +644,32 @@ fn unchosen_sacrifice_selections_for_scope(
     source_id: ObjectId,
     source_controller: PlayerId,
 ) -> Vec<(PlayerId, Vec<ObjectId>)> {
-    let filter_ctx = FilterContext::from_source_with_controller(source_id, source_controller);
     let mut selections: Vec<(PlayerId, Vec<ObjectId>)> = Vec::new();
     for player in scope {
+        // CR 608.2c: When the sacrifice filter carries a `ParentTarget`-relative
+        // predicate (Winnowing's "that don't share a creature type with the
+        // chosen creature they control"), the reference must resolve to THIS
+        // player's kept creature — not to a single global keeper. Bind
+        // `recipient_id` to the first kept object this player controls so the
+        // `SharesQuality { reference: ParentTarget }` prop is scoped per player.
+        // `kept` is a flat list across all players (see `resolve`).
+        // ponytail: first kept object per player — if a future effect lets one
+        // player keep multiple creatures here, only the first is used as the
+        // shared-quality reference.
+        let recipient = kept.iter().copied().find(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == *player)
+        });
+        let filter_ctx = match recipient {
+            Some(recipient_id) => {
+                FilterContext::from_source_with_recipient(state, source_id, recipient_id)
+            }
+            // Inert for filters with no reference/recipient-reading prop
+            // (Cataclysm, Tragic Arrogance, Slaughter the Strong, Natural Balance).
+            None => FilterContext::from_source_with_controller(source_id, source_controller),
+        };
         let cards: Vec<ObjectId> = state
             .battlefield
             .iter()

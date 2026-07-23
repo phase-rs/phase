@@ -59,40 +59,44 @@ expression: "&ir"
         "fragment": "~ can't be blocked by creatures with power 2 or less."
       },
       "node": {
-        "PreLoweredStatic": {
-          "mode": {
-            "CantBeBlockedBy": {
-              "filter": {
-                "type": "Typed",
-                "type_filters": [
-                  "Creature"
-                ],
-                "controller": null,
-                "properties": [
-                  {
-                    "type": "PtComparison",
-                    "stat": "Power",
-                    "scope": "Current",
-                    "comparator": "LE",
-                    "value": {
-                      "type": "Fixed",
-                      "value": 2
+        "Static": {
+          "definition": {
+            "mode": {
+              "CantBeBlockedBy": {
+                "filter": {
+                  "type": "Typed",
+                  "type_filters": [
+                    "Creature"
+                  ],
+                  "controller": null,
+                  "properties": [
+                    {
+                      "type": "PtComparison",
+                      "stat": "Power",
+                      "scope": "Current",
+                      "comparator": "LE",
+                      "value": {
+                        "type": "Fixed",
+                        "value": 2
+                      }
                     }
-                  }
-                ]
+                  ]
+                }
               }
-            }
+            },
+            "affected": {
+              "type": "SelfRef"
+            },
+            "modifications": [],
+            "condition": null,
+            "affected_zone": null,
+            "effect_zone": null,
+            "active_zones": [],
+            "characteristic_defining": false,
+            "description": "~ can't be blocked by creatures with power 2 or less."
           },
-          "affected": {
-            "type": "SelfRef"
-          },
-          "modifications": [],
-          "condition": null,
-          "affected_zone": null,
-          "effect_zone": null,
-          "active_zones": [],
-          "characteristic_defining": false,
-          "description": "~ can't be blocked by creatures with power 2 or less."
+          "source_text": "~ can't be blocked by creatures with power 2 or less.",
+          "body_ir": null
         }
       }
     },

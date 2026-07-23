@@ -7,17 +7,36 @@ import {
 
 /**
  * Result of a successful handshake with `phase-server`. Wraps the live
- * `WebSocket` plus the `ServerInfo` parsed from `ServerHello`. Callers
+ * socket plus the `ServerInfo` parsed from `ServerHello`. Callers
  * own the socket — whoever received a `PhaseSocket` from `openPhaseSocket`
  * is responsible for calling `close()` when done.
  */
-export interface PhaseSocket {
-  readonly ws: WebSocket;
+export interface PhaseSocketTransport {
+  readonly readyState: number;
+  onopen: ((event: Event) => void) | null;
+  onmessage: ((event: MessageEvent<string>) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  onclose: ((event: CloseEvent) => void) | null;
+  addEventListener(
+    type: "close",
+    listener: (event: CloseEvent) => void,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+  removeEventListener(type: "close", listener: (event: CloseEvent) => void): void;
+  send(data: string): void;
+  close(): void;
+}
+
+export type PhaseSocketFactory<T extends PhaseSocketTransport = PhaseSocketTransport> =
+  (url: string) => T;
+
+export interface PhaseSocket<T extends PhaseSocketTransport = WebSocket> {
+  readonly ws: T;
   readonly serverInfo: ServerInfo;
   close(): void;
 }
 
-export interface OpenOptions {
+export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
   /**
    * Abort the pending handshake. If the signal fires before resolution the
    * returned promise rejects with an `AbortError` AND the in-flight
@@ -26,6 +45,11 @@ export interface OpenOptions {
   signal?: AbortSignal;
   /** WS-open + ServerHello wait cap, in ms. Defaults to 5000. */
   timeoutMs?: number;
+  /**
+   * Creates the transport used for the handshake. Omitted callers retain the
+   * browser's direct `new WebSocket(url)` behavior.
+   */
+  socketFactory?: PhaseSocketFactory<T>;
 }
 
 export class HandshakeError extends Error {
@@ -68,19 +92,27 @@ export class HandshakeError extends Error {
  */
 export function openPhaseSocket(
   wsUrl: string,
-  opts: OpenOptions = {},
-): Promise<PhaseSocket> {
+  opts?: OpenOptions<WebSocket>,
+): Promise<PhaseSocket<WebSocket>>;
+export function openPhaseSocket<T extends PhaseSocketTransport>(
+  wsUrl: string,
+  opts: OpenOptions<T>,
+): Promise<PhaseSocket<T>>;
+export function openPhaseSocket(
+  wsUrl: string,
+  opts: OpenOptions<PhaseSocketTransport> = {},
+): Promise<PhaseSocket<PhaseSocketTransport>> {
   const { signal, timeoutMs = 5000 } = opts;
 
-  return new Promise<PhaseSocket>((resolve, reject) => {
+  return new Promise<PhaseSocket<PhaseSocketTransport>>((resolve, reject) => {
     if (signal?.aborted) {
       reject(new HandshakeError("aborted", "Handshake aborted before start"));
       return;
     }
 
-    let ws: WebSocket;
+    let ws: PhaseSocketTransport;
     try {
-      ws = new WebSocket(wsUrl);
+      ws = opts.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl);
     } catch (err) {
       reject(
         new HandshakeError(

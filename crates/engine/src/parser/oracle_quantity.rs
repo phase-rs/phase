@@ -27,7 +27,9 @@ use nom::Parser;
 
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
-use super::oracle_nom::condition::{inject_controller_you, parse_spell_history_filter};
+use super::oracle_nom::condition::{
+    inject_controller_you, parse_life_total_comparator, parse_spell_history_filter,
+};
 use super::oracle_nom::duration::parse_cast_snapshot_suffix;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -877,63 +879,8 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // CR 208.1: "the difference between its power and toughness" — the
-    // unsigned gap between an object's two current post-layer characteristics.
-    // ("The difference between A and B" being unsigned is an Oracle templating
-    // convention with no dedicated CR number; the resolver takes `.abs()`.)
-    // Composed from `tag`s by axis (subject form ×
-    // power/toughness ordering), emitting a general `QuantityExpr::Difference`
-    // over existing `QuantityRef::Power`/`Toughness` leaves. Placed before the
-    // generic `parse_quantity_ref` arm so the whole difference phrase is
-    // recognized as a unit. Operand order is irrelevant — `Difference`
-    // resolves to an absolute value — but both orderings are parsed so the
-    // remainder is fully consumed.
-    //
-    // CR 115.10: the P/T refs are scoped to `ObjectScope::Recipient`. On a
-    // trigger pump like Doran's ("Whenever a creature you control attacks or
-    // blocks, it gets +X/+X … where X is the difference between its power and
-    // toughness"), "its" anaphors back to the *affected* creature, not the
-    // ability's own source — `Recipient` resolves to the first object target
-    // (the pumped creature) and only falls back to the source when no target
-    // is present (the CDA case), so a single scope is correct for every
-    // parse path that lands a difference phrase.
-    if let Ok((rest, (left_ref, right_ref))) = (
-        tag::<_, _, OracleError<'_>>("the difference between "),
-        alt((tag("its "), tag("~'s "), tag("this creature's "))),
-        alt((
-            value(
-                (
-                    QuantityRef::Power {
-                        scope: ObjectScope::Recipient,
-                    },
-                    QuantityRef::Toughness {
-                        scope: ObjectScope::Recipient,
-                    },
-                ),
-                pair(tag("power and "), tag("toughness")),
-            ),
-            value(
-                (
-                    QuantityRef::Toughness {
-                        scope: ObjectScope::Recipient,
-                    },
-                    QuantityRef::Power {
-                        scope: ObjectScope::Recipient,
-                    },
-                ),
-                pair(tag("toughness and "), tag("power")),
-            ),
-        )),
-    )
-        .parse(text)
-        .map(|(rest, (_, _, refs))| (rest, refs))
-    {
-        if rest.is_empty() {
-            return Some(QuantityExpr::Difference {
-                left: Box::new(QuantityExpr::Ref { qty: left_ref }),
-                right: Box::new(QuantityExpr::Ref { qty: right_ref }),
-            });
-        }
+    if let Ok((_, expr)) = all_consuming(nom_quantity::parse_recipient_pt_difference).parse(text) {
+        return Some(expr);
     }
 
     // CR 208.1 / CR 107.1: General "the difference between A and B" over any
@@ -1462,19 +1409,23 @@ fn parse_opponents_attacked_clause(input: &str) -> nom::IResult<&str, (), Oracle
 /// (GE); the count-style predicates (cards drawn, battlefield entries) are always
 /// "N or more" (GE), so a `map` adapter tags them with `Comparator::GE`.
 fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<QuantityRef> {
-    let ((relation, attr, comparator, count), rest) = nom_on_lower(clause, clause, |input| {
+    let ((relation, attr, comparator, value_expr), rest) = nom_on_lower(clause, clause, |input| {
         let (input, relation) = parse_player_population(input)?;
-        let (input, (attr, comparator, count)) = alt((
-            parse_hand_size_who_attr_clause,
-            map(parse_cards_drawn_attr_clause, |(attr, n)| {
-                (attr, Comparator::GE, n)
+        let (input, (attr, comparator, value_expr)) = alt((
+            parse_life_total_who_attr_clause,
+            map(parse_hand_size_who_attr_clause, |(a, c, n)| {
+                (a, c, QuantityExpr::Fixed { value: n })
             }),
-            map(parse_battlefield_entries_attr_clause, |(attr, n)| {
-                (attr, Comparator::GE, n)
+            parse_comparative_hand_size_who_clause,
+            map(parse_cards_drawn_attr_clause, |(a, n)| {
+                (a, Comparator::GE, QuantityExpr::Fixed { value: n })
+            }),
+            map(parse_battlefield_entries_attr_clause, |(a, n)| {
+                (a, Comparator::GE, QuantityExpr::Fixed { value: n })
             }),
         ))
         .parse(input)?;
-        Ok((input, (relation, attr, comparator, count)))
+        Ok((input, (relation, attr, comparator, value_expr)))
     })?;
     if !rest.is_empty() || relation != PlayerRelation::Opponent {
         return None;
@@ -1484,9 +1435,38 @@ fn parse_for_each_opponent_player_attribute_clause(clause: &str) -> Option<Quant
             relation,
             attr: Box::new(attr),
             comparator,
-            value: Box::new(QuantityExpr::Fixed { value: count }),
+            value: Box::new(value_expr),
         },
     })
+}
+
+/// CR 119: "whose life total is <comparator> <quantity>" → the candidate player's
+/// own life total (CR 119.1), compared under <comparator> to a threshold quantity.
+/// Anya, Merciless Angel: "for each opponent whose life total is less than half
+/// their starting life total" → LifeTotal LT DivideRounded(StartingLifeTotal, 2,
+/// Down). Reuses `parse_life_total_comparator` (the shared life-total ordering
+/// grammar) and `nom_quantity::parse_quantity` (the shared threshold grammar) —
+/// the exact pair the existential "an opponent's life total is <cmp> <qty>" static
+/// condition uses, so this per-candidate predicate's RHS is AST-identical to
+/// Anya's indestructible-ability condition RHS. The `PlayerScope` on the LHS ref
+/// is inert at runtime (the `PlayerAttribute` resolver reads each candidate player
+/// directly); `ScopedPlayer` documents the "each candidate's own life total" read.
+fn parse_life_total_who_attr_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, Comparator, QuantityExpr)> {
+    let (input, _) = tag("whose life total is ").parse(input)?;
+    let (input, comparator) = parse_life_total_comparator(input)?;
+    let (input, value) = nom_quantity::parse_quantity(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::LifeTotal {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator,
+            value,
+        ),
+    ))
 }
 
 /// CR 402.1: "who has/have N or fewer|more cards in hand" → the candidate's hand
@@ -1515,6 +1495,41 @@ fn parse_hand_size_who_attr_clause(
             },
             comparator,
             n as i32,
+        ),
+    ))
+}
+
+/// CR 402.1 + CR 109.5: "who has/have {more|fewer} cards in hand than you" /
+/// "who has/have as many cards in hand as you" — the comparative-operand form of
+/// the hand-size population predicate (CR 402.1, the hand zone). The reference
+/// operand "you" (CR 109.5; for a triggered ability, the controller when it
+/// triggered) reuses the SAME `HandSize` noun as the per-candidate attr, so both
+/// sides read hand size (Wojek Investigator). Composed by axis (comparator × noun ×
+/// operand), not enumerated full-string tags.
+fn parse_comparative_hand_size_who_clause(
+    input: &str,
+) -> OracleResult<'_, (QuantityRef, Comparator, QuantityExpr)> {
+    let (input, _) = alt((tag("who has "), tag("who have "))).parse(input)?;
+    let (input, (comparator, connector)) = alt((
+        value((Comparator::GT, "than "), tag("more ")),
+        value((Comparator::LT, "than "), tag("fewer ")),
+        value((Comparator::EQ, "as "), tag("as many ")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag("cards in hand ").parse(input)?;
+    let (input, _) = tag(connector).parse(input)?;
+    // Reference-operand axis; today only "you" → controller. `value`-ready for future refs.
+    let (input, ref_scope) = value(PlayerScope::Controller, tag("you")).parse(input)?;
+    Ok((
+        input,
+        (
+            QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            }, // per-candidate (inert scope)
+            comparator,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize { player: ref_scope },
+            }, // CR 109.5 operand
         ),
     ))
 }
@@ -1721,14 +1736,25 @@ fn parse_anaphoric_power_toughness_sum(
 pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let lower = lower.trim();
+    if let Ok((_, expr)) =
+        all_consuming(nom_quantity::parse_demonstrative_pt_difference).parse(lower)
+    {
+        return Some(expr);
+    }
+    // CR 120.1 + CR 603.2c + CR 608.2c: "opponents dealt damage this way" in
+    // trigger-context effects counts the damaged opponents, not the numeric
+    // damage amount. Must precede the passive-voice "dealt damage" numeric
+    // parser below.
+    if let Ok(("", qty)) = nom_quantity::parse_event_context_opponent_dealt_damage(lower) {
+        return Some(QuantityExpr::Ref { qty });
+    }
     // CR 608.2c + CR 608.2h: "the X <verb>ed/<verb> this way" — numeric result from the
     // preceding effect (or trigger event) in the same resolution. Must check
     // before "that much" to avoid false match on "this way" vs. "this turn".
     // Verb-phrase combinators cover:
     //   - life-payment/loss: "life lost", "life paid"
     //   - combat-damage triggers: "damage dealt" (active voice),
-    //     "dealt damage" (passive voice — e.g. Hordewing Skaab's
-    //     "opponents dealt damage this way")
+    //     "dealt damage" (passive voice)
     //   - counter-removal chains: "counters removed", "counter removed"
     //     (Sensational Spider-Man's "stun counters removed this way";
     //     `state.last_effect_amount` is stamped by the preceding RemoveCounter).
@@ -2446,6 +2472,13 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
     parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
+/// CR 611.3a: The provenance-preserving entry, for the one caller that CAN bind
+/// the anaphor — `oracle_static`, whose `lower_static_ir` knows the affected set
+/// and so knows whether "it" names the source or each affected object.
+pub(crate) fn parse_for_each_clause_expr_deferred(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause_deferred)
+}
+
 /// "Other spell(s) cast this turn" (Storm Entity class): all spells cast this
 /// turn by any player, excluding the resolving spell. Composes
 /// `SpellsCastThisTurn { scope: All }` with offset −1, clamped at zero.
@@ -2886,11 +2919,34 @@ fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
 }
 
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
+    let mut qty = parse_for_each_clause_deferred(clause)?;
+    // CR 608.2k: settle a deferred counter anaphor for every caller that has no
+    // antecedent to bind it to. Only `oracle_static`'s lowering knows the
+    // affected set, so it takes the `_deferred` entry below; for everyone else
+    // the pronoun names the ability's own object — exactly what `Source` meant
+    // before the scope started carrying provenance, so the AST is unchanged.
+    settle_deferred_counter_anaphor_ref(&mut qty);
+    Some(qty)
+}
+
+/// CR 611.3a: The provenance-preserving entry, for the one caller that CAN bind
+/// the anaphor — `oracle_static`, whose `lower_static_ir` knows the affected set
+/// and so knows whether "it" names the source or each affected object.
+pub(crate) fn parse_for_each_clause_deferred(clause: &str) -> Option<QuantityRef> {
     parse_for_each_clause_with_they_controller(
         clause,
         ControllerRef::ScopedPlayer,
         &ParseContext::default(),
     )
+}
+
+/// CR 608.2k: Collapse an unbound deferred counter anaphor back to `Source`.
+fn settle_deferred_counter_anaphor_ref(qty: &mut QuantityRef) {
+    if let QuantityRef::CountersOn { scope, .. } = qty {
+        if *scope == ObjectScope::Anaphoric {
+            *scope = ObjectScope::Source;
+        }
+    }
 }
 
 pub(crate) fn parse_for_each_clause_with_context(
@@ -2900,7 +2956,12 @@ pub(crate) fn parse_for_each_clause_with_context(
     let they_controller = ctx
         .third_person_player_controller_ref()
         .unwrap_or(ControllerRef::ScopedPlayer);
-    parse_for_each_clause_with_they_controller(clause, they_controller, ctx)
+    let mut qty = parse_for_each_clause_with_they_controller(clause, they_controller, ctx)?;
+    // CR 608.2k: same settle as `parse_for_each_clause` — this context-carrying
+    // entry has no antecedent for the pronoun either, so an unbound anaphor
+    // names the ability's own object.
+    settle_deferred_counter_anaphor_ref(&mut qty);
+    Some(qty)
 }
 
 fn parse_for_each_clause_with_they_controller(
@@ -2971,6 +3032,14 @@ fn parse_for_each_clause_with_they_controller(
                 filter: PlayerFilter::PerformedActionThisWay { relation, action },
             });
         }
+    }
+
+    // CR 120.1 + CR 603.2c + CR 608.2c: "opponent(s) dealt damage this way"
+    // in a trigger effect counts damaged players from the current trigger
+    // event batch. It must not fall through to `TrackedSetSize` (object-set
+    // anaphor) or `PreviousEffectAmount` (numeric producer amount).
+    if let Ok(("", qty)) = nom_quantity::parse_event_context_opponent_dealt_damage(clause) {
+        return Some(qty);
     }
 
     // "card put into a graveyard this way" / "creature card exiled this way" / etc.
@@ -3083,6 +3152,13 @@ fn parse_for_each_clause_with_they_controller(
         });
     }
 
+    // CR 120.1 + CR 603.2c + CR 608.2c: Malcolm-style trigger-context count
+    // ("for each opponent dealt damage") has no "this turn" duration and must
+    // read the resolving trigger event batch, not the turn damage ledger.
+    if let Ok(("", qty)) = nom_quantity::parse_event_context_opponent_dealt_damage(clause) {
+        return Some(qty);
+    }
+
     // CR 508.6: "opponent you attacked this turn".
     if parse_opponents_attacked_clause(clause).is_ok() {
         return Some(QuantityRef::PlayerCount {
@@ -3141,7 +3217,6 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    // "[counter type] counter on ~" / "[counter type] counter on it"
     if clause.contains("counter on") {
         let raw_type = clause.split("counter").next().unwrap_or("").trim();
         if !raw_type.is_empty() {
@@ -3384,6 +3459,89 @@ mod tests {
     };
     use crate::types::mana::ManaColor;
 
+    /// DynQty subgroup D / Matrix #1 — the comparative hand-size producer builds the
+    /// exact `PlayerAttribute` AST (Wojek Investigator). Fails iff EDIT 2 is reverted;
+    /// independent of EDIT 1. The full `assert_eq` pins operand scope (Controller,
+    /// CR 109.5) ≠ per-candidate attr scope (ScopedPlayer) — swapping them flips it.
+    /// Sibling cells (fewer→LT, as many→EQ) and the fixed-arm reach-guard prove the
+    /// alt is axis-composed and the numeric backtrack is intact.
+    #[test]
+    fn comparative_hand_size_producer_builds_player_attribute() {
+        let gt = parse_for_each_clause("opponent who has more cards in hand than you");
+        assert_eq!(
+            gt,
+            Some(QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute {
+                    relation: PlayerRelation::Opponent,
+                    attr: Box::new(QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer
+                    }),
+                    comparator: Comparator::GT,
+                    value: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller
+                        }
+                    }),
+                }
+            }),
+            "Wojek exact AST"
+        );
+
+        let lt = parse_for_each_clause("opponent who has fewer cards in hand than you");
+        assert!(
+            matches!(
+                lt,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        comparator: Comparator::LT,
+                        ..
+                    }
+                })
+            ),
+            "fewer → LT: {lt:?}"
+        );
+
+        let eq = parse_for_each_clause("opponent who has as many cards in hand as you");
+        assert!(
+            matches!(
+                eq,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        comparator: Comparator::EQ,
+                        ..
+                    }
+                })
+            ),
+            "as many → EQ: {eq:?}"
+        );
+
+        // Reach-guard: the fixed-threshold arm is untouched — a numeric "N or more"
+        // still lowers to a `Fixed` operand with `GE` (backtrack intact).
+        let fixed = parse_for_each_clause("opponent who has 3 or more cards in hand");
+        assert!(
+            matches!(
+                fixed,
+                Some(QuantityRef::PlayerCount {
+                    filter: PlayerFilter::PlayerAttribute {
+                        comparator: Comparator::GE,
+                        ..
+                    }
+                })
+            ),
+            "fixed 'N or more' must still parse to GE: {fixed:?}"
+        );
+        if let Some(QuantityRef::PlayerCount {
+            filter: PlayerFilter::PlayerAttribute { value, .. },
+        }) = fixed
+        {
+            assert_eq!(
+                *value,
+                QuantityExpr::Fixed { value: 3 },
+                "fixed operand = 3"
+            );
+        }
+    }
+
     /// The expected `QuantityExpr::Difference` for "power and toughness" order:
     /// `Difference { Ref(Power{Recipient}), Ref(Toughness{Recipient}) }`.
     /// Operand order is irrelevant at resolution (`Difference` resolves to an
@@ -3508,6 +3666,42 @@ mod tests {
             ),
             "reversed ordering should still parse to a Difference, got {expr:?}"
         );
+    }
+
+    #[test]
+    fn event_context_difference_between_trigger_creatures_power_and_toughness() {
+        let expr = parse_event_context_quantity(
+            "the difference between that creature's power and its toughness",
+        );
+        assert!(
+            matches!(
+                expr,
+                Some(QuantityExpr::Difference { ref left, ref right })
+                    if matches!(**left, QuantityExpr::Ref { qty: QuantityRef::Power { scope: ObjectScope::Demonstrative } })
+                    && matches!(**right, QuantityExpr::Ref { qty: QuantityRef::Toughness { scope: ObjectScope::Demonstrative } })
+            ),
+            "bare demonstrative referent must use Demonstrative, got {expr:?}"
+        );
+    }
+
+    #[test]
+    fn event_context_pt_difference_does_not_claim_recipient_surfaces() {
+        for phrase in [
+            "the difference between its power and toughness",
+            "the difference between ~'s power and its toughness",
+            "the difference between this creature's power and toughness",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                None,
+                "recipient phrase must not bind to Demonstrative: {phrase:?}"
+            );
+            assert_eq!(
+                parse_cda_quantity(phrase),
+                Some(pt_difference()),
+                "recipient grammar must remain reachable for {phrase:?}"
+            );
+        }
     }
 
     /// CR 107.1a: a "where X is half …, rounded …" binding routes through
@@ -3693,6 +3887,26 @@ mod tests {
     }
 
     #[test]
+    fn quantity_ref_self_loyalty_is_loyalty_counters_on_source() {
+        // CR 306.5c: a planeswalker's loyalty on the battlefield is its
+        // loyalty-counter count, so every self-possessive "loyalty" phrasing
+        // (Nissa, Ascended Animist's "where X is ~'s loyalty") resolves to
+        // `CountersOn { Source, Loyalty }`.
+        for phrase in ["~'s loyalty", "its loyalty", "this card's loyalty"] {
+            let qty = parse_quantity_ref(phrase).unwrap_or_else(|| panic!("failed: {phrase}"));
+            match qty {
+                QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: Some(CounterType::Loyalty),
+                } => {}
+                other => {
+                    panic!("Expected CountersOn{{Source, Loyalty}} for {phrase}, got {other:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
     fn quantity_ref_all_counters_on_normalized_self() {
         for phrase in [
             "the number of counters on ~",
@@ -3728,14 +3942,14 @@ mod tests {
 
     #[test]
     fn for_each_any_counter_on_self_type_phrase() {
-        // CR 122.1: "counter on this [type]" — untyped, source-scoped.
+        // CR 122.1: "counter on this [type]" / "counter on ~" — an EXPLICIT
+        // self-reference binds to the source at parse time.
         // Gavel of the Righteous: "gets +1/+1 for each counter on this Equipment."
         for phrase in [
             "counter on this equipment",
             "counter on this artifact",
             "counter on this permanent",
             "counter on ~",
-            "counter on it",
             "counters on this equipment",
         ] {
             let qty = parse_for_each_clause(phrase);
@@ -3752,13 +3966,48 @@ mod tests {
         }
     }
 
+    /// CR 608.2k: the bare pronoun defers instead — `lower_static_ir` binds it
+    /// to the recipient for a per-recipient anthem (Luxior, Giada's Gift:
+    /// "Equipped creature gets +1/+1 for each counter on it") and to the source
+    /// when the static modifies only the object printing it.
+    #[test]
+    fn for_each_any_counter_on_pronoun_defers() {
+        let qty = parse_for_each_clause_deferred("counter on it");
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityRef::CountersOn {
+                    scope: ObjectScope::Anaphoric,
+                    counter_type: None,
+                })
+            ),
+            "expected CountersOn{{Anaphoric, None}}, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn plain_for_each_counter_pronoun_settles_to_source() {
+        let qty = parse_for_each_clause("counter on it");
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                })
+            ),
+            "plain entry must settle the pronoun to Source, got {qty:?}"
+        );
+    }
+
     #[test]
     fn for_each_singular_counter_on_self() {
-        // Singular "counter on ~" (not "counters on ~")
-        let qty = parse_for_each_clause("blight counter on it").unwrap();
+        // Singular "counter on it" (not "counters on it") — same deferred
+        // referent, exercising the singular arm of the counter-word axis.
+        let qty = parse_for_each_clause_deferred("blight counter on it").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(ref counter_type) } if *counter_type == CounterType::Generic("blight".to_string())),
-            "singular counter form should produce CountersOnSelf"
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Anaphoric, counter_type: Some(ref counter_type) } if *counter_type == CounterType::Generic("blight".to_string())),
+            "singular counter form should defer the pronoun, got {qty:?}"
         );
     }
 
@@ -5297,7 +5546,6 @@ mod tests {
             "the life lost this way",
             "the amount of life paid this way",
             "the damage dealt this way",
-            "opponents dealt damage this way",
             "the number of stun counters removed this way",
         ] {
             assert_eq!(
@@ -5308,6 +5556,25 @@ mod tests {
                     },
                 }),
                 "phrase {phrase:?} must map to PreviousEffectAmount on the TOTAL channel"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_event_context_quantity_opponents_dealt_damage_counts_event_players() {
+        for phrase in [
+            "opponents dealt damage this way",
+            "the number of opponents dealt damage this way",
+            "number of opponents dealt damage this way",
+        ] {
+            assert_eq!(
+                parse_event_context_quantity(phrase),
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextPlayerCount {
+                        filter: PlayerFilter::Opponent,
+                    },
+                }),
+                "phrase {phrase:?} must count damaged players"
             );
         }
     }

@@ -9,7 +9,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use crate::cast_facts::{
-    cast_facts_for_action, effect_profile_for_action, CastFacts, EffectProfile,
+    cast_facts_for_action, effect_profile_for_action, effective_activated_ability, CastFacts,
+    EffectProfile,
 };
 use crate::config::{AiConfig, PolicyPenalties};
 use crate::eval::{strategic_intent, StrategicIntent};
@@ -185,6 +186,12 @@ impl<'a> PolicyContext<'a> {
             })
     }
 
+    /// Exact activated ability represented by this candidate, including
+    /// runtime-granted abilities in the engine's production index space.
+    pub fn effective_activated_ability(&self) -> Option<AbilityDefinition> {
+        effective_activated_ability(self.state, &self.candidate.action)
+    }
+
     /// Effect-level profile for both spells and activated abilities.
     /// For spells, delegates to CastFacts (includes ETB/replacement effects).
     /// For activated abilities, scans the specific ability's effect chain.
@@ -275,6 +282,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -285,10 +293,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(engine::types::ability::TargetRef::Object(ObjectId(2))),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -340,6 +345,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -348,10 +354,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -417,10 +420,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -491,10 +491,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
         };
         let ctx = PolicyContext {
             state: &state,
@@ -562,6 +559,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -570,10 +568,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
@@ -613,6 +608,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -621,10 +617,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
@@ -642,8 +635,10 @@ mod tests {
         config.search.projection_min_budget_ms = 0;
 
         let mut ai_ctx = crate::context::AiContext::empty(&config.weights);
-        // Tight but not expired — 1ms remaining.
-        ai_ctx.deadline = engine::util::Deadline::after(1);
+        // Large budget keeps this deterministic under parallel test load —
+        // with floor=0 the remaining time is never read, so any non-expired
+        // deadline exercises the same branch.
+        ai_ctx.deadline = engine::util::Deadline::after(60_000);
 
         let ability = ResolvedAbility::new(
             Effect::Pump {
@@ -663,6 +658,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -671,15 +667,13 @@ mod tests {
         };
         let candidate = CandidateAction {
             action: GameAction::ChooseTarget { target: None },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(0)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Target),
         };
         let ctx = deadline_test_ctx(&state, &decision, &candidate, &config, &ai_ctx);
 
-        // With floor=0, even 1ms remaining allows projection. Only an
-        // already-expired deadline blocks.
+        // With floor=0, any non-expired deadline allows projection; only an
+        // already-expired one blocks (covered by
+        // `deadline_expired_gates_projection`).
         assert!(ctx.can_afford_projection());
     }
 }

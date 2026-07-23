@@ -79,6 +79,7 @@ impl PaymentSelectionPolicy {
         let extra_penalty = extra_count as f64 * 0.35;
         let resume_scale = match resume {
             CostResume::Spell { .. } | CostResume::SpellCost { .. } => 1.0,
+            CostResume::Resolution => 1.0,
             CostResume::ManaAbility { .. } => 0.8,
         };
 
@@ -189,6 +190,7 @@ fn next_station_threshold_remaining(state: &GameState, spacecraft_id: ObjectId) 
         .trigger_definitions
         .as_slice()
         .iter()
+        .map(|entry| &entry.definition)
         .filter_map(|def| {
             def.condition
                 .as_ref()
@@ -257,6 +259,10 @@ fn payment_cost(
 ) -> f64 {
     match kind {
         PayCostKind::Discard => card_value(state, obj_id),
+        // CR 701.20a + CR 701.20b: Revealing doesn't move the card — it stays
+        // in hand — so the real resource cost is ~0, mirroring Behold's
+        // reveal-from-hand branch.
+        PayCostKind::Reveal => card_value(state, obj_id) * 0.1,
         PayCostKind::ReturnToHand => 0.5 + permanent_value(state, obj_id) * 0.5,
         PayCostKind::ExileFromZone { zone } => match zone {
             ExileCostSourceZone::Hand => card_value(state, obj_id) * 1.2,
@@ -375,10 +381,7 @@ mod tests {
         };
         let candidate = CandidateAction {
             action,
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Selection,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);

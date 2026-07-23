@@ -15,13 +15,13 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount, Effect,
-    EffectScope, FilterProp, QuantityExpr, SacrificeRequirement, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
+    CostReduction, Effect, EffectScope, FilterProp, QuantityExpr, SacrificeRequirement,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
-    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, EmbalmCost,
-    EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
+    EmbalmCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
 use crate::types::zones::Zone;
@@ -425,6 +425,12 @@ fn parse_keyword_list_with_policy(
         }
     }
 
+    if mtgjson_keyword_names.iter().any(|n| n == "disguise") {
+        if let Some(kw) = parse_disguise_keyword_line(line) {
+            return Some(vec![kw]);
+        }
+    }
+
     // CR 303.4a: "Enchant A, B, [and/or] C" — multi-type enchant restriction.
     // The comma-separated list is a single keyword (one TargetFilter::Or), not
     // multiple comma-separated keywords. Detect and handle before the generic
@@ -696,6 +702,19 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
 
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
+    // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
+    // current power on resolution, or its last known information if it left its
+    // expected public zone.
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("pay life equal to "),
+        alt((tag("this creature's power"), tag("~'s power"))),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(WardCost::PayLifeEqualToPower);
+    }
+
     // "pay N life"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("pay ").parse(lower) {
         if let Some(life_str) = rest.strip_suffix(" life") {
@@ -1210,6 +1229,45 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
     (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
 }
 
+/// CR 702.168d + CR 118.7a: Parse a disguise line with a trailing generic
+/// reduction. The reduction belongs to the turn-face-up special action, not
+/// to casting the creature or its face-down spell.
+fn parse_disguise_keyword_line(text: &str) -> Option<Keyword> {
+    let stripped = strip_reminder_text(text);
+    let upper = stripped.trim().to_ascii_uppercase();
+    let (after_for_each, (_, cost, _, amount, _)) = (
+        tag::<_, _, OracleError<'_>>("DISGUISE "),
+        nom_primitives::parse_mana_cost,
+        tag(". THIS COST IS REDUCED BY "),
+        nom_primitives::parse_mana_cost,
+        tag(" FOR EACH "),
+    )
+        .parse(upper.as_str())
+        .ok()?;
+    let ManaCost::Cost {
+        generic: amount_per,
+        shards,
+    } = amount
+    else {
+        return None;
+    };
+    if !shards.is_empty() {
+        return None;
+    }
+    let count_text = after_for_each.to_ascii_lowercase();
+    let (_, qty) =
+        super::oracle_nom::quantity::parse_for_each_clause_ref_complete(&count_text).ok()?;
+    Some(Keyword::Disguise(DisguiseCost::Reduced {
+        cost,
+        reduction: Box::new(CostReduction {
+            mode: crate::types::statics::CostModifyMode::Reduce,
+            amount_per,
+            count: QuantityExpr::Ref { qty },
+            condition: None,
+        }),
+    }))
+}
+
 /// Remainder-preserving keyword core — the SINGLE authority for keyword-line
 /// parsing. Returns the typed keyword plus the input it did **not** consume.
 ///
@@ -1230,6 +1288,10 @@ pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeT
 /// handling the "from" preposition used by protection keywords.
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
+
+    if let Some(kw) = parse_disguise_keyword_line(text) {
+        return Some((kw, ""));
+    }
 
     // CR 702.124: Partner variant keywords — must come BEFORE generic "partner" match.
     // MTGJSON sends Character Select, Friends Forever, and generic Partner all as keyword "Partner".
@@ -3209,6 +3271,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_granted_keyword_fragment_ward_pay_life_equal_to_power() {
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to this creature's power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+        assert_eq!(
+            parse_granted_keyword_fragment("ward—pay life equal to ~'s power"),
+            Some(Keyword::Ward(WardCost::PayLifeEqualToPower))
+        );
+    }
+
+    #[test]
     fn parse_granted_keyword_fragment_protection_from_color() {
         use crate::types::keywords::ProtectionTarget;
         use crate::types::mana::ManaColor;
@@ -3859,6 +3933,69 @@ mod tests {
         let keywords = result.unwrap();
         assert_eq!(keywords.len(), 1);
         assert!(matches!(keywords[0], Keyword::Transmute(_)));
+    }
+
+    /// CR 702.168d + CR 118.7a: Fugitive Codebreaker's red pip and dynamic
+    /// turn-face-up discount both survive keyword extraction.
+    #[test]
+    fn extract_router_keyword_line_disguise_with_graveyard_reduction() {
+        use crate::types::ability::{CountScope, QuantityRef, TypeFilter, ZoneRef};
+
+        let keyword = parse_router_keyword_line(
+            "Disguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)",
+        )
+        .and_then(|routed| routed.keyword)
+        .expect("compound disguise keyword should extract");
+        let Keyword::Disguise(DisguiseCost::Reduced { cost, reduction }) = &keyword else {
+            panic!("expected reduced disguise cost, got {keyword:?}");
+        };
+        assert!(matches!(
+            cost,
+            ManaCost::Cost { generic: 5, shards }
+                if shards.as_slice() == [ManaCostShard::Red]
+        ));
+        assert_eq!(reduction.amount_per, 1);
+        assert!(matches!(
+            reduction.count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    ref card_types,
+                    filter: None,
+                    scope: CountScope::Controller,
+                },
+            } if card_types == &[TypeFilter::Instant, TypeFilter::Sorcery]
+        ));
+
+        let serialized = serde_json::to_value(&keyword).expect("serialize reduced disguise");
+        let round_trip: Keyword =
+            serde_json::from_value(serialized).expect("deserialize reduced disguise");
+        assert_eq!(round_trip, keyword);
+        let legacy: Keyword = serde_json::from_value(serde_json::json!({
+            "Disguise": {"type": "Cost", "generic": 5, "shards": ["Red"]}
+        }))
+        .expect("legacy disguise mana cost remains readable");
+        assert!(matches!(legacy, Keyword::Disguise(DisguiseCost::Mana(_))));
+
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Prowess, haste\nDisguise {5}{R}. This cost is reduced by {1} for each instant and sorcery card in your graveyard. (You may cast this card face down for {3} as a 2/2 creature with ward {2}. Turn it face up any time for its disguise cost.)\nWhen this creature is turned face up, discard your hand, then draw three cards.",
+            "Fugitive Codebreaker",
+            &["prowess".to_string(), "haste".to_string(), "disguise".to_string()],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Detective".to_string()],
+        );
+        assert!(
+            parsed
+                .extracted_keywords
+                .iter()
+                .any(|kw| matches!(kw, Keyword::Disguise(DisguiseCost::Reduced { .. }))),
+            "full Oracle parse should retain the reduced disguise cost: {parsed:#?}"
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "fully represented Fugitive line should not report a swallowed dynamic quantity: {:?}",
+            parsed.parse_warnings
+        );
     }
 
     #[test]

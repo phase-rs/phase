@@ -1,5 +1,6 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 
 use super::engine::{begin_pending_trigger_target_selection, check_exile_returns, EngineError};
 use super::match_flow;
@@ -58,19 +59,73 @@ pub(crate) fn run_post_action_pipeline_from(
     // `collect_triggers_into_deferred` when `waiting_for` is `NamedChoice`)
     // and fired a second time by the replay, causing double-fire for ETB
     // observers like Soul Warden (issue #830).
-    if !skip_trigger_scan {
-        let unconsumed_events = triggers::filter_consumed_trigger_events(
-            &events[event_start..],
+    // CR 603.3b + CR 608.2g: A terminal resolution completion can be installed while a
+    // replacement-resume action is finalizing its deferred free cast. That
+    // action may have already handled ordinary zone-event triggers, but its
+    // just-emitted `SpellCast` still has to join the terminal batch before B's
+    // parked trigger drains.
+    if !skip_trigger_scan || state.pending_resolution_completion.is_some() {
+        // A paused logical zone-change owner has already Segment-collected its
+        // retained ZoneChanged occurrences into deferred trigger contexts. Do
+        // not rediscover those records through the generic post-action scan;
+        // its batched definitions remain reserved for final settlement.
+        let mut retained_logical_zone_events = Vec::new();
+        if let Some(pending) = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.pending.as_ref())
+        {
+            retained_logical_zone_events.extend(
+                pending
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event),
+            );
+            if let Some(paused_current) = pending.paused_current.as_ref() {
+                retained_logical_zone_events.extend(&paused_current.delivery_events);
+            }
+        }
+        if let Some(pending) = state.active_batch_delivery() {
+            retained_logical_zone_events.extend(
+                pending
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event),
+            );
+            if let Some(paused_current) = pending.paused_current.as_ref() {
+                retained_logical_zone_events.extend(&paused_current.delivery_events);
+            }
+        }
+        // A completed logical owner has already collected its segment and
+        // settlement contexts into the existing deferred queue. The owner is
+        // intentionally gone before the trailing completion event, so use those
+        // exact queued occurrences to keep the generic scan from rediscovering
+        // them while still allowing every unrelated event through.
+        let deferred_logical_zone_events: Vec<_> = state
+            .deferred_triggers
+            .iter()
+            .flat_map(|context| context.trigger_events.iter())
+            .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .collect();
+        let unconsumed_events = triggers::filter_consumed_trigger_events_from(
+            events,
+            event_start,
             &consumed_trigger_events,
         );
-        let filtered_events: Vec<_> = unconsumed_events
+        let mut filtered_events: Vec<_> = unconsumed_events
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
                     && !state.deferred_entry_events.contains(event)
+                    && !retained_logical_zone_events.contains(event)
+                    && !deferred_logical_zone_events.contains(event)
             })
             .cloned()
             .collect();
+        if skip_trigger_scan {
+            filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+        }
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
         // abilities it generated (e.g. "whenever you scry, ...") must NOT be
@@ -79,7 +134,11 @@ pub(crate) fn run_post_action_pipeline_from(
         // `ScryChoice` when 2+ same-controller triggers fire). Park them in
         // `deferred_triggers`; they are drained below once the action settles
         // back to Priority. Mirrors `batch_or_drain_observer_triggers`' B2 branch.
-        if super::engine_resolution_choices::handles(&state.waiting_for) {
+        // CR 603.3b: Terminal-resolution observers join the deferred batch so
+        // they are ordered only after the resolving ability has completed.
+        if super::engine_resolution_choices::handles(&state.waiting_for)
+            || state.pending_resolution_completion.is_some()
+        {
             triggers::collect_triggers_into_deferred(state, &filtered_events);
         } else {
             triggers::process_triggers(state, &filtered_events);
@@ -124,7 +183,13 @@ pub(crate) fn run_post_action_pipeline_from(
         }
         if events.len() > events_before {
             let sba_events: Vec<_> = events[events_before..].to_vec();
-            triggers::process_triggers(state, &sba_events);
+            // CR 603.3b: SBA-generated triggers join the terminal batch rather
+            // than being ordered before its final cast trigger is collected.
+            if state.pending_resolution_completion.is_some() {
+                triggers::collect_triggers_into_deferred(state, &sba_events);
+            } else {
+                triggers::process_triggers(state, &sba_events);
+            }
             // CR 603.3d: SBA-generated zone changes (e.g. lethal damage) may put
             // death triggers on the stack that need target/mode prompts before the
             // next SBA pass.
@@ -141,6 +206,50 @@ pub(crate) fn run_post_action_pipeline_from(
         }
     }
 
+    // CR 610.3a: "until this leaves" returns are immediate one-shot effects.
+    // A resolving effect can remove the source and then pause for a later
+    // SearchChoice (Boseiju) or other resolution choice. Process the return
+    // before that choice is surfaced; otherwise the source's ZoneChanged
+    // event is lost with this pipeline pass and its exiled card never returns.
+    let events_before_exile_returns = events.len();
+    let deferred_trigger_count_before_exile_returns = state.deferred_triggers.len();
+    check_exile_returns(state, events);
+    if events.len() > events_before_exile_returns {
+        let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();
+        let consumed_exile_return_events =
+            std::mem::take(&mut state.consumed_before_priority_trigger_events);
+        let unconsumed_exile_return_events = triggers::filter_consumed_trigger_events(
+            &exile_return_events,
+            &consumed_exile_return_events,
+        );
+        // CR 603.3b: Exile-return triggers also join a terminal batch so they
+        // cannot be ordered before the final cast trigger is collected.
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+            || state.pending_resolution_completion.is_some()
+        {
+            triggers::collect_triggers_into_deferred(state, &unconsumed_exile_return_events);
+        } else {
+            let mut normal_pending = state
+                .deferred_triggers
+                .split_off(deferred_trigger_count_before_exile_returns);
+            normal_pending.extend(triggers::collect_triggers_for_batch(
+                state,
+                &unconsumed_exile_return_events,
+            ));
+            let outcome = triggers::process_collected_triggers_with_delayed_events(
+                state,
+                normal_pending,
+                &exile_return_events,
+                events,
+            );
+            if let Some(waiting_for) = outcome.prompt {
+                state.waiting_for = waiting_for.clone();
+                state.consumed_before_priority_trigger_events.clear();
+                return Ok(waiting_for);
+            }
+        }
+    }
+
     // CR 603.3b: Triggered abilities parked while a resolution choice was open
     // (e.g. "whenever you scry, ..." deferred above so it couldn't clobber the
     // choice's WaitingFor) go on the stack once resolution truly settles. The
@@ -148,7 +257,13 @@ pub(crate) fn run_post_action_pipeline_from(
     // / mid-spell settles; same-controller groups get `OrderTriggers` first).
     // A drained trigger that itself needs input returns its own WaitingFor,
     // handled by the check below.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+    if settle_pending_resolution_completion(state) {
+        if let Some(wf) =
+            triggers::drain_deferred_triggers_after_stack_object_announcement(state, events)
+        {
+            state.waiting_for = wf;
+        }
+    } else if matches!(state.waiting_for, WaitingFor::Priority { .. })
         && !state.deferred_triggers.is_empty()
         && !skip_deferred_trigger_drain
     {
@@ -171,41 +286,6 @@ pub(crate) fn run_post_action_pipeline_from(
         if !players::is_alive(state, player) {
             state.consumed_before_priority_trigger_events.clear();
             return Ok(state.waiting_for.clone());
-        }
-    }
-
-    let events_before_returns = events.len();
-    check_exile_returns(state, events);
-
-    // CR 603.2 + CR 603.3: A card returning from exile enters the battlefield,
-    // which is a game event that can trigger abilities — most commonly the
-    // returned permanent's OWN enters-the-battlefield trigger (Wall of Omens
-    // returned by Fiend Hunter's leaves-the-battlefield trigger draws a card,
-    // issue #3673). `check_exile_returns` appends those enter events but,
-    // unlike the SBA loop above, does not scan them; scan here so the ETB
-    // reaches the stack. Combine normal ETBs with delayed triggers matching
-    // the same return event before ordering, so simultaneous triggers controlled
-    // by the same player share one CR 603.3b ordering prompt. Any state-based
-    // actions the return implicates (CR 704.3) are checked on the next pipeline
-    // pass once the ETB resolves.
-    //
-    // Gate on Priority so a return that paused on an as-enters
-    // replacement/aura choice (`BatchMoveResult::NeedsChoice`) is not
-    // clobbered — that resume path owns its own trigger scan.
-    if events.len() > events_before_returns
-        && matches!(state.waiting_for, WaitingFor::Priority { .. })
-    {
-        let return_events: Vec<_> = events[events_before_returns..].to_vec();
-        let outcome = triggers::process_triggers_with_delayed_events(
-            state,
-            &return_events,
-            &return_events,
-            events,
-        );
-        if let Some(waiting_for) = outcome.prompt {
-            state.waiting_for = waiting_for.clone();
-            state.consumed_before_priority_trigger_events.clear();
-            return Ok(waiting_for);
         }
     }
 
@@ -254,6 +334,71 @@ pub(crate) fn run_post_action_pipeline_from(
         default_wf.clone(),
         default_wf.acting_player(),
     ))
+}
+
+/// CR 603.3b + CR 608.2g: settles a terminal resolution marker only after its
+/// final free cast has actually been announced. The drain uses the
+/// stack-announcement boundary so B/C's triggers may be ordered above their
+/// still-stacked spells, rather than the ordinary resolution drain's spell guard.
+fn settle_pending_resolution_completion(state: &mut GameState) -> bool {
+    let Some(completion) = state.pending_resolution_completion.as_ref() else {
+        return false;
+    };
+    let final_cast = completion.final_cast;
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || !triggers::resolution_completion_can_settle(state)
+    {
+        return false;
+    }
+    if final_cast.is_some_and(|object_id| {
+        !state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.zone == crate::types::zones::Zone::Stack)
+    }) {
+        return false;
+    }
+
+    ensure_terminal_cast_spell_triggers_collected(state, final_cast);
+
+    // The source check at batch completion proved this is the active Ripple
+    // resolution. Now its terminal instruction has completed, so clear the
+    // resolution-only LKI before the explicit post-announcement drain.
+    state.pending_resolution_completion = None;
+    state.resolving_stack_entry = None;
+    state.resolution_source_relatch = None;
+    true
+}
+
+/// CR 603.2 + CR 603.3b + CR 608.2g: replacement-resume casts can complete
+/// below the ordinary event-scan seam. At terminal Ripple settlement, recover
+/// the one authoritative SpellCast event from the fully announced spell if it
+/// has not already been collected into this ordering batch.
+fn ensure_terminal_cast_spell_triggers_collected(
+    state: &mut GameState,
+    final_cast: Option<ObjectId>,
+) {
+    let Some(object_id) = final_cast else {
+        return;
+    };
+    let already_collected = state.deferred_triggers.iter().any(|context| {
+        matches!(
+            context.pending.trigger_event.as_ref(),
+            Some(GameEvent::SpellCast { object_id: event_id, .. }) if *event_id == object_id
+        )
+    });
+    if already_collected {
+        return;
+    }
+    let Some(object) = state.objects.get(&object_id) else {
+        return;
+    };
+    let event = GameEvent::SpellCast {
+        card_id: object.card_id,
+        controller: object.controller,
+        object_id,
+    };
+    triggers::collect_triggers_into_deferred(state, &[event]);
 }
 
 fn flush_pending_priority_intercepts(

@@ -5,11 +5,20 @@ import {
   WIRE_PROTOCOL_VERSION,
   decodeWireMessage,
   encodeWireMessage,
+  legalActionsFromWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
 
 describe("encodeWireMessage / decodeWireMessage", () => {
+  it("pins the P2P wire protocol to v14", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(14);
+  });
+
+  it("defaults shortcut actions for a v14 payload created before the additive field", () => {
+    expect(legalActionsFromWire({ legalActions: [] }).manaPaymentShortcutActions).toEqual([]);
+  });
+
   // (a) Round-trip across P2PMessage variants.
   const variants: P2PMessage[] = [
     { type: "ping", timestamp: 12345 },
@@ -35,6 +44,14 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       type: "action",
       senderPlayerId: 0,
       action: { type: "PassPriority" },
+    },
+    {
+      type: "action",
+      senderPlayerId: 0,
+      action: {
+        type: "SetPriorityPassingMode",
+        data: { mode: "SkipLowUseWindows" },
+      },
     },
     {
       type: "action",
@@ -65,6 +82,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       assignedPlayerId: 1,
       playerToken: "token-123",
       state: buildGameState({
+        priority_passing_modes: { 1: "SkipLowUseWindows" },
         derived: {
           planechase: {
             can_roll: true,
@@ -75,6 +93,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
       events: [],
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
     },
     {
       type: "reconnect_ack",
@@ -91,6 +110,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
         },
       }),
       legalActions: [{ type: "RollPlanarDie" }],
+      manaPaymentShortcutActions: [],
     },
   ];
 
@@ -140,6 +160,7 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       state: buildGameState(),
       events: [],
       legalActions: [],
+      manaPaymentShortcutActions: [],
     })).toThrow(/Wire protocol mismatch/);
   });
 

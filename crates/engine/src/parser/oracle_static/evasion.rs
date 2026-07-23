@@ -1576,6 +1576,8 @@ pub(crate) fn try_split_and_cant_activate_abilities(text: &str) -> Option<Vec<St
             who: ProhibitionScope::AllPlayers,
             source_filter: affected.clone(),
             exemption: parse_cant_be_activated_exemption_in_text(&lower),
+            // CR 606.2: not kind-narrowed — blocks any activated ability.
+            kind: None,
         })
         .affected(affected)
         .description(text.to_string()),

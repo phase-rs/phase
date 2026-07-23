@@ -3,7 +3,7 @@ import type React from "react";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameAction, GameObject, Keyword } from "../../adapter/types.ts";
+import type { AbilityBlockKind, GameAction, GameObject, Keyword } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -23,6 +23,7 @@ import { COUNTER_COLORS, computePTDisplay, counterIconClass, formatCounterType, 
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 import { ManaFontIcon } from "../icons/ManaFontIcon.tsx";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
+import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { KeywordStrip } from "./KeywordStrip.tsx";
@@ -74,6 +75,64 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
+// CR 732.2a / CR 701.34a: stable empty ref for the per-object ∞-counter selector so a
+// permanent with no unbounded counter (the dominant case) never re-renders on identity churn.
+const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
+
+/**
+ * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
+ * display formatting — no game logic. Exhaustive so a new kind is a compile
+ * error until a key is added.
+ */
+const ABILITY_BLOCK_REASON_KEY: Record<AbilityBlockKind, string> = {
+  CantBeActivated: "abilityBlock.cantBeActivated",
+  CantActivateDuring: "abilityBlock.cantActivateDuring",
+  Prohibited: "abilityBlock.prohibited",
+};
+
+// CR 602.5: display-only badge summarizing which of this permanent's activated
+// abilities are currently blocked, and why. Reads the engine-provided
+// `blocked_abilities` read-out verbatim — it performs no game logic. The tooltip
+// lists each blocked ability's localized reason, labelling printed abilities with
+// their description and naming the prohibiting source only when that object is
+// still present in the state (a departed source renders the reason alone).
+function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
+  const { t } = useTranslation("game");
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const blocked = obj.blocked_abilities;
+  if (!blocked || blocked.length === 0) return null;
+  return (
+    <span className="group absolute left-1/2 top-1 z-30 inline-flex -translate-x-1/2">
+      <span
+        className="flex items-center gap-0.5 rounded bg-amber-600/90 px-1 py-0.5 text-[10px] font-bold text-amber-50 shadow ring-1 ring-amber-200/60"
+        aria-label={t("abilityBlock.badge")}
+      >
+        <span aria-hidden>⊘</span>
+        {t("abilityBlock.badge")}
+      </span>
+      <GameplayTooltip>
+        {blocked.map((entry, i) => {
+          const abilityName =
+            entry.ability_index < obj.abilities.length
+              ? obj.abilities[entry.ability_index]?.description
+              : undefined;
+          const names = (entry.sources ?? [])
+            .map((id) => objects?.[String(id)]?.name)
+            .filter((n): n is string => !!n);
+          const reason = t(ABILITY_BLOCK_REASON_KEY[entry.type]);
+          return (
+            <span key={i} className="block">
+              {abilityName ? `${abilityName}: ${reason}` : reason}
+              {names.length
+                ? ` ${t("preview.fromSource", { source: names.join(", ") })}`
+                : ""}
+            </span>
+          );
+        })}
+      </GameplayTooltip>
+    </span>
+  );
+}
 
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
@@ -201,6 +260,21 @@ export const PermanentCard = memo(function PermanentCard({
     (s) =>
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
+  );
+  // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
+  // copiable values. Engine-classified because a copy of a permanent lives in a
+  // Layer 1a continuous effect, not on the object — and the copy overrides
+  // `printed_ref` too, so a copy is pixel-identical to its source here.
+  const isCopiedPermanent = useGameStore((s) =>
+    (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
+  );
+  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
+  // counter-growth loop) for this object. Values match the object's `counters` map keys
+  // (e.g. "charge"); the pill renders ∞ instead of ×N for any type in this set.
+  const unboundedCounterTypes = useGameStore(
+    (s) =>
+      s.gameState?.derived?.unbounded_counters?.[String(objectId)]
+      ?? EMPTY_UNBOUNDED_COUNTERS,
   );
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
@@ -485,7 +559,18 @@ export const PermanentCard = memo(function PermanentCard({
   // CR 708.2: a face-down permanent has no characteristics other than those
   // its face-down rule grants, so never surface "Copy" on it — that would leak
   // that it's a token-copy (matches the `!face_down` guard on the keyword strip).
-  const isCopy = obj.is_token === true && obj.display_source !== "Token" && !obj.face_down;
+  // Two independent ways a permanent is a copy, unioned so the badge covers the
+  // whole class rather than only the token half (issue #5932):
+  //   - a token minted as a copy (`is_token` + card art), and
+  //   - a real card under a live copy effect (`copied_permanents`) — Clone,
+  //     Phantasmal Image, Vesuvan Doppelganger. These were previously missed
+  //     entirely, so two Reveillarks were indistinguishable on the board.
+  // CR 708.2: the face-down guard leads, so it covers BOTH sources — a
+  // face-down permanent has only the characteristics its face-down rules grant,
+  // and surfacing "Copy" on one would leak what it really is.
+  const isCopy =
+    !obj.face_down
+    && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
@@ -633,6 +718,16 @@ export const PermanentCard = memo(function PermanentCard({
   const useArtCrop = battlefieldCardDisplay === "art_crop";
   const highlightRadiusClass = useArtCrop ? "rounded-[6px]" : "rounded-lg";
 
+  // ⧉ badge scales with the active card width var (same idiom as the keyword
+  // strip / tap glyph) so it stays a corner affordance instead of covering
+  // half of a small battlefield card.
+  const attachmentBadgeSize = useArtCrop
+    ? "clamp(20px, calc(var(--art-crop-w) * 0.24), 26px)"
+    : "clamp(20px, calc(var(--card-w) * 0.22), 28px)";
+  const attachmentBadgeFontSize = useArtCrop
+    ? "clamp(12px, calc(var(--art-crop-w) * 0.13), 14px)"
+    : "clamp(12px, calc(var(--card-w) * 0.12), 15px)";
+
   return (
     <motion.div
       ref={cardRef}
@@ -753,6 +848,7 @@ export const PermanentCard = memo(function PermanentCard({
               {t("permanent.ringBearer")}
             </div>
           )}
+          <BlockedAbilitiesBadge obj={obj} />
         </div>
       ) : (
         <>
@@ -830,13 +926,23 @@ export const PermanentCard = memo(function PermanentCard({
             </div>
           )}
 
+          <BlockedAbilitiesBadge obj={obj} />
+
           {/* Top-right overlay stack: counter badges kept clear of the
               bottom-right P/T box. */}
           <div className="absolute right-0.5 top-0.5 z-[60] flex flex-col items-end gap-0.5">
             {counters.map(([type, count]) => {
               const iconClass = counterIconClass(type);
+              // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this
+              // counter unboundedly — render ∞ instead of the (still-finite) real count.
+              const isUnbounded = unboundedCounterTypes.includes(type);
               return (
-                <CounterTooltip key={type} type={type} count={count}>
+                <CounterTooltip
+                  key={type}
+                  type={type}
+                  count={count}
+                  isUnbounded={isUnbounded}
+                >
                   <span
                     className={`flex items-center gap-0.5 rounded px-1 text-[10px] font-bold text-white ${COUNTER_COLORS[type] ?? "bg-purple-600"}`}
                   >
@@ -847,7 +953,7 @@ export const PermanentCard = memo(function PermanentCard({
                         label={formatCounterType(type)}
                       />
                     )}
-                    {formatCounterType(type)} x{count}
+                    {formatCounterType(type)} {isUnbounded ? "∞" : `x${count}`}
                   </span>
                 </CounterTooltip>
               );
@@ -961,7 +1067,12 @@ export const PermanentCard = memo(function PermanentCard({
       {obj.attachments.length === 1 && (
         <button
           type="button"
-          className="absolute -left-3 -top-3 z-40 flex h-11 w-11 items-center justify-center rounded-full bg-black/90 text-[18px] leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+          style={{
+            width: attachmentBadgeSize,
+            height: attachmentBadgeSize,
+            fontSize: attachmentBadgeFontSize,
+          }}
           title={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
           aria-label={t("permanent.viewAttachmentsFor", { count: 1, name: obj.name })}
           onPointerDown={(event) => event.stopPropagation()}

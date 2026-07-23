@@ -383,6 +383,7 @@ mod tests {
                 target_slots: vec![TargetSelectionSlot {
                     legal_targets: vec![TargetRef::Object(target_id)],
                     optional: false,
+                    chooser: None,
                 }],
                 mode_labels: Vec::new(),
                 selection: Default::default(),
@@ -393,10 +394,7 @@ mod tests {
             action: GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target_id)),
             },
-            metadata: ActionMetadata {
-                actor: Some(PlayerId(1)),
-                tactical_class: TacticalClass::Target,
-            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(1)), TacticalClass::Target),
         };
         (decision, candidate)
     }

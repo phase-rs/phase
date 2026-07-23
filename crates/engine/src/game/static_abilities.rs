@@ -6,9 +6,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::{
     battlefield_active_statics, game_active_statics, game_functioning_statics, static_kind_present,
 };
+use crate::game::game_object::GameObject;
 use crate::game::layers::{evaluate_condition, evaluate_condition_with_recipient};
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, TargetFilter, TypedFilter,
+    ContinuousModification, ControllerRef, Duration, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -192,6 +193,14 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 701.15b: Goaded — this creature must attack and avoid the goading
     // player if able. Runtime enforcement lives in combat.rs.
     registry.insert(StaticMode::Goaded, handle_rule_mod);
+    // CR 508.1d + CR 701.15b: MustAttackAwayFromSource — the goad requirement
+    // pair without the designation (Kardur, Doomscourge; Maximum Carnage I).
+    // Nullary, so it is registry-keyable (unlike the data-carrying
+    // `MustAttackPlayer`). Runtime enforcement lives in combat.rs. The registry
+    // key is ALSO what keeps `coverage::unimplemented_mechanics` quiet for every
+    // creature this grafts onto — it is load-bearing for the client, not
+    // decoration.
+    registry.insert(StaticMode::MustAttackAwayFromSource, handle_rule_mod);
     // CR 506.5 + CR 508.1c + CR 509.1b: CombatAlone — parameterized "alone"
     // restriction. Runtime enforcement lives in combat.rs.
     registry.insert(
@@ -402,7 +411,16 @@ pub(crate) fn prohibition_scope_matches_player(
         return false;
     };
     match scope {
-        ProhibitionScope::Opponents => player != source_obj.controller,
+        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
+        // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
+        // their team, so a naive `player != source_obj.controller` inequality wrongly
+        // treats a teammate as an opponent (barring them from casting). Route through
+        // the team-aware authority; in a two-player / FFA `IndividualSeats` topology
+        // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
+        // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
+        ProhibitionScope::Opponents => {
+            crate::game::players::is_opponent(state, source_obj.controller, player)
+        }
         ProhibitionScope::AllPlayers => true,
         ProhibitionScope::Controller => player == source_obj.controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
@@ -709,71 +727,100 @@ pub fn check_static_ability(
     // CR 114.4: Abilities of emblems function in the command zone.
     // Check both battlefield objects and command zone emblems. The functioning
     // gate is applied before context-specific condition evaluation below.
-    for (obj, def) in game_functioning_statics(state) {
-        if def.mode != mode {
-            continue;
-        }
+    game_functioning_statics(state).any(|(obj, def)| {
+        def.mode == mode && static_ability_match_applies(state, &mode, context, obj, def)
+    })
+}
 
-        // Check affected filter if present (typed TargetFilter)
-        if let Some(ref affected) = def.affected {
-            if !static_filter_matches(state, context, affected, obj.id) {
-                continue;
-            }
+/// CR 604.1: the shared per-`(obj, def)` applicability predicate — the single
+/// authority both `check_static_ability` (early-return bool driver) and
+/// `check_static_ability_sources` (full-scan collector driver) consume. Returns
+/// true exactly where the original `check_static_ability` loop reached
+/// `return true` for a matching-mode definition. Callers pre-check
+/// `def.mode == *mode`.
+fn static_ability_match_applies(
+    state: &GameState,
+    mode: &StaticMode,
+    context: &StaticCheckContext,
+    obj: &GameObject,
+    def: &StaticDefinition,
+) -> bool {
+    // Check affected filter if present (typed TargetFilter)
+    if let Some(ref affected) = def.affected {
+        if !static_filter_matches(state, context, affected, obj.id) {
+            return false;
         }
-
-        if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
-            continue;
-        }
-
-        // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
-        // restrictions) only apply when the declared target matches `attack_defended`.
-        // When no target is in context (eligibility queries), skip scoped statics so
-        // the creature remains able to attack other players.
-        if matches!(
-            def.mode,
-            StaticMode::CantAttack | StaticMode::CantAttackOrBlock
-        ) {
-            if let Some(defended) = def.attack_defended.as_ref() {
-                if !super::restrictions::attack_target_matches_defended_scope(
-                    state,
-                    context.attack_target.as_ref(),
-                    defended,
-                    obj.controller,
-                    obj.owner,
-                ) {
-                    continue;
-                }
-            }
-        }
-
-        // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
-        // against the affected object's controller (the player whose creature/spell
-        // is restricted), distinct from the source-relative `condition` gate above.
-        // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
-        // (Angelic Arbiter's attack clause).
-        if let Some(ref cond) = def.per_player_condition {
-            let affected_player = context
-                .target_id
-                .and_then(|id| state.objects.get(&id))
-                .map(|o| o.controller)
-                .or(context.player_id);
-            match affected_player {
-                Some(p) => {
-                    if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
-                        continue;
-                    }
-                }
-                // No affected player in context -> cannot evaluate a per-player
-                // gate; fail closed (skip this static) so an under-specified query
-                // never over-applies the prohibition.
-                None => continue,
-            }
-        }
-
-        return true;
     }
 
-    false
+    if !static_condition_matches_context(state, obj.id, obj.controller, def, context) {
+        return false;
+    }
+
+    // CR 508.1d: Scoped attack prohibitions (Eriette, Propaganda-family flat
+    // restrictions) only apply when the declared target matches `attack_defended`.
+    // When no target is in context (eligibility queries), skip scoped statics so
+    // the creature remains able to attack other players.
+    if matches!(mode, StaticMode::CantAttack | StaticMode::CantAttackOrBlock) {
+        if let Some(defended) = def.attack_defended.as_ref() {
+            if !super::restrictions::attack_target_matches_defended_scope(
+                state,
+                context.attack_target.as_ref(),
+                defended,
+                obj.controller,
+                obj.owner,
+            ) {
+                return false;
+            }
+        }
+    }
+
+    // CR 101.2 + CR 109.5: per-affected-player applicability gate. Evaluated
+    // against the affected object's controller (the player whose creature/spell
+    // is restricted), distinct from the source-relative `condition` gate above.
+    // Used by "each opponent who [did X] this turn can't [Y]" prohibitions
+    // (Angelic Arbiter's attack clause).
+    if let Some(ref cond) = def.per_player_condition {
+        let affected_player = context
+            .target_id
+            .and_then(|id| state.objects.get(&id))
+            .map(|o| o.controller)
+            .or(context.player_id);
+        match affected_player {
+            Some(p) => {
+                if !crate::game::restrictions::evaluate_condition(state, p, obj.id, cond) {
+                    return false;
+                }
+            }
+            // No affected player in context -> cannot evaluate a per-player
+            // gate; fail closed (skip this static) so an under-specified query
+            // never over-applies the prohibition.
+            None => return false,
+        }
+    }
+
+    true
+}
+
+/// CR 604.1: sorted-agnostic carriers of every functioning static of `mode`
+/// applying to `context`. Same per-`(obj, def)` predicate as
+/// `check_static_ability` (`static_ability_match_applies`); this is the
+/// full-scan collector driver, on the display/payload path only. The
+/// `static_kind_present` fast-empty gate is preserved.
+pub fn check_static_ability_sources(
+    state: &GameState,
+    mode: StaticMode,
+    context: &StaticCheckContext,
+) -> Vec<ObjectId> {
+    if !static_kind_present(state, mode.kind()) {
+        return Vec::new();
+    }
+    crate::game::perf_counters::record_static_full_scan();
+    game_functioning_statics(state)
+        .filter(|(obj, def)| {
+            def.mode == mode && static_ability_match_applies(state, &mode, context, obj, def)
+        })
+        .map(|(obj, _)| obj.id)
+        .collect()
 }
 
 /// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect
@@ -1112,7 +1159,29 @@ pub fn build_cost_permission_context(
 ///
 /// Checks both battlefield permanents and spell-applied transient effects
 /// (e.g., a sorcery that grants all players CantWinTheGame this turn).
+///
+/// CR 810.8a: "If an effect says that a player can't win the game, that
+/// player's team can't win the game" (the Platinum Angel / Angel's Grace
+/// example: neither player on the opposing team can win while the clause
+/// affects one of them). So in 2HG this is true for `player_id` if EITHER
+/// `player_id` itself or their teammate has the grant — mirrors the
+/// `player_has_cant_gain_life` / `player_has_cant_lose_life` teammate fold
+/// below (CR 810.9g/810.9h siblings) and `sba::player_has_cant_lose`'s
+/// identical CR 810.8a fold on the can't-lose side.
 pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
+    cant_win_active_for(state, player_id)
+        || (super::topology::has_two_headed_giant_shared_resources(state)
+            && super::players::teammates(state, player_id)
+                .into_iter()
+                .any(|teammate| cant_win_active_for(state, teammate)))
+}
+
+/// Single-player check underlying `player_has_cant_win`: does `player_id`
+/// itself (battlefield permanent, command-zone emblem, or spell-applied
+/// transient effect) have an active `CantWinTheGame` grant? Does NOT fold in
+/// teammates — callers needing the CR 810.8a team-wide answer must go through
+/// `player_has_cant_win`.
+fn cant_win_active_for(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
         StaticMode::CantWinTheGame,
@@ -1647,6 +1716,37 @@ fn check_static_other_by_name(state: &GameState, name: &str, context: &StaticChe
             ) {
                 continue;
             }
+            // CR 101.2 + CR 109.5 + CR 115.10: per-affected-player applicability
+            // gate — the same read `check_static_ability` performs for typed
+            // prohibition modes. An `Other` static carrying a per-player
+            // relative-count predicate (Ward of Bones: "each opponent who controls
+            // more lands than you can't play lands" → `CantPlayLand` +
+            // `per_player_condition`) applies to the queried player ONLY when that
+            // predicate holds for them. Evaluated against the affected player
+            // (target-owner, else the queried `player_id`) with `ScopedPlayer`
+            // bound to them and "you" to the source's controller. Fail closed when
+            // no affected player is in context so an under-specified query never
+            // over-applies the prohibition.
+            if let Some(ref cond) = def.per_player_condition {
+                let affected_player = context
+                    .target_id
+                    .and_then(|id| state.objects.get(&id))
+                    .map(|o| o.controller)
+                    .or(context.player_id);
+                match affected_player {
+                    Some(p) => {
+                        if !crate::game::restrictions::evaluate_condition(
+                            state,
+                            p,
+                            source_obj.id,
+                            cond,
+                        ) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
             return true;
         }
     }
@@ -1851,9 +1951,16 @@ pub(crate) fn static_filter_matches(
                         crate::types::ability::ControllerRef::You => {
                             source_controller == Some(player_id)
                         }
-                        crate::types::ability::ControllerRef::Opponent => {
-                            source_controller.is_some() && source_controller != Some(player_id)
-                        }
+                        // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a
+                        // multiplayer team game (e.g. Two-Headed Giant) a player's
+                        // opponents are only players NOT on their team, so a naive
+                        // `source_controller != player_id` inequality wrongly treats a
+                        // teammate as an opponent. Route through the team-aware
+                        // authority; in a two-player game `is_opponent` reduces to `!=`.
+                        crate::types::ability::ControllerRef::Opponent => source_controller
+                            .is_some_and(|sc| {
+                                crate::game::players::is_opponent(state, sc, player_id)
+                            }),
                         // CR 109.4: Static abilities have no ability-target context
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.

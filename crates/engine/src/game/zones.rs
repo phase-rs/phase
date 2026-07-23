@@ -1,11 +1,9 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-#[cfg(test)]
-use crate::types::game_state::ZoneChangeRecord;
 use crate::types::game_state::{
     GameState, ResolutionSourceRelatch, StackEntry, ZoneChangeCombatStatus,
 };
-use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
@@ -109,6 +107,7 @@ pub(crate) fn capture_attachment_snapshot(
             };
             Some(crate::types::game_state::AttachmentSnapshot {
                 object_id: *id,
+                identity: Some(ObjectIncarnationRef::from_object(att)),
                 controller: att.controller,
                 kind,
             })
@@ -137,15 +136,15 @@ pub(crate) fn apply_zone_exit_cleanup(
     attachments: Vec<crate::types::game_state::AttachmentSnapshot>,
 ) {
     // CR 400.7: An object that changes zones becomes a new object with no
-    // memory of its previous existence. Both the short-lived `revealed_cards`
-    // (cleared at action boundaries) and the persistent `public_revealed_cards`
-    // (reveal memory that survives action boundaries so e.g. a Duress-revealed
-    // card stays visible in the opponent's hand) are keyed by ObjectId. Since
-    // ObjectId here is storage identity and persists across the zone change,
-    // we must drop both flags so a card shuffled back into the library and
-    // re-drawn does not surface as "still revealed."
-    state.revealed_cards.remove(&object_id);
-    state.public_revealed_cards.remove(&object_id);
+    // memory of its previous existence. The information authority receives the
+    // pre-move occurrence so the future Zone command can apply this same clear
+    // without ever exposing the new incarnation through the old reveal lease.
+    let occurrence = state
+        .objects
+        .get(&object_id)
+        .map(ObjectIncarnationRef::from_object)
+        .expect("zone-exit cleanup must reference a live object");
+    state.clear_revealed_information_on_zone_exit(occurrence);
     // CR 400.7 + CR 702.187b: The "discarded this turn" mark (Mayhem's gate)
     // belongs to the old object. Clear it on any zone change so a card that
     // leaves the graveyard and returns is not treated as still discarded; the
@@ -167,7 +166,10 @@ pub(crate) fn apply_zone_exit_cleanup(
     // Power/toughness reflect layer modifications on battlefield (Layer 7);
     // from exile they will be None (no layer computation), which is correct.
     if from == Zone::Battlefield || from == Zone::Exile {
+        let lki_copiable_values =
+            crate::game::layers::compute_current_copiable_values(state, object_id);
         if let Some(obj) = state.objects.get(&object_id) {
+            let incarnation = obj.incarnation;
             let lki = crate::types::game_state::LKISnapshot {
                 name: obj.name.clone(),
                 token_image_ref: obj.token_image_ref.clone(),
@@ -208,7 +210,15 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // Supplied by the caller: the sever already ran by the time we get here.
                 attachments,
             };
-            state.lki_cache.insert(object_id, lki);
+            state.lki_cache.insert(object_id, lki.clone());
+            state
+                .lki_by_incarnation
+                .entry(object_id)
+                .or_default()
+                .insert(incarnation, lki);
+        }
+        if let Some(values) = lki_copiable_values {
+            state.lki_copiable_values.insert(object_id, values);
         }
     }
 
@@ -624,7 +634,7 @@ pub(crate) fn record_resolution_source_relatch(
         .resolving_stack_entry
         .as_ref()
         .and_then(StackEntry::ability)
-        .map(|a| (a.source_id, a.source_incarnation))
+        .map(|a| (a.source_id, a.trigger_source_incarnation()))
     else {
         return;
     };
@@ -795,6 +805,13 @@ pub fn move_to_zone(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    zone_change_record.sync_trigger_source_exiled_cards(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+    );
     // CR 607.2b + CR 603.10e: Persist the linked-exile snapshot as last-known
     // information so a self-sacrifice ability that refers to "cards exiled with
     // this permanent" (Rod of Absorption) still resolves correctly after its own
@@ -817,6 +834,7 @@ pub fn move_to_zone(
     } else {
         capture_combat_status(state, object_id)
     };
+    zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
@@ -1125,7 +1143,7 @@ pub fn stamp_simultaneous_from_slice(state: &GameState, slice: &mut [GameEvent])
     mark_simultaneous_departures(slice, &departed);
 }
 
-fn capture_linked_exile_snapshot(
+pub(crate) fn capture_linked_exile_snapshot(
     state: &GameState,
     source_id: ObjectId,
     from: Zone,
@@ -1195,7 +1213,10 @@ fn sever_battlefield_attachment_graph_on_exit(
     }
 }
 
-fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCombatStatus {
+pub(crate) fn capture_combat_status(
+    state: &GameState,
+    object_id: ObjectId,
+) -> ZoneChangeCombatStatus {
     let Some(combat) = &state.combat else {
         return ZoneChangeCombatStatus::default();
     };
@@ -1253,6 +1274,23 @@ pub fn move_to_library_position(
     move_to_library_at_index(state, object_id, index, events);
 }
 
+/// Digital-only Alchemy placement (no CR entry): resolve a uniformly-random
+/// 0-based insertion index for `LibraryPosition::RandomWithinTop { n }`. A card
+/// slotted "into the top `top_n` cards of a library at random" lands among the
+/// top `top_n` positions; with `slots_after_insert` total positions available
+/// (the destination library's length *including* the card being placed), the
+/// reachable range is `0..min(top_n, slots_after_insert)`. Consumes exactly one
+/// RNG draw. Single authority for the random-top-N index so the conjure resolver
+/// and the zone pipeline compute it identically.
+pub(crate) fn random_top_slot_index(
+    rng: &mut impl rand::Rng,
+    top_n: usize,
+    slots_after_insert: usize,
+) -> usize {
+    let upper = top_n.min(slots_after_insert).max(1);
+    rng.random_range(0..upper)
+}
+
 /// Move an object to a specific index in its owner's library.
 /// `index = Some(0)` = top, `index = None` = bottom, `index = Some(n)` = nth position.
 /// Handles full cross-zone cleanup (LKI, transform revert, layer pruning, restrictions)
@@ -1286,6 +1324,14 @@ pub fn move_to_library_at_index(
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
     zone_change_record.combat_status = capture_combat_status(state, object_id);
+    zone_change_record.sync_trigger_source_exiled_cards(
+        state
+            .cards_exiled_with_source_this_turn
+            .get(&object_id)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    zone_change_record.sync_trigger_source_context();
 
     sever_battlefield_attachment_graph_on_exit(state, object_id, &unattached_from);
 
@@ -1552,6 +1598,7 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         .find(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield)
     {
         record.controller = controller;
+        record.sync_trigger_source_context();
     }
 
     if let Some(record) = state
@@ -1574,6 +1621,7 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         )
     }) {
         record.controller = controller;
+        record.sync_trigger_source_context();
     }
 }
 
@@ -2404,18 +2452,25 @@ mod tests {
         move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
 
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            GameEvent::ZoneChanged {
-                object_id: id,
-                from: Some(Zone::Hand),
-                to: Zone::Graveyard,
-                record: Box::new(ZoneChangeRecord {
-                    name: "Card".to_string(),
-                    ..ZoneChangeRecord::test_minimal(id, Some(Zone::Hand), Zone::Graveyard)
-                }),
-            }
-        );
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+        } = &events[0]
+        else {
+            panic!("move_to_zone must emit ZoneChanged");
+        };
+        assert_eq!(*object_id, id);
+        assert_eq!(*from, Some(Zone::Hand));
+        assert_eq!(*to, Zone::Graveyard);
+        assert_eq!(record.name, "Card");
+        let context = record
+            .trigger_source_context()
+            .expect("real zone-change events carry their source context");
+        assert_eq!(context.identity.reference.object_id, id);
+        assert_eq!(context.identity.expected_zone, Zone::Hand);
+        assert_eq!(context.card_id, CardId(1));
     }
 
     #[test]

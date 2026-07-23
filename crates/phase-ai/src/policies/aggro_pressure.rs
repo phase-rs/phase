@@ -262,6 +262,7 @@ mod tests {
                 player: AI,
                 valid_attacker_ids: vec![],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             },
             candidates: Vec::new(),
@@ -287,10 +288,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
         }
     }
 
@@ -302,10 +300,7 @@ mod tests {
                 attacks,
                 bands: vec![],
             },
-            metadata: ActionMetadata {
-                actor: Some(AI),
-                tactical_class: TacticalClass::Attack,
-            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Attack),
         }
     }
 
@@ -510,6 +505,7 @@ mod tests {
                 player: AI,
                 valid_attacker_ids: vec![oid],
                 valid_attack_targets: vec![],
+                valid_attack_targets_by_attacker: None,
                 attacker_constraints: Default::default(),
             },
             candidates: Vec::new(),

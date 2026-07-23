@@ -11,8 +11,12 @@ const BROTHERHOODS_END: &str = "Choose one —\n\
 
 fn opponent_client_state(runner: &GameRunner) -> ClientGameState {
     let filtered = filter_state_for_viewer(runner.state(), P1);
-    let json = serde_json::to_string(&ClientGameStateRef::wrap(&filtered, Some(P1)))
-        .expect("serialize opponent state");
+    let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+        runner.state(),
+        &filtered,
+        Some(P1),
+    ))
+    .expect("serialize opponent state");
     serde_json::from_str(&json).expect("deserialize opponent state")
 }
 

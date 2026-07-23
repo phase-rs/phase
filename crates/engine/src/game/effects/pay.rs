@@ -36,6 +36,19 @@ pub fn resolve(
         Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
     };
+    // CR 118.12 + CR 608.2c: make the failure signal resolution-local to THIS
+    // `PayCost` instance. `cost_payment_failed_flag` is only ever SET on
+    // failure; without clearing it here, a stale `true` left by an earlier,
+    // unrelated resolution's unpayable cost would survive into this payment,
+    // suppress the `optional_effect_performed` seed for a payment that
+    // SUCCEEDED (`effects/mod.rs`'s mandatory-rider seed guards on
+    // `!cost_payment_failed_flag`), and make a `Not { OptionalEffectPerformed }`
+    // "If you can't" rider fire despite the cost having been paid (Greenbelt
+    // Rampager bouncing after a successful {E}{E} payment, issue #4955 review).
+    // Mirrors the established per-iteration clear in the repeated-payment
+    // driver ("clear the resolution failure flag before THIS payment so a
+    // prior iteration's failure can't be misread as this payment's outcome").
+    state.cost_payment_failed_flag = false;
     let Some(payer) = resolve_effect_player_ref(state, ability, payer_filter) else {
         state.cost_payment_failed_flag = true;
         return Ok(());
@@ -250,13 +263,19 @@ fn resolve_ability_cost_payment(
         // `DiscardChoice` — interrupted payment. `state.waiting_for` is already
         // set by the authority; the resolution chain resumes from there.
         Ok(PaymentOutcome::Paused { remaining_cost }) => {
-            if let Some(remaining_cost) = remaining_cost.clone() {
-                super::prepend_remaining_pay_cost_continuation(
-                    state,
-                    ability,
-                    payer,
-                    remaining_cost,
-                );
+            // CR 118.12 + CR 605.3b + CR 616.1: A paused mana-source payment
+            // owns its complete unpaid suffix in `ManaAbilityResume`, never in
+            // the effect continuation queue.  The queue remains only for
+            // ordinary non-mana cost choices such as discard selection.
+            if !crate::game::casting::mana_ability_cost_payment_is_paused(state) {
+                if let Some(remaining_cost) = remaining_cost.clone() {
+                    super::prepend_remaining_pay_cost_continuation(
+                        state,
+                        ability,
+                        payer,
+                        remaining_cost,
+                    );
+                }
             }
             Ok(PaymentOutcome::Paused { remaining_cost })
         }
@@ -908,6 +927,42 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         assert_eq!(state.players[0].energy, 0);
         assert_eq!(state.last_effect_count, Some(5));
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a successful payment must REPLACE the stale failure signal, not keep it"
+        );
+    }
+
+    /// Maintainer review on PR #5869: the failure signal is resolution-local
+    /// to each `PayCost` instance. A stale `cost_payment_failed_flag` left by
+    /// an EARLIER, unrelated resolution must be cleared at this payment's
+    /// chain handoff, so a SUCCESSFUL mandatory payment reads as performed —
+    /// otherwise the mandatory-rider seed (guarded on
+    /// `!cost_payment_failed_flag`) skips `optional_effect_performed` and a
+    /// `Not { OptionalEffectPerformed }` "If you can't" rider fires despite
+    /// the cost having been paid (Greenbelt Rampager, issue #4955).
+    #[test]
+    fn resolution_pay_success_clears_stale_failed_flag() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].energy = 2;
+        state.cost_payment_failed_flag = true;
+        let ability = make_ability(Effect::PayCost {
+            cost: AbilityCost::PayEnergy {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
+        });
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].energy, 0,
+            "the payment itself must succeed"
+        );
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a stale pre-set failure flag must not survive a successful PayCost"
+        );
     }
 
     #[test]
@@ -1617,8 +1672,7 @@ mod tests {
         // optional_effect_performed=true. Link (c) regression: continuation None.
         // Link (d) regression: continuation present but performed flag false.
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("pending_continuation must be stashed (link c)");
         assert!(
             matches!(cont.chain.effect, Effect::Draw { .. }),
@@ -1892,8 +1946,7 @@ mod tests {
         // Reach guard: the stashed continuation is a REAL DealDamage node (never
         // Effect::Unimplemented), and it snapshotted the trigger context.
         let cont = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("DealDamage continuation must be stashed on the pause");
         assert!(
             matches!(cont.chain.effect, Effect::DealDamage { .. }),
@@ -1944,7 +1997,7 @@ mod tests {
     /// damages the triggering player P1 — never the Aura controller P0. Sibling
     /// coverage for the decline branch; the decline resolves synchronously
     /// inside `handle_optional_effect_choice`, so its trigger context is kept
-    /// live by the pre-existing `pending_optional_trigger_event` mechanism
+    /// live by the optional-effect frame's trigger-context mechanism
     /// rather than by the drain-time snapshot under test. It guards that the
     /// `PendingContinuation::new` signature change did not regress the decline
     /// path's damage recipient.
@@ -2030,7 +2083,7 @@ mod tests {
         // Reach guard: no residual pending continuation — the DealDamage fully
         // resolved in one shot (positive P1 life-loss confirms it ran).
         assert!(
-            state.pending_continuation.is_none(),
+            state.active_ability_continuation().is_none(),
             "the no-pause path must not stash a continuation"
         );
         assert_eq!(
@@ -2090,11 +2143,10 @@ mod tests {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
         });
-        state.pending_continuation = Some(PendingContinuation::new(Box::new(first_chain), &state));
+        state.park_ability_continuation(PendingContinuation::new(Box::new(first_chain), &state));
         assert_eq!(
             state
-                .pending_continuation
-                .as_ref()
+                .active_ability_continuation()
                 .and_then(|c| c.trigger_context.clone()),
             Some(context_a.clone()),
             "sanity: the first pause stashed context A"
@@ -2127,8 +2179,7 @@ mod tests {
         // The merged continuation must retain context A (the earliest pause),
         // NOT re-capture context B from the live state at splice time.
         let merged = state
-            .pending_continuation
-            .as_ref()
+            .active_ability_continuation()
             .expect("merge must leave a continuation stashed");
         assert_eq!(
             merged.trigger_context,

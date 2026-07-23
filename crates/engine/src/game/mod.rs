@@ -65,6 +65,7 @@ pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
 pub mod haunt;
+pub mod interaction;
 // Tests for `haunt` live in a sibling file (declared here, not in `haunt.rs`,
 // so `haunt.rs` stays implementation-only).
 #[cfg(test)]
@@ -72,6 +73,8 @@ pub mod haunt;
 mod haunt_tests;
 pub mod keywords;
 pub mod layers;
+pub mod ledger;
+pub mod library;
 pub mod life_costs;
 pub mod log;
 pub mod mana_abilities;
@@ -105,6 +108,7 @@ mod conspiracy_tests;
 mod merge_tests;
 pub mod morph;
 pub mod mulligan;
+pub mod object_state;
 pub(crate) mod off_zone_characteristics;
 pub mod pairing;
 pub mod perf_counters;
@@ -139,7 +143,9 @@ pub mod restrictions;
 pub mod room;
 pub(crate) mod sacrifice;
 pub mod sba;
+#[cfg(any(test, feature = "test-support"))]
 pub mod scenario;
+#[cfg(any(test, feature = "test-support"))]
 pub mod scenario_db;
 pub mod specialize;
 pub mod speed;
@@ -191,11 +197,11 @@ pub use deck_loading::{
     resolve_deck_list, resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    can_pair_commanders, deck_copy_limit_for, evaluate_deck_compatibility,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
     is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
-    validate_deck_for_format, validate_name_deck_for_format, validate_name_deck_for_format_full,
-    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
-    UnsupportedCard,
+    signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
+    validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
+    DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,

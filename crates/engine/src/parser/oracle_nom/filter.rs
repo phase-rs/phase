@@ -164,6 +164,8 @@ pub fn parse_property_filter(input: &str) -> OracleResult<'_, FilterProp> {
         value(FilterProp::Unblocked, tag("unblocked")),
         value(FilterProp::Suspected, tag("suspected")),
         value(FilterProp::Renowned, tag("renowned")),
+        // CR 701.15b/c: standalone "goaded" designation property token.
+        value(FilterProp::Goaded, tag("goaded")),
         value(FilterProp::EnchantedBy, tag("enchanted")),
         value(FilterProp::EquippedBy, tag("equipped")),
         parse_color_property,
@@ -562,6 +564,14 @@ mod tests {
     fn test_parse_property_filter_renowned() {
         let (rest, p) = parse_property_filter("renowned creature").unwrap();
         assert_eq!(p, FilterProp::Renowned);
+        assert_eq!(rest, " creature");
+    }
+
+    #[test]
+    fn test_parse_property_filter_goaded() {
+        // CR 701.15b/c: standalone "goaded" designation property token (Gap A, site 14).
+        let (rest, p) = parse_property_filter("goaded creature").unwrap();
+        assert_eq!(p, FilterProp::Goaded);
         assert_eq!(rest, " creature");
     }
 

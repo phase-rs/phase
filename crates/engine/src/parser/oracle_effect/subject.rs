@@ -9,7 +9,7 @@ use nom::Parser;
 
 use super::animation::{
     animation_modifications_with_replacement, has_in_addition_to_other_colors,
-    has_in_addition_to_other_types, parse_animation_spec,
+    has_in_addition_to_other_types, parse_animation_spec, split_in_addition_tail,
 };
 use super::imperative;
 use super::lower::BOUNDED_TARGET_CARDINALITIES;
@@ -32,7 +32,7 @@ use super::super::oracle_nom::duration::parse_duration;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_nom::target::parse_event_context_ref;
+use super::super::oracle_nom::target::{parse_event_context_ref, parse_supertype_word};
 use super::super::oracle_quantity;
 use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
@@ -196,6 +196,15 @@ pub(super) fn try_parse_subject_predicate_ast(
             },
             ctx,
         ));
+    }
+
+    // CR 205.4b + CR 611.2a: one-shot supertype removal — "target <filter> isn't
+    // / is not / is no longer <supertype>", the RemoveSupertype sibling of the
+    // "becomes <supertype>" AddSupertype one-shot above (Arcum's Weathervane,
+    // Thermal Flux). Runs after the become arm because its subject is always
+    // targeted, never a carried-over conjunct.
+    if let Some(ast) = try_parse_subject_supertype_removal_clause(text, ctx) {
+        return Some(ast);
     }
 
     // CR 509.1b + CR 611.2c: "<source> and up to N other target creature(s) can't
@@ -725,6 +734,103 @@ fn try_parse_subject_become_clause(
         parse_subject_application(subject, ctx)?
     };
     build_become_clause(application, &predicate, ctx)
+}
+
+/// CR 205.4b + CR 611.2a: One-shot supertype REMOVAL on a targeted permanent —
+/// "target <filter> isn't / is not / is no longer <supertype> [until end of
+/// turn]". This is the inverse of the "target <filter> becomes <supertype>"
+/// one-shot that [`build_become_clause`] already lowers (it emits
+/// [`ContinuousModification::AddSupertype`]); this arm emits the sibling
+/// [`ContinuousModification::RemoveSupertype`] into the SAME targeted
+/// [`Effect::GenericEffect`] continuous grant, which `game/layers.rs` already
+/// applies in both directions (CR 205.4 layer 4). Parser-only: no new effect
+/// variant and no resolver path.
+///
+/// Anchored on the AddSupertype sibling that ships on the very same cards:
+///   * Arcum's Weathervane pairs "{2}, {T}: Target snow land is no longer snow."
+///     (this arm) with "{2}, {T}: Target nonsnow basic land becomes snow."
+///     (already supported).
+///   * Thermal Flux pairs the "isn't snow until end of turn" mode with the
+///     already-supported "becomes snow until end of turn" mode.
+///
+/// Scoped strictly to the five CR 205.4a supertype words via `all_consuming`, so
+/// the copula-negation core-type removal path ("target creature isn't a creature
+/// until end of turn" -> `RemoveType`) is never claimed here, and gated on an
+/// explicit target so anaphoric / self-referential copy-exception forms
+/// ("it isn't legendary") do not match.
+fn try_parse_subject_supertype_removal_clause(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ClauseAst> {
+    let lower = text.to_lowercase();
+    // The copula-negation seam. Keep recognition in the nom grammar and map the
+    // remainder back to original case through `nom_on_lower`; the three copulas
+    // are independent alternatives, not a full-string permutation list.
+    let (subject_lower, predicate) = nom_on_lower(text, &lower, |input| {
+        map(
+            alt((
+                terminated(
+                    take_until::<_, _, OracleError<'_>>(" isn't "),
+                    tag(" isn't "),
+                ),
+                terminated(
+                    take_until::<_, _, OracleError<'_>>(" is no longer "),
+                    tag(" is no longer "),
+                ),
+                terminated(
+                    take_until::<_, _, OracleError<'_>>(" is not "),
+                    tag(" is not "),
+                ),
+            )),
+            str::to_owned,
+        )
+        .parse(input)
+    })?;
+    let subject = text[..subject_lower.len()].trim();
+    if subject.is_empty() {
+        return None;
+    }
+    // Peel a trailing duration ("until end of turn"); CR 611.2a: a one-shot type
+    // change with no explicit duration is permanent.
+    let (supertype_text, duration) = super::strip_trailing_duration(predicate.trim());
+    let supertype_lower = supertype_text
+        .trim()
+        .trim_end_matches('.')
+        .trim()
+        .to_lowercase();
+    let (_, supertype) = all_consuming(parse_supertype_word)
+        .parse(supertype_lower.as_str())
+        .ok()?;
+
+    // Only a genuinely targeted subject reaches the shared AddSupertype runtime
+    // as `ParentTarget`; decline anaphoric / self-referential subjects (no
+    // target) so an out-of-context "it isn't legendary" cannot animate here.
+    let application = parse_subject_application(subject, ctx)?;
+    application.target.as_ref()?;
+    let affected = static_affected_for_application(&application);
+    let duration = duration.or(Some(Duration::Permanent));
+    let effect = Effect::GenericEffect {
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::RemoveSupertype { supertype }])
+            .description(text.to_string())],
+        duration: duration.clone(),
+        target: application.target.clone(),
+    };
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Become {
+            effect,
+            duration,
+            sub_ability: None,
+        }),
+    })
 }
 
 /// CR 208.1: which base characteristic(s) a "base power [and toughness] become"
@@ -1565,23 +1671,28 @@ fn try_parse_subject_restriction_clause(
                 unless_pay: None,
             });
         }
-        // CR 701.15a + CR 701.15b: "[subject] attacks each combat if able and
-        // attacks a player other than you if able" is the printed goad definition
-        // (Maximum Carnage chapter I). Map it to `Effect::GoadAll` over the subject
-        // population so the goad mechanic (goaded_by mark, "attack a player other
-        // than the goading player", goading-player next-turn cleanup) handles it.
-        // Tried before the plain attack recognizer since the goad compound is the
-        // strict superset and must win. The subject is a population ("each
-        // creature"), so the GoadAll target is `application.affected`.
-        if imperative::try_parse_goad_equivalent(&predicate) {
+        // CR 508.1d + CR 701.15b + CR 611.2c: "[subject] attacks each combat if
+        // able and attacks a player other than you if able" is the goad
+        // *requirement pair* printed in full (Kardur, Doomscourge; Maximum
+        // Carnage chapter I). CR 701.15a: only a spell or ability that *goads*
+        // makes a creature goaded, so this lowers to combat requirements and NOT
+        // to the goad mechanic — official Maximum Carnage ruling (2025-09-19):
+        // "that ability doesn't cause any creatures to become goaded. Effects
+        // that refer to 'goaded creatures' won't apply."
+        // Tried before the plain attack recognizer since the compound is the
+        // strict superset. `duration: None` — the stated duration ("Until your
+        // next turn,") arrives on `ability.duration` and wins in
+        // `effects/effect.rs::resolve`.
+        if imperative::try_parse_attack_away_requirement(&predicate) {
             let application = parse_subject_application(subject, ctx)?;
-            let goad_target = application
-                .target
-                .clone()
-                .unwrap_or_else(|| application.affected.clone());
+            let affected = static_affected_for_application(&application);
             return Some(ParsedEffectClause {
-                effect: Effect::GoadAll {
-                    target: goad_target,
+                effect: Effect::GenericEffect {
+                    static_abilities: vec![
+                        imperative::must_attack_away_static_definition().affected(affected)
+                    ],
+                    duration: None,
+                    target: application.target,
                 },
                 distribute: None,
                 multi_target: application.multi_target,
@@ -1653,6 +1764,9 @@ fn try_parse_subject_restriction_clause(
             who: ProhibitionScope::AllPlayers,
             source_filter: TargetFilter::SelfRef,
             exemption,
+            // CR 606.2: "<subject>'s activated abilities can't be activated"
+            // (Dovin Baan, Xathrid Gorgon) is not kind-narrowed.
+            kind: None,
         };
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
@@ -2273,6 +2387,16 @@ pub(super) fn parse_subject_application(
             inherits_parent: false,
             is_optional: false,
         });
+    }
+    // CR 303.4b + CR 702.5a + CR 701.17a (issue #5947): "enchanted player"
+    // names the Aura's attached player host — `AttachedTo`, not a Typed
+    // EnchantedBy filter (which is object-only). Used by curse bodies such as
+    // Fraying Sanity's "enchanted player mills X cards".
+    if all_consuming(tag::<_, _, OracleError<'_>>("enchanted player"))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return subject_filter_application(TargetFilter::AttachedTo, false);
     }
     // "those creatures" / "those lands" — anaphoric reference to previous
     // targets. Maps to ParentTarget so the restriction applies to the same
@@ -3028,10 +3152,24 @@ fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
             TargetFilter::TriggeringPlayer
         }
         Some(TargetFilter::Player) => TargetFilter::TriggeringPlayer,
-        // Object-type trigger subject
-        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
-            TargetFilter::TriggeringSource
-        }
+        // Object-type trigger subject: the trigger's SOURCE is "they" only when no
+        // nearer antecedent exists.
+        //
+        // CR 608.2c (issue #5985): a mass ("each …") effect in an earlier clause of
+        // the same chain establishes an object population, and that population is
+        // the nearer antecedent — Ardbert, Warrior of Darkness: "Whenever you cast a
+        // white spell, put a +1/+1 counter on each legendary creature you control.
+        // They gain vigilance until end of turn." "They" is those creatures, not the
+        // cast spell. Binding to the spell granted the keyword to an object on the
+        // stack, so the grant half silently did nothing while the counters landed.
+        //
+        // A mass effect chooses no target, so `ParentTarget` cannot express this
+        // (see `has_typed_target_widened`'s single-target whitelist); the anaphor
+        // inherits the population FILTER itself.
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => ctx
+            .chain_prior_mass_population
+            .clone()
+            .unwrap_or(TargetFilter::TriggeringSource),
         // No trigger context — anaphoric reference to previously mentioned objects
         _ => TargetFilter::ParentTarget,
     }
@@ -3195,7 +3333,8 @@ fn try_split_pump_compound(
 
     // CR 608.2d: a pump compounded with a modal keyword grant --
     // "gets +1/+1 and gains your choice of deathtouch or lifelink" (Alchemist's
-    // Gift) -- has a grant half that is a two-branch player choice, so it cannot
+    // Gift) -- has a grant half that is an N-branch player choice (two or more
+    // options, e.g. Golem Artisan's "flying, trample, or haste"), so it cannot
     // collapse into a single `ContinuousModification` the way a fixed "and gains
     // trample" does (which the guard above routes to `build_continuous_clause`'s
     // coalescing path). Route the choice through the same
@@ -3230,7 +3369,7 @@ fn try_split_pump_compound(
 }
 
 /// CR 608.2d: build the modal keyword-grant half of a pump
-/// compound ("gets +1/+1 AND gains your choice of X or Y") as a `ChooseOneOf`
+/// compound ("gets +1/+1 AND gains your choice of X, Y, or Z") as a `ChooseOneOf`
 /// sub_ability. Reuses the same `parse_keyword_choice_grant` /
 /// `keyword_choice_branch` builders as the standalone `build_keyword_choice_clause`,
 /// keyed to the pumped creature via `static_affected_for_application`
@@ -3246,13 +3385,13 @@ fn build_keyword_choice_sub_ability(
     // "gains your choice of ...". `parse_keyword_choice_grant` anchors on the
     // bare "gain ..." form, so deconjugate the remainder here first.
     let normalized = deconjugate_verb(remainder);
-    let (first, second, duration) = parse_keyword_choice_grant(&normalized)?;
+    let (keywords, duration) = parse_keyword_choice_grant(&normalized)?;
     let affected = static_affected_for_application(application);
     let choice_duration = duration.clone();
-    let branches = vec![
-        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
-        keyword_choice_branch(second, affected, None, duration),
-    ];
+    let branches = keywords
+        .into_iter()
+        .map(|kw| keyword_choice_branch(kw, affected.clone(), None, duration.clone()))
+        .collect();
     Some((
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -3265,18 +3404,29 @@ fn build_keyword_choice_sub_ability(
     ))
 }
 
-fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Option<Duration>)> {
+fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<Duration>)> {
     let lower = predicate.to_lowercase();
 
-    // Shape 1: "gain your choice of X or Y" — an explicit keyword-grant menu.
+    // Shape 1: "gain your choice of X, Y, or Z" — an explicit keyword-grant menu
+    // of two OR MORE options (Golem Artisan: "flying, trample, or haste"). Reuse
+    // the nom-based `split_choice_list_items` splitter (shared with the counter-
+    // choice and "from among" paths) so an Oxford-comma N-ary list parses without
+    // manual byte slicing.
     if let Ok((choice_text, _)) =
         tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
     {
         let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-        let (_, (left, right)) = nom_primitives::split_once_on(keyword_text.trim(), " or ").ok()?;
-        let first = parse_granted_keyword_fragment(left.trim())?;
-        let second = parse_granted_keyword_fragment(right.trim())?;
-        return Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))));
+        let items = super::split_choice_list_items(keyword_text.trim())?;
+        // `separated_list1` succeeds on a single item when there is no separator
+        // at all; require ≥2 so a lone keyword is not mistaken for a "choice".
+        if items.len() < 2 {
+            return None;
+        }
+        let keywords: Vec<Keyword> = items
+            .iter()
+            .map(|item| parse_granted_keyword_fragment(item.trim()))
+            .collect::<Option<Vec<Keyword>>>()?;
+        return Some((keywords, duration.or(Some(Duration::UntilEndOfTurn))));
     }
 
     // Shape 2: "gain/have protection from X or from the color of your choice"
@@ -3308,7 +3458,10 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Keyword, Keyword, Opti
     let second = Keyword::Protection(crate::types::keywords::parse_protection_target(
         right.trim(),
     ));
-    Some((first, second, duration.or(Some(Duration::UntilEndOfTurn))))
+    Some((
+        vec![first, second],
+        duration.or(Some(Duration::UntilEndOfTurn)),
+    ))
 }
 
 fn keyword_choice_branch(
@@ -3338,12 +3491,12 @@ fn build_keyword_choice_clause(
     application: &SubjectApplication,
     predicate: &str,
 ) -> Option<ParsedEffectClause> {
-    let (first, second, duration) = parse_keyword_choice_grant(predicate)?;
+    let (keywords, duration) = parse_keyword_choice_grant(predicate)?;
     let affected = static_affected_for_application(application);
-    let branches = vec![
-        keyword_choice_branch(first, affected.clone(), None, duration.clone()),
-        keyword_choice_branch(second, affected, None, duration),
-    ];
+    let branches = keywords
+        .into_iter()
+        .map(|kw| keyword_choice_branch(kw, affected.clone(), None, duration.clone()))
+        .collect();
 
     let choose_effect = Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
@@ -3471,6 +3624,23 @@ fn build_continuous_clause(
             keyword: crate::types::keywords::Keyword::Suspend { .. },
         }]
     ) {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
+    // CR 205.1b + CR 611.2a: an additive type grant — "becomes a <type> in
+    // addition to its other [creature] types" (Sensei Golden-Tail's training
+    // grant: "gains bushido 1 and becomes a Samurai in addition to its other
+    // creature types") — states no duration and therefore lasts until end of
+    // game: the granted type/keyword is added for as long as the affected object
+    // exists. Without this the unstated `None` duration flips to UntilEndOfTurn in
+    // `effect.rs::resolve` and the grant is swept by `prune_end_of_turn_effects`,
+    // so it wrongly "wears off" after the turn. Only fires when NO duration was
+    // parsed, so an explicit "... in addition to its other types until end of
+    // turn" keeps its stated turn-scoped duration. Mirrors the Suspend and
+    // `build_become_clause` (CR 611.2b) default-permanent precedents.
+    let duration = if duration.is_none() && has_in_addition_to_other_types(predicate_text) {
         Some(Duration::Permanent)
     } else {
         duration
@@ -4456,8 +4626,8 @@ fn ends_with_of_your_choice(lower: &str) -> bool {
 }
 
 /// CR 205.3 / CR 305.7 / CR 105.3: Parse "become the [creature type / basic land
-/// type / color] of your choice [and <keyword grant>]" into a Choose →
-/// GenericEffect(apply) chain.
+/// type / color] of your choice [in addition to its other types] [and
+/// <keyword grant>]" into a Choose → GenericEffect(apply) chain.
 ///
 /// The optional trailing "and <keyword grant>" clause (Mondo Gecko: "becomes the
 /// color of your choice and gains hexproof from that color") composes the chosen
@@ -4466,6 +4636,17 @@ fn ends_with_of_your_choice(lower: &str) -> bool {
 /// which resolves "hexproof from that color" to `HexproofFrom(ChosenColor)`
 /// (CR 702.11d) — the same `ChosenAttribute::Color` the `AddChosenColor`
 /// modification reads, so the protection tracks the chosen color.
+///
+/// The optional "in addition to its other types" retention marker (Navigator's
+/// Compass: "becomes the basic land type of your choice in addition to its
+/// other types") is peeled off via the shared `split_in_addition_tail` splitter
+/// — the same one `build_become_clause`'s fixed-value fallback already uses for
+/// the non-choice "becomes a `<type>`" form (Possessed Goat). Previously this
+/// function anchored on the choice phrase literally ending in "of your choice",
+/// so any trailing marker text made the whole predicate fall through unparsed.
+/// The land/creature choice modification (`AddChosenSubtype`) is additive by
+/// construction (CR 205.1b) regardless of the marker, so accepting it changes
+/// nothing about the emitted modification — only whether the line parses at all.
 fn try_parse_become_choice(
     become_text: &str,
     application: &SubjectApplication,
@@ -4491,6 +4672,23 @@ fn try_parse_become_choice(
         _ => (become_text.trim(), None),
     };
 
+    // CR 205.1b: the choice phrase may itself carry the "in addition to its
+    // other types" retention marker (Navigator's Compass: "becomes the basic
+    // land type of your choice in addition to its other types") — the same
+    // marker the fixed-value sibling path already recognizes via
+    // `has_in_addition_to_other_types` (see `build_become_clause`'s
+    // `parse_animation_spec` fallback). Peel it off with the shared
+    // `split_in_addition_tail` splitter before the "of your choice" anchor
+    // check below, so the choice phrase underneath is still recognized instead
+    // of the whole predicate falling through unparsed. `AddChosenSubtype` (the
+    // land/creature-type modification below) is additive by construction
+    // regardless of the marker, so no branching on the match is needed — it
+    // only needs to be accepted, not interpreted.
+    let choice_text = match split_in_addition_tail(choice_text) {
+        Some((prefix, _matched)) => prefix.trim(),
+        None => choice_text,
+    };
+
     let lower = choice_text.to_lowercase();
     if !ends_with_of_your_choice(lower.as_str()) {
         return None;
@@ -4499,6 +4697,11 @@ fn try_parse_become_choice(
     let (choice_type, modification) = if lower.contains("creature type") {
         (
             ChoiceType::creature_type(),
+            // CR 205.1b: additive by construction regardless of the marker —
+            // `AddChosenSubtype` never clears existing creature subtypes (unlike
+            // the bare "are the chosen type" static form, which pairs it with
+            // `RemoveAllSubtypes` for CR 205.1a replacement semantics). The
+            // marker (if present) is accepted, not required.
             ContinuousModification::AddChosenSubtype {
                 kind: ChosenSubtypeKind::CreatureType,
             },
@@ -4512,6 +4715,10 @@ fn try_parse_become_choice(
         )
     } else if lower.contains("color") {
         // CR 105.3: "become the color of your choice" — player chooses a color.
+        // No printed card pairs this with the "in addition to its other colors"
+        // marker (unlike the land/creature-type axes), so this stays the
+        // CR 105.3 replacement default; the marker-strip above still lets such a
+        // line parse instead of falling through, should one ever be printed.
         (
             ChoiceType::color(),
             ContinuousModification::AddChosenColor {
@@ -5813,6 +6020,14 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
         alt((
             value((), tag::<_, _, OracleError<'_>>("its owner ")),
             value((), tag("~'s owner ")),
+            // CR 115.1 + CR 109.1: "another target X" declares a target, and
+            // the downstream Another property identifies an object distinct from
+            // the source. Without this arm, an imperative predicate on an
+            // "another target ..." subject (for example, "another target nonland
+            // permanent phases out") is not subject-stripped and falls through
+            // to first-word dispatch on "another", lowering to Unimplemented
+            // instead of reaching the existing effect.
+            value((), tag("another target ")),
             value((), tag("target ")),
             value((), tag("that ")),
             value((), tag("the chosen ")),

@@ -1,4 +1,10 @@
 {
+  "abilityBlock": {
+    "badge": "Blocked",
+    "cantBeActivated": "This ability can't be activated",
+    "cantActivateDuring": "Can't be activated right now",
+    "prohibited": "Activating this ability is prohibited"
+  },
   "comboShortcut": {
     "declareTitle": "Loop Shortcut",
     "declareSubtitle": "You control a loop with a determined outcome. Take the shortcut to resolve it.",
@@ -353,7 +359,7 @@
     "assignRemaining_other": "Assign {{count}} more",
     "confirmDistribute_one": "Declare {{count}} Attacker",
     "confirmDistribute_other": "Declare {{count}} Attackers",
-    "mustAttackPlayer": "{{creature}} must attack {{player}}"
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
   },
   "fullControl": {
     "label": "Control",
@@ -399,7 +405,14 @@
     "scopeOwnTurn": "Stops only on your turns.",
     "scopeOpponentsTurns": "Stops only on opponents' turns.",
     "tooltipCurrentPhase": "Current phase.",
-    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}"
+    "tooltip": "Phase stop: {{label}}. {{description}} {{stopText}}{{activeText}}",
+    "chipAria": "Current phase: {{phase}}. Open phase stop settings.",
+    "sheetTitle": "Turn phases",
+    "sheetSubtitle": "Tap a step to change when auto-pass stops there.",
+    "scopeShortOff": "Off",
+    "scopeShortAllTurns": "All turns",
+    "scopeShortOwnTurn": "My turns",
+    "scopeShortOpponentsTurns": "Opponents' turns"
   },
   "phaseTracker": {
     "turn": "Turn {{number}}"
@@ -439,6 +452,7 @@
   "counterTooltip": {
     "summary_one": "1 {{label}} counter\n{{description}}",
     "summary_other": "{{count}} {{label}} counters\n{{description}}",
+    "summaryUnbounded": "∞ {{label}} counters\n{{description}}",
     "descriptions": {
       "p1p1": "Each +1/+1 counter gives the permanent +1/+1.",
       "m1m1": "Each -1/-1 counter gives the permanent -1/-1.",
@@ -517,13 +531,22 @@
     "clickToFocus": "click to focus"
   },
   "manaPool": {
+    "onlyForSpell": "Spend only to cast spells",
     "onlyForSpellType": "Spend only to cast spells of a specific type",
     "onlyForCreatureType": "Spend only to cast a creature spell of the chosen type",
     "onlyForTypeSpellsOrAbilities": "Spend only on spells or abilities of a specific type",
+    "onlyForTaggedActivation": "Spend only to activate abilities of a specific kind",
     "onlyForSpellWithKeywordKind": "Spend only to cast spells with a specific keyword",
     "onlyForSpellWithKeywordKindFromZone": "Spend only to cast keyword spells from a graveyard",
+    "onlyForSpellWithManaValue": "Spend only to cast spells meeting a mana-value requirement",
+    "onlyForSpellMatchingCostCriteria": "Spend only to cast spells meeting a cost requirement",
+    "onlyForSpellWithColorCount": "Spend only to cast spells meeting a color-count requirement",
+    "onlyForSpellFromZone": "Spend only to cast spells from an allowed zone",
+    "onlyForFaceDownSpell": "Spend only to cast face-down spells",
     "onlyForActivation": "Spend only to activate abilities",
     "onlyForXCosts": "Spend only on costs that include {X}",
+    "onlyForAny": "Spend only on one of the listed uses",
+    "onlyForSpecialAction": "Spend only on a specific special action",
     "convokePayment": "Convoke payment",
     "grantsProperty": "Grants a property to the spell",
     "grantCantBeCountered": "Spend on this spell to make it uncounterable"
@@ -538,6 +561,11 @@
     "castCommander": "Cast {{name}} — double-click or drag to play",
     "castCommanderTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "ninjutsuCommander": "Commander ninjutsu: {{name}} — click to return an unblocked attacker to hand and put this commander onto the battlefield tapped and attacking",
+    "signatureSpell": "Signature Spell",
+    "signatureSpellTitle": "Signature spell: {{name}}",
+    "signatureSpellTitleTax": "Signature spell: {{name}} (Tax: +{{tax}})",
+    "castSignatureSpell": "Cast {{name}} — double-click or drag to play",
+    "castSignatureSpellTax": "Cast {{name}} (Tax: +{{tax}}) — double-click or drag to play",
     "tax": "Tax: +{{tax}}",
     "companion": "Companion",
     "companionTitle": "Companion: {{name}}",
@@ -597,6 +625,15 @@
     "resourceMana": "mana",
     "resourceCounters": "counters",
     "resourceSpeed": "speed",
+    "loopCollapseTitleTokens": "Choose how many tokens to create",
+    "loopCollapseTitleCounters": "Choose how many times to add counters",
+    "loopCollapseTitleLife": "Choose how many times to gain life",
+    "loopCollapseTitleMixed": "Choose how many times to repeat the loop",
+    "loopCollapseAmountTokens_one": "Create {{count}} token",
+    "loopCollapseAmountTokens_other": "Create {{count}} tokens",
+    "loopCollapseAmountCounters": "Add counters {{value}}×",
+    "loopCollapseAmountLife": "Gain life {{value}}×",
+    "loopCollapseAmountMixed": "Repeat loop {{value}}×",
     "manualMana": "Manual",
     "manualManaTooltip": "Manual mana — this game only. Tap your own lands and mana to pay.",
     "spendHint": "Click your mana to spend it on this cost",
@@ -660,8 +697,6 @@
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
-    "unsatisfiedMustAttack_one": "{{count}} creature must attack",
-    "unsatisfiedMustAttack_other": "{{count}} creatures must attack",
     "unsatisfiedMustBlock_one": "{{count}} creature must block",
     "unsatisfiedMustBlock_other": "{{count}} creatures must block",
     "assignDamageTitle": "Assign {{amount}} Combat Damage",
@@ -754,7 +789,8 @@
     "confirmSacrifice": "Sacrifice ({{selected}}/{{count}})",
     "skipSacrifice": "Skip Sacrifice",
     "keepCurrentTargets": "Keep Current Targets",
-    "skip": "Skip"
+    "skip": "Skip",
+    "opponentChoice": "(opponent's choice)"
   },
   "log": {
     "title": "Game Log",
@@ -1704,9 +1740,20 @@
     "battleFallback": "Battle",
     "subtitle": "{{name}} needs a new protector. Choose which opponent will defend it."
   },
+  "announcingOpponent": {
+    "title": "Choose Announcing Opponent ({{current}} of {{total}})",
+    "subtitle": "Choose which opponent announces {{target}} ({{current}} of {{total}}).",
+    "targetLand": "the land target",
+    "targetCreature": "the creature target",
+    "targetChoice": "this target choice"
+  },
   "clashOpponent": {
     "title": "Choose Clash Opponent",
     "subtitle": "Choose which opponent will clash with you."
+  },
+  "zoneOpponentChooser": {
+    "title": "Choose Opponent",
+    "subtitle": "Choose which opponent makes the choice."
   },
   "pileOpponent": {
     "title": "Choose Opponent",
@@ -1785,6 +1832,13 @@
     "variantBestow": "Cast with Bestow",
     "variantFreerunning": "Cast with Freerunning",
     "variantFuse": "Cast with Fuse",
+    "variantMutate": "Cast with Mutate",
+    "variantAwaken": "Cast with Awaken",
+    "variantCleave": "Cast with Cleave",
+    "variantImpending": "Cast with Impending",
+    "variantMoreThanMeetsTheEye": "Cast Converted",
+    "variantPrototype": "Cast with Prototype",
+    "variantFaceDown": "Cast Face Down",
     "variantFallback": "Cast with {{type}}"
   },
   "categoryChoice": {
@@ -2077,6 +2131,7 @@
     "fromSideboard": "From sideboard"
   },
   "phaseName": {
+    "Untap": "Untap",
     "Upkeep": "Upkeep",
     "Draw": "Draw",
     "PreCombatMain": "Main Phase 1",

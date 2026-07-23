@@ -23,6 +23,7 @@ import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 export interface LegalActionsWire {
   legalActions: GameAction[];
   autoPassRecommended?: boolean;
+  manaPaymentShortcutActions?: GameAction[];
   legalActionsByObject?: Record<string, GameAction[]>;
   spellCosts?: Record<string, ManaCost>;
 }
@@ -32,6 +33,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
+    manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
   };
@@ -42,6 +44,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
   return {
     actions: wire.legalActions,
     autoPassRecommended: wire.autoPassRecommended ?? false,
+    manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
   };
@@ -61,6 +64,11 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *   3 — Planechase state and action payloads in game_setup/reconnect snapshots
  *   4 — Archenemy derived view and scheme deck payloads
  *   5 — CardPredicateGuessMade game event shape
+ *  13 — Actor-scoped priority-passing settings and filtered per-player state.
+ *  12 — Connive exact subject snapshots and resident paused post-replacement
+ *       drains changed P2P GameState snapshots.
+ *  11 — Serialized GameState trigger provenance and paused logical zone-change owners.
+ *  10 — Dedicated companion deck slot and typed companion-reveal choices.
  *   9 — Meld pair and attacking-entry choices after mana-payment preview variants.
  *   8 — Mana-payment preview request/response variants.
  *   7 — PrecastCopyShortcut action and its two WaitingFor variants.
@@ -68,7 +76,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 9 as const;
+export const WIRE_PROTOCOL_VERSION = 14 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

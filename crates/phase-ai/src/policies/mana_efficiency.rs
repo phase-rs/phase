@@ -148,10 +148,7 @@ mod tests {
     fn make_pass_candidate(player: PlayerId) -> CandidateAction {
         CandidateAction {
             action: GameAction::PassPriority,
-            metadata: ActionMetadata {
-                actor: Some(player),
-                tactical_class: TacticalClass::Pass,
-            },
+            metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Pass),
         }
     }
 
@@ -168,10 +165,7 @@ mod tests {
 
                 payment_mode: CastPaymentMode::Auto,
             },
-            metadata: ActionMetadata {
-                actor: Some(player),
-                tactical_class: TacticalClass::Spell,
-            },
+            metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Spell),
         }
     }
 

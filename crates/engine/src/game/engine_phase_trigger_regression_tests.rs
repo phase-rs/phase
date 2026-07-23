@@ -394,6 +394,45 @@ fn put_boundless_go_shintai(state: &mut GameState) -> ObjectId {
     id
 }
 
+fn put_kitt_kanto(state: &mut GameState) -> ObjectId {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "When Kitt Kanto enters, create a 1/1 green and white Citizen creature token.\nAt the beginning of combat on each player's turn, you may tap two untapped creatures you control. When you do, target creature that player controls gets +2/+2 and gains trample until end of turn. Goad that creature.",
+        "Kitt Kanto, Mayhem Diva",
+        &[],
+        &["Creature".to_string()],
+        &["Cat".to_string(), "Bard".to_string(), "Druid".to_string()],
+    );
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.phase == Some(Phase::BeginCombat)),
+        "parser must produce Kitt's beginning-of-combat trigger, got {parsed:?}"
+    );
+
+    let id = create_object(
+        state,
+        CardId(3262),
+        PlayerId(0),
+        "Kitt Kanto, Mayhem Diva".to_string(),
+        Zone::Battlefield,
+    );
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.card_types.subtypes.push("Cat".to_string());
+    obj.card_types.subtypes.push("Bard".to_string());
+    obj.card_types.subtypes.push("Druid".to_string());
+    obj.power = Some(3);
+    obj.toughness = Some(3);
+    for trigger in parsed.triggers {
+        if trigger.phase == Some(Phase::BeginCombat) {
+            obj.trigger_definitions.push(trigger);
+        }
+    }
+    obj.base_card_types = obj.card_types.clone();
+    id
+}
+
 fn shintai_p1p1_counters(state: &GameState, id: ObjectId) -> u32 {
     state
         .objects
@@ -552,6 +591,168 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         state.players[0].mana_pool.mana.len(),
         0,
         "the {{1}} must actually be paid on accept"
+    );
+}
+
+/// CR 118.12 + CR 603.12 + CR 701.26a + CR 102.1: Kitt Kanto's
+/// beginning-of-combat trigger asks its controller to tap two untapped
+/// creatures they control as a resolution-time optional cost. If paid, the
+/// reflexive target must be a creature controlled by the active player whose
+/// turn it is.
+#[test]
+fn issue_3262_kitt_kanto_taps_two_then_targets_active_player_creature() {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = PlayerId(1);
+    state.priority_player = PlayerId(1);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(1),
+    };
+
+    put_kitt_kanto(&mut state);
+    let first_cost_creature =
+        put_pt_creature(&mut state, 32620, PlayerId(0), "First Citizen", 1, 1);
+    let second_cost_creature =
+        put_pt_creature(&mut state, 32621, PlayerId(0), "Second Citizen", 1, 1);
+    let active_player_creature = put_pt_creature(
+        &mut state,
+        32622,
+        PlayerId(1),
+        "Active Player Creature",
+        1,
+        1,
+    );
+    let controller_creature =
+        put_pt_creature(&mut state, 32623, PlayerId(0), "Controller Creature", 1, 1);
+
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(state.phase, Phase::BeginCombat);
+    assert!(
+        !state.stack.is_empty() || state.pending_trigger.is_some(),
+        "Kitt's beginning-of-combat trigger must fire on each player's turn"
+    );
+
+    let mut saw_may_prompt = false;
+    let mut saw_tap_cost_prompt = false;
+    let mut saw_reflexive_target_prompt = false;
+    for _ in 0..30 {
+        match state.waiting_for.clone() {
+            WaitingFor::Priority { player } => {
+                if state.stack.is_empty() {
+                    break;
+                }
+                apply(&mut state, player, GameAction::PassPriority).unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                saw_may_prompt = true;
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::DecideOptionalEffect { accept: true },
+                )
+                .unwrap();
+            }
+            WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::TapCreatures { .. },
+                choices,
+                count,
+                ..
+            } => {
+                saw_tap_cost_prompt = true;
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert!(choices.contains(&first_cost_creature));
+                assert!(choices.contains(&second_cost_creature));
+                assert!(!choices.contains(&active_player_creature));
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::SelectCards {
+                        cards: vec![first_cost_creature, second_cost_creature],
+                    },
+                )
+                .unwrap();
+            }
+            WaitingFor::TriggerTargetSelection {
+                player,
+                target_slots,
+                ..
+            } => {
+                assert_eq!(
+                    state
+                        .pending_trigger
+                        .as_ref()
+                        .map(|pending| pending.ability.scoped_player),
+                    Some(Some(PlayerId(1))),
+                    "reflexive pending trigger must retain the active-player scoped binding"
+                );
+                let legal_targets = &target_slots[0].legal_targets;
+                assert!(
+                    legal_targets.contains(&TargetRef::Object(active_player_creature)),
+                    "reflexive target prompt must include the active player's creature, got {legal_targets:?}"
+                );
+                assert!(
+                    !legal_targets.contains(&TargetRef::Object(controller_creature)),
+                    "reflexive target prompt must not include the controller's own creature"
+                );
+                saw_reflexive_target_prompt = true;
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(active_player_creature)],
+                    },
+                )
+                .unwrap();
+            }
+            WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                ..
+            } => {
+                let legal_targets = &target_slots[0].legal_targets;
+                assert!(
+                    legal_targets.contains(&TargetRef::Object(active_player_creature)),
+                    "reflexive target prompt must include the active player's creature, got {legal_targets:?}"
+                );
+                assert!(
+                    !legal_targets.contains(&TargetRef::Object(controller_creature)),
+                    "reflexive target prompt must not include the controller's own creature"
+                );
+                saw_reflexive_target_prompt = true;
+                apply(
+                    &mut state,
+                    player,
+                    GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(active_player_creature)],
+                    },
+                )
+                .unwrap();
+            }
+            _ => break,
+        }
+    }
+
+    assert!(saw_may_prompt, "Kitt must offer the optional tap cost");
+    assert!(
+        saw_tap_cost_prompt,
+        "accepting Kitt's cost must surface a tap-creatures PayCost prompt"
+    );
+    assert!(
+        saw_reflexive_target_prompt,
+        "paying the tap cost must create the WhenYouDo target prompt"
+    );
+    assert!(state.objects[&first_cost_creature].tapped);
+    assert!(state.objects[&second_cost_creature].tapped);
+    assert_eq!(state.objects[&active_player_creature].power, Some(3));
+    assert_eq!(state.objects[&active_player_creature].toughness, Some(3));
+    assert_eq!(
+        state.objects[&controller_creature].power,
+        Some(1),
+        "\"that player controls\" must not retarget the controller's creature"
     );
 }
 
@@ -1009,8 +1210,12 @@ When this creature enters or dies, create a 1/1 red Goblin creature token.";
         for trigger in face.triggers.clone() {
             obj.trigger_definitions.push(trigger);
         }
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
         // CR 702.30a: the next controller-upkeep echo payment is due.
         obj.echo_due = true;
     }
@@ -1138,8 +1343,12 @@ Echo—Discard a card. (At the beginning of your upkeep, if this came under your
         for trigger in face.triggers.clone() {
             obj.trigger_definitions.push(trigger);
         }
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
         // CR 702.30a: the next controller-upkeep echo payment is due.
         obj.echo_due = true;
     }
@@ -1270,6 +1479,7 @@ fn attack_trigger_resolves_before_combat_damage_and_only_once() {
         player: PlayerId(0),
         valid_attacker_ids: vec![ajani, linden],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -1422,8 +1632,12 @@ fn lifelink_replacement_does_not_double_fire_life_gain_triggers() {
                     },
                 )),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
 
     // Leyline of Hope analog: "If you would gain life, gain that much + 1 instead"
@@ -1463,6 +1677,7 @@ fn lifelink_replacement_does_not_double_fire_life_gain_triggers() {
         player: PlayerId(0),
         valid_attacker_ids: vec![bat],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 
@@ -1530,7 +1745,7 @@ fn card_name_choice_validates_against_all_card_names() {
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -1548,7 +1763,7 @@ fn card_name_choice_validates_against_all_card_names() {
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -1570,7 +1785,7 @@ fn card_name_choice_is_case_insensitive() {
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::CardName,
         options: Vec::new(),
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -1616,7 +1831,11 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     draw.condition = Some(AbilityCondition::effect_performed());
     ability.sub_ability = Some(Box::new(draw));
 
-    state.pending_optional_effect = Some(Box::new(ability));
+    state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        ability: Box::new(ability),
+        trigger_event: None,
+        trigger_match_count: None,
+    });
     state.waiting_for = WaitingFor::OptionalEffectChoice {
         player: PlayerId(0),
         source_id,
@@ -1637,7 +1856,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 #[test]
@@ -1662,7 +1881,11 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     let mut ability = hand_to_battlefield_choice_ability(source_id, PlayerId(1));
     ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(1))));
 
-    state.pending_optional_effect = Some(Box::new(ability));
+    state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        ability: Box::new(ability),
+        trigger_event: None,
+        trigger_match_count: None,
+    });
     state.waiting_for = WaitingFor::OpponentMayChoice {
         player: PlayerId(1),
         remaining: vec![],
@@ -1683,7 +1906,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 #[test]
@@ -1728,7 +1951,7 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 /// CR 610.3 + #783: When a permanent that exiled something "until it
@@ -1914,8 +2137,12 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
                     },
                 )),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
 
     let mut primary = ResolvedAbility::new(
@@ -2016,8 +2243,12 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
             TriggerDefinition::new(TriggerMode::Scry)
                 .execute(AbilityDefinition::new(AbilityKind::Database, effect)),
         );
-        obj.base_trigger_definitions =
-            Arc::new(obj.trigger_definitions.iter_all().cloned().collect());
+        obj.base_trigger_definitions = Arc::new(
+            obj.trigger_definitions
+                .iter_all()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        );
     }
     for (card_id, name) in [
         (CardId(919), "Library One"),
@@ -2432,7 +2663,7 @@ fn multi_target_selection_preserves_nested_effect_zone_choice_continuation() {
             ..
         }
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
     assert!(state.objects[&target_id].tapped);
 }
 
@@ -2470,8 +2701,9 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
-    state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+    state.park_ability_continuation(crate::types::game_state::PendingContinuation::new(
         Box::new(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 2 },
@@ -2545,6 +2777,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
 
     let result = apply_as_current(
@@ -2595,6 +2828,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         library_position: None,
         is_cost_payment: false,
         enters_modified_if: None,
+        duration: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] });
@@ -2997,11 +3231,11 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
             ..
         })
     ));
-    assert!(state.pending_continuation.is_some());
+    assert!(state.active_ability_continuation().is_some());
 }
 
 #[test]
-fn choose_option_with_source_id_stores_chosen_attribute() {
+fn choose_option_with_exact_source_stores_chosen_attribute() {
     use crate::types::ability::ChoiceType;
     use crate::types::mana::ManaColor;
 
@@ -3014,7 +3248,7 @@ fn choose_option_with_source_id_stores_chosen_attribute() {
         Zone::Battlefield,
     );
 
-    // Set up NamedChoice with source_id (simulating persist=true Choose)
+    // Set up an exact-object prompt (simulating a persist=true Choose).
     state.waiting_for = WaitingFor::NamedChoice {
         player: PlayerId(0),
         choice_type: ChoiceType::color(),
@@ -3025,7 +3259,15 @@ fn choose_option_with_source_id_stores_chosen_attribute() {
             "Red".to_string(),
             "Green".to_string(),
         ],
-        source_id: Some(obj_id),
+        source: Some(
+            crate::types::game_state::NamedChoiceSource::from_trigger_source(
+                crate::game::triggers::trigger_source_context_for_latch(
+                    &state,
+                    state.objects.get(&obj_id).unwrap(),
+                ),
+                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution,
+            ),
+        ),
         persist_player: None,
     };
 
@@ -3086,11 +3328,15 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
         WaitingFor::NamedChoice {
             player,
             choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
-            source_id,
+            source: Some(source),
             ..
         } => {
             assert_eq!(player, PlayerId(0));
-            assert_eq!(source_id, Some(siege_id));
+            assert_eq!(source.prompt.identity.reference.object_id, siege_id);
+            assert_eq!(
+                source.binding,
+                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+            );
             assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
         }
         other => panic!("expected Glacierwood Siege anchor choice, got {other:?}"),
@@ -3122,7 +3368,7 @@ fn restricted_color_choice_rejects_excluded_color() {
             "Red".to_string(),
             "Green".to_string(),
         ],
-        source_id: None,
+        source: None,
         persist_player: None,
     };
 
@@ -3321,6 +3567,255 @@ fn copy_target_choice_applies_copied_enter_with_counters_replacement_before_sba(
     assert_eq!(copied.toughness, Some(5));
 }
 
+#[test]
+fn echoing_deeps_copying_sunken_citadel_prompts_for_the_copied_color_choice() {
+    let mut state = setup_game_at_main_phase();
+    let citadel = zones::create_object(
+        &mut state,
+        CardId(9_021),
+        PlayerId(1),
+        "Sunken Citadel".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&citadel)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        citadel,
+        "Sunken Citadel",
+        "This land enters tapped. As it enters, choose a color.\n{T}: Add one mana of the chosen color.\n{T}: Add two mana of the chosen color. Spend this mana only to activate abilities of land sources.",
+    );
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_022),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+    state.waiting_for = WaitingFor::CopyTargetChoice {
+        player: PlayerId(0),
+        source_id: deeps,
+        valid_targets: vec![citadel],
+        max_mana_value: None,
+    };
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(citadel)),
+        },
+    )
+    .expect("Echoing Deeps should copy Sunken Citadel");
+    let WaitingFor::NamedChoice {
+        player,
+        source: Some(source),
+        options,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "the copied as-enters choice must be offered, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(source.prompt.identity.reference.object_id, deeps);
+    assert!(options
+        .iter()
+        .any(|option| option.eq_ignore_ascii_case("blue")));
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseOption {
+            choice: options
+                .into_iter()
+                .find(|option| option.eq_ignore_ascii_case("blue"))
+                .unwrap(),
+        },
+    )
+    .expect("the copied land must accept its as-enters color choice");
+    let copy = &state.objects[&deeps];
+    assert_eq!(copy.name, "Sunken Citadel");
+    assert_eq!(copy.chosen_color(), Some(ManaColor::Blue));
+}
+
+/// CR 614.1c + CR 707.9: Echoing Deeps can enter tapped as a copy only when
+/// a land card exists in a graveyard. With no copy source, it enters untapped
+/// and must not expose an invalid accept-replacement action to the AI.
+#[test]
+fn echoing_deeps_with_empty_graveyards_enters_untapped_without_copy_offer() {
+    let mut state = setup_game_at_main_phase();
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_023),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+    assert!(state
+        .players
+        .iter()
+        .all(|player| player.graveyard.is_empty()));
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: deeps,
+            card_id: CardId(9_023),
+        },
+    )
+    .expect("Echoing Deeps should be playable with empty graveyards");
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "an impossible copy must not offer an accept-replacement action, got {:?}",
+        result.waiting_for
+    );
+    let entered = &state.objects[&deeps];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert!(
+        !entered.tapped,
+        "an un-copied Echoing Deeps enters untapped"
+    );
+}
+
+/// CR 614.1c + CR 707.9: the impossible-copy guard must not suppress a real
+/// Echoing Deeps choice. A land card in either graveyard makes the optional
+/// replacement applicable; accepting it prompts for that land and the Deeps
+/// enters tapped as its copy with the additional Cave subtype.
+#[test]
+fn echoing_deeps_with_graveyard_land_offers_and_applies_copy() {
+    let mut state = setup_game_at_main_phase();
+    let forest = zones::create_object(
+        &mut state,
+        CardId(9_024),
+        PlayerId(1),
+        "Forest".to_string(),
+        Zone::Graveyard,
+    );
+    state
+        .objects
+        .get_mut(&forest)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    let deeps = zones::create_object(
+        &mut state,
+        CardId(9_025),
+        PlayerId(0),
+        "Echoing Deeps".to_string(),
+        Zone::Hand,
+    );
+    state
+        .objects
+        .get_mut(&deeps)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    apply_oracle_to_object(
+        &mut state,
+        deeps,
+        "Echoing Deeps",
+        "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.\n{T}: Add {C}.",
+    );
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::PlayLand {
+            object_id: deeps,
+            card_id: CardId(9_025),
+        },
+    )
+    .expect("Echoing Deeps should be playable with a graveyard land");
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "a valid graveyard land must expose the optional copy replacement, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(
+        candidate_count, 2,
+        "the player may accept or decline the copy"
+    );
+
+    let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting Echoing Deeps' replacement should prompt for a copy target");
+    let WaitingFor::CopyTargetChoice {
+        player,
+        source_id,
+        valid_targets,
+        ..
+    } = result.waiting_for
+    else {
+        panic!(
+            "accepting the copy replacement must expose the graveyard land, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(player, PlayerId(0));
+    assert_eq!(source_id, deeps);
+    assert_eq!(valid_targets, vec![forest]);
+
+    apply_as_current(
+        &mut state,
+        GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(forest)),
+        },
+    )
+    .expect("Echoing Deeps should enter as a copy of the chosen graveyard land");
+    let entered = &state.objects[&deeps];
+    assert_eq!(entered.zone, Zone::Battlefield);
+    assert_eq!(entered.name, "Forest");
+    assert!(entered.tapped, "a copied Echoing Deeps enters tapped");
+    assert!(
+        entered
+            .card_types
+            .subtypes
+            .iter()
+            .any(|subtype| subtype == "Cave"),
+        "the copy must be a Cave in addition to its other types"
+    );
+}
+
 /// CR 614.12a + CR 707.9: Callidus Assassin grants its copy a "When this
 /// creature enters" trigger as part of the entering-as-copy bundle. The
 /// ETB event for the copy must fire *after* the player chooses a target
@@ -3441,7 +3936,10 @@ fn copy_target_choice_fires_granted_etb_trigger_against_deferred_entry_event() {
     // must be on the copy's trigger_definitions...
     let copied = state.objects.get(&assassin).unwrap();
     assert!(
-        copied.trigger_definitions.iter_all().any(|t| t == &granted),
+        copied
+            .trigger_definitions
+            .iter_all()
+            .any(|t| t.definition == granted),
         "BecomeCopy's GrantTrigger modification must be present on the copy"
     );
 
@@ -4122,6 +4620,7 @@ fn declare_blockers_grants_ap_priority_when_no_legal_blockers() {
         player: PlayerId(0),
         valid_attacker_ids: vec![attacker],
         valid_attack_targets: vec![AttackTarget::Player(PlayerId(1))],
+        valid_attack_targets_by_attacker: None,
         attacker_constraints: Default::default(),
     };
 

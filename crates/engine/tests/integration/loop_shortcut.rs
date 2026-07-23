@@ -25,7 +25,9 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor, YieldTarget};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, LoopDetectionMode, StackEntryKind, WaitingFor, YieldTarget,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -62,7 +64,7 @@ const BLOODTHIRSTY_CONQUEROR: &str =
 /// HEAD `dc67bd130` on the UNMODIFIED reconcile body. See the module docs.
 /// `subject: None` was appended to each `EffectResolved` when that field was added to the
 /// event — it is `None` on every path this test drives, so the stream is otherwise unchanged.
-const GOLDEN_ON: &str = r#"[StackPushed { object_id: ObjectId(3) }, ZoneChanged { object_id: ObjectId(3), from: Some(Hand), to: Stack, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Hand), cast_from_zone: None, played_from_zone: None, to_zone: Stack, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 0, is_suspected: false } }, SpellCast { card_id: CardId(3), controller: PlayerId(0), object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(3), subject: None }, ZoneChanged { object_id: ObjectId(3), from: Some(Stack), to: Graveyard, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Stack), cast_from_zone: None, played_from_zone: None, to_zone: Graveyard, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 1, is_suspected: false } }, StackResolved { object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(1), amount: -1 }, EffectResolved { kind: LoseLife, source_id: ObjectId(1), subject: None }, StackResolved { object_id: ObjectId(4) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(2), subject: None }, StackResolved { object_id: ObjectId(5) }, GameOver { winner: Some(PlayerId(0)) }]"#;
+const GOLDEN_ON: &str = r#"[StackPushed { object_id: ObjectId(3) }, ZoneChanged { object_id: ObjectId(3), from: Some(Hand), to: Stack, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 0 }, expected_zone: Hand }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: None, played_from_zone: None, cast_controller: None, phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Hand), cast_from_zone: None, played_from_zone: None, to_zone: Stack, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 0, is_suspected: false } }, SpellCast { card_id: CardId(3), controller: PlayerId(0), object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(3), subject: None }, ZoneChanged { object_id: ObjectId(3), from: Some(Stack), to: Graveyard, record: ZoneChangeRecord { object_id: ObjectId(3), name: "Test Lifegain Kickoff", core_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], trigger_definitions: [], trigger_source_context: Some(TriggerSourceContext { identity: ObjectIdentityBinding { reference: ObjectIncarnationRef { object_id: ObjectId(3), incarnation: 1 }, expected_zone: Stack }, lki: LKISnapshot { name: "Test Lifegain Kickoff", token_image_ref: None, power: None, toughness: None, base_power: None, base_toughness: None, mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), card_types: [Sorcery], subtypes: [], supertypes: [], keywords: [], colors: [], chosen_attributes: [], counters: {}, tapped: false, is_suspected: false, attachments: [] }, card_id: CardId(3), printed_ref: None, is_token: false, face_down: false, transformed: false, is_renowned: false, is_saddled: false, class_level: None, trigger_entries: [], timestamp: 0, entered_battlefield_turn: None, paired_with: None, pair_controller: None, attached_to: None, attachments: [], linked_exile_snapshot: [], combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, cast_from_zone: None, played_from_zone: None, cast_controller: None, phase_status: PhasedIn, cast_variant_paid: None, cast_timing_permission: None, cost_x_paid: None, cast_spell_keywords: [], mana_spent_to_cast: false, colors_spent_to_cast: ColoredManaCount { white: 0, blue: 0, black: 0, red: 0, green: 0 }, mana_spent_to_cast_amount: 0, kickers_paid: [], additional_cost_payment_count: 0, additional_cost_payments: [], cast_cost_paid_object: None }), power: None, toughness: None, base_power: None, base_toughness: None, colors: [], mana_value: 0, controller: PlayerId(0), owner: PlayerId(0), from_zone: Some(Stack), cast_from_zone: None, played_from_zone: None, to_zone: Graveyard, attachments: [], linked_exile_snapshot: [], is_token: false, combat_status: ZoneChangeCombatStatus { attacking: false, blocking: false, blocked: false, attacking_alone: false, blocking_alone: false, defending_player: None }, co_departed: [], entered_incarnation: None, attached_to: None, turn_zone_change_index: 1, is_suspected: false } }, StackResolved { object_id: ObjectId(3) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(1), amount: -1 }, EffectResolved { kind: LoseLife, source_id: ObjectId(1), subject: None }, StackResolved { object_id: ObjectId(4) }, PriorityPassed { player_id: PlayerId(1) }, LifeChanged { player_id: PlayerId(0), amount: 1 }, EffectResolved { kind: GainLife, source_id: ObjectId(2), subject: None }, StackResolved { object_id: ObjectId(5) }, GameOver { winner: Some(PlayerId(0)) }]"#;
 
 fn life(runner: &GameRunner, p: PlayerId) -> i32 {
     runner
@@ -693,7 +695,7 @@ fn interactive_shorten_hands_priority_and_breaks_loop() {
 /// (`state.waiting_for = WaitingFor::Priority { .. }`): deleting it leaves `waiting_for ==
 /// LoopShortcut { P0 }` (the reconcile's Priority-gated seams skip a non-Priority state) ⇒ the
 /// `Priority { P0 }` assertion (a) flips to fail. Seam-2 independence is proven by the
-/// object-growth test: deleting `last_recast_context = None` fails THAT test while this one is
+/// object-growth test: deleting `last_loop_action_sequence = None` fails THAT test while this one is
 /// unaffected (this fixture captures no recast context).
 #[test]
 fn interactive_optional_drain_decline_restores_priority_no_reoffer() {
@@ -1397,6 +1399,9 @@ fn declare_illegal_pin_falls_back_legal_ingests() {
             slot: slot.clone(),
             kind: DecisionPointKind::Targets {
                 legal_targets: vec![TargetRef::Player(P1)],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
             },
         }],
         convoke_tappable_count: 0,
@@ -2639,7 +2644,7 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     // Sprout Swarm returned to hand (CR 702.27a buyback) — recastable for the loop.
     assert_eq!(outcome.zone_of(sprout), engine::types::zones::Zone::Hand);
 
-    // N7 CAPTURE-side (live, seam-not-line): the foundation's `fodder_cover_last_recast_context_
+    // N7 CAPTURE-side (live, seam-not-line): the foundation's `fodder_cover_last_loop_action_sequence_
     // two_sided` proves the COMPARE (`eq_except_growable`) rejects a heterogeneous context, but
     // it CONSTRUCTS the field by hand — it cannot prove the live capture at
     // `finalize_cast_with_phyrexian_choices` writes DISCRIMINATING values (a wrong-but-constant
@@ -2647,17 +2652,25 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     // holds the real cast's discriminating fields, so a constant/wrong capture fails here.
     let ctx = outcome
         .state()
-        .last_recast_context
-        .as_ref()
-        .expect("buyback + token-creating cast must capture a recast context");
+        .last_loop_action_sequence
+        .first()
+        .expect("buyback + token-creating cast must capture a loop-action context");
     assert_eq!(ctx.controller, P0);
+    let engine::types::game_state::LoopAction::Recast {
+        from_zone,
+        uses_buyback,
+        ..
+    } = &ctx.action
+    else {
+        panic!("a buyback token cast must capture a Recast loop action");
+    };
     assert_eq!(
-        ctx.from_zone,
+        *from_zone,
         engine::types::zones::Zone::Hand,
         "CR 601.2a: buyback returns the spell to hand ⇒ from_zone is Hand"
     );
     assert_eq!(
-        ctx.uses_buyback,
+        *uses_buyback,
         engine::types::game_state::BuybackUsage::Used,
         "the captured context records that buyback was paid"
     );
@@ -2683,6 +2696,107 @@ fn object_growth_51st_sprout_swarm_covers_and_offers() {
     );
 }
 
+/// Kodama of the East Tree's growing-class-reading trigger (Scryfall / card-data).
+/// Its body puts a permanent "with equal or lesser mana value" from hand onto the
+/// battlefield — a `ChangeZone` whose target filter reads a mutable board aggregate,
+/// so `fire_time_conditions_read_growing_class` flags it IF it is scanned.
+const KODAMA_TRIGGER_ORACLE: &str = "Whenever another permanent you control enters, if it wasn't put onto the battlefield with this ability, you may put a permanent card with equal or lesser mana value from your hand onto the battlefield.";
+
+/// REGRESSION (user 2026-07-18): a growing-class-reading trigger sitting in a zone
+/// where it CANNOT function (here P0's LIBRARY) must NOT suppress the loop-shortcut
+/// offer. This reproduces the real 4-player game where Witherbloom + Sprout Swarm
+/// failed to prompt because Kodama of the East Tree — a deck card in the library —
+/// was scanned by the object-growth cover's `fire_time_conditions_read_growing_class`
+/// firewall as if it were a live observer (CR 603.4 / CR 113.6: a permanent trigger
+/// functions only on the battlefield). The board is otherwise the passing 51st
+/// fixture, so the ONLY variable is the inert library observer.
+///
+/// DISCRIMINATING (revert-probe verified): reverting the block-(1) zone gate in
+/// `fire_time_conditions_read_growing_class` flips this to NO offer — Kodama's
+/// library trigger is re-scanned, `cover_ok` goes false, and `final_waiting_for`
+/// stays `Priority`. So this fails without the fix.
+#[test]
+fn object_growth_library_observer_does_not_suppress_offer() {
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Witherbloom, the Balancer",
+        5,
+        5,
+        WITHERBLOOM_AFFINITY_ORACLE,
+    );
+    // Kodama parses ON the battlefield (so its trigger is a real parsed def), then we
+    // relocate it into the library below — where it cannot function.
+    let kodama = scenario
+        .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 6, KODAMA_TRIGGER_ORACLE)
+        .id();
+    let mut fodder = Vec::new();
+    for _ in 0..4 {
+        fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+    }
+    let sprout = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Sprout Swarm", true, SPROUT_SWARM_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        b.id()
+    };
+    let mut runner = scenario.build();
+    {
+        let st = runner.state_mut();
+        st.loop_detection = LoopDetectionMode::Interactive;
+        for &id in &fodder {
+            st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+        // Move Kodama from the battlefield into P0's LIBRARY (CR 603.4: its
+        // "another permanent enters" trigger no longer functions there).
+        st.battlefield.retain(|&id| id != kodama);
+        let obj = st.objects.get_mut(&kodama).unwrap();
+        obj.zone = Zone::Library;
+        let p0 = st.players.iter_mut().find(|p| p.id == P0).unwrap();
+        p0.library.insert(0, kodama);
+    }
+
+    // Sanity: Kodama really is in the library (not the battlefield), so any offer
+    // must come from correctly IGNORING it, not from it having been removed.
+    assert_eq!(
+        runner.state().objects.get(&kodama).unwrap().zone,
+        Zone::Library,
+        "the growing-class observer must sit in the library for this to discriminate",
+    );
+
+    let outcome = runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit()
+        .resolve();
+
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "a growing-class trigger in the LIBRARY must not suppress the offer, got {:?}",
+        outcome.final_waiting_for()
+    );
+    // The offer still names the token-growth axis (the loop is genuinely detected,
+    // not an unrelated fall-through).
+    let WaitingFor::LoopShortcut { certificate, .. } = outcome.final_waiting_for() else {
+        unreachable!()
+    };
+    assert!(
+        certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+        "the detected loop's unbounded axis must be TokensCreated, got {:?}",
+        certificate.unbounded
+    );
+}
+
 /// Find the (single) object named `name` controlled by `player` in `zone`.
 fn object_named_in_zone(
     state: &GameState,
@@ -2697,14 +2811,20 @@ fn object_named_in_zone(
         .map(|o| o.id)
 }
 
-/// P2 ⭐ — Accept materializes exactly N real Saprolings. Continue P1 to the offer, declare
-/// `Fixed(5)`, opponent Accepts ⇒ the injector drives 5 real recast cycles on a clone,
-/// committing each ⇒ exactly +5 net Saprolings, Sprout Swarm back in hand, priority handed
-/// back, ring cleared. Revert-failing: without the object-growth materializer routing the
-/// drain path's boundary check (equal / cover_growth, no fodder disjunct) never recognizes
-/// the growing board ⇒ 0 committed cycles ⇒ 0 tokens.
+/// P2 ⭐ (updated 2026-07-18, user directive): ACCEPTING an unbounded object-growth (fodder /
+/// token) shortcut MARKS the certificate's ∞ axes via the shared `mark_unbounded_loop` writer
+/// and materializes ZERO discrete tokens — the ∞ status IS the applied result (contrast the
+/// old O(N) drive, which capped the infinite at N and cost ≈0.4 s/token / 212 s for 500). The
+/// finite tokens are minted later, at the CR 500.4 phase/turn boundary, when the player names a
+/// finite count for each ∞ status; accept itself only flags the status. Declaring `Fixed(5)`
+/// yet getting 0 tokens is itself discriminating — it proves the count is ignored (no drive).
+///
+/// DISCRIMINATING (revert-probe verified): deleting the `mark_unbounded_loop` call in
+/// `materialize_object_growth_shortcut` leaves `unbounded_resources` empty ⇒ the ∞-status
+/// assertion FLIPS to fail ("must mark unbounded_resources"); a re-introduced N-iteration drive
+/// would break the board-invariance assertion (it would add ≥1 Saproling).
 #[test]
-fn object_growth_51st_materializes_five_saprolings_on_accept() {
+fn object_growth_51st_accept_marks_unbounded_and_mints_no_tokens() {
     let (mut runner, sprout, fodder) = sprout_swarm_scenario(4);
     let outcome = runner
         .cast(sprout)
@@ -2712,32 +2832,50 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
         .convoke_with(&[fodder[0]])
         .commit()
         .resolve();
+    let WaitingFor::LoopShortcut { certificate, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "P2 precondition: the offer must fire, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert!(certificate.unbounded.contains(&ResourceAxis::TokensCreated));
     assert!(
-        matches!(outcome.final_waiting_for(), WaitingFor::LoopShortcut { .. }),
-        "P2 precondition: the offer must fire, got {:?}",
-        outcome.final_waiting_for()
+        runner.state().unbounded_resources.is_empty(),
+        "the OFFER must not pre-mark the ∞ status (only accepting does)"
     );
     let at_offer = saproling_count(runner.state());
 
-    // P0 (LoopShortcut.proposer — inferred submitter) declares a Fixed(5) shortcut; the
-    // template is rederived from `last_recast_context`.
+    // P0 (LoopShortcut.proposer — inferred submitter) declares a Fixed(5) shortcut. The count
+    // is ignored for an unbounded loop (the ∞ mark is count-independent); Fixed(5) here is a
+    // discriminator that a re-introduced drive would turn into +5 tokens.
     runner
         .act(GameAction::DeclareShortcut {
             count: IterationCount::Fixed(5),
             template: None,
         })
         .expect("declare shortcut");
-    // The lone opponent (P1 — inferred RespondToShortcut submitter) accepts ⇒ materialize.
+    // The lone opponent (P1 — inferred RespondToShortcut submitter) accepts ⇒ mark ∞.
     runner
         .act(GameAction::RespondToShortcut {
             response: ShortcutResponse::Accept,
         })
         .expect("respond accept");
 
+    // (1) ∞ status APPLIED — the revert-probe target.
+    let axes = runner
+        .state()
+        .unbounded_resources
+        .get(&P0)
+        .expect("accepting an unbounded loop must mark unbounded_resources for the controller");
+    assert!(
+        axes.contains(&ResourceAxis::TokensCreated),
+        "the marked axis must be TokensCreated, got {axes:?}"
+    );
+    // (2) ZERO tokens minted at accept — the finite count is named later, at the phase boundary.
     assert_eq!(
         saproling_count(runner.state()),
-        at_offer + 5,
-        "5 real recast cycles ⇒ +5 net Saprolings"
+        at_offer,
+        "accepting an unbounded loop must not drive discrete iterations"
     );
     assert!(
         object_named_in_zone(
@@ -2747,11 +2885,12 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
             engine::types::zones::Zone::Hand
         )
         .is_some(),
-        "CR 702.27a: Sprout Swarm must still be in P0's hand after materialization"
+        "CR 702.27a: Sprout Swarm must still be in P0's hand after accept"
     );
+    // (3) priority handed back to a living seat (CR 800.4a) — the protocol closed cleanly.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "priority handed back after materialization, got {:?}",
+        "priority handed back after accept, got {:?}",
         runner.state().waiting_for
     );
     assert!(runner.state().loop_detect_ring.is_empty());
@@ -2762,10 +2901,10 @@ fn object_growth_51st_materializes_five_saprolings_on_accept() {
 /// object-growth routing context, an ordinary action resolves, and the loop is NOT re-offered.
 ///
 /// Non-vacuous, two-seam-independent revert-probe: this offer is gated by
-/// `last_recast_context.is_some()` (engine.rs Seam 2), so `last_recast_context = None` in
-/// `handle_decline_shortcut` is the SOLE load-bearing suppression here (the ring is empty on
+/// `!last_loop_action_sequence.is_empty()` (engine.rs Seam 2), so `last_loop_action_sequence.clear()`
+/// in `handle_decline_shortcut` is the SOLE load-bearing suppression here (the ring is empty on
 /// this path, so deleting `loop_detect_ring.clear()` has no effect). Deleting
-/// `last_recast_context = None` leaves the routing context set ⇒ the post-return reconcile
+/// `last_loop_action_sequence.clear()` leaves the routing sequence set ⇒ the post-return reconcile
 /// re-fires `try_offer_object_growth_shortcut` within this same `apply()` ⇒ the `Priority`
 /// assertion flips back to `LoopShortcut`. (Distinct from the interactive test's probe line ⇒
 /// the two seams are covered independently.)
@@ -2787,7 +2926,7 @@ fn object_growth_sprout_swarm_decline_restores_priority_no_reoffer() {
         runner.state().waiting_for
     );
     assert!(
-        runner.state().last_recast_context.is_some(),
+        !runner.state().last_loop_action_sequence.is_empty(),
         "the object-growth offer must have captured a recast context (the Seam-2 gate)"
     );
 
@@ -2822,7 +2961,7 @@ fn object_growth_sprout_swarm_decline_restores_priority_no_reoffer() {
 
     // (a) + (c): ordinary priority restored AND the Seam-2 routing context cleared, so the
     // post-return reconcile does not re-fire `try_offer_object_growth_shortcut`. With
-    // `last_recast_context = None` reverted, the intact context re-offers ⇒ this flips to
+    // `last_loop_action_sequence = None` reverted, the intact context re-offers ⇒ this flips to
     // `LoopShortcut`.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -2834,7 +2973,7 @@ fn object_growth_sprout_swarm_decline_restores_priority_no_reoffer() {
         "the decline result hands priority back"
     );
     assert!(
-        runner.state().last_recast_context.is_none(),
+        runner.state().last_loop_action_sequence.is_empty(),
         "the object-growth routing context was cleared on decline (Seam-2 revert-probe line)"
     );
     assert!(runner.state().loop_detect_ring.is_empty());
@@ -2904,8 +3043,414 @@ fn object_growth_no_affinity_does_not_offer() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// INTERRUPTIBILITY matched pair (combo 2+3): the opponent HOLDS a real Murder.
+// Undefused (opponent passes) ⇒ the CR 732.2a object-growth shortcut is GRANTED.
+// Defused (opponent Murders Witherbloom in response to Sprout Swarm on the
+// stack, CR 601.2i) ⇒ the affinity granter is gone, so the empty-stack hook's
+// clone-drive re-derives the recast WITHOUT affinity, convoke alone can't pay
+// {4}{G} ⇒ NO grant beyond the current stack. The opponent's pass-vs-respond is
+// the SOLE delta and FLIPS the outcome.
+// ---------------------------------------------------------------------------
+
+/// Arm `player` with a real castable Murder ({1}{B}{B}, "Destroy target creature.") backed by 3
+/// Swamps — the held defuse. Returns the Murder's `ObjectId`.
+fn arm_murder(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    for _ in 0..3 {
+        scenario.add_basic_land(player, ManaColor::Black);
+    }
+    let mut murder =
+        scenario.add_spell_to_hand_from_oracle(player, "Murder", true, "Destroy target creature.");
+    murder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 1,
+    });
+    murder.id()
+}
+
+/// As [`sprout_swarm_scenario`], but ALSO arms P1 with a held Murder (the defuse for the CR 732.2a
+/// interruptibility pair). Returns `(runner, sprout, witherbloom, murder, fodder)`.
+///
+/// R3: pinned at `n_fodder = 4`. The defused negative relies on the driven recast being unpayable
+/// once affinity is removed — convoke-only must then pay the full {4}{G} (buyback {3} + base
+/// {1}{G}), i.e. 5 taps, while at most 4 untapped green creatures remain at the recast (one fodder
+/// is tapped for the real cast's convoke, plus the one fresh Saproling). If a future bump made
+/// convoke alone able to pay {4}{G}, the Murder defuse would stop breaking the loop and the defused
+/// test would go vacuous — keep this tied to the `object_growth_no_affinity_does_not_offer` math.
+fn sprout_swarm_scenario_with_murder(
+    n_fodder: usize,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, Vec<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let witherbloom = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Witherbloom, the Balancer",
+            5,
+            5,
+            WITHERBLOOM_AFFINITY_ORACLE,
+        )
+        .id();
+    let mut fodder = Vec::new();
+    for _ in 0..n_fodder {
+        fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+    }
+    let sprout = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Sprout Swarm", true, SPROUT_SWARM_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        b.id()
+    };
+    let murder = arm_murder(&mut scenario, P1);
+    let mut runner = scenario.build();
+    {
+        let st = runner.state_mut();
+        st.loop_detection = LoopDetectionMode::Interactive;
+        for &id in &fodder {
+            st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+    }
+    (runner, sprout, witherbloom, murder, fodder)
+}
+
+/// T-object-growth-INT-a ⭐ — INTERRUPTIBILITY, UNDEFUSED: P1 HOLDS a real Murder but PASSES ⇒ the
+/// CR 732.2a object-growth shortcut is GRANTED. Sprout Swarm resolves through a genuine response
+/// window (P1 auto-passes, CR 601.2i/117.3c), the token-growth loop settles, and the shortcut is
+/// OFFERED. Matched with the defused twin: P1's pass-vs-respond is the SOLE delta and FLIPS the
+/// outcome. Reach-guards prove the defuse was genuinely held (Murder still in hand, Witherbloom
+/// still on the battlefield).
+#[test]
+fn object_growth_interruptibility_undefused_opponent_passes_grants() {
+    let (mut runner, sprout, witherbloom, murder, fodder) = sprout_swarm_scenario_with_murder(4);
+    let outcome = runner
+        .cast(sprout)
+        .accept_optional() // pay buyback {3}
+        .convoke_with(&[fodder[0]]) // tap one green Saproling for the {G} pip
+        .commit()
+        .resolve();
+
+    assert!(
+        matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::LoopShortcut { proposer, .. } if *proposer == P0
+        ),
+        "UNDEFUSED (P1 passes): the object-growth shortcut is OFFERED to P0, got {:?}",
+        outcome.final_waiting_for()
+    );
+    // Reach-guards: the defuse was genuinely HELD (not spent) and the affinity granter survived.
+    assert_eq!(
+        outcome.state().objects[&murder].zone,
+        engine::types::zones::Zone::Hand,
+        "P1's Murder is still in hand (held, not cast) — the offer is not vacuous on a spent defuse"
+    );
+    assert_eq!(
+        outcome.state().objects[&witherbloom].zone,
+        engine::types::zones::Zone::Battlefield,
+        "Witherbloom (the affinity granter) survives when P1 passes"
+    );
+}
+
+/// T-object-growth-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS to Sprout Swarm (on the stack,
+/// CR 601.2i) by casting Murder on Witherbloom. The affinity granter is destroyed, Sprout resolves
+/// (one Saproling made, buyback → hand), and the empty-stack hook's clone-drive re-derives the
+/// recast WITHOUT affinity ⇒ convoke-only {4}{G} needs 5 taps but ≤4 untapped greens remain ⇒
+/// unpayable ⇒ NO grant beyond the current stack (CR 732.2a). The ONLY delta vs the undefused twin
+/// is P1's respond-vs-pass, and the outcome FLIPS (offer → no offer). This is the exact
+/// `object_growth_no_affinity_does_not_offer` mechanism, reached at RUNTIME by removing affinity
+/// mid-stack instead of omitting the granter from the fixture.
+#[test]
+fn object_growth_interruptibility_defused_opponent_responds_no_grant() {
+    let (mut runner, sprout, witherbloom, murder, fodder) = sprout_swarm_scenario_with_murder(4);
+    let before = saproling_count(runner.state());
+    let murder_card = runner.state().objects[&murder].card_id;
+
+    // Commit Sprout (buyback + convoke) to the stack WITHOUT resolving — leaving P0 priority with
+    // Sprout on the stack. The bare `commit()` temporary is dropped at the `;`, releasing the
+    // borrow so the manual drive can continue.
+    runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit();
+    // P0 passes ⇒ P1 gets priority with Sprout on the stack (the real response window).
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    // P1 RESPONDS: Murder destroys Witherbloom in response to Sprout. The reducer surfaces a
+    // `TargetSelection` prompt (the action's `targets` field is not consumed), answered below.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: murder,
+            card_id: murder_card,
+            targets: vec![witherbloom],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 may cast Murder in response (instant speed)");
+    // Settle: Murder targets Witherbloom, resolves, destroys it; then Sprout resolves (token +
+    // buyback → hand); then the empty-stack hook drives the clone (no affinity ⇒ unpayable ⇒ no
+    // offer).
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(witherbloom)],
+                    })
+                    .expect("Murder targets Witherbloom (a legal creature)");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            _ => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Reach-guards: the response LANDED (Witherbloom gone) and the Sprout cast still RESOLVED (a
+    // real Saproling was made — the no-offer is the recast-unpayable break, not a fizzled cast).
+    assert!(
+        runner.state().objects.get(&witherbloom).map(|o| o.zone)
+            != Some(engine::types::zones::Zone::Battlefield),
+        "reach-guard: P1's Murder destroyed Witherbloom (the response landed)"
+    );
+    assert_eq!(
+        saproling_count(runner.state()),
+        before + 1,
+        "reach-guard: Sprout still resolved and made one Saproling (the cast did not fizzle)"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "DEFUSED (P1 responds): affinity is gone ⇒ the driven recast can't afford {{4}}{{G}} via \
+         convoke ⇒ NO grant beyond the current stack, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// As [`setup_2p_vito_optional`], but ALSO arms P1 with a held Murder (the defuse for the CR 732.2a
+/// Vito-drain interruptibility pair) and captures the Bloodthirsty Conqueror + Murder ids.
+///
+/// Sanguine Bond is a REDUNDANT drainer: the drain loop is Vito+Conqueror OR Sanguine+Conqueror
+/// (either targeted drainer feeds the single closer). Bloodthirsty Conqueror is the SINGLE closer
+/// ("Whenever an opponent loses life, you gain that much life") — Murder→Conqueror breaks the loop
+/// regardless of the redundant Sanguine (drop-probe-confirmed by the spike). Both drainers still
+/// fire per P0 lifegain, so the per-window life decrement is 2 (Vito's 1 + Sanguine's 1).
+fn setup_2p_vito_optional_with_murder(
+    mode: LoopDetectionMode,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_life(P0, 20);
+    scenario.with_life(P1, 6);
+    scenario.add_creature_from_oracle(P0, "Vito, Thorn of the Dusk Rose", 1, 4, VITO);
+    scenario.add_creature_from_oracle(P0, "Sanguine Bond", 2, 2, SANGUINE_BOND);
+    let conqueror = scenario
+        .add_creature_from_oracle(P0, "Bloodthirsty Conqueror", 3, 4, BLOODTHIRSTY_CONQUEROR)
+        .id();
+    // The red land + Bolt make the loop OPTIONAL (so it OFFERS instead of auto-crowning); keep it.
+    scenario.add_basic_land(P1, ManaColor::Red);
+    scenario.add_bolt_to_hand(P1);
+    let murder = arm_murder(&mut scenario, P1);
+    let kickoff = scenario
+        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = mode;
+    (runner, kickoff, conqueror, murder)
+}
+
+/// T-Vito-INT-a ⭐ — INTERRUPTIBILITY, UNDEFUSED: P1 HOLDS a real Murder but PASSES ⇒ the CR 732.2a
+/// Vito-drain shortcut is GRANTED. The kickoff resolves, the Vito/Sanguine drains fan out through
+/// genuine APNAP priority windows (P1 auto-passes, CR 601.2i/117.3c), the loop settles, and the
+/// shortcut is OFFERED to P0. Matched with the defused twin: P1's pass-vs-respond is the SOLE delta
+/// and FLIPS the outcome. Reach-guards prove the defuse was genuinely held (Murder still in hand,
+/// closer still on the battlefield, P1 alive-positive).
+#[test]
+fn vito_interruptibility_undefused_opponent_passes_grants() {
+    let (mut runner, kickoff, conqueror, murder) =
+        setup_2p_vito_optional_with_murder(LoopDetectionMode::Interactive);
+    let _ = runner.cast(kickoff).resolve();
+    let (_events, wf) = drive_collect(&mut runner, 2000);
+
+    let WaitingFor::LoopShortcut {
+        proposer,
+        certificate,
+        ..
+    } = wf
+    else {
+        panic!("UNDEFUSED (P1 passes): the optional 2p Vito drain must OFFER a LoopShortcut, got {wf:?}");
+    };
+    assert_eq!(proposer, P0, "P0 has priority and proposes the shortcut");
+    // The Vito drain's deciding win is lethal (the drain kills P1), not an inert Advantage loop.
+    assert_eq!(
+        certificate.win_kind,
+        WinKind::LethalDamage,
+        "the Vito drain offer's deciding win_kind is LethalDamage"
+    );
+    assert!(
+        !certificate.mandatory,
+        "the loop is OPTIONAL (P1 holds real answers)"
+    );
+    // Reach-guards: the defuse was genuinely HELD (Murder still in hand, not spent) and the single
+    // closer survived — so the offer is not vacuous on a spent defuse / broken loop.
+    assert_eq!(
+        runner.state().objects[&murder].zone,
+        engine::types::zones::Zone::Hand,
+        "P1's Murder is still in hand (held, not cast)"
+    );
+    assert_eq!(
+        runner.state().objects[&conqueror].zone,
+        engine::types::zones::Zone::Battlefield,
+        "Bloodthirsty Conqueror (the single closer) survives when P1 passes"
+    );
+    assert!(
+        life(&runner, P1) > 0 && !is_eliminated(&runner, P1),
+        "the offer fires EARLY with P1 alive-positive, life = {}",
+        life(&runner, P1)
+    );
+}
+
+/// T-Vito-INT-b ⭐ — INTERRUPTIBILITY, DEFUSED: P1 RESPONDS at the first pre-offer priority window
+/// that has the Vito/Sanguine drains on the stack (CR 603.3b) by casting Murder on Bloodthirsty
+/// Conqueror. The single closer is destroyed; the 2 in-flight drains then resolve (P1 loses EXACTLY
+/// 2, no Conqueror re-gain) and the stack empties ⇒ NO grant beyond the current stack (CR 732.2a).
+/// The ONLY delta vs the undefused twin is P1's respond-vs-pass, and the outcome FLIPS (offer → no
+/// offer). Non-vacuity reach-guards: the response LANDED (Conqueror → graveyard), the defuse was
+/// spent (Murder left P1's hand), and P1 lost EXACTLY 2 — the precise decrement proves the 2 drains
+/// fired before the closer-removal break (so no-offer is the break, not an upstream fizzle).
+#[test]
+fn vito_interruptibility_defused_opponent_responds_no_grant() {
+    let (mut runner, kickoff, conqueror, murder) =
+        setup_2p_vito_optional_with_murder(LoopDetectionMode::Interactive);
+    let initial_p1_life = life(&runner, P1);
+    let murder_card = runner.state().objects[&murder].card_id;
+
+    // Commit the kickoff to the stack WITHOUT resolving — P0 retains priority with it on the stack.
+    runner.cast(kickoff).commit();
+
+    // STEP to the FIRST Priority{P1} window whose stack carries a Vito/Sanguine drain trigger
+    // (CR 603.3b: the drains sit on the stack after the kickoff resolves, giving P1 a genuine
+    // pre-offer response window). Do NOT auto-pass P1 there. Before that window the only stack
+    // entry is the kickoff Spell (no TriggeredAbility), so this precisely selects the drain window.
+    let mut reached = false;
+    for _ in 0..80 {
+        let (wf, drain_on_stack) = {
+            let st = runner.state();
+            (
+                st.waiting_for.clone(),
+                st.stack
+                    .iter()
+                    .any(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. })),
+            )
+        };
+        match wf {
+            WaitingFor::Priority { player } if player == P1 && drain_on_stack => {
+                reached = true;
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to advance toward the drain window");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                runner
+                    .act(GameAction::OrderTriggers { order })
+                    .expect("P0 orders its two simultaneous drain triggers");
+            }
+            other => panic!("unexpected state before the drain window: {other:?}"),
+        }
+    }
+    assert!(
+        reached,
+        "must reach a Priority{{P1}} window with a drain trigger on the stack; got {:?}",
+        runner.state().waiting_for
+    );
+    // Reach-guard: at the response window P1 has NOT yet lost life (drains unresolved) and the
+    // closer is still live — the loss below is caused by the in-flight drains, not a prior cycle.
+    assert_eq!(
+        life(&runner, P1),
+        initial_p1_life,
+        "P1 has not lost life yet at the response window (drains still on the stack)"
+    );
+
+    // P1 RESPONDS: Murder destroys the single closer (Bloodthirsty Conqueror) in response to the
+    // drains. The reducer surfaces a `TargetSelection` (the action's `targets` is not consumed),
+    // answered in the settle loop below.
+    runner
+        .act(GameAction::CastSpell {
+            object_id: murder,
+            card_id: murder_card,
+            targets: vec![conqueror],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("P1 may cast Murder in response (instant speed)");
+
+    // Settle: Murder resolves (destroys Conqueror), then the 2 drains resolve (P1 -2, no re-gain),
+    // then the stack empties. No new triggers fire (the closer is gone) ⇒ no offer.
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::LoopShortcut { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(conqueror)],
+                    })
+                    .expect("Murder targets Bloodthirsty Conqueror (a legal creature)");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                let order: Vec<usize> = (0..triggers.len()).collect();
+                let _ = runner.act(GameAction::OrderTriggers { order });
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            _ => {
+                if runner.act(GameAction::PassPriority).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Reach-guards (non-vacuity): the response LANDED (closer destroyed), the defuse was spent, and
+    // the 2 in-flight drains resolved — the EXACT decrement proves the break happened after the
+    // drains fired (not an upstream fizzle) and that the closer removal stopped the re-gain.
+    assert_eq!(
+        runner.state().objects[&conqueror].zone,
+        engine::types::zones::Zone::Graveyard,
+        "reach-guard: P1's Murder destroyed the closer (Conqueror → graveyard)"
+    );
+    assert_ne!(
+        runner.state().objects[&murder].zone,
+        engine::types::zones::Zone::Hand,
+        "reach-guard: the defuse was spent (Murder left P1's hand)"
+    );
+    assert_eq!(
+        life(&runner, P1),
+        initial_p1_life - 2,
+        "reach-guard: the 2 in-flight drains resolved (P1 lost EXACTLY 2, no Conqueror re-gain), \
+         life = {}",
+        life(&runner, P1)
+    );
+    // Terminal is NOT a LoopShortcut and IS a plain empty-stack Priority (the break, not a fizzle).
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "DEFUSED (P1 responds Murder→Conqueror): the single closer is gone ⇒ the drains resolve \
+         once and the loop is broken ⇒ NO grant beyond the current stack, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty(),
+        "terminal is a plain empty-stack Priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
 /// N3 — no-buyback REJECTS (B3). Sprout Swarm cast WITHOUT paying buyback ⇒ the spell goes to
-/// the graveyard, not hand ⇒ (a) `last_recast_context` is never captured (gate requires
+/// the graveyard, not hand ⇒ (a) `last_loop_action_sequence` is never captured (gate requires
 /// `additional_cost_paid`), and (b) even were it captured, the injector's per-cycle re-find
 /// in `ctx.from_zone` (Hand) would abort. Either way: no offer. Revert-failing paired
 /// reach-guard: P1 (buyback paid, card returns to hand) DOES offer.
@@ -2925,8 +3470,8 @@ fn object_growth_no_buyback_does_not_offer() {
         outcome.final_waiting_for()
     );
     assert!(
-        outcome.state().last_recast_context.is_none(),
-        "B3: last_recast_context must NOT be captured when buyback is unpaid"
+        outcome.state().last_loop_action_sequence.is_empty(),
+        "B3: last_loop_action_sequence must NOT be captured when buyback is unpaid"
     );
     // Reach-guard: confirm the cast actually resolved (a real Saproling was made), so the
     // negative above is not vacuous on an aborted cast.
@@ -2938,7 +3483,7 @@ fn object_growth_no_buyback_does_not_offer() {
 }
 
 /// FIX 1 (#4603 opt-in gate): the RecastContext capture is gated on `loop_detection.samples()`,
-/// so DEFAULT/OFF mode never writes `last_recast_context` — keeping the serialized surface
+/// so DEFAULT/OFF mode never writes `last_loop_action_sequence` — keeping the serialized surface
 /// byte-identical to pre-PR-7 (the field is `skip_serializing_if=is_none`). Paired reach-guard:
 /// the SAME buyback + token cast in Interactive (sampling) mode DOES capture `Some(..)`, proving
 /// the OFF assertion is not vacuous on a cast that simply never captures.
@@ -2954,8 +3499,8 @@ fn off_mode_capture_leaves_recast_context_none() {
         .commit()
         .resolve();
     assert!(
-        off.state().last_recast_context.is_none(),
-        "OFF (#4603): a buyback+token cast must NOT write last_recast_context on the serialized surface"
+        off.state().last_loop_action_sequence.is_empty(),
+        "OFF (#4603): a buyback+token cast must NOT write last_loop_action_sequence on the serialized surface"
     );
 
     // ON/sampling reach-guard: the same cast captures Some(..) (else the OFF assertion is vacuous).
@@ -2967,7 +3512,7 @@ fn off_mode_capture_leaves_recast_context_none() {
         .commit()
         .resolve();
     assert!(
-        on.state().last_recast_context.is_some(),
+        !on.state().last_loop_action_sequence.is_empty(),
         "Interactive/sampling: the same buyback+token cast DOES capture the recast context"
     );
 }
@@ -3214,7 +3759,7 @@ fn object_growth_offer_schema_has_live_convoke_taps() {
     );
 
     // The point's slot binds the recast card's CR 400.7 AllCopies identity.
-    let ctx = outcome.state().last_recast_context.as_ref().unwrap();
+    let ctx = outcome.state().last_loop_action_sequence.first().unwrap();
     assert_eq!(
         schema.points[0].slot.source,
         YieldTarget::AllCopies {
@@ -3282,6 +3827,9 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
                     TargetRef::Player(P1),
                     TargetRef::Object(battlefield),
                 ],
+                min_targets: 1,
+                max_targets: 1,
+                ordered: true,
             },
         }],
         convoke_tappable_count: 0,
@@ -3303,7 +3851,7 @@ fn loop_shortcut_schema_redacts_hidden_targets_for_non_controller() {
         let WaitingFor::LoopShortcut { schema, .. } = wf else {
             panic!("expected LoopShortcut, got {wf:?}");
         };
-        let DecisionPointKind::Targets { legal_targets } = &schema.points[0].kind else {
+        let DecisionPointKind::Targets { legal_targets, .. } = &schema.points[0].kind else {
             panic!("expected a Targets point, got {:?}", schema.points[0].kind);
         };
         legal_targets.clone()
@@ -3513,4 +4061,143 @@ fn predicted_winner_concede_mid_apnap_does_not_drive() {
         ),
         ref other => panic!("the liveness guard hands priority back (manual play), got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// BB-FU10 T16 — a battlefield-entry-LEDGER observer VETOES the object-growth
+// offer. This is the ruling's disclosed, sound post-Step-0c behaviour, asserted
+// as such so nobody "fixes" the test by deleting it.
+// ---------------------------------------------------------------------------
+
+/// Park Heights Pegasus, verbatim (Scryfall / MTGJSON `AtomicCards.json`). Its
+/// trigger `execute` body carries the CR 608.2i
+/// `QuantityRef::BattlefieldEntriesThisTurn` read, which
+/// `fire_time_conditions_read_growing_class` block (1) scans at the
+/// `ability_definition_reads_sibling_mutable_for_loop` call site.
+const PARK_HEIGHTS_PEGASUS_ORACLE: &str = "Flying, trample\nWhenever this creature deals combat damage to a player, draw a card if you had two or more creatures enter the battlefield under your control this turn.";
+
+/// ANTI-VACUITY CONTROL: the same board shape with a trigger that reads NOTHING
+/// board-mutable. Granted in BOTH builds, which is what proves the veto below
+/// comes from the ledger clause and not from the bystander's mere presence.
+const PLAIN_DRAW_TRIGGER_ORACLE: &str =
+    "Flying, trample\nWhenever this creature deals combat damage to a player, draw a card.";
+
+/// The passing 51st Sprout Swarm / Witherbloom object-growth row plus exactly ONE
+/// extra P0 battlefield permanent carrying `bystander_oracle`. Returns the final
+/// `WaitingFor` plus the bystander's id, so the caller can reach-guard its zone.
+fn object_growth_with_bystander(bystander_oracle: &str) -> (GameRunner, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Witherbloom, the Balancer",
+        5,
+        5,
+        WITHERBLOOM_AFFINITY_ORACLE,
+    );
+    let bystander = scenario
+        .add_creature_from_oracle(P0, "BBFU10 Bystander", 2, 2, bystander_oracle)
+        .id();
+    let mut fodder = Vec::new();
+    for _ in 0..4 {
+        fodder.push(scenario.add_creature(P0, "Saproling", 1, 1).id());
+    }
+    let sprout = {
+        let mut b =
+            scenario.add_spell_to_hand_from_oracle(P0, "Sprout Swarm", true, SPROUT_SWARM_ORACLE);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        b.id()
+    };
+    let mut runner = scenario.build();
+    {
+        let st = runner.state_mut();
+        st.loop_detection = LoopDetectionMode::Interactive;
+        for &id in &fodder {
+            st.objects.get_mut(&id).unwrap().color = vec![ManaColor::Green];
+        }
+    }
+    // The cast pipeline settles the loop verdict into `state().waiting_for`, which
+    // is what the caller reads (the borrowed `CastOutcome` is dropped here).
+    runner
+        .cast(sprout)
+        .accept_optional()
+        .convoke_with(&[fodder[0]])
+        .commit()
+        .resolve();
+    (runner, bystander)
+}
+
+/// T16 (BB-FU10 RULING deliverable). With Step 0c applied, a shipped
+/// battlefield-entry-ledger observer anywhere on a functioning battlefield
+/// SUPPRESSES a CR 732.2a object-growth offer that fires without it.
+///
+/// This asserts the SUPPRESSION as the sound behaviour. Per the plan's §0.5
+/// ruling, the engine already classifies `battlefield_entries_this_turn` as a
+/// journal a loop pumps (`project_out_resources` clears it), so `sibling: false`
+/// let the firewall hand out a false ∞ certificate while a live observer read the
+/// growing class — the one error direction `ability_scan`'s ADD-1 contract
+/// forbids.
+///
+/// **`BB-FU10-N` is the narrowing follow-up that will flip assertion (1) back to
+/// an offer** (gate the veto on whether the observer's filter can actually match
+/// the growing class, mirroring `etb_observer_provably_excludes_class`). Do NOT
+/// "fix" this test by deleting it — update it when `BB-FU10-N` lands.
+///
+/// REVERT-PROBE: set the `BattlefieldEntriesThisTurn` arm's `sibling` back to
+/// `false` in `game/ability_scan.rs` → (1) FAILS (the offer returns). Measured
+/// both directions; the (2) control is granted in BOTH builds.
+#[test]
+fn object_growth_ledger_observer_bystander_suppresses_offer() {
+    use engine::types::zones::Zone;
+
+    // (2) ANTI-VACUITY CONTROL first: an otherwise byte-identical board whose
+    // bystander reads nothing board-mutable still gets the offer.
+    let (control_runner, control_bystander) =
+        object_growth_with_bystander(PLAIN_DRAW_TRIGGER_ORACLE);
+    match &control_runner.state().waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => assert!(
+            certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+            "(2) control: the detected loop's unbounded axis must be TokensCreated, got {:?}",
+            certificate.unbounded
+        ),
+        other => panic!(
+            "(2) anti-vacuity control: a plain draw-trigger bystander must NOT suppress \
+             the offer, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        control_runner.state().objects[&control_bystander].zone,
+        Zone::Battlefield,
+        "(3) control reach-guard: the bystander is a functioning battlefield permanent"
+    );
+
+    // The subject: the SAME board with Park Heights Pegasus instead.
+    let (runner, bystander) = object_growth_with_bystander(PARK_HEIGHTS_PEGASUS_ORACLE);
+
+    // (3) reach-guard — block (1) hard-skips non-battlefield zones, so the observer
+    // must actually be on the battlefield, and must carry exactly one trigger.
+    let obj = &runner.state().objects[&bystander];
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "(3) reach-guard: the ledger observer must be a functioning battlefield permanent"
+    );
+    assert_eq!(
+        obj.trigger_definitions.len(),
+        1,
+        "(3) reach-guard: exactly one trigger definition carries the ledger read"
+    );
+
+    // (1) THE VETO — the disclosed, sound post-0c behaviour.
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "(1) CR 732.2a: a live observer reading the battlefield-entry ledger must \
+         VETO the object-growth certificate; got {:?}. If BB-FU10-N (the narrowing \
+         follow-up) has landed, this assertion is expected to flip back to an OFFER \
+         — update it, do not delete the test.",
+        runner.state().waiting_for
+    );
 }

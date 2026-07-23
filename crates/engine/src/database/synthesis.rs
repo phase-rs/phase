@@ -1394,7 +1394,11 @@ pub fn synthesize_bargain(face: &mut CardFace) {
         return;
     }
 
-    face.additional_cost = Some(AdditionalCost::Optional {
+    face.additional_cost = Some(bargain_additional_cost());
+}
+
+pub(crate) fn bargain_additional_cost() -> AdditionalCost {
+    AdditionalCost::Optional {
         cost: AbilityCost::Sacrifice(SacrificeCost::count(
             TargetFilter::Or {
                 filters: vec![
@@ -1408,7 +1412,7 @@ pub fn synthesize_bargain(face: &mut CardFace) {
             1,
         )),
         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    });
+    }
 }
 
 /// Synthesize Gift optional cost and delivery effect.
@@ -2320,6 +2324,14 @@ pub fn synthesize_casualty(face: &mut CardFace) {
             TriggerDefinition::new(TriggerMode::SpellCast)
                 .valid_card(TargetFilter::SelfRef)
                 .trigger_zones(vec![Zone::Stack])
+                .condition(TriggerCondition::AdditionalCostPaid {
+                    source: AdditionalCostPaymentSource::NonKicker,
+                    origin: Some(AdditionalCostOrigin::Casualty),
+                    origin_ordinal: Some(casualty_ordinal),
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                })
                 .execute(execute)
                 .description("Casualty — copy this spell when cast with casualty paid".to_string()),
         );
@@ -3110,14 +3122,16 @@ pub(crate) fn ensure_evoke_etb_sac_trigger(obj: &mut crate::game::game_object::G
     // so the trigger is collectable this same resolution before the next layers
     // pass re-derives `trigger_definitions`.
     if obj.base_trigger_definitions.iter().any(is_evoke_sac) {
-        if !obj.trigger_definitions.iter_all().any(is_evoke_sac) {
-            obj.trigger_definitions.push(build_evoke_etb_sac_trigger());
+        if !obj
+            .trigger_definitions
+            .iter_all()
+            .any(|entry| is_evoke_sac(entry.definition()))
+        {
+            obj.relive_printed_trigger(is_evoke_sac);
         }
         return;
     }
-    let trigger = build_evoke_etb_sac_trigger();
-    std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-    obj.trigger_definitions.push(trigger);
+    obj.push_printed_trigger(build_evoke_etb_sac_trigger());
 }
 
 fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinition {
@@ -3205,20 +3219,17 @@ pub(crate) fn ensure_paid_offspring_etb_copy_triggers(
             .iter()
             .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal));
         if has_base {
-            if !obj
-                .trigger_definitions
-                .iter_all()
-                .any(|trigger| is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal))
-            {
-                obj.trigger_definitions
-                    .push(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
+            if !obj.trigger_definitions.iter_all().any(|entry| {
+                is_offspring_etb_copy_trigger_for_ordinal(entry.definition(), origin_ordinal)
+            }) {
+                obj.relive_printed_trigger(|trigger| {
+                    is_offspring_etb_copy_trigger_for_ordinal(trigger, origin_ordinal)
+                });
             }
             continue;
         }
 
-        let trigger = offspring_etb_copy_trigger_for_ordinal(origin_ordinal);
-        std::sync::Arc::make_mut(&mut obj.base_trigger_definitions).push(trigger.clone());
-        obj.trigger_definitions.push(trigger);
+        obj.push_printed_trigger(offspring_etb_copy_trigger_for_ordinal(origin_ordinal));
     }
 }
 
@@ -4036,7 +4047,9 @@ fn is_unleash_cant_block_static(
 ///     Graveyard`, `valid_card = SelfRef` (the canonical dies trigger shape;
 ///     CR 603.10a — leaves-the-battlefield triggers look back in time).
 ///   * `condition = Not(HadCounters { Some("P1P1") })` — CR 400.7 LKI lookup
-///     against `state.lki_cache` for the source's pre-death counter map.
+///     against the exact `ZoneChanged` record context for the pre-death counter
+///     map. The ObjectId-keyed cache is only a compatibility fallback when a
+///     legacy/defaulted record has no context.
 ///   * Execute body: `Effect::ChangeZone` from `Graveyard` → `Battlefield`
 ///     targeting `SelfRef`, with `enter_with_counters = [("P1P1", 1)]`. The
 ///     default `enters_under = None` matches the rule's "under its owner's
@@ -6364,6 +6377,10 @@ fn build_evolve_trigger() -> TriggerDefinition {
 /// (`"P1P1"` or `"M1M1"`). Any future "dies → return with single typed
 /// counter, gated on the same counter type's prior absence" keyword can reuse
 /// this directly.
+///
+/// At runtime, `HadCounters` reads the exact `ZoneChanged` record LKI. The
+/// ObjectId-keyed cache is retained only for legacy records whose defaulted
+/// source context is absent, never as an alternative to a present context.
 fn build_dies_return_with_counter_trigger(
     counter_type: &str,
     counter_label: &str,
@@ -6397,8 +6414,9 @@ fn build_dies_return_with_counter_trigger(
     ));
 
     // CR 400.7 + CR 603.10a: "if it had no <polarity> counters on it" —
-    // negate `HadCounters` to express the absence of the specific counter
-    // type in the LKI snapshot captured by `apply_zone_exit_cleanup`.
+    // negate `HadCounters` to express the absence of the specific counter type
+    // in the exact ZoneChanged record LKI. Only a legacy record with no source
+    // context may fall back to the ObjectId-keyed cache.
     let condition = TriggerCondition::Not {
         condition: Box::new(TriggerCondition::HadCounters {
             counter_type: Some(counter_type),
@@ -9927,6 +9945,23 @@ fn build_oracle_face_inner(
     // Myriad/Exalted) — see the helper's doc comment for the per-class rules.
     merge_extracted_keywords(&mut keywords, extracted_keywords);
 
+    // CR 611.3a + CR 702: MTGJSON can list a keyword that is granted only by a
+    // conditional static (Goddric's flying). Keep it on the static and drop the
+    // unconditional copy unless a standalone keyword line corroborates it.
+    keywords.retain(|keyword| {
+        oracle_corroborated.iter().any(|entry| entry == keyword)
+            || !parsed.statics.iter().any(|definition| {
+                definition.condition.is_some()
+                    && definition.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            ContinuousModification::AddKeyword { keyword: granted }
+                                if granted == keyword
+                        )
+                    })
+            })
+    });
+
     // CR 702.124j: "Partner with [Name]" — upgrade Generic → With(name).
     // MTGJSON sends both "Partner" and "Partner with" keywords; the former produces
     // Partner(Generic) via FromStr. Scan Oracle text for the actual partner name.
@@ -12616,11 +12651,12 @@ mod undying_persist_synthesis_tests {
 #[cfg(test)]
 mod undying_persist_runtime_tests {
     //! CR 702.93a + CR 702.79a runtime integration: a battlefield permanent
-    //! with the keyword dies, `apply_zone_exit_cleanup` captures its LKI
-    //! counter map into `state.lki_cache`, `process_triggers` fires the
-    //! synthesized dies-trigger, the intervening `Not(HadCounters)` condition
-    //! reads the LKI snapshot, and `resolve_top` resolves `Effect::ChangeZone`
-    //! to return the permanent with a single +1/+1 (or -1/-1) counter.
+    //! with the keyword dies, the `ZoneChanged` record captures its exact LKI
+    //! counter map, `process_triggers` fires the synthesized dies-trigger, the
+    //! intervening `Not(HadCounters)` condition reads that record snapshot, and
+    //! `resolve_top` resolves `Effect::ChangeZone` to return the permanent with
+    //! a single +1/+1 (or -1/-1) counter. The ObjectId-keyed cache is only an
+    //! absence-only compatibility path for legacy/defaulted records.
 
     use super::*;
     use crate::game::printed_cards::apply_card_face_to_object;
@@ -15576,6 +15612,7 @@ mod myriad_runtime_tests {
             player: PlayerId(0),
             valid_attacker_ids: vec![],
             valid_attack_targets: vec![],
+            valid_attack_targets_by_attacker: None,
             attacker_constraints: Default::default(),
         };
 
@@ -15903,8 +15940,9 @@ mod myriad_runtime_tests {
             "Muddle should have Myriad keyword after becoming a copy"
         );
         let has_myriad_trigger = muddle_obj.trigger_definitions.iter_all().any(|trigger| {
-            matches!(trigger.mode, TriggerMode::Attacks)
+            matches!(trigger.definition.mode, TriggerMode::Attacks)
                 && trigger
+                    .definition
                     .execute
                     .as_deref()
                     .is_some_and(|a| a.optional && matches!(a.effect.as_ref(), Effect::Myriad))
@@ -15958,10 +15996,12 @@ mod myriad_runtime_tests {
         assert_eq!(token_attacker.defending_player, PlayerId(2));
 
         // Token should inherit the combat damage trigger from Face-Breaker.
-        let token_has_damage_trigger = token_obj
-            .trigger_definitions
-            .iter_all()
-            .any(|trigger| matches!(trigger.mode, TriggerMode::DamageDoneOnceByController));
+        let token_has_damage_trigger = token_obj.trigger_definitions.iter_all().any(|trigger| {
+            matches!(
+                trigger.definition.mode,
+                TriggerMode::DamageDoneOnceByController
+            )
+        });
         assert!(
             token_has_damage_trigger,
             "Token copy should inherit the source's triggered abilities"
@@ -17912,6 +17952,19 @@ mod idempotency_tests {
             .execute
             .as_ref()
             .expect("casualty trigger must have an execute ability");
+
+        assert_eq!(
+            trig.condition,
+            Some(TriggerCondition::AdditionalCostPaid {
+                source: AdditionalCostPaymentSource::NonKicker,
+                origin: Some(AdditionalCostOrigin::Casualty),
+                origin_ordinal: Some(0),
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            }),
+            "intrinsic casualty must be gated when the spell is cast, not only when the copy trigger resolves"
+        );
 
         assert_eq!(
             **execute, canonical,

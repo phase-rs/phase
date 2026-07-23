@@ -127,12 +127,14 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         target_slots: vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: legal_targets.clone(),
             optional: false,
+            chooser: None,
         }],
         target_constraints: Vec::new(),
         selection: crate::game::ability_utils::begin_target_selection(
             &[crate::types::game_state::TargetSelectionSlot {
                 legal_targets: legal_targets.clone(),
                 optional: false,
+                chooser: None,
             }],
             &[],
         )
@@ -235,6 +237,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         target_slots: vec![crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(legal_target)],
             optional: false,
+            chooser: None,
         }],
         mode_labels: Vec::new(),
         target_constraints: Vec::new(),
@@ -817,6 +820,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             },
             crate::types::game_state::TargetSelectionSlot {
                 legal_targets: vec![
@@ -824,6 +828,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
                     TargetRef::Player(PlayerId(1)),
                 ],
                 optional: false,
+                chooser: None,
             },
         ],
         mode_labels: Vec::new(),
@@ -884,6 +889,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
                 TargetRef::Player(PlayerId(1)),
             ],
             optional: false,
+            chooser: None,
         },
         crate::types::game_state::TargetSelectionSlot {
             legal_targets: vec![
@@ -891,6 +897,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
                 TargetRef::Player(PlayerId(1)),
             ],
             optional: false,
+            chooser: None,
         },
     ];
     let target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];

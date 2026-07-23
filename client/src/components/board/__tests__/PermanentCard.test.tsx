@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameObject, GameState } from "../../../adapter/types.ts";
+import type { GameAction, GameObject, GameState } from "../../../adapter/types.ts";
 import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -181,6 +181,47 @@ describe("PermanentCard", () => {
     cleanup();
   });
 
+  // Issue #5932: a Phantasmal Image copying a Reveillark rendered identically to
+  // the real one. The board's copy badge was gated on a TOKEN-copy heuristic
+  // (`is_token`), so a real card under a copy effect never qualified. The engine
+  // now classifies it (CR 613.2a Layer 1a + CR 707.2) and this reads that.
+  it("badges a real card that a copy effect turned into a copy", () => {
+    const gameState = makeState();
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByText("Copy")).toBeInTheDocument();
+  });
+
+  it("shows no copy badge on an ordinary permanent", () => {
+    // Discriminating guard: without it the test above would still pass if the
+    // badge rendered unconditionally.
+    const gameState = makeState();
+    gameState.derived = { copied_permanents: [] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
+  it("never badges a face-down permanent as a copy (CR 708.2)", () => {
+    // A face-down permanent has only the characteristics its face-down rules
+    // grant, so surfacing "Copy" would leak what it really is. The engine omits
+    // it from the projection; the client keeps its own guard so neither side
+    // alone can leak it.
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.derived = { copied_permanents: [1] };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
   it("renders only the engine-classified battlefield keyword badges", () => {
     const gameState = makeState();
     gameState.objects[1].keywords = ["Flying", "Ravenous", "Evoke"];
@@ -195,6 +236,34 @@ describe("PermanentCard", () => {
     expect(screen.getByTestId("keyword-strip")).toHaveTextContent("Flying");
     expect(screen.getByTestId("keyword-strip")).not.toHaveTextContent("Ravenous");
     expect(screen.getByTestId("keyword-strip")).not.toHaveTextContent("Evoke");
+  });
+
+  // CR 732.2a / CR 701.34a: an accepted counter-growth ∞ loop (Kilo proliferate → Pentad
+  // charge) marks the pumped counter in `derived.unbounded_counters`; the pill renders ∞
+  // instead of the (still-finite) real count. Matched pair — the ONLY difference between the
+  // two cases is the presence of the engine mark, so it is the discriminator.
+  it("renders ∞ on a counter the engine marks as unbounded", () => {
+    const gameState = makeState();
+    gameState.objects[1].counters = { charge: 4 };
+    gameState.derived = { unbounded_counters: { 1: ["charge"] } };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.textContent).toContain("∞");
+    expect(container.textContent).not.toContain("x4");
+  });
+
+  it("renders the finite ×N count when the counter is not marked unbounded", () => {
+    const gameState = makeState();
+    gameState.objects[1].counters = { charge: 4 };
+    gameState.derived = {}; // no unbounded_counters mark
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    const { container } = renderPermanent();
+
+    expect(container.textContent).toContain("x4");
+    expect(container.textContent).not.toContain("∞");
   });
 
   it("lifts the permanent tree above siblings while keeping attachments behind the host", () => {
@@ -336,6 +405,20 @@ describe("PermanentCard", () => {
     expect(useUiStore.getState().attachmentFanHostId).toBe(1);
     expect(useUiStore.getState().selectedObjectId).toBeNull();
     expect(useUiStore.getState().inspectedObjectId).toBeNull();
+  });
+
+  it("keeps the single-attachment control readable at compact card sizes", () => {
+    renderPermanent();
+
+    const button = screen.getByRole("button", {
+      name: "View Test Creature's attached card",
+    });
+
+    expect(button).toHaveStyle({
+      width: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
+      height: "clamp(20px, calc(var(--card-w) * 0.22), 28px)",
+      fontSize: "clamp(12px, calc(var(--card-w) * 0.12), 15px)",
+    });
   });
 
   it("refreshes the attachment fan when the engine clears host attachments", () => {
@@ -807,7 +890,20 @@ describe("PermanentCard", () => {
       objects: { 39: kessig },
       battlefield: [39],
     };
-    const manaAction = { type: "TapLandForMana", data: { object_id: 39 } } as const;
+    const manaAction: GameAction = {
+      type: "TapLandForMana",
+      data: {
+        selection: {
+          source: { object_id: 39, incarnation: 1 },
+          ability_index: null,
+          mana_type: "Green",
+          atomic_combination: null,
+          restrictions: [],
+          penalty: "None",
+          taps_for_mana: [],
+        },
+      },
+    };
     const abilityAction = {
       type: "ActivateAbility",
       data: { source_id: 39, ability_index: 1 },
@@ -1233,5 +1329,85 @@ describe("PermanentCard", () => {
 
     expect(dispatchAction).toHaveBeenCalledWith(abilityAction);
     expect(useUiStore.getState().pendingAbilityChoice).toBeNull();
+  });
+
+  // Issue #6092: the engine-derived `blocked_abilities` read-out renders as a
+  // badge with a localized reason. The frontend performs no game logic — it
+  // reads the entries verbatim.
+  it("renders the blocked-ability badge and localized reason from blocked_abilities", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "Tap ability",
+          effect: { type: "Draw" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [1], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Badge label (t("abilityBlock.badge")) and the localized CantBeActivated
+    // reason both render.
+    expect(screen.getAllByText("Blocked").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(/This ability can't be activated/),
+    ).toBeInTheDocument();
+    // Single-source name renders via preview.fromSource.
+    expect(screen.getByText(/\(from Test Creature\)/)).toBeInTheDocument();
+  });
+
+  it("renders every prohibiting source when two sources block one ability", () => {
+    const gameState = makeState();
+    gameState.objects[10] = makeObject({ id: 10, name: "Needle A" });
+    gameState.objects[11] = makeObject({ id: 11, name: "Needle B" });
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "Tap ability",
+          effect: { type: "Draw" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [10, 11], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Both prohibiting source names render in the joined fromSource string.
+    expect(screen.getByText(/\(from Needle A, Needle B\)/)).toBeInTheDocument();
+  });
+
+  it("renders a blocked-ability reason without throwing when the source is departed", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [],
+      // source 999 is not present in objects — the departed-source guard must
+      // render the reason alone and never dereference a missing object.
+      blocked_abilities: [
+        { ability_index: 5, sources: [999], type: "Prohibited" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    expect(() => renderPermanent()).not.toThrow();
+    expect(
+      screen.getByText(/Activating this ability is prohibited/),
+    ).toBeInTheDocument();
+    // Departed source is dropped — no fromSource span renders.
+    expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
   });
 });
