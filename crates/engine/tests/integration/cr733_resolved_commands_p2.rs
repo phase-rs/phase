@@ -91,6 +91,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
                 .apply_resolved_frame_transition(command.as_ref())
                 .unwrap();
         }
+        ResolvedRulesCommand::TriggerCollection(command) => {
+            engine::game::triggers::apply_resolved_trigger_collection(state, command).unwrap();
+        }
     }
 }
 
@@ -179,7 +182,8 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
             | ResolvedRulesCommand::Information(_)
-            | ResolvedRulesCommand::FrameTransition(_) => {
+            | ResolvedRulesCommand::FrameTransition(_)
+            | ResolvedRulesCommand::TriggerCollection(_) => {
                 apply_semantic_command(&mut replay, command)
             }
         }

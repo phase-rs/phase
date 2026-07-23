@@ -91,8 +91,10 @@ pub use resolved_commands::{
     ResolvedObjectStatusReplayInvariantError, ResolvedOncePerTurnPermission, ResolvedPlayerEdit,
     ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
-    ResolvedRulesJournalError, ResolvedTriggerLedgerEdit, RulesExecutionNodeKind,
-    RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal, SpentManaUnit,
+    ResolvedRulesJournalError, ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
+    ResolvedTriggerCollectionReplayInvariantError, ResolvedTriggerLedgerEdit,
+    RulesExecutionNodeKind, RulesExecutionNodeRef, SettlementNode, SettlementNodeOrdinal,
+    SpentManaUnit,
 };
 pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};

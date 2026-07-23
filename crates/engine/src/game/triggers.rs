@@ -26,6 +26,10 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::resolved_commands::{
+    ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
+    ResolvedTriggerCollectionReplayInvariantError,
+};
 use crate::types::statics::{
     StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
 };
@@ -302,6 +306,57 @@ impl PendingTriggerContext {
             dispatch_origin: PendingTriggerDispatchOrigin::Delayed,
         }
     }
+}
+
+/// Applies exact trigger/LKI collection output without rerunning trigger matching.
+///
+/// CR 603.2 + CR 603.3b: pending contexts preserve their resolved firing and
+/// placement order. CR 603.10 + CR 603.10a: a logical zone-change final pass
+/// appends its last-known-information-aware settlement. CR 603.2c: consumed
+/// event occurrences prevent a duplicate generic priority collection.
+pub fn apply_resolved_trigger_collection(
+    state: &mut GameState,
+    command: &ResolvedTriggerCollectionCommand,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    match &command.collection {
+        ResolvedTriggerCollection::DeferPending { contexts } => {
+            state.deferred_triggers.extend(contexts.clone());
+        }
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences } => {
+            state
+                .consumed_before_priority_trigger_events
+                .extend(occurrences.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Resolves, applies, and journals one non-empty trigger/LKI collection append.
+///
+/// Empty vectors are no-ops, so they deliberately do not allocate a causal
+/// node or add a journal entry.
+pub fn resolve_and_apply_trigger_collection(
+    state: &mut GameState,
+    collection: ResolvedTriggerCollection,
+) -> Result<(), ResolvedTriggerCollectionReplayInvariantError> {
+    let is_empty = match &collection {
+        ResolvedTriggerCollection::DeferPending { contexts } => contexts.is_empty(),
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences } => occurrences.is_empty(),
+    };
+    if is_empty {
+        return Ok(());
+    }
+
+    let command = ResolvedTriggerCollectionCommand {
+        collection,
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    apply_resolved_trigger_collection(state, &command)?;
+    state
+        .resolved_rules_journal
+        .record_trigger_collection(command)
+        .expect("resolved trigger collection must have a live journal cause");
+    Ok(())
 }
 
 fn matching_batched_trigger_events(
@@ -2183,7 +2238,11 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
         .collect();
     group.append_delivery_events(&zone_change_events)?;
     let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
-    state.deferred_triggers.extend(pending);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending { contexts: pending },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2235,7 +2294,13 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     group.stamp_battlefield_departures()?;
     sync_logical_zone_change_departure_stamps(group, final_events);
     let settlement = collect_logical_zone_trigger_settlement(state, group)?;
-    state.deferred_triggers.extend(settlement);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::DeferPending {
+            contexts: settlement,
+        },
+    )
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -2305,9 +2370,10 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
         .iter()
         .map(|occurrence| occurrence.event.clone())
         .collect();
-    state
-        .consumed_before_priority_trigger_events
-        .extend(events.iter().enumerate().filter_map(|(index, event)| {
+    let occurrences = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
             matches!(event, GameEvent::ZoneChanged { .. })
                 .then(|| {
                     unclaimed_owned_zone_events
@@ -2322,7 +2388,13 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
                         occurrence: trigger_event_occurrence(events, index),
                     }
                 })
-        }));
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("consumed-before-priority trigger journal cause must be live");
 }
 
 /// Collect the one final observer pass owned by a completed logical zone-change

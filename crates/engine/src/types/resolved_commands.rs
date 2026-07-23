@@ -7,6 +7,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
+
 use super::ability::TriggerDefinitionRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -283,6 +285,30 @@ pub struct ResolvedFrameTransitionCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// Exact trigger occurrences collected at one logical trigger/LKI boundary.
+///
+/// CR 603.2 + CR 603.3b: collected trigger contexts retain their already
+/// determined firing and placement order. CR 603.10 + CR 603.10a: final
+/// logical zone-change settlement uses the recorded pre-event authority.
+/// CR 603.2c: consumed event occurrences prevent the generic priority scan
+/// from collecting the same occurrence a second time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedTriggerCollection {
+    DeferPending {
+        contexts: Vec<PendingTriggerContext>,
+    },
+    ConsumeBeforePriority {
+        occurrences: Vec<ConsumedTriggerEventOccurrence>,
+    },
+}
+
+/// One exact trigger/LKI collection append under its causal rules-execution node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedTriggerCollectionCommand {
+    pub collection: ResolvedTriggerCollection,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -298,7 +324,15 @@ pub enum ResolvedRulesCommand {
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
     FrameTransition(Box<ResolvedFrameTransitionCommand>),
+    TriggerCollection(ResolvedTriggerCollectionCommand),
 }
+
+/// An append-only trigger collection command has no replay-time precondition.
+///
+/// The uninhabited type keeps the uniform resolved-command applier signature
+/// without inventing a failure mode for a pure `Vec::extend` operation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedTriggerCollectionReplayInvariantError {}
 
 /// Typed failure while applying an already-resolved frame transition.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1155,6 +1189,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact trigger/LKI collection append under its causal node.
+    pub fn record_trigger_collection(
+        &mut self,
+        command: ResolvedTriggerCollectionCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::TriggerCollection(command),
+        )
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -1356,7 +1401,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
-                | ResolvedRulesCommand::FrameTransition(_) => {}
+                | ResolvedRulesCommand::FrameTransition(_)
+                | ResolvedRulesCommand::TriggerCollection(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1592,6 +1638,13 @@ impl ResolvedRulesJournal {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "frame-transition command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::TriggerCollection(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "trigger-collection command has an unrelated cause".to_string(),
                     ));
                 }
             }

@@ -94,6 +94,7 @@ mod cr733_resolved_commands_p0;
 mod cr733_resolved_commands_p1;
 mod cr733_resolved_commands_p2;
 mod cr733_resolved_frame_transition;
+mod cr733_resolved_trigger_collection;
 mod cr_annotations;
 mod craft_tithing_blade_transform;
 mod cross_line_instead_override_branch;
