@@ -83,6 +83,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
             engine::game::library::apply_resolved_library_shuffle(state, command, &mut Vec::new())
                 .unwrap();
         }
+        ResolvedRulesCommand::ZoneChange(command) => {
+            engine::game::zones::apply_resolved_zone_change(state, command).unwrap();
+        }
         ResolvedRulesCommand::Information(command) => {
             state.apply_resolved_information(command).unwrap();
         }
@@ -181,6 +184,7 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ObjectCounter(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
+            | ResolvedRulesCommand::ZoneChange(_)
             | ResolvedRulesCommand::Information(_)
             | ResolvedRulesCommand::FrameTransition(_)
             | ResolvedRulesCommand::TriggerCollection(_) => {

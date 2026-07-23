@@ -12,11 +12,12 @@ use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContex
 use super::ability::TriggerDefinitionRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
-use super::game_state::SpellCastRecord;
+use super::game_state::{SpellCastRecord, ZoneChangeRecord};
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
+use super::zones::Zone;
 
 /// Globally ordered identity of a resolved command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -266,6 +267,53 @@ pub struct ResolvedLibraryShuffleCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// One exact transition of an object occurrence between zone containers.
+///
+/// CR 400.7: the command binds the source occurrence and its resulting
+/// incarnation, so replay neither selects a new object nor creates a new
+/// incarnation. CR 613.7d: battlefield-entry timestamps are captured by the
+/// ordinary path and installed exactly on replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedZoneChangeCommand {
+    pub object: ObjectIncarnationRef,
+    pub resulting_incarnation: u64,
+    pub from: Zone,
+    pub to: Zone,
+    /// Zero-based position after the source occurrence has been removed.
+    pub destination_position: usize,
+    pub owner: PlayerId,
+    pub entry_timestamp: Option<u64>,
+    pub turn_zone_change_index: usize,
+    pub zone_change_record: ZoneChangeRecord,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved zone transition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedZoneChangeReplayInvariantError {
+    #[error("zone-change command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("zone-change occurrence mismatch: expected {expected:?}, found {found:?}")]
+    OccurrenceMismatch {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("zone-change owner mismatch: expected {expected:?}, found {found:?}")]
+    OwnerMismatch { expected: PlayerId, found: PlayerId },
+    #[error("zone-change source-zone mismatch: expected {expected:?}, found {found:?}")]
+    SourceZoneMismatch { expected: Zone, found: Zone },
+    #[error("zone-change destination position mismatch: expected {expected}, found {found}")]
+    DestinationPositionMismatch { expected: usize, found: usize },
+    #[error("zone-change turn-record index mismatch: expected {expected}, found {found}")]
+    TurnRecordIndexMismatch { expected: usize, found: usize },
+    #[error("zone-change battlefield entry is missing its timestamp")]
+    MissingBattlefieldEntryTimestamp,
+    #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
+    UnexpectedNonbattlefieldTimestamp,
+    #[error("zone-change installed incarnation mismatch: expected {expected}, found {found}")]
+    ResultingIncarnationMismatch { expected: u64, found: u64 },
+}
+
 /// One bounded structural transition of the resolution-frame stack.
 ///
 /// This carries only the primitive operation and its native operand. It never
@@ -323,6 +371,7 @@ pub enum ResolvedRulesCommand {
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
+    ZoneChange(Box<ResolvedZoneChangeCommand>),
     FrameTransition(Box<ResolvedFrameTransitionCommand>),
     TriggerCollection(ResolvedTriggerCollectionCommand),
 }
@@ -1178,6 +1227,17 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::LibraryShuffle(command))
     }
 
+    /// Records one exact zone-container transition under its causal node.
+    pub fn record_zone_change(
+        &mut self,
+        command: ResolvedZoneChangeCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ZoneChange(Box::new(command)),
+        )
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1401,6 +1461,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
+                | ResolvedRulesCommand::ZoneChange(_)
                 | ResolvedRulesCommand::FrameTransition(_)
                 | ResolvedRulesCommand::TriggerCollection(_) => {}
             }
@@ -1634,6 +1695,14 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::ZoneChange(command) => {
+                if entry.node != command.cause || zone_change_command_is_invalid(command) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "zone-change command has an invalid occurrence, receipt, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
             ResolvedRulesCommand::FrameTransition(command) => {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
@@ -1717,6 +1786,23 @@ fn information_command_is_invalid(command: &ResolvedInformationCommand) -> bool 
         || command.occurrences.iter().any(|occurrence| {
             occurrence.incarnation == LEGACY_INCARNATION || !object_ids.insert(occurrence.object_id)
         })
+}
+
+fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
+    let record = &command.zone_change_record;
+    let changes_incarnation = command.from != command.to;
+    command.object.incarnation == LEGACY_INCARNATION
+        || command.owner != record.owner
+        || record.object_id != command.object.object_id
+        || record.from_zone != Some(command.from)
+        || record.to_zone != command.to
+        || record.turn_zone_change_index != command.turn_zone_change_index
+        || (changes_incarnation && command.resulting_incarnation <= command.object.incarnation)
+        || (!changes_incarnation && command.resulting_incarnation != command.object.incarnation)
+        || (command.to == Zone::Battlefield) != command.entry_timestamp.is_some()
+        || (command.to == Zone::Battlefield
+            && record.entered_incarnation != Some(command.resulting_incarnation))
+        || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
 }
 
 fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
