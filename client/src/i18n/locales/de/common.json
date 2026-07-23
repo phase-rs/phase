@@ -257,7 +257,13 @@
     "youPlayFirst": "Du beginnst",
     "playerPlaysFirst": "{{name}} beginnt",
     "heads": "Kopf",
-    "tails": "Zahl"
+    "tails": "Zahl",
+    "coinFlip": "Münzwurf",
+    "wonCoinFlip": "{{name}} hat den Münzwurf gewonnen",
+    "lostCoinFlip": "{{name}} hat den Münzwurf verloren",
+    "turnOrder": "Zugreihenfolge",
+    "turnOrderItem": "Zug {{turn}}: {{name}}",
+    "youTakeTurn": "Du bist in Zug {{turn}} dran"
   },
   "chrome": {
     "back": "Zurück",

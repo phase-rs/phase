@@ -918,26 +918,47 @@ jobs:
             | { grep -v "^- chore: update coverage" || true; } \
             >> changelog.md
 
+      - name: Build release asset list
+        id: release-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHELL_UPDATER_BRIDGE_AVAILABLE: ${{ steps.shell-updater-bridge.outputs.available }}
+        run: |
+          set -euo pipefail
+
+          # Immutable releases cannot accept a late asset upload. Include the
+          # optional bridge in the initial create/publish request, but skip it
+          # for recovery runs targeting a release that is already published.
+          release_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft' 2>/dev/null || echo missing)
+          include_bridge=false
+          if [ "$SHELL_UPDATER_BRIDGE_AVAILABLE" = true ] && [ "$release_draft" != false ]; then
+            include_bridge=true
+          elif [ "$SHELL_UPDATER_BRIDGE_AVAILABLE" = true ]; then
+            echo "Release $RELEASE_TAG is already published; skipping optional shell updater migration bridge."
+          fi
+
+          {
+            echo "files<<EOF"
+            cat <<'EOF'
+          artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
+          artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
+          artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
+          artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
+          artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
+          artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
+          release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
+          release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
+          EOF
+            if [ "$include_bridge" = true ]; then
+              echo "artifacts/update.json"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
           fail_on_unmatched_files: true
-          files: |
-            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl
-            artifacts/phase-server-slim-x86_64-unknown-linux-musl/phase-server-slim-x86_64-unknown-linux-musl.minisig
-            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin
-            artifacts/phase-server-slim-aarch64-apple-darwin/phase-server-slim-aarch64-apple-darwin.minisig
-            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe
-            artifacts/phase-server-slim-x86_64-pc-windows-msvc/phase-server-slim-x86_64-pc-windows-msvc.exe.minisig
-            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json
-            release-server-${{ needs.resolve-release-ref.outputs.release_tag }}.json.minisig
-
-      - name: Attach shell updater migration bridge
-        if: steps.shell-updater-bridge.outputs.available == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          fail_on_unmatched_files: true
-          files: artifacts/update.json
+          files: ${{ steps.release-assets.outputs.files }}

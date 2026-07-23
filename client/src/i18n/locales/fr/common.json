@@ -257,7 +257,13 @@
     "youPlayFirst": "Vous jouez en premier",
     "playerPlaysFirst": "{{name}} joue en premier",
     "heads": "Face",
-    "tails": "Pile"
+    "tails": "Pile",
+    "coinFlip": "Pile ou face",
+    "wonCoinFlip": "{{name}} a gagné le pile ou face",
+    "lostCoinFlip": "{{name}} a perdu le pile ou face",
+    "turnOrder": "Ordre des tours",
+    "turnOrderItem": "Tour {{turn}} : {{name}}",
+    "youTakeTurn": "Vous jouez au tour {{turn}}"
   },
   "chrome": {
     "back": "Retour",
