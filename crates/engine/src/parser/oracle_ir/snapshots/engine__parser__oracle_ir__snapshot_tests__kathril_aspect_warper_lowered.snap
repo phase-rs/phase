@@ -278,6 +278,7 @@ expression: "&lowered"
                             },
                             "optional_targeting": false,
                             "optional": false,
+                            "target_choice_timing": "Resolution",
                             "forward_result": false,
                             "sub_link": "SequentialSibling",
                             "sibling_condition": "ReplicatedOrBranch"
@@ -318,6 +319,7 @@ expression: "&lowered"
                           },
                           "optional_targeting": false,
                           "optional": false,
+                          "target_choice_timing": "Resolution",
                           "forward_result": false,
                           "sub_link": "SequentialSibling",
                           "sibling_condition": "ReplicatedOrBranch"
@@ -358,6 +360,7 @@ expression: "&lowered"
                         },
                         "optional_targeting": false,
                         "optional": false,
+                        "target_choice_timing": "Resolution",
                         "forward_result": false,
                         "sub_link": "SequentialSibling",
                         "sibling_condition": "ReplicatedOrBranch"
@@ -398,6 +401,7 @@ expression: "&lowered"
                       },
                       "optional_targeting": false,
                       "optional": false,
+                      "target_choice_timing": "Resolution",
                       "forward_result": false,
                       "sub_link": "SequentialSibling",
                       "sibling_condition": "ReplicatedOrBranch"
@@ -438,6 +442,7 @@ expression: "&lowered"
                     },
                     "optional_targeting": false,
                     "optional": false,
+                    "target_choice_timing": "Resolution",
                     "forward_result": false,
                     "sub_link": "SequentialSibling",
                     "sibling_condition": "ReplicatedOrBranch"
@@ -478,6 +483,7 @@ expression: "&lowered"
                   },
                   "optional_targeting": false,
                   "optional": false,
+                  "target_choice_timing": "Resolution",
                   "forward_result": false,
                   "sub_link": "SequentialSibling",
                   "sibling_condition": "ReplicatedOrBranch"
@@ -518,6 +524,7 @@ expression: "&lowered"
                 },
                 "optional_targeting": false,
                 "optional": false,
+                "target_choice_timing": "Resolution",
                 "forward_result": false,
                 "sub_link": "SequentialSibling",
                 "sibling_condition": "ReplicatedOrBranch"
@@ -558,6 +565,7 @@ expression: "&lowered"
               },
               "optional_targeting": false,
               "optional": false,
+              "target_choice_timing": "Resolution",
               "forward_result": false,
               "sub_link": "SequentialSibling",
               "sibling_condition": "ReplicatedOrBranch"
@@ -598,6 +606,7 @@ expression: "&lowered"
             },
             "optional_targeting": false,
             "optional": false,
+            "target_choice_timing": "Resolution",
             "forward_result": false,
             "sub_link": "SequentialSibling",
             "sibling_condition": "ReplicatedOrBranch"
@@ -638,6 +647,7 @@ expression: "&lowered"
           },
           "optional_targeting": false,
           "optional": false,
+          "target_choice_timing": "Resolution",
           "forward_result": false,
           "sub_link": "SequentialSibling",
           "sibling_condition": "ReplicatedOrBranch"
@@ -678,6 +688,7 @@ expression: "&lowered"
         },
         "optional_targeting": false,
         "optional": false,
+        "target_choice_timing": "Resolution",
         "forward_result": false
       },
       "valid_card": {
