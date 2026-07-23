@@ -1710,7 +1710,23 @@
     "targetCreature": "il bersaglio creatura",
     "targetChoice": "questa scelta del bersaglio"
   },
-  "clashOpponent": {
+  "giftRecipient": {
+    "title": "Choose Gift Recipient",
+    "subtitle": "Choose which opponent receives the promised gift."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promise a gift?",
+      "pay": "Promise {{gift}}",
+      "decline": "Cast without promising",
+      "kind": {
+        "card": "a card",
+        "treasure": "a Treasure",
+        "food": "a Food",
+        "tappedFish": "a tapped Fish"
+      }
+    }
+  },  "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",
     "subtitle": "Scegli quale avversario si scontrerà con te."
   },

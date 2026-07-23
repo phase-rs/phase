@@ -1710,7 +1710,23 @@
     "targetCreature": "cel stwora",
     "targetChoice": "ten wybór celu"
   },
-  "clashOpponent": {
+  "giftRecipient": {
+    "title": "Choose Gift Recipient",
+    "subtitle": "Choose which opponent receives the promised gift."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promise a gift?",
+      "pay": "Promise {{gift}}",
+      "decline": "Cast without promising",
+      "kind": {
+        "card": "a card",
+        "treasure": "a Treasure",
+        "food": "a Food",
+        "tappedFish": "a tapped Fish"
+      }
+    }
+  },  "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",
     "subtitle": "Wybierz, który przeciwnik stoczy z tobą starcie."
   },

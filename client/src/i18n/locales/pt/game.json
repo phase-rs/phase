@@ -1710,7 +1710,23 @@
     "targetCreature": "o alvo de criatura",
     "targetChoice": "esta escolha de alvo"
   },
-  "clashOpponent": {
+  "giftRecipient": {
+    "title": "Choose Gift Recipient",
+    "subtitle": "Choose which opponent receives the promised gift."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promise a gift?",
+      "pay": "Promise {{gift}}",
+      "decline": "Cast without promising",
+      "kind": {
+        "card": "a card",
+        "treasure": "a Treasure",
+        "food": "a Food",
+        "tappedFish": "a tapped Fish"
+      }
+    }
+  },  "clashOpponent": {
     "title": "Escolher oponente para confronto",
     "subtitle": "Escolha qual oponente fará confronto com você."
   },
