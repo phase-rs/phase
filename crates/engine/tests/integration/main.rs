@@ -67,6 +67,7 @@ mod chain_of_smog_copy;
 mod chandra_revolution_doesnt_untap_slot;
 mod charging_cinderhorn_issue_2868;
 mod chatterstorm_storm;
+mod citadel_of_pain_each_player_end_step_6508;
 mod claim_jumper_repeat;
 mod cleave_text_changing_cost;
 mod cloud_key_chosen_type_cost;

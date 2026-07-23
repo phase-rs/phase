@@ -17353,6 +17353,240 @@ fn phase_trigger_blinkmoth_urn_that_player_adds_mana_for_their_artifacts() {
     }
 }
 
+/// Issue #6508 SHAPE — Citadel of Pain: "At the beginning of each player's end
+/// step, this enchantment deals X damage to that player, where X is the number
+/// of untapped lands they control." The where-X filter-controller anaphor
+/// ("they control") must bind to the scoped (phase) player, not the source
+/// controller. CR 608.2c: a per-player-scoped count reads the iterating player.
+#[test]
+fn citadel_of_pain_each_player_end_step_scoped_amount() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's end step, this enchantment deals X damage to that player, where X is the number of untapped lands they control.",
+        "Citadel of Pain",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::End));
+    assert_eq!(def.constraint, None);
+    let exec = def
+        .execute
+        .as_ref()
+        .expect("Citadel of Pain must have execute");
+    match exec.effect.as_ref() {
+        Effect::DealDamage { amount, target, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ScopedPlayer,
+                "damage recipient must be the phase player (ScopedPlayer)"
+            );
+            let QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            } = amount
+            else {
+                panic!("expected ObjectCount amount, got {amount:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land),
+                "count must be lands, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::Untapped),
+                "count must be UNTAPPED lands, got {:?}",
+                tf.properties
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::ScopedPlayer),
+                "\"they control\" must bind to the scoped player (CR 608.2c)"
+            );
+        }
+        other => panic!("expected Effect::DealDamage, got {other:?}"),
+    }
+}
+
+/// Issue #6508 SHAPE (Part B) — Iron Maiden: "At the beginning of each
+/// opponent's upkeep, this artifact deals X damage to that player, where X is
+/// the number of cards in their hand minus 4." The possessive hand-count
+/// ("their hand") is a context-free `TargetZoneCardCount` at parse time; the
+/// scoped-phase-trigger lowering rewrites it to `HandSize { ScopedPlayer }`
+/// (CR 603.2b + CR 102.1). The `minus 4` offset is preserved.
+#[test]
+fn iron_maiden_each_opponent_upkeep_scoped_hand_size() {
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's upkeep, this artifact deals X damage to that player, where X is the number of cards in their hand minus 4.",
+        "Iron Maiden",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    let exec = def.execute.as_ref().expect("Iron Maiden must have execute");
+    match exec.effect.as_ref() {
+        Effect::DealDamage { amount, target, .. } => {
+            assert_eq!(*target, TargetFilter::ScopedPlayer);
+            let QuantityExpr::Offset { inner, offset } = amount else {
+                panic!("expected Offset amount, got {amount:?}");
+            };
+            assert_eq!(*offset, -4, "the \"minus 4\" offset must be preserved");
+            assert_eq!(
+                **inner,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                "\"cards in their hand\" must bind to the scoped player"
+            );
+        }
+        other => panic!("expected Effect::DealDamage, got {other:?}"),
+    }
+}
+
+/// Issue #6508 SHAPE (multi-authority, Part B) — Dark Suspicions: "At the
+/// beginning of each opponent's upkeep, that player loses X life, where X is the
+/// number of cards in that player's hand minus the number of cards in your
+/// hand." The scoped-player hand-count moves to `ScopedPlayer` while the
+/// controller-side "your hand" MUST stay `Controller` (CR 109.5) — the rewrite
+/// touches only the Target/possessive side, never `You`.
+#[test]
+fn dark_suspicions_scoped_hand_minus_controller_hand() {
+    let def = parse_trigger_line(
+        "At the beginning of each opponent's upkeep, that player loses X life, where X is the number of cards in that player's hand minus the number of cards in your hand.",
+        "Dark Suspicions",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    let exec = def
+        .execute
+        .as_ref()
+        .expect("Dark Suspicions must have execute");
+    match exec.effect.as_ref() {
+        Effect::LoseLife { amount, .. } => {
+            let QuantityExpr::Sum { exprs } = amount else {
+                panic!("expected Sum amount, got {amount:?}");
+            };
+            assert_eq!(
+                exprs.len(),
+                2,
+                "sum of scoped-player hand and negated controller hand, got {exprs:?}"
+            );
+            assert_eq!(
+                exprs[0],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                "\"that player's hand\" must bind to the scoped player"
+            );
+            assert_eq!(
+                exprs[1],
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    }),
+                },
+                "\"your hand\" must remain Controller (CR 109.5) — the rewrite must not move it"
+            );
+        }
+        other => panic!("expected Effect::LoseLife, got {other:?}"),
+    }
+}
+
+/// Issue #6508 SHAPE (REQUIRED — only exerciser of the `PlayerScope::Target →
+/// ScopedPlayer` life-total arm) — Havoc Festival: "At the beginning of each
+/// player's upkeep, that player loses half their life, rounded up." The
+/// life-total possessive ("their life") must bind to the scoped player
+/// (CR 603.2b + CR 102.1). Reach-guard: the loss is a parsed `DivideRounded`
+/// (not `Unimplemented`).
+#[test]
+fn havoc_festival_life_total_binds_scoped_player() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's upkeep, that player loses half their life, rounded up.",
+        "Havoc Festival",
+    );
+    assert_eq!(def.mode, TriggerMode::Phase);
+    assert_eq!(def.phase, Some(Phase::Upkeep));
+    let exec = def
+        .execute
+        .as_ref()
+        .expect("Havoc Festival must have execute");
+    match exec.effect.as_ref() {
+        Effect::LoseLife { amount, .. } => {
+            let QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } = amount
+            else {
+                panic!(
+                    "reach-guard failed: expected parsed DivideRounded life loss, got {amount:?}"
+                );
+            };
+            assert_eq!(*divisor, 2);
+            assert_eq!(*rounding, crate::types::ability::RoundingMode::Up);
+            assert_eq!(
+                **inner,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                "\"their life\" must bind to the scoped player (PlayerScope::Target → ScopedPlayer)"
+            );
+        }
+        other => panic!("expected Effect::LoseLife, got {other:?}"),
+    }
+}
+
+/// Issue #6508 negative (with reach-guard) — "you control" inside a where-X of
+/// an each-player phase trigger must STAY bound to the controller (You),
+/// unaffected by the scoped-player anaphor fix (CR 109.5). Reach-guard: the
+/// recipient is still `ScopedPlayer` and the amount is a real parsed
+/// `ObjectCount` (not `Unimplemented`), proving the where-X actually parsed and
+/// the assertion is not vacuously true.
+#[test]
+fn each_player_end_step_where_x_you_control_stays_you() {
+    let def = parse_trigger_line(
+        "At the beginning of each player's end step, this enchantment deals X damage to that player, where X is the number of creatures you control.",
+        "Test Card",
+    );
+    let exec = def.execute.as_ref().expect("must have execute");
+    match exec.effect.as_ref() {
+        Effect::DealDamage { amount, target, .. } => {
+            assert_eq!(
+                *target,
+                TargetFilter::ScopedPlayer,
+                "reach-guard: the recipient is still the scoped player"
+            );
+            let QuantityExpr::Ref {
+                qty:
+                    QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(tf),
+                    },
+            } = amount
+            else {
+                panic!("reach-guard failed: expected a parsed ObjectCount, got {amount:?}");
+            };
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "count must be creatures, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you control\" must remain You (CR 109.5)"
+            );
+        }
+        other => panic!("expected Effect::DealDamage, got {other:?}"),
+    }
+}
+
 #[test]
 fn trigger_each_of_your_main_phases_uses_main_phase_constraint() {
     let def = parse_trigger_line(

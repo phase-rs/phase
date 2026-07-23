@@ -1636,6 +1636,20 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
             crate::parser::oracle_effect::rewrite_player_quantity_refs_to_source_chosen(ability);
         }
     }
+    // CR 603.2b + CR 102.1: each-player/each-opponent PHASE triggers bind
+    // "their hand"/"their life" possessives to the phase's active player, which
+    // the runtime stamps onto `scoped_player` (build_triggered_ability,
+    // game/triggers.rs). Reuses the identical rewrite the TargetPlayer event
+    // triggers use; `PlayerScope::Controller` ("your hand") is deliberately NOT
+    // rewritten by that pass, so mixed-anaphor cards (Dark Suspicions) keep the
+    // controller side intact. Mutually exclusive with the SourceChosenPlayer
+    // branch above: `relative_player_scope_for_condition` checks the chosen-player
+    // phase before the scoped-phase player, so The Rack never enters here.
+    if modifiers.relative_player_scope == Some(ControllerRef::ScopedPlayer) {
+        if let Some(ability) = execute.as_deref_mut() {
+            crate::parser::oracle_effect::rewrite_event_player_quantity_refs_to_scoped(ability);
+        }
+    }
     if let Some(ability) = execute.as_deref_mut() {
         rewrite_each_other_player_scope_for_any_caster_spell_triggers(
             &def,

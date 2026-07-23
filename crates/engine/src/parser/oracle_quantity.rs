@@ -3334,7 +3334,10 @@ fn parse_for_each_clause_with_they_controller(
     None
 }
 
-fn for_each_anaphor_context(ctx: &ParseContext, they_controller: &ControllerRef) -> ParseContext {
+pub(crate) fn for_each_anaphor_context(
+    ctx: &ParseContext,
+    they_controller: &ControllerRef,
+) -> ParseContext {
     ParseContext {
         relative_player_scope: Some(they_controller.clone()),
         subject: ctx.subject.clone(),

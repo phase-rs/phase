@@ -8142,7 +8142,24 @@ pub(crate) fn parse_where_x_quantity_expression(where_x_expression: &str) -> Opt
     // CDA-quantity classification takes precedence: it is the more specific
     // where-X interpreter (object counts, "that spell's mana value",
     // "the number of age counters on this enchantment", etc.).
-    if let Some(expr) = parse_cda_quantity(where_x_expression) {
+    //
+    // CR 109.5 + CR 608.2c + CR 603.2b/CR 102.1: third-person player anaphors
+    // inside a where-X definition ("they control", "that player controls") bind
+    // to the contextually-scoped player, exactly as the sibling for-each
+    // interpreter does (parse_for_each_clause_with_context). `ScopedPlayer`
+    // degrades to the source's controller when no scope is stamped at runtime
+    // (scoped_player_or_controller / resolve_player_for_context_ref), so
+    // caster-relative reads are unchanged for spells, while each-player phase
+    // triggers (Citadel of Pain) read the phase player CR-correctly. "you
+    // control" is ctx-independent and unaffected.
+    let mut anaphor_ctx = crate::parser::oracle_quantity::for_each_anaphor_context(
+        &ParseContext::default(),
+        &ControllerRef::ScopedPlayer,
+    );
+    if let Some(expr) = crate::parser::oracle_quantity::parse_cda_quantity_with_context(
+        where_x_expression,
+        &mut anaphor_ctx,
+    ) {
         return Some(expr);
     }
     // CR 107.3i + CR 115.1: Some where-X definitions spell the count as
@@ -11222,6 +11239,41 @@ mod where_x_tests {
                 .contains(&TypeFilter::Subtype("Island".to_string())),
             "expected Island subtype in object-count filter, got {:?}",
             typed.type_filters
+        );
+    }
+
+    /// Issue #6508: a where-X filter-controller anaphor ("they control") inside a
+    /// trigger body must bind to the scoped player, mirroring the sibling
+    /// for-each interpreter (CR 608.2c). `parse_where_x_quantity_expression` now
+    /// carries the `ScopedPlayer` anaphor context into the CDA-quantity delegate,
+    /// so Citadel of Pain's "the number of untapped lands they control" counts
+    /// the phase player's untapped lands.
+    #[test]
+    fn where_x_they_control_binds_scoped_player() {
+        let parsed = parse_where_x_quantity_expression("the number of untapped lands they control");
+        let Some(QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        }) = parsed
+        else {
+            panic!("expected an object count, got {parsed:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed object-count filter, got {filter:?}");
+        };
+        assert_eq!(
+            typed.controller,
+            Some(ControllerRef::ScopedPlayer),
+            "\"they control\" must bind to the scoped player"
+        );
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Land),
+            "expected Land in the object-count filter, got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            typed.properties.contains(&FilterProp::Untapped),
+            "expected the Untapped qualifier, got {:?}",
+            typed.properties
         );
     }
 
