@@ -171,9 +171,9 @@ fn mutable_pupa_accumulates_every_matching_keyword() {
 // (`ReplicateKind::CounterPlacement` via `attach_repeat_process_keywords`),
 // fixed by the same `SiblingCondition::ReplicatedOrBranch` marker + the shared
 // `resolve_chain_body` disjunct. CR 608.2c. Oracle text verbatim from
-// data/card-data.json. Kathril's counter target parses to `TargetFilter::Any`
-// (a known TargetFallback), which resolves to the source without a target
-// prompt, so the ETB drives through the cast pipeline unaided.
+// data/card-data.json. Kathril's counter recipient parses to `TargetFilter::Any`
+// (a known TargetFallback), so the ETB opens a trigger target-selection prompt;
+// the cast driver carries the declared Kathril choice forward to that prompt.
 // -----------------------------------------------------------------------
 
 const KATHRIL: &str = "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.";
@@ -199,7 +199,7 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
     scenario.with_mana_pool(P0, white_pool(6));
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(kathril).resolve();
+    let outcome = runner.cast(kathril).target_object(kathril).resolve();
     outcome.assert_zone(&[kathril], Zone::Battlefield);
 
     let kathril_obj = &outcome.state().objects[&kathril];
