@@ -257,7 +257,13 @@
     "youPlayFirst": "Zaczynasz",
     "playerPlaysFirst": "{{name}} zaczyna",
     "heads": "Orzeł",
-    "tails": "Reszka"
+    "tails": "Reszka",
+    "coinFlip": "Rzut monetą",
+    "wonCoinFlip": "{{name}} wygrywa rzut monetą",
+    "lostCoinFlip": "{{name}} przegrywa rzut monetą",
+    "turnOrder": "Kolejność tur",
+    "turnOrderItem": "Tura {{turn}}: {{name}}",
+    "youTakeTurn": "Rozgrywasz turę {{turn}}"
   },
   "chrome": {
     "back": "Wstecz",

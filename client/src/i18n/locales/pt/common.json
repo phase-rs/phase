@@ -257,7 +257,13 @@
     "youPlayFirst": "Você joga primeiro",
     "playerPlaysFirst": "{{name}} joga primeiro",
     "heads": "Cara",
-    "tails": "Coroa"
+    "tails": "Coroa",
+    "coinFlip": "Cara ou coroa",
+    "wonCoinFlip": "{{name}} venceu o lançamento",
+    "lostCoinFlip": "{{name}} perdeu o lançamento",
+    "turnOrder": "Ordem dos turnos",
+    "turnOrderItem": "Turno {{turn}}: {{name}}",
+    "youTakeTurn": "Você joga no turno {{turn}}"
   },
   "chrome": {
     "back": "Voltar",
