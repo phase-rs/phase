@@ -189,3 +189,88 @@ fn peerless_recycling_three_player_chooses_gift_recipient_not_next_player() {
     );
     let _ = runner;
 }
+
+const GIFT_DRAW_SPELL: &str =
+    "Gift a card (You may promise an opponent a gift as you cast this spell. \
+If you do, they draw a card before its other effects.)\n\
+Draw a card.";
+
+/// Non-Peerless Gift delivery: 3p cast that chooses the non–seat-next opponent.
+/// Reverting `gift_delivery` to `next_player` fails this even if Peerless
+/// targeting still works.
+#[test]
+fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    with_green_mana(&mut scenario, P0, 2);
+    let p1_draw = scenario.add_card_to_library_top(P1, "P1 Draw");
+    let p2_draw = scenario.add_card_to_library_top(PlayerId(2), "P2 Draw");
+    let caster_draw = scenario.add_card_to_library_top(P0, "Caster Draw");
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gift Draw Test", true, GIFT_DRAW_SPELL)
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Gift Draw Test");
+
+    let mut chose_non_first = false;
+    for _ in 0..200 {
+        match &runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("complete mana payment");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("promise Gift");
+            }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                assert!(
+                    candidates.contains(&PlayerId(2)),
+                    "P2 must be a legal Gift recipient"
+                );
+                // Deliberately not seat-order next (P1) — revert of next_player fails here.
+                runner
+                    .act(GameAction::ChooseGiftRecipient {
+                        opponent: PlayerId(2),
+                    })
+                    .expect("choose Gift recipient P2");
+                chose_non_first = true;
+            }
+            WaitingFor::OrderTriggers { .. } | WaitingFor::Priority { .. }
+                if !runner.state().stack.is_empty() =>
+            {
+                runner.act(GameAction::PassPriority).expect("advance spell");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            other => panic!("unexpected prompt while casting Gift Draw Test: {other:?}"),
+        }
+    }
+
+    assert!(
+        chose_non_first,
+        "3p Gift promise must raise ChooseGiftRecipient"
+    );
+    assert!(
+        runner.state().players[2].hand.contains(&p2_draw),
+        "chosen Gift recipient must draw"
+    );
+    assert!(
+        runner.state().players[1].library.contains(&p1_draw),
+        "seat-next opponent must not receive the gift"
+    );
+    assert!(
+        runner.state().players[0].hand.contains(&caster_draw),
+        "caster still draws from the spell body"
+    );
+}
