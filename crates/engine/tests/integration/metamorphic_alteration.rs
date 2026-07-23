@@ -14,7 +14,7 @@
 //! and ends when the Aura leaves the battlefield (CR 400.7 / CR 611.2a).
 
 use engine::game::game_object::{AttachTarget, DisplaySource};
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     ChoosePermanentPersist, ChosenAttribute, ContinuousModification, Effect, FilterProp,
@@ -50,6 +50,19 @@ fn stage_metamorphic(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
+/// CR 608.3c: pin Enchant to a single host so spell-path attach cannot become
+/// an ambiguous multi-host consult when stack enchant targets are absent.
+/// Opponent donors remain legal *copy* choices (ChoosePermanent pool ≠ Enchant).
+fn pin_enchant_host(runner: &mut GameRunner, aura: ObjectId, host: ObjectId) {
+    let obj = runner.state_mut().objects.get_mut(&aura).unwrap();
+    obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
+    obj.base_keywords
+        .retain(|k| !matches!(k, Keyword::Enchant(_)));
+    let pinned = Keyword::Enchant(TargetFilter::SpecificObject { id: host });
+    obj.keywords.push(pinned.clone());
+    obj.base_keywords.push(pinned);
+}
+
 fn blue_pool(scenario: &mut GameScenario) {
     scenario.with_mana_pool(
         P0,
@@ -80,6 +93,7 @@ fn enchanted_creature_becomes_copy_of_chosen_and_aura_is_unchanged() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura, host);
 
     runner
         .cast(aura)
@@ -142,6 +156,7 @@ fn copied_values_are_a_frozen_snapshot_of_the_chosen_creature() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -185,6 +200,7 @@ fn host_reverts_when_the_aura_leaves_play() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -235,6 +251,7 @@ fn hexproof_opponent_creature_is_a_legal_copy_donor() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -286,6 +303,7 @@ fn host_is_the_only_creature_and_remains_a_legal_copy_choice() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura, host);
     runner
         .cast(aura)
         .target_object(host)
@@ -375,6 +393,8 @@ fn two_auras_install_independent_copies_on_their_own_hosts() {
     );
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura_a, host_a);
+    pin_enchant_host(&mut runner, aura_b, host_b);
     runner
         .cast(aura_a)
         .target_object(host_a)
@@ -423,6 +443,7 @@ fn host_copying_a_token_donor_routes_token_display() {
     blue_pool(&mut scenario);
 
     let mut runner = scenario.build();
+    pin_enchant_host(&mut runner, aura, host);
     // Make the donor a TRUE token so its display routes to the token art db
     // (CR 111.1): `is_token` with no `base_printed_ref` derives
     // `DisplaySource::Token` in the layer engine; its `token_image_ref` is its

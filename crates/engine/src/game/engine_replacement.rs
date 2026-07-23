@@ -1403,6 +1403,8 @@ fn handle_persist_chosen_attribute_choice(
 
     // CR 303.4f: Non-spell path may still be unattached if entry skipped the
     // auto-attach consult (e.g. liminal copy → Aura). Resolve it now.
+    // CR 608.3c recovery: the same consult covers spell-path Auras whose stack
+    // ability lost enchant targets before the CallerEpilogue attach site ran.
     if state
         .objects
         .get(&source_id)

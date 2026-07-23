@@ -440,10 +440,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // Capture targets for Aura attachment after resolution
+    // Capture targets for Aura attachment after resolution. Prefer the full
+    // chain flatten so Enchant targets assigned onto an Aura placeholder are
+    // not missed when only a nested sink holds them.
     let spell_targets = ability
         .as_ref()
-        .map(|a| a.targets.clone())
+        .map(|a| {
+            let flat = flatten_targets_in_chain(a);
+            if flat.is_empty() {
+                a.targets.clone()
+            } else {
+                flat
+            }
+        })
         .unwrap_or_default();
 
     // CR 702.103e: As a bestowed Aura spell begins resolving, if its target is
@@ -1473,6 +1482,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
+                let mut attached = false;
                 match spell_targets.first() {
                     // CR 608.3c + CR 608.2b: Object Aura — verify the target is
                     // still a legal host per the Aura's own zone-scoped enchant
@@ -1489,6 +1499,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ) =>
                     {
                         effects::attach::attach_to(state, entry.id, *target_id);
+                        attached = true;
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
@@ -1500,12 +1511,22 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
                         effects::attach::attach_to_player(state, entry.id, *player_id);
+                        attached = true;
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
                     }
+                }
+                // CR 608.3c recovery: when the stack ability lost its enchant
+                // targets (placeholder Unimplemented stripped with empty
+                // targets), fall back to the Enchant-filter attach authority
+                // used for non-spell Aura entry (CR 303.4f). A unique legal
+                // host auto-attaches; multiple hosts raise NeedsChoice (rare
+                // for a correctly targeted Aura spell).
+                if !attached {
+                    let _ = zone_pipeline::resolve_entering_aura_attachment(state, entry.id);
                 }
             }
 
