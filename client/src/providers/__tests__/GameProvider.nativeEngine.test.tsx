@@ -11,6 +11,7 @@ const {
   WasmAdapter,
   clearActiveGame,
   ensureNativeEngine,
+  fetchAvatarArtUrl,
   gameStoreState,
   getSharedAdapter,
   nativeAdapterInitialize,
@@ -30,6 +31,7 @@ const {
   }
 
   const nativeAdapterInitialize = vi.fn<() => Promise<void>>();
+  const fetchAvatarArtUrl = vi.fn<() => Promise<string | null>>();
   const preferences = {
     aiArchetypeFilter: "Any",
     aiCoverageFloor: 0,
@@ -124,6 +126,7 @@ const {
     WasmAdapter,
     clearActiveGame: vi.fn(),
     ensureNativeEngine: vi.fn(),
+    fetchAvatarArtUrl,
     gameStoreState,
     getSharedAdapter,
     nativeAdapterInitialize,
@@ -249,7 +252,7 @@ vi.mock("../../services/playerAvatars", () => ({
     { name: "Liliana", cardName: "Liliana of the Veil" },
   ]),
   avatarCardNameForName: vi.fn(),
-  fetchAvatarArtUrl: vi.fn(async () => null),
+  fetchAvatarArtUrl,
 }));
 
 vi.mock("../../services/multiplayerSession", () => ({
@@ -278,6 +281,7 @@ describe("GameProvider native AI routing", () => {
     vi.clearAllMocks();
     clearActiveGame.mockReset();
     ensureNativeEngine.mockReset();
+    fetchAvatarArtUrl.mockReset();
     nativeAdapterInitialize.mockReset();
     saveActiveGame.mockReset();
     nativeAdapters.splice(0);
@@ -290,6 +294,7 @@ describe("GameProvider native AI routing", () => {
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
     ensureNativeEngine.mockResolvedValue({ port: 9375 });
+    fetchAvatarArtUrl.mockResolvedValue(null);
     nativeAdapterInitialize.mockResolvedValue(undefined);
   });
 
@@ -343,6 +348,30 @@ describe("GameProvider native AI routing", () => {
     view.unmount();
     expect(nativeAdapters).toHaveLength(1);
     expect(nativeAdapters[0].dispose).toHaveBeenCalledWith({ concede: true });
+  });
+
+  it("uses each commander's name for native AI opponents", async () => {
+    gameStoreState.gameState = {
+      command_zone: [1, 2],
+      objects: {
+        1: { name: "Aesi, Tyrant of Gyre Strait", owner: 0, is_commander: true },
+        2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+      },
+    } as never;
+
+    render(
+      <GameProvider gameId="native-commander-names" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerNames: new Map([[0, "Aesi"], [1, "Muldrotha"]]),
+        }),
+      );
+    });
   });
 
   it("preserves every exact server AI difficulty label from buildLocalAiDeckList", async () => {
