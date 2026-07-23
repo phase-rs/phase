@@ -28952,34 +28952,6 @@ pub(crate) fn parse_effect_chain_ir(
                 None
             }
         });
-        // CR 109.4 + CR 608.2c: "for each opponent, <effect> ... that player
-        // ..." binds the per-iteration anaphor to the opponent being
-        // processed by this repetition. Previously only
-        // `parse_for_each_opponent_target_fanout_clause`'s own scoped clone
-        // carried this scope, so it was lost whenever that fanout declined
-        // (e.g. any effect whose surrounding shape has no `MultiTargetSpec`
-        // slot to fold `repeat_for` into, such as a triggered ability's
-        // execute body — Riptide Gearhulk's "for each opponent, put up to
-        // one target nonland permanent that player controls into its
-        // owner's library third from the top." kept `repeat_for` and fell
-        // back to resolving "that player controls" as `You`, #5994).
-        // Setting it here, for the whole re-parse below, keeps the anaphor
-        // bound to the iterated opponent regardless of which arm below ends
-        // up producing the clause.
-        let is_for_each_opponent_repeat = matches!(
-            repeat_for,
-            Some(QuantityExpr::Ref {
-                qty: QuantityRef::PlayerCount {
-                    filter: PlayerFilter::Opponent
-                }
-            })
-        );
-        let prior_relative_player_scope = is_for_each_opponent_repeat
-            .then(|| {
-                ctx.relative_player_scope
-                    .replace(ControllerRef::TargetPlayer)
-            })
-            .flatten();
         let (clause, repeat_for) = if let Some(draw) = difference_draw {
             (draw, repeat_for)
         } else if let Some(lose) = difference_lose {
@@ -29042,9 +29014,6 @@ pub(crate) fn parse_effect_chain_ir(
                 (parse_effect_clause(&text_no_qty, ctx), repeat_for)
             }
         };
-        if is_for_each_opponent_repeat {
-            ctx.relative_player_scope = prior_relative_player_scope;
-        }
 
         // CR 608.2c + CR 109.4: After a `Choose(Player)` clause is finalized,
         // advance the chain's chosen-player counter exactly once. The index is
