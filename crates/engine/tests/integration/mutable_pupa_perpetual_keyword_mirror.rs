@@ -170,13 +170,15 @@ fn mutable_pupa_accumulates_every_matching_keyword() {
 // Kathril, Aspect Warper — the SAME list-collapse bug in the counters class
 // (`ReplicateKind::CounterPlacement` via `attach_repeat_process_keywords`),
 // fixed by the same `SiblingCondition::ReplicatedOrBranch` marker + the shared
-// `resolve_chain_body` disjunct. CR 608.2c. Oracle text verbatim from
-// data/card-data.json. Kathril's counter recipient parses to `TargetFilter::Any`
-// (a known TargetFallback), so the ETB opens a trigger target-selection prompt;
-// the cast driver carries the declared Kathril choice forward to that prompt.
+// `resolve_chain_body` disjunct. CR 608.2c. Every counter recipient is "Kathril"
+// (self-ref, `TargetFilter::SelfRef` — the same self-targeting phrasing the
+// unconditional tail clause already uses), so this test exercises ONLY the
+// per-item independent-gate mechanism under test — the counter recipient's own
+// targeting resolution (a separate, pre-existing concern, unrelated to this
+// fix) is deliberately kept out of scope.
 // -----------------------------------------------------------------------
 
-const KATHRIL: &str = "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.";
+const KATHRIL: &str = "When Kathril enters, put a flying counter on Kathril if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.";
 
 // Only trample is in the graveyard — flying (K0) and every gate before trample
 // are FALSE. The trample counter must still be placed (the chain reaches node 9
@@ -210,7 +212,7 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
     );
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(kathril).target_object(kathril).resolve();
+    let outcome = runner.cast(kathril).resolve();
     outcome.assert_zone(&[kathril], Zone::Battlefield);
 
     let kathril_obj = &outcome.state().objects[&kathril];
