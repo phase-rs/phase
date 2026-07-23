@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import {
+  getNativeEngineProgress,
   type NativeEngineProgress,
   subscribeNativeEngineProgress,
 } from "../../services/nativeEngine";
@@ -40,15 +41,20 @@ export function NativeEngineProgressOverlay() {
   useEffect(() => {
     let active = true;
     let unlisten: (() => void) | undefined;
+    let receivedLiveProgress = false;
 
     void subscribeNativeEngineProgress((next) => {
+      receivedLiveProgress = true;
       if (active) setProgress(next);
     }).then((registeredUnlisten) => {
-      if (active) {
-        unlisten = registeredUnlisten;
-      } else {
+      if (!active) {
         registeredUnlisten();
+        return;
       }
+      unlisten = registeredUnlisten;
+      return getNativeEngineProgress().then((latest) => {
+        if (active && !receivedLiveProgress && latest) setProgress(latest);
+      });
     }).catch(() => {
       // The browser build has no Tauri event bridge to subscribe to.
     });
@@ -73,7 +79,7 @@ export function NativeEngineProgressOverlay() {
     <AnimatePresence>
       {progress && (
         <motion.div
-          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+          className="pointer-events-none fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

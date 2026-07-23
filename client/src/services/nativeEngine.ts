@@ -53,6 +53,14 @@ export async function ensureNativeEngine(key: NativeEngineKey): Promise<NativeEn
   return invoke<NativeEngineReady>("ensure_native_engine", { key });
 }
 
+/** Returns progress emitted before this webview registered its listener. */
+export async function getNativeEngineProgress(): Promise<NativeEngineProgress | null> {
+  if (!isTauri()) return null;
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<NativeEngineProgress | null>("native_engine_progress");
+}
+
 /** Subscribes to the shell's native-engine provisioning progress. */
 export async function subscribeNativeEngineProgress(
   listener: (progress: NativeEngineProgress) => void,

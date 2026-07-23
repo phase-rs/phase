@@ -15,11 +15,13 @@ const mocks = vi.hoisted(() => {
       listener = next;
       return unlisten;
     }),
+    getNativeEngineProgress: vi.fn(async (): Promise<NativeEngineProgress | null> => null),
     unlisten,
   };
 });
 
 vi.mock("../../../services/nativeEngine", () => ({
+  getNativeEngineProgress: mocks.getNativeEngineProgress,
   subscribeNativeEngineProgress: mocks.subscribeNativeEngineProgress,
 }));
 
@@ -61,5 +63,25 @@ describe("NativeEngineProgressOverlay", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("Native engine ready");
     expect(status).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("replays progress emitted before the overlay mounted", async () => {
+    mocks.getNativeEngineProgress.mockResolvedValueOnce({ phase: "resolving" });
+
+    render(<NativeEngineProgressOverlay />);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Finding the correct local server…");
+  });
+
+  it("keeps live progress when the replay snapshot is stale", async () => {
+    mocks.subscribeNativeEngineProgress.mockImplementationOnce(async (next) => {
+      next({ phase: "downloading_data" });
+      return mocks.unlisten;
+    });
+    mocks.getNativeEngineProgress.mockResolvedValueOnce({ phase: "resolving" });
+
+    render(<NativeEngineProgressOverlay />);
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Downloading game data…");
   });
 });

@@ -416,6 +416,7 @@ impl Default for NativeEngineState {
 }
 
 static ENGINE_STATE: OnceLock<Mutex<NativeEngineState>> = OnceLock::new();
+static LATEST_PROGRESS: OnceLock<Mutex<Option<NativeEngineProgress>>> = OnceLock::new();
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) enum NativeBridgeRegistryError {
@@ -425,6 +426,10 @@ pub(crate) enum NativeBridgeRegistryError {
 
 fn engine_state() -> &'static Mutex<NativeEngineState> {
     ENGINE_STATE.get_or_init(|| Mutex::new(NativeEngineState::default()))
+}
+
+fn latest_progress() -> &'static Mutex<Option<NativeEngineProgress>> {
+    LATEST_PROGRESS.get_or_init(|| Mutex::new(None))
 }
 
 pub(crate) fn register_native_engine_bridge(
@@ -502,6 +507,12 @@ pub async fn ensure_native_engine(
         emit_progress(&progress_app, NativeEngineProgressPhase::Failed, None);
     }
     result
+}
+
+/// Returns the latest provisioning progress for listeners that register late.
+#[tauri::command]
+pub fn native_engine_progress() -> Option<NativeEngineProgress> {
+    latest_progress().lock().ok()?.clone()
 }
 
 /// Stops the held or adopted native server and removes its persisted record.
@@ -1357,7 +1368,11 @@ fn binary_file_name() -> String {
 }
 
 fn emit_progress(app: &AppHandle, phase: NativeEngineProgressPhase, detail: Option<String>) {
-    let _ = app.emit(PROGRESS_EVENT, NativeEngineProgress { phase, detail });
+    let progress = NativeEngineProgress { phase, detail };
+    if let Ok(mut latest) = latest_progress().lock() {
+        *latest = Some(progress.clone());
+    }
+    let _ = app.emit(PROGRESS_EVENT, progress);
 }
 
 #[cfg(test)]
