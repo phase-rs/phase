@@ -170,15 +170,36 @@ fn mutable_pupa_accumulates_every_matching_keyword() {
 // Kathril, Aspect Warper — the SAME list-collapse bug in the counters class
 // (`ReplicateKind::CounterPlacement` via `attach_repeat_process_keywords`),
 // fixed by the same `SiblingCondition::ReplicatedOrBranch` marker + the shared
-// `resolve_chain_body` disjunct. CR 608.2c. Every counter recipient is "Kathril"
-// (self-ref, `TargetFilter::SelfRef` — the same self-targeting phrasing the
-// unconditional tail clause already uses), so this test exercises ONLY the
-// per-item independent-gate mechanism under test — the counter recipient's own
-// targeting resolution (a separate, pre-existing concern, unrelated to this
-// fix) is deliberately kept out of scope.
+// `resolve_chain_body` disjunct. CR 608.2c. Oracle text verbatim from
+// data/card-data.json. The counter recipient, "any creature you control", now
+// parses to a real `TargetFilter::Typed{Creature, controller: You}` (see the
+// `parse_type_phrase_with_ctx` "any " quantifier fix) instead of falling back
+// to the degenerate `TargetFilter::Any`, so the ETB opens a real trigger
+// target-selection prompt; the cast driver carries the declared Kathril choice
+// forward to that prompt and chain propagation carries it through every
+// subsequent independently-gated sibling.
+//
+// KNOWN LIMITATION (not fixed by this PR, tracked separately from #6321): the
+// recipient is still chosen ONCE, at trigger-stack time, and that single
+// choice is reused for every replicated keyword node via chain-target
+// propagation (`resolve_chain_body`'s `sub_resolved.targets = ability.targets
+// .clone()`). Per CR 608.2d, an untargeted "any creature you control" choice
+// with no literal "target" wording should be re-offered independently at EACH
+// instruction's own resolution — so on a board with more than one legal
+// creature, a real Kathril should let the controller spread flying/trample/
+// vigilance/etc. across different creatures, not force them all onto whichever
+// one was picked first. `target_choice_timing_for_clause`'s `PutCounter` guard
+// (`oracle_effect/lower.rs`) only flips to per-instance `Resolution` timing for
+// source-attached-host filters (Equipped/Enchanted), not general "creature you
+// control" targets — extending that classification has broader blast radius
+// across every other card using this target shape and is out of scope for the
+// list-collapse fix this test exists to prove. This scenario deliberately
+// gives P0 only ONE creature (Kathril itself), so the single-shared-choice
+// gap is not observable here — the assertions below are correct FOR THIS
+// BOARD but do not exercise or claim the multi-creature CR 608.2d case.
 // -----------------------------------------------------------------------
 
-const KATHRIL: &str = "When Kathril enters, put a flying counter on Kathril if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.";
+const KATHRIL: &str = "When Kathril enters, put a flying counter on any creature you control if a creature card in your graveyard has flying. Repeat this process for first strike, double strike, deathtouch, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance. Then put a +1/+1 counter on Kathril for each counter put on a creature this way.";
 
 // Only trample is in the graveyard — flying (K0) and every gate before trample
 // are FALSE. The trample counter must still be placed (the chain reaches node 9
@@ -212,7 +233,7 @@ fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
     );
     let mut runner = scenario.build();
 
-    let outcome = runner.cast(kathril).resolve();
+    let outcome = runner.cast(kathril).target_object(kathril).resolve();
     outcome.assert_zone(&[kathril], Zone::Battlefield);
 
     let kathril_obj = &outcome.state().objects[&kathril];
