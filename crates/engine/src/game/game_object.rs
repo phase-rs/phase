@@ -678,6 +678,11 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 702.174a: Opponent chosen when this object's Gift cost was paid.
+    /// Mirrors `SpellContext.gift_recipient`; stamped at cast finalize
+    /// (kickers_paid pattern). Prep for permanent Gift ETB consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gift_recipient: Option<PlayerId>,
     /// CR 601.2b/f/h + CR 702.157a: Count of non-kicker repeatable
     /// additional costs paid while casting the spell that produced this
     /// permanent. Kept separate from `kickers_paid` so Squad does not inherit

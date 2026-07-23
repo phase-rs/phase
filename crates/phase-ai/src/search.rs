@@ -1215,6 +1215,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
 
+        // CR 702.174a: Gift recipient — fall back to the first candidate.
+        WaitingFor::ChooseGiftRecipient { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseGiftRecipient { opponent }),
+
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
             kind: CastOfferKind::Adventure { .. },

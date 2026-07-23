@@ -1680,6 +1680,7 @@ impl GameRunner {
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
             WaitingFor::CostTypeChoice { .. } => "CostTypeChoice",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
@@ -2318,6 +2319,18 @@ impl<'a> SpellCast<'a> {
                     let pay = matches!(optional, OptionalPolicy::Accept);
                     act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
                 }
+                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
+                // Sole-opponent games auto-latch and never raise this prompt.
+                WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                    let opponent = candidates.first().copied().unwrap_or_else(|| {
+                        panic!("ChooseGiftRecipient raised with empty candidates")
+                    });
+                    act_collect(
+                        runner,
+                        GameAction::ChooseGiftRecipient { opponent },
+                        &mut events,
+                    )?;
+                }
                 // CR 601.2f / CR 118.3: additional non-mana costs that require
                 // selecting objects, such as sacrificing a creature.
                 WaitingFor::PayCost {
@@ -2657,6 +2670,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
         WaitingFor::SearchChoice { .. } => "SearchChoice",
         WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+        WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
         WaitingFor::CastOffer { .. } => "CastOffer",
         WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
         WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
@@ -3277,6 +3291,17 @@ fn drive_resolution(
             WaitingFor::OptionalCostChoice { .. } => {
                 let pay = matches!(policy.optional, OptionalPolicy::Accept);
                 act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+            }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let opponent = candidates
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("ChooseGiftRecipient raised with empty candidates"));
+                act_collect(
+                    runner,
+                    GameAction::ChooseGiftRecipient { opponent },
+                    &mut events,
+                )?;
             }
             WaitingFor::ReplacementChoice { .. } => {
                 let Some(index) = policy.replacement_choice else {

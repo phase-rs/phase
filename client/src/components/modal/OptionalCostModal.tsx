@@ -23,8 +23,13 @@ export function OptionalCostModalContent({
   waitingFor,
   dispatch,
 }: OptionalCostModalProps) {
-  const { cost, times_kicked } = waitingFor.data;
-  const { title, options } = additionalCostChoices(cost, times_kicked);
+  const { cost, times_kicked, origin, gift_kind } = waitingFor.data;
+  const { title, options } = additionalCostChoices(
+    cost,
+    times_kicked,
+    origin,
+    gift_kind,
+  );
   // Mandatory Choice costs (e.g. "discard a card or pay 3 life") require
   // picking one — no abort allowed. All other costs allow aborting the cast.
   const isMandatoryChoice = cost.type === "Choice";

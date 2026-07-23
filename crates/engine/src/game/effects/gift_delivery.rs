@@ -1,4 +1,4 @@
-use crate::game::{players, zones};
+use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -9,9 +9,9 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-/// CR 702.174: Deliver a gift to the opponent of the ability's controller.
+/// CR 702.174: Deliver a gift to the opponent chosen when the gift cost was paid.
 /// Gift delivery is a no-op when the gift wasn't promised (`additional_cost_paid == false`).
-/// When promised, the opponent receives the gift before the spell's other effects resolve.
+/// When promised, the chosen opponent receives the gift before the spell's other effects resolve.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -33,8 +33,14 @@ pub fn resolve(
         return Ok(());
     }
 
-    // In 2-player, the opponent is the next player after the controller.
-    let opponent = players::next_player(state, ability.controller);
+    // CR 702.174a/e: Deliver to the opponent chosen when the gift cost was paid.
+    // Prefer the cast-time SpellContext latch, then the finalize stamp on the
+    // source object. Never fall back to turn-order `next_player`.
+    let Some(opponent) = resolve_gift_recipient(state, ability) else {
+        // CR 800.4b / CR 609.3: Latched recipient left the game, or the cast
+        // path failed to stamp a recipient — do as much as possible (nothing).
+        return Ok(());
+    };
 
     // CR 702.174b: On a permanent, the gift ability triggers when the permanent enters.
     // CR 702.174j: For instants/sorceries, the gift effect always happens first.
@@ -88,6 +94,22 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 702.174a: Resolve the latched gift recipient.
+fn resolve_gift_recipient(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
+    let candidate = ability.context.gift_recipient.or_else(|| {
+        state
+            .objects
+            .get(&ability.source_id)
+            .and_then(|obj| obj.gift_recipient)
+    })?;
+    // CR 800.4: Only deliver if the chosen player is still in the game.
+    state
+        .players
+        .iter()
+        .any(|p| p.id == candidate && !p.is_eliminated)
+        .then_some(candidate)
 }
 
 /// Deliver "gift a card" — opponent draws one card.
@@ -177,6 +199,10 @@ mod tests {
             PlayerId(0),
         );
         ability.context.additional_cost_paid = promised;
+        if promised {
+            // CR 702.174a: Latched recipient (2p sole opponent = P1).
+            ability.context.gift_recipient = Some(PlayerId(1));
+        }
         ability
     }
 

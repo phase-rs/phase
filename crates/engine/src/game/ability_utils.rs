@@ -432,17 +432,25 @@ pub fn additional_cost_instead_spell_has_legal_targets(
     if !has_kicker_cost && !has_queue_cost {
         return false;
     }
-    let Some(sub) = ability_def.sub_ability.as_deref() else {
-        return false;
-    };
-    if !matches!(
-        sub.condition,
-        Some(AbilityCondition::AdditionalCostPaidInstead)
-    ) {
+    // Walk past GiftDelivery wrappers to find AdditionalCostPaidInstead.
+    let mut instead_node = ability_def.sub_ability.as_deref();
+    let mut found_instead = false;
+    while let Some(sub) = instead_node {
+        if matches!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) {
+            found_instead = true;
+            break;
+        }
+        instead_node = sub.sub_ability.as_deref();
+    }
+    if !found_instead {
         return false;
     }
     let mut resolved = build_resolved_from_def(ability_def, object_id, player);
     resolved.context.additional_cost_paid = true;
+    resolved.set_context_recursive(resolved.context.clone());
     // CR 601.2c: a queue-synthesized "instead" cost only broadens castability when the
     // override re-selects a REAL (non-context-ref) target — mirror the cast-time gate
     // (requires_additional_cost_declaration_before_targets). A context-ref override

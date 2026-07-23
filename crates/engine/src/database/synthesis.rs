@@ -1415,6 +1415,17 @@ pub(crate) fn bargain_additional_cost() -> AdditionalCost {
     }
 }
 
+/// CR 702.174a: Zero-cost optional Gift promise. Matches `synthesize_gift` so
+/// `obj_additional_matches_instance` dedups the legacy face cost against the queue.
+pub(crate) fn gift_additional_cost() -> AdditionalCost {
+    AdditionalCost::Optional {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        },
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+    }
+}
+
 /// Synthesize Gift optional cost and delivery effect.
 /// Gift is a promise (zero-cost optional additional cost) that sets `additional_cost_paid`
 /// when the player promises the gift. Conditional branches ("if the gift was promised" /
@@ -1440,12 +1451,7 @@ pub fn synthesize_gift(face: &mut CardFace) {
     };
 
     // Gift uses a zero-cost optional additional cost — the "cost" is just a decision.
-    face.additional_cost = Some(AdditionalCost::Optional {
-        cost: AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        },
-        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    });
+    face.additional_cost = Some(gift_additional_cost());
 
     // Inject GiftDelivery as a wrapper around the first spell ability.
     // The delivery effect is a no-op when the gift wasn't promised, so the

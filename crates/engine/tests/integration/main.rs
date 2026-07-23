@@ -737,6 +737,7 @@ mod painters_servant_multi_zone_additive_color;
 mod palisade_giant_redirect;
 mod panther_habit_equipped_prevention_scope;
 mod peer_into_the_abyss;
+mod peerless_recycling_gift_recipient;
 mod pendrell_flux_unless_pay_own_cost;
 mod perrie_the_pulverizer_attack_trigger_6219;
 mod peter_parker_modal_back_face_cast;

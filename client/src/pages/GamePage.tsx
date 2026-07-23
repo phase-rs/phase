@@ -102,6 +102,7 @@ import { ClashOpponentModal } from "../components/modal/ClashOpponentModal.tsx";
 import { ZoneOpponentChooserModal } from "../components/modal/ZoneOpponentChooserModal.tsx";
 import { PileOpponentModal } from "../components/modal/PileOpponentModal.tsx";
 import { AnnouncingOpponentModal } from "../components/modal/AnnouncingOpponentModal.tsx";
+import { GiftRecipientModal } from "../components/modal/GiftRecipientModal.tsx";
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { TopOrBottomChoiceModalContent } from "../components/modal/TopOrBottomChoiceModal.tsx";
@@ -1752,6 +1753,7 @@ function GamePageContent({
         <ZoneOpponentChooserModal />
         <PileOpponentModal />
         <AnnouncingOpponentModal />
+        <GiftRecipientModal />
         <TributeModal />
         <CombatTaxModal />
         <AlternativeCostModal />

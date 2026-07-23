@@ -21,7 +21,7 @@ use crate::types::game_state::{
     SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{GiftKind, Keyword};
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
@@ -318,6 +318,52 @@ fn continue_after_declared_mana_split(
 ///
 /// For `Optional`: `pay=true` pays the cost and sets `additional_cost_paid`, `pay=false` skips.
 /// For `Choice`: `pay=true` pays the first cost, `pay=false` pays the second cost.
+/// Build an OptionalCostChoice WaitingFor with Gift identity when the queue head is Gift.
+fn make_optional_cost_choice(
+    state: &GameState,
+    player: PlayerId,
+    cost: AdditionalCost,
+    times_kicked: u32,
+    pending: PendingCast,
+) -> WaitingFor {
+    let origin = pending
+        .additional_cost_queue
+        .first()
+        .map(|instance| instance.origin)
+        .unwrap_or(AdditionalCostOrigin::Other);
+    let gift_kind = if origin == AdditionalCostOrigin::Gift {
+        gift_kind_for_object(state, pending.object_id)
+    } else {
+        None
+    };
+    WaitingFor::OptionalCostChoice {
+        player,
+        cost,
+        times_kicked,
+        origin,
+        gift_kind,
+        pending_cast: Box::new(pending),
+    }
+}
+
+fn gift_kind_for_object(state: &GameState, object_id: ObjectId) -> Option<GiftKind> {
+    state.objects.get(&object_id).and_then(|obj| {
+        obj.keywords.iter().rev().find_map(|k| match k {
+            Keyword::Gift(kind) => Some(kind.clone()),
+            _ => None,
+        })
+    })
+}
+
+/// CR 702.174a + CR 601.2c: Propagate SpellContext (including additional_cost_paid /
+/// gift_recipient) through GiftDelivery nesting so Instead target slots see the
+/// paid flag on the parent of the Instead node.
+fn stamp_pending_ability_context_recursive(pending: &mut PendingCast) {
+    pending
+        .ability
+        .set_context_recursive(pending.ability.context.clone());
+}
+
 pub(crate) fn handle_decide_additional_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -544,11 +590,85 @@ pub(crate) fn handle_decide_additional_cost(
         recompute_pending_cast_cost_after_additional_cost(state, player, &mut updated_pending);
     }
 
+    // CR 702.174a: After promising Gift, latch the chosen opponent (or prompt when
+    // ≥2 opponents) before continuing to targets / mana payment.
+    if optional_cost_paid
+        && current_instance
+            .as_ref()
+            .is_some_and(|instance| instance.origin == AdditionalCostOrigin::Gift)
+    {
+        return continue_after_gift_promised(state, player, updated_pending, cost_to_pay, events);
+    }
+
     if let Some(cost) = cost_to_pay {
         pay_additional_cost_with_source(state, player, cost, cost_source, updated_pending, events)
     } else {
         finish_pending_cost_or_cast(state, player, updated_pending, events)
     }
+}
+
+/// CR 702.174a: After the Gift optional cost is accepted, assign or request the
+/// recipient opponent, then resume the cast.
+fn continue_after_gift_promised(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    cost_to_pay: Option<AbilityCost>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let opponents = crate::game::players::opponents(state, player);
+    if opponents.is_empty() {
+        return Err(EngineError::InvalidAction(
+            "Cannot promise a gift with no opponents".to_string(),
+        ));
+    }
+    let gift_kind = gift_kind_for_object(state, pending.object_id);
+    if opponents.len() == 1 {
+        pending.ability.context.gift_recipient = Some(opponents[0]);
+        stamp_pending_ability_context_recursive(&mut pending);
+        if let Some(cost) = cost_to_pay {
+            pay_additional_cost_with_source(
+                state,
+                player,
+                cost,
+                SpellCostSource::Other,
+                pending,
+                events,
+            )
+        } else {
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+    } else {
+        // Mana-zero Gift sentinel is not a real payment to defer — resume via
+        // ChooseGiftRecipient → finish_pending_cost_or_cast after recipient latch.
+        let _ = cost_to_pay;
+        Ok(WaitingFor::ChooseGiftRecipient {
+            player,
+            candidates: opponents,
+            gift_kind,
+            pending_cast: Box::new(pending),
+        })
+    }
+}
+
+/// CR 702.174a: Apply the chosen Gift recipient and resume deferred casting.
+pub(crate) fn handle_choose_gift_recipient(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    opponent: PlayerId,
+    candidates: &[PlayerId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !candidates.contains(&opponent) {
+        return Err(EngineError::InvalidAction(
+            "Gift recipient must be one of the offered opponents".to_string(),
+        ));
+    }
+    let mut pending = pending;
+    pending.ability.context.gift_recipient = Some(opponent);
+    stamp_pending_ability_context_recursive(&mut pending);
+    finish_pending_cost_or_cast(state, player, pending, events)
 }
 
 pub(crate) fn payable_spell_alternative_cost(
@@ -928,15 +1048,16 @@ fn finish_pending_cost_or_cast(
                     pending.additional_cost_queue.remove(0);
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
-                return Ok(WaitingFor::OptionalCostChoice {
+                return Ok(make_optional_cost_choice(
+                    state,
                     player,
-                    cost: AdditionalCost::Optional {
+                    AdditionalCost::Optional {
                         cost,
                         repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                     },
-                    times_kicked: 0,
-                    pending_cast: Box::new(pending),
-                });
+                    0,
+                    pending,
+                ));
             }
             AdditionalCost::Optional {
                 cost,
@@ -946,16 +1067,17 @@ fn finish_pending_cost_or_cast(
                     .ability
                     .context
                     .instance_payment_count_for_ordinal(instance.origin, instance.origin_ordinal);
-                return Ok(WaitingFor::OptionalCostChoice {
+                return Ok(make_optional_cost_choice(
+                    state,
                     player,
-                    cost: AdditionalCost::Optional {
+                    AdditionalCost::Optional {
                         cost,
                         repeatability:
                             crate::types::ability::AdditionalCostRepeatability::Repeatable,
                     },
                     times_kicked,
-                    pending_cast: Box::new(pending),
-                });
+                    pending,
+                ));
             }
             AdditionalCost::Kicker { .. } | AdditionalCost::Choice(_, _) => {
                 pending.additional_cost_queue.remove(0);
@@ -991,15 +1113,16 @@ fn finish_pending_cost_or_cast(
     ) {
         if let Some(current_cost) = next_repeatable_additional_cost(state, player, &pending) {
             let times_kicked = pending.ability.context.additional_cost_payment_count;
-            return Ok(WaitingFor::OptionalCostChoice {
+            return Ok(make_optional_cost_choice(
+                state,
                 player,
-                cost: AdditionalCost::Optional {
+                AdditionalCost::Optional {
                     cost: current_cost,
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Repeatable,
                 },
                 times_kicked,
-                pending_cast: Box::new(pending),
-            });
+                pending,
+            ));
         }
         pending.additional_cost_flow = None;
     }
@@ -1016,15 +1139,16 @@ fn finish_pending_cost_or_cast(
                 // Optional) so the frontend can render a kicker-aware modal and
                 // know whether the kicker is repeatable.
                 let times_kicked = pending.ability.context.kickers_paid.len() as u32;
-                return Ok(WaitingFor::OptionalCostChoice {
+                return Ok(make_optional_cost_choice(
+                    state,
                     player,
-                    cost: AdditionalCost::Kicker {
+                    AdditionalCost::Kicker {
                         costs: vec![current_cost],
                         repeatability,
                     },
                     times_kicked,
-                    pending_cast: Box::new(pending),
-                });
+                    pending,
+                ));
             }
             return begin_deferred_target_selection(state, player, pending, events);
         }
@@ -1039,15 +1163,16 @@ fn finish_pending_cost_or_cast(
             // CR 702.33c/d: present the live Kicker cost (not a laundered Optional)
             // so the frontend renders the kicker re-prompt with the running kick count.
             let times_kicked = pending.ability.context.kickers_paid.len() as u32;
-            return Ok(WaitingFor::OptionalCostChoice {
+            return Ok(make_optional_cost_choice(
+                state,
                 player,
-                cost: AdditionalCost::Kicker {
+                AdditionalCost::Kicker {
                     costs: vec![current_cost],
                     repeatability,
                 },
                 times_kicked,
-                pending_cast: Box::new(pending),
-            });
+                pending,
+            ));
         }
         if pending.deferred_modal_choice.is_none() {
             pending.additional_cost_flow = None;
@@ -1088,12 +1213,13 @@ fn finish_pending_cost_or_cast(
                 cost: optional_cost.clone(),
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             };
-            return Ok(WaitingFor::OptionalCostChoice {
+            return Ok(make_optional_cost_choice(
+                state,
                 player,
-                cost: optional_cost,
-                times_kicked: 0,
-                pending_cast: Box::new(pending),
-            });
+                optional_cost,
+                0,
+                pending,
+            ));
         }
     }
 
@@ -1344,6 +1470,10 @@ pub(crate) fn begin_deferred_target_selection(
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // Defense in depth: nest-propagate SpellContext before building slots so
+    // GiftDelivery → AdditionalCostPaidInstead sees additional_cost_paid.
+    stamp_pending_ability_context_recursive(&mut pending);
+
     // CR 601.2c + CR 115.1: If an "of an opponent's choice" slot group still needs
     // its announcing opponent chosen (and the controller has ≥2 opponents to pick
     // among), raise that decision before declaring targets. This loops once per
@@ -5246,15 +5376,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                     }
                 }
             }
-            return Ok(WaitingFor::OptionalCostChoice {
+            return Ok(make_optional_cost_choice(
+                state,
                 player,
-                cost: AdditionalCost::Choice(
-                    alt_cost.cost,
-                    AbilityCost::Mana { cost: cost.clone() },
-                ),
-                times_kicked: 0,
-                pending_cast: Box::new(pending),
-            });
+                AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: cost.clone() }),
+                0,
+                pending,
+            ));
         }
     }
 
@@ -5384,12 +5512,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 )? {
                     return finish_pending_cost_or_cast(state, player, pending, events);
                 }
-                return Ok(WaitingFor::OptionalCostChoice {
+                return Ok(make_optional_cost_choice(
+                    state,
                     player,
-                    cost: additional_cost,
-                    times_kicked: 0,
-                    pending_cast: Box::new(pending),
-                });
+                    additional_cost,
+                    0,
+                    pending,
+                ));
             }
             AdditionalCost::Choice(preferred, fallback) => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
@@ -5423,12 +5552,13 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                     }
                     return pay_additional_cost(state, player, fallback.clone(), pending, events);
                 }
-                return Ok(WaitingFor::OptionalCostChoice {
+                return Ok(make_optional_cost_choice(
+                    state,
                     player,
-                    cost: additional_cost,
-                    times_kicked: 0,
-                    pending_cast: Box::new(pending),
-                });
+                    additional_cost,
+                    0,
+                    pending,
+                ));
             }
         }
     }
@@ -7001,6 +7131,9 @@ pub(super) fn build_effective_additional_cost_queue(
     additional_cost_queue.extend(effective_teamwork_additional_cost_instances(
         state, player, object_id,
     ));
+    additional_cost_queue.extend(effective_gift_additional_cost_instances(
+        state, player, object_id,
+    ));
     additional_cost_queue
 }
 
@@ -7127,6 +7260,30 @@ pub(super) fn effective_teamwork_additional_cost_instances(
                     },
                     repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
                 },
+            )
+        })
+        .collect()
+}
+
+/// CR 702.174a: Return each effective Gift keyword as its own optional
+/// zero-cost promise. The dedicated queue record stamps `AdditionalCostOrigin::Gift`
+/// so Gift composes with Bargain/Teamwork and UI can present Gift-specific copy.
+/// The produced cost matches `synthesize_gift` / `gift_additional_cost` so
+/// `obj_additional_matches_instance` suppresses the legacy `face.additional_cost` copy.
+pub(super) fn effective_gift_additional_cost_instances(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Vec<AdditionalCostInstance> {
+    super::casting::effective_spell_keyword_instances(state, player, object_id)
+        .into_iter()
+        .filter(|keyword| matches!(keyword, Keyword::Gift(_)))
+        .enumerate()
+        .map(|(ordinal, _)| {
+            AdditionalCostInstance::new_with_ordinal(
+                AdditionalCostOrigin::Gift,
+                u32::try_from(ordinal).unwrap_or(u32::MAX),
+                crate::database::synthesis::gift_additional_cost(),
             )
         })
         .collect()
@@ -8197,6 +8354,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
     let kickers_paid = ability.context.kickers_paid.clone();
+    let gift_recipient = ability.context.gift_recipient;
     let chosen_modes = ability.context.chosen_modes.clone();
     let additional_cost_paid = ability.context.additional_cost_paid;
     let additional_cost_payment_count = ability.context.additional_cost_payment_count;
@@ -8319,6 +8477,14 @@ fn finalize_cast_with_phyrexian_choices_inner(
     if !kickers_paid.is_empty() {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.kickers_paid.clone_from(&kickers_paid);
+        }
+    }
+    // CR 702.174a: Stamp Gift recipient onto the spell-on-stack object (kickers_paid
+    // pattern) so delivery / future permanent ETB consumers can read it after the
+    // spell leaves the stack.
+    if gift_recipient.is_some() {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.gift_recipient = gift_recipient;
         }
     }
     // CR 700.2a + CR 700.2d + CR 601.2b: Stamp chosen modal-mode indices onto the

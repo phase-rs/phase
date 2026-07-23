@@ -11897,17 +11897,16 @@ fn continue_with_prepared(
             prepared.payment_mode,
             events,
         );
-    } else if requires_additional_cost_declaration_before_targets(&resolved)
+    } else if (requires_additional_cost_declaration_before_targets(&resolved)
+        || ability_chain_has_gift_delivery(&resolved))
         && !casting_costs::build_effective_additional_cost_queue(state, player, prepared.object_id)
             .is_empty()
     {
-        // CR 601.2b + CR 702.194c: generalizes the kicker-only gate above to
-        // every OTHER target-dependent "instead" additional cost with a
-        // non-empty effective queue (currently Teamwork/Bargain; Too Evil to
-        // Stay Dead, Cruel Alliance). Bounded by the queue-emptiness check so
-        // non-kicker `AdditionalCostPaidInstead` cards with an empty queue
-        // (no queue-synthesized cost to declare pre-target) fall through to
-        // the ordinary target-slot path below, unchanged.
+        // CR 601.2b + CR 702.194c + CR 702.174a/m: generalizes the kicker-only
+        // gate above to every OTHER target-dependent "instead" additional cost
+        // with a non-empty effective queue (Teamwork/Bargain/Gift). Gift always
+        // announces before targets when queued (CR 601.2b), including when the
+        // only gift-gated effect is delivery rather than an Instead target set.
         return casting_costs::begin_target_dependent_additional_cost_declaration(
             state,
             player,
@@ -12228,13 +12227,35 @@ fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::Mod
 pub(crate) fn requires_additional_cost_declaration_before_targets(
     ability: &ResolvedAbility,
 ) -> bool {
-    let Some(sub_ability) = ability.sub_ability.as_deref() else {
-        return false;
-    };
-    matches!(
-        sub_ability.condition,
-        Some(AbilityCondition::AdditionalCostPaidInstead)
-    ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect).is_some()
+    // Walk the full sub_ability chain (GiftDelivery nesting) for
+    // AdditionalCostPaidInstead with a real target filter (CR 601.2c / 702.174m).
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        if let Some(sub_ability) = current.sub_ability.as_deref() {
+            if matches!(
+                sub_ability.condition,
+                Some(AbilityCondition::AdditionalCostPaidInstead)
+            ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect)
+                .is_some()
+            {
+                return true;
+            }
+        }
+        node = current.sub_ability.as_deref();
+    }
+    false
+}
+
+/// CR 702.174a / CR 601.2b: Gift is always announced before targets when present.
+pub(crate) fn ability_chain_has_gift_delivery(ability: &ResolvedAbility) -> bool {
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        if matches!(current.effect, Effect::GiftDelivery { .. }) {
+            return true;
+        }
+        node = current.sub_ability.as_deref();
+    }
+    false
 }
 
 /// Fast path for permanent spells with no spell-level ability.
@@ -12512,23 +12533,14 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
     if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
         return Ok(Vec::new());
-    } else if requires_additional_cost_declaration_before_targets(&resolved)
+    } else if (requires_additional_cost_declaration_before_targets(&resolved)
+        || ability_chain_has_gift_delivery(&resolved))
         && !casting_costs::build_effective_additional_cost_queue(state, player, prepared.object_id)
             .is_empty()
     {
-        // CR 601.2c: parity with the live-cast gate above — the preview must
-        // defer EXACTLY the cards the live path defers. The queue-emptiness
-        // guard is load-bearing (NOT merely a Gift exclusion — Gift's
-        // `AdditionalCostPaidInstead` sits at sub_ability level 2 under
-        // `GiftDelivery`, so `requires_additional_cost_declaration_before_
-        // targets`, which inspects only the first level, already returns
-        // `false` for Gift and it never reaches this check either way). Its
-        // real protected class is non-kicker LEVEL-1 `AdditionalCostPaidInstead`
-        // cards with a PRINTED additional cost (empty effective queue, e.g.
-        // `obj.additional_cost = Optional`/`Required`/`Choice`): those have
-        // `requires_ == true` but must NOT defer here (there is no
-        // queue-synthesized cost to declare pre-target), so a bare `requires_`
-        // gate would wrongly return `Ok(Vec::new())` for them.
+        // CR 601.2c + CR 702.174a/m: parity with the live-cast gate — defer when
+        // Gift or Instead needs pre-target declaration and the effective queue
+        // is non-empty.
         return Ok(Vec::new());
     }
 

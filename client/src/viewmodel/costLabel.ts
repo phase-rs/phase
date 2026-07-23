@@ -521,7 +521,26 @@ export interface AdditionalCostOption {
 export function additionalCostChoices(
   cost: AdditionalCost,
   timesKicked = 0,
+  origin?: string,
+  giftKind?: { type: string },
 ): { title: string; options: AdditionalCostOption[] } {
+  if (origin === "Gift") {
+    const gift =
+      giftKind?.type === "Treasure"
+        ? "a Treasure"
+        : giftKind?.type === "Food"
+          ? "a Food"
+          : giftKind?.type === "TappedFish"
+            ? "a tapped Fish"
+            : "a card";
+    return {
+      title: "Promise a gift?",
+      options: [
+        { id: "pay", label: `Promise ${gift}` },
+        { id: "decline", label: "Cast without promising" },
+      ],
+    };
+  }
   switch (cost.type) {
     case "Optional": {
       const label = formatAbilityCost(cost.data.cost);
