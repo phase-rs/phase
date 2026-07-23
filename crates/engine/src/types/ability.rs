@@ -16171,23 +16171,35 @@ pub enum CastingRestriction {
     CantSpendMana,
 }
 
-/// CR 602.2b + CR 601.2f: Self-referential cost reduction on an activated ability.
-/// "This ability costs {N} less to activate for each [condition]" (scaling), or
-/// "This ability costs {N} less to activate if [condition]" (conditional flat:
-/// `count = Fixed(1)` gated by `condition`).
+/// CR 602.2b + CR 601.2f: Self-referential activation/cast cost modification.
+/// "This ability costs {N} less/more to activate for each [condition]" (scaling), or
+/// "This ability costs {N} less/more to activate if [condition]" (conditional flat:
+/// `count = Fixed(1)` gated by `condition`). Direction is the same
+/// [`CostModifyMode`] axis used by external `ReduceAbilityCost` statics — not a
+/// sibling `CostIncrease` type (parameterize, don't proliferate).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostReduction {
-    /// Generic mana reduced per counted object (the {N} value).
+    /// CR 601.2f: `Reduce` subtracts generic mana (floor {0}); `Raise` adds it
+    /// (Loreseeker's Stone class). `Minimum` is not emitted for self-referential
+    /// ability text — only Reduce/Raise. Serde-defaults to Reduce so pre-field
+    /// card-data remains a reduction.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::statics::is_cost_modify_mode_reduce"
+    )]
+    pub mode: crate::types::statics::CostModifyMode,
+    /// Generic mana adjusted per counted object (the {N} value).
     pub amount_per: u32,
     /// How many objects to count (e.g., legendary creatures you control).
     /// For the conditional flat form this is `Fixed(1)`.
     pub count: QuantityExpr,
-    /// CR 602.2b + CR 601.2f: Optional gate for the conditional flat form — the reduction
-    /// applies only when this condition holds at cost-determination time
-    /// (Razorlash Transmogrant, Esquire of the King, …). `None` = unconditional
-    /// (the "for each" scaling form and all pre-existing reductions). Evaluated
-    /// at runtime via the shared `restrictions::evaluate_condition`, the same
-    /// path `ActivationRestriction::RequiresCondition` uses.
+    /// CR 602.2b + CR 601.2f: Optional gate for the conditional flat form — the
+    /// modification applies only when this condition holds at cost-determination
+    /// time (Razorlash Transmogrant, Esquire of the King, …). `None` =
+    /// unconditional (the "for each" scaling form and all pre-existing
+    /// reductions). Evaluated at runtime via the shared
+    /// `restrictions::evaluate_condition`, the same path
+    /// `ActivationRestriction::RequiresCondition` uses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<ParsedCondition>,
 }

@@ -3095,7 +3095,15 @@ fn cost_resolves_without_choice(cost: &Option<AbilityCost>) -> bool {
     cost.as_ref().is_none_or(cost_component_choice_free)
 }
 
-fn cost_component_choice_free(cost: &AbilityCost) -> bool {
+/// CR 605.3a: True iff a single cost node resolves with no player prompt. The
+/// full-tree building block behind [`cost_resolves_without_choice`]: a
+/// `Composite` qualifies only when **every** component qualifies, so a
+/// self-sacrifice component sitting beside a choice-bearing sibling (Lion's Eye
+/// Diamond's `Discard`) is correctly rejected. Shared with
+/// `mana_sources::has_unambiguous_self_sacrifice_component` so the auto-tap
+/// eligibility gate applies the identical whole-tree invariant rather than a
+/// per-component `any` match.
+pub(crate) fn cost_component_choice_free(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::Tap => true,
         AbilityCost::Sacrifice(cost)

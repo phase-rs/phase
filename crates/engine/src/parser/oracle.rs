@@ -4382,6 +4382,7 @@ pub(crate) fn parse_oracle_ir(
                 // CR 702.193b + CR 602.2b + CR 601.2f + CR 302.6: the activation cost's
                 // generic mana is reduced by the source's mana value if it entered this turn.
                 def.cost_reduction = Some(CostReduction {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
                     amount_per: 1,
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::SelfManaValue,
