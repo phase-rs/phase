@@ -1066,12 +1066,73 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 events,
                             ) {
                                 zone_pipeline::ZoneDeliveryResult::Done => {}
-                                // CR 614.1c / CR 616.1: the delivery tail parked a
-                                // counter-replacement pause and stashed the
-                                // remaining tail; surface it without running the
-                                // caller epilogue (the parked tail carries
-                                // `CallerEpilogue` and the resume path owns it).
+                                // CR 614.1c / CR 616.1 / CR 614.12a: the delivery
+                                // tail parked a mid-entry choice (CopyTargetChoice,
+                                // NamedChoice, counter branch, …) and stashed the
+                                // remaining tail. Surface it without running the
+                                // caller epilogue — including CR 608.3c Aura attach,
+                                // which has not run yet.
+                                //
+                                // CR 608.3c + CR 400.7d: stash PendingSpellResolution
+                                // so the choice-answer resume can complete Aura
+                                // attachment / cast-link stamps — mirrors the
+                                // ReplacementResult::NeedsChoice arm below.
                                 zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                                    let cast_from_zone = ability
+                                        .as_ref()
+                                        .and_then(|a| a.context.cast_from_zone)
+                                        .or_else(|| {
+                                            state
+                                                .objects
+                                                .get(&entry.id)
+                                                .and_then(|o| o.cast_from_zone)
+                                        });
+                                    let kickers_paid = ability
+                                        .as_ref()
+                                        .map(|a| a.context.kickers_paid.clone())
+                                        .unwrap_or_else(|| {
+                                            state
+                                                .objects
+                                                .get(&entry.id)
+                                                .map(|o| o.kickers_paid.clone())
+                                                .unwrap_or_default()
+                                        });
+                                    let additional_cost_payment_count = ability
+                                        .as_ref()
+                                        .map(|a| a.context.additional_cost_payment_count)
+                                        .unwrap_or_else(|| {
+                                            state
+                                                .objects
+                                                .get(&entry.id)
+                                                .map(|o| o.additional_cost_payment_count)
+                                                .unwrap_or_default()
+                                        });
+                                    let additional_cost_payments = ability
+                                        .as_ref()
+                                        .map(|a| a.context.additional_cost_payments.clone())
+                                        .unwrap_or_else(|| {
+                                            state
+                                                .objects
+                                                .get(&entry.id)
+                                                .map(|o| o.additional_cost_payments.clone())
+                                                .unwrap_or_default()
+                                        });
+                                    state.push_spell_resolution(
+                                        crate::types::game_state::PendingSpellResolution {
+                                            object_id: entry.id,
+                                            controller: entry.controller,
+                                            casting_variant,
+                                            cast_from_zone,
+                                            cast_controller: Some(entry.controller),
+                                            cast_timing_permission,
+                                            spell_targets: spell_targets.clone(),
+                                            actual_mana_spent,
+                                            kickers_paid,
+                                            additional_cost_payment_count,
+                                            additional_cost_payments,
+                                            convoked_creatures: convoked_creatures.clone(),
+                                        },
+                                    );
                                     events.push(GameEvent::StackResolved {
                                         object_id: entry.id,
                                     });

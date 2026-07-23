@@ -1376,20 +1376,25 @@ fn handle_persist_chosen_attribute_choice(
             ));
     }
 
+    // CR 608.3c + CR 614.12a: Mid-entry `CopyTargetChoice` is raised from the
+    // zone-delivery post-replacement drain, which pauses BEFORE the spell-
+    // resolution epilogue (Aura attach, cast-link stamps) in `stack.rs`. The
+    // stash pushed there (`PendingSpellResolution`) carries the Aura spell's
+    // enchant target — apply it now so `attached_to` is set before the host
+    // copy installs. Not CR 303.4f (non-spell Aura entry). `attach_to` is
+    // idempotent if attachment already ran.
+    if state
+        .active_spell_resolution()
+        .is_some_and(|ctx| ctx.object_id == source_id)
+    {
+        let ctx = state
+            .take_active_spell_resolution()
+            .expect("active spell-resolution frame checked above");
+        apply_pending_spell_resolution(state, &ctx, events);
+    }
+
     // CR 303.4 + CR 702.5: the Aura enchants a creature — its host is the
-    // recipient of the copy effect. On the spell-cast path the Aura is put onto
-    // the battlefield ALREADY attached to its enchant target (CR 608.3c — NOT
-    // CR 303.4f, which governs only Auras entering "by any means other than by
-    // resolving as an Aura spell"). That attach runs in the Aura-spell
-    // resolution tail in `stack.rs` (the `is_aura` block at the CR 608.3c
-    // comment) BEFORE this `CopyTargetChoice` answer is processed: on the
-    // Execute path the copy choice is raised while draining post-replacement
-    // effects, execution then falls through to the CR 608.3c attach, and only
-    // then is priority (carrying the pending choice) returned — so `attached_to`
-    // is already `Some` here. CR 608.2b guarantees it further: an Aura spell
-    // whose sole enchant target is illegal at resolution is countered and never
-    // enters, so the "as this Aura enters, choose a creature" replacement never
-    // fires with a hostless Aura. No defensive attach is performed here.
+    // recipient of the copy effect.
     let host = state
         .objects
         .get(&source_id)
@@ -1417,26 +1422,24 @@ fn handle_persist_chosen_attribute_choice(
         super::effects::become_copy::apply_precomputed_copy_values(state, host_id, copy, events)
             .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     } else {
-        // Unreachable on the spell-cast path (see the CR 608.3c / CR 608.2b note
-        // above). If it were ever reached, the copy simply does not apply and the
-        // unattached Aura is cleaned up by SBA (CR 704.5m) — never invent an
-        // attach here.
+        // CR 608.2b: an Aura spell whose enchant target is illegal at resolution
+        // is countered and never enters — so this choose-a-creature replacement
+        // should not fire hostless on the spell-cast path. If reached anyway,
+        // skip the copy; SBA CR 704.5m cleans up the unattached Aura.
         debug_assert!(
             false,
-            "Metamorphic Alteration's Aura must be attached to a creature host when \
-             the copy choice is answered (CR 608.3c: the spell-cast attach runs \
-             before the CopyTargetChoice answer)"
+            "Metamorphic Alteration's Aura must be attached (CR 608.3c via \
+             PendingSpellResolution) when the copy choice is answered"
         );
     }
 
-    // CR 707.4: changing the host's copiable identity is NOT a zone change and
-    // must not disturb the Aura's own identity.
+    // CR 707.4: installing the host copy must not disturb the Aura's attachment.
     debug_assert!(
         state
             .objects
             .get(&source_id)
             .is_some_and(|aura| aura.attached_to.is_some()),
-        "the Aura's own identity/attachment must be unchanged by installing the host copy"
+        "the Aura must remain attached after installing the host copy"
     );
 
     // CR 614.12a + CR 603.2: replay the Aura's deferred battlefield-entry event
