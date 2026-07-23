@@ -36354,7 +36354,7 @@ mod ovika_noncreature_spell_token_trigger {
                 obj.card_types.subtypes
             );
             assert!(
-                obj.keywords.contains(&Keyword::Haste),
+                obj.keywords.contains(&Keyword::Haste), // allow-raw-authority: asserts the literal keyword set stamped on the freshly created token, not an effective-keyword query
                 "each token must gain haste (\"They gain haste until end of turn\"), \
                  got keywords {:?}",
                 obj.keywords
