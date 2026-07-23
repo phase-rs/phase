@@ -38,6 +38,18 @@ fn spell(name: &str) -> CardFace {
     }
 }
 
+fn land(name: &str) -> CardFace {
+    CardFace {
+        name: name.to_string(),
+        card_type: CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Land],
+            subtypes: Vec::new(),
+        },
+        ..Default::default()
+    }
+}
+
 fn entry(card: CardFace, count: u32) -> DeckEntry {
     DeckEntry { card, count }
 }
@@ -75,8 +87,9 @@ fn proliferate_spell(name: &str) -> CardFace {
 fn empty_deck_produces_defaults() {
     let feature = detect(&[]);
     assert_eq!(feature.source_count, 0);
+    assert_eq!(feature.direct_count, 0);
+    assert_eq!(feature.proliferate_count, 0);
     assert_eq!(feature.commitment, 0.0);
-    assert!(feature.source_names.is_empty());
 }
 
 #[test]
@@ -135,34 +148,20 @@ fn self_poison_drawback_not_counted() {
     assert_eq!(feature.direct_count, 0);
 }
 
-/// One push per UNIQUE face, not per playset copy.
+/// Counts scale per playset copy, not per unique face.
 #[test]
-fn source_names_dedup_per_face() {
+fn counts_scale_by_copy_count() {
     let feature = detect(&[entry(infect_creature("Glistener Elf"), 4)]);
     assert_eq!(feature.source_count, 4);
-    assert_eq!(feature.source_names, vec!["Glistener Elf".to_string()]);
 }
 
-/// A face that is BOTH a source and a direct-poison card pushes its name once.
+/// Calibration anchor: Modern Infect — 12 infect creatures + 2 proliferate over
+/// 37 nonland cards → commitment ≈ 0.904. Two-sided: the lower bound is the
+/// policy calibration; the upper bound pins the source weight, since
+/// `weighted_sum` clamps at 1.0 and a one-sided `> 0.85` would still pass if the
+/// source contribution were inflated toward saturation.
 #[test]
-fn source_and_direct_face_pushes_name_once() {
-    let mut face = infect_creature("Hybrid Threat");
-    face.abilities = vec![AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::GivePlayerCounter {
-            counter_kind: PlayerCounterKind::Poison,
-            count: QuantityExpr::Fixed { value: 1 },
-            target: TargetFilter::Opponent,
-        },
-    )];
-    let feature = detect(&[entry(face, 2)]);
-    assert_eq!(feature.source_names.len(), 1);
-}
-
-/// Calibration anchor: Modern Infect — 12 infect creatures + 2 proliferate
-/// over 37 nonland cards → strongly committed.
-#[test]
-fn modern_infect_hits_calibration_floor() {
+fn modern_infect_calibration_is_pinned() {
     let deck = vec![
         entry(infect_creature("Glistener Elf"), 4),
         entry(infect_creature("Blighted Agent"), 4),
@@ -173,26 +172,55 @@ fn modern_infect_hits_calibration_floor() {
     let feature = detect(&deck);
     assert_eq!(feature.source_count, 12);
     assert!(
-        feature.commitment > 0.85,
-        "Modern Infect must clear 0.85, got {}",
+        (0.894..=0.914).contains(&feature.commitment),
+        "Modern Infect must land at 0.904 ± 0.01, got {}",
         feature.commitment
     );
 }
 
 /// Anti-calibration: a superfriends deck running proliferate but no poison
-/// source must stay far below the policy floor.
+/// source stays at ≈ 0.061 — far below the floor. Two-sided so the assertion
+/// pins the proliferate weight rather than leaving 5.7× of headroom to the
+/// floor.
 #[test]
-fn superfriends_proliferate_stays_below_floor() {
+fn superfriends_proliferate_is_pinned_below_floor() {
     let deck = vec![
         entry(proliferate_spell("Contagion Clasp"), 2),
         entry(spell("Planeswalker Filler"), 35),
     ];
     let feature = detect(&deck);
     assert!(
-        feature.commitment < POISON_CLOCK_FLOOR,
-        "proliferate alone is not a poison plan, got {}",
+        (0.056..=0.066).contains(&feature.commitment),
+        "proliferate-only must land at 0.061 ± 0.005, got {}",
         feature.commitment
     );
+    assert!(feature.commitment < POISON_CLOCK_FLOOR);
+}
+
+/// CR 104.3d: lands are excluded from the commitment denominator (they are not
+/// part of the poison plan's nonland payload). Two decks with identical nonland
+/// content score identically no matter how many lands pad the manabase — pinning
+/// the `CoreType::Land` guard in `detect`, whose removal would inflate the
+/// denominator and silently lower every commitment.
+#[test]
+fn lands_are_excluded_from_commitment_denominator() {
+    let core = |extra: Vec<DeckEntry>| {
+        let mut deck = vec![
+            entry(infect_creature("Glistener Elf"), 4),
+            entry(infect_creature("Blighted Agent"), 4),
+            entry(infect_creature("Phyrexian Crusader"), 4),
+            entry(spell("Pump Spell"), 25),
+        ];
+        deck.extend(extra);
+        detect(&deck).commitment
+    };
+    let landless = core(Vec::new());
+    let with_lands = core(vec![entry(land("Inkmoth Nexus"), 20)]);
+    assert_eq!(
+        landless, with_lands,
+        "20 lands must not change commitment; the nonland payload is identical"
+    );
+    assert!(landless > 0.0);
 }
 
 #[test]
@@ -291,6 +319,118 @@ fn double_negation_round_trips() {
         1,
     )]);
     assert_eq!(poisons_self.direct_count, 0);
+}
+
+// ─── Or / And player scopes ─────────────────────────────────────────────────
+//
+// `Or`/`And` distribute their quantifier the OPPOSITE way between the two
+// predicates: `filter_can_hit_opponent` is existential over `Or` / universal
+// over `And` (some/every constraint must admit an opponent), while
+// `filter_matches_every_opponent` — reached only through a negated scope — is
+// universal over `Or` / existential over `And`. Each fixture below flips
+// exactly one branch's outcome if its `.any`/`.all` is swapped, so a mistaken
+// inversion in either predicate fails a test rather than passing silently.
+
+fn or_filter(filters: Vec<TargetFilter>) -> TargetFilter {
+    TargetFilter::Or { filters }
+}
+
+fn and_filter(filters: Vec<TargetFilter>) -> TargetFilter {
+    TargetFilter::And { filters }
+}
+
+/// `filter_can_hit_opponent` over `Or` is existential: one opponent-admitting
+/// branch is enough, and no branch admitting one means it cannot hit.
+#[test]
+fn or_scope_hits_opponent_iff_some_branch_does() {
+    // Opponent branch admits an opponent → hits (swapping `.any`→`.all` here
+    // would drop this, since the Controller branch does not).
+    let hits = detect(&[entry(
+        poison_spell(
+            "Or Hits",
+            or_filter(vec![TargetFilter::Controller, TargetFilter::Opponent]),
+        ),
+        1,
+    )]);
+    assert_eq!(hits.direct_count, 1);
+
+    // No branch admits an opponent → cannot hit.
+    let misses = detect(&[entry(
+        poison_spell(
+            "Or Misses",
+            or_filter(vec![TargetFilter::Controller, TargetFilter::SelfRef]),
+        ),
+        1,
+    )]);
+    assert_eq!(misses.direct_count, 0);
+}
+
+/// `filter_can_hit_opponent` over `And` is universal (CR 109.3): every
+/// constraint must admit an opponent, so one self-only constraint blocks it.
+#[test]
+fn and_scope_hits_opponent_iff_every_branch_does() {
+    // Both constraints admit an opponent → hits.
+    let hits = detect(&[entry(
+        poison_spell(
+            "And Hits",
+            and_filter(vec![TargetFilter::Player, TargetFilter::Opponent]),
+        ),
+        1,
+    )]);
+    assert_eq!(hits.direct_count, 1);
+
+    // Controller constraint cannot be an opponent → the conjunction cannot
+    // (swapping `.all`→`.any` here would wrongly count it).
+    let misses = detect(&[entry(
+        poison_spell(
+            "And Misses",
+            and_filter(vec![TargetFilter::Opponent, TargetFilter::Controller]),
+        ),
+        1,
+    )]);
+    assert_eq!(misses.direct_count, 0);
+}
+
+/// `filter_matches_every_opponent` (reached via `Not`) over `Or` is universal:
+/// `Not { Or }` hits an opponent only if some `Or` branch leaves one unmatched.
+#[test]
+fn negated_or_scope_pins_every_opponent_quantifier() {
+    // `Or { Controller, Opponent }` covers every opponent (the Opponent branch
+    // does), so its negation resolves to you alone → does not count. Swapping
+    // the `Or` arm of `filter_matches_every_opponent` to `.all` would make the
+    // Controller branch drag universality to false → wrongly count.
+    let feature = detect(&[entry(
+        poison_spell(
+            "Not Or",
+            not_filter(or_filter(vec![
+                TargetFilter::Controller,
+                TargetFilter::Opponent,
+            ])),
+        ),
+        1,
+    )]);
+    assert_eq!(feature.direct_count, 0);
+}
+
+/// `filter_matches_every_opponent` over `And` is existential: `Not { And }`
+/// hits an opponent unless every conjunct covers all opponents.
+#[test]
+fn negated_and_scope_pins_every_opponent_quantifier() {
+    // `And { Opponent, Controller }` does NOT cover every opponent (the
+    // Controller conjunct is not universal), so its negation leaves an opponent
+    // matched → counts. Swapping the `And` arm to `.any` would make the
+    // Opponent conjunct alone assert universality → wrongly drop it.
+    let feature = detect(&[entry(
+        poison_spell(
+            "Not And",
+            not_filter(and_filter(vec![
+                TargetFilter::Opponent,
+                TargetFilter::Controller,
+            ])),
+        ),
+        1,
+    )]);
+    assert_eq!(feature.direct_count, 1);
 }
 
 // ─── modal / conditional branches (CR 700.2, CR 608.2c) ─────────────────────

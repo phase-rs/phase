@@ -68,10 +68,6 @@ pub struct PoisonFeature {
     /// `0.0..=1.0` — how central the poison clock is to this deck. Consumed by
     /// `PoisonClockPolicy::activation` as the single scaling knob.
     pub commitment: f32,
-    /// Names of detected poison sources. NOT used for classification — that
-    /// already happened against the AST. Used as battlefield identifiers at
-    /// decision time (identity lookup, exempt from the name-matching lint).
-    pub source_names: Vec<String>,
 }
 
 /// Structural detection over each `DeckEntry`'s `CardFace` AST.
@@ -84,7 +80,6 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
     let mut direct_count = 0u32;
     let mut proliferate_count = 0u32;
     let mut total_nonland = 0u32;
-    let mut source_names: Vec<String> = Vec::new();
 
     for entry in deck {
         let face = &entry.card;
@@ -96,19 +91,11 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
         // mode of a modal card counts here even though the mode has not been
         // chosen. The live policy asks the narrower question at the seam where
         // the mode IS chosen — see `AbilityScope`.
-        let is_source = is_poison_source_parts(&face.card_type.core_types, &face.keywords);
-        let is_direct = gives_opponents_poison_parts(&face.abilities, AbilityScope::Potential);
-
-        if is_source {
+        if is_poison_source_parts(&face.card_type.core_types, &face.keywords) {
             source_count = source_count.saturating_add(entry.count);
         }
-        if is_direct {
+        if gives_opponents_poison_parts(&face.abilities, AbilityScope::Potential) {
             direct_count = direct_count.saturating_add(entry.count);
-        }
-        // One push per UNIQUE face, and once even when both axes fire —
-        // guards the per-copy and double-push traps.
-        if is_source || is_direct {
-            source_names.push(face.name.clone());
         }
         if proliferates_parts(&face.abilities, AbilityScope::Potential) {
             proliferate_count = proliferate_count.saturating_add(entry.count);
@@ -123,7 +110,6 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
         direct_count,
         proliferate_count,
         commitment,
-        source_names,
     }
 }
 

@@ -61,7 +61,7 @@ use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
 use super::registry::{
-    DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, STRONG_MAX,
+    DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, CRITICAL_MAX, STRONG_MAX,
 };
 
 pub struct PoisonClockPolicy;
@@ -280,10 +280,15 @@ impl TacticalPolicy for PoisonClockPolicy {
                 PolicyVerdict::neutral(PolicyReason::new("poison_clock_na"))
             }
             // A single counter is the conservative floor: `GivePlayerCounter.count`
-            // is a `QuantityExpr` that need not be statically known.
-            PoisonContribution::DirectPoison => {
-                score_clock(scalar, most_poisoned_opponent(ctx.state, ctx.ai_player), 1)
-            }
+            // is a `QuantityExpr` that need not be statically known. A resolving
+            // spell's counter is guaranteed, so its lethal case may reach the
+            // critical band (`CRITICAL_MAX` ceiling).
+            PoisonContribution::DirectPoison => score_clock(
+                scalar,
+                most_poisoned_opponent(ctx.state, ctx.ai_player),
+                1,
+                CRITICAL_MAX,
+            ),
             PoisonContribution::Proliferate => {
                 let highest = most_poisoned_opponent(ctx.state, ctx.ai_player);
                 // CR 701.34a: proliferate chooses among permanents and players
@@ -294,10 +299,15 @@ impl TacticalPolicy for PoisonClockPolicy {
                         "poison_clock_no_counters_to_proliferate",
                     ));
                 }
-                score_clock(scalar, highest, 1)
+                score_clock(scalar, highest, 1, CRITICAL_MAX)
             }
+            // CR 509.1a: declared combat damage is not guaranteed — the attack
+            // can be blocked or prevented — so even a would-be-lethal poison
+            // swing is held below the critical band (`STRONG_MAX` ceiling) that
+            // a guaranteed direct poison earns. A committed attacker is still a
+            // strong play, just not a booked win.
             PoisonContribution::CombatDamage { current, added } => {
-                score_clock(scalar, current, added)
+                score_clock(scalar, current, added, STRONG_MAX)
             }
         }
     }
@@ -308,16 +318,18 @@ impl TacticalPolicy for PoisonClockPolicy {
 /// one tenth of a clock at 10/10, because it is the only way to reach ten.
 const MIN_CLOCK_PROGRESS: f64 = 0.25;
 
-/// Shared scoring for every branch: game-ending when the action reaches CR
-/// 104.3d's ten, otherwise scaled by how far the clock has run — the last
-/// counters are worth more than the first.
+/// Shared scoring for every branch: reaching CR 104.3d's ten is the top of the
+/// scale, otherwise scaled by how far the clock has run — the last counters are
+/// worth more than the first.
 ///
-/// Both magnitudes are state- and config-dependent, so they route through
-/// `PolicyVerdict::score`, which selects the band. The sub-lethal ceiling is
-/// held at `STRONG_MAX` so only an action that actually reaches ten can land in
-/// the critical band; an advancing-but-not-lethal clock must never outrank a
-/// genuine win.
-fn score_clock(scalar: f64, current: u32, added: u32) -> PolicyVerdict {
+/// `ceiling` is the highest band this branch may reach: `CRITICAL_MAX` for a
+/// guaranteed counter (a resolving direct-poison spell), `STRONG_MAX` for a
+/// merely-declared one (a combat swing that can still be blocked). Both
+/// magnitudes are state- and config-dependent, so they route through
+/// `PolicyVerdict::score`, which selects the band from the clamped value. The
+/// sub-lethal case is always held under `STRONG_MAX`, so an advancing-but-not-
+/// lethal clock never outranks a booked win.
+fn score_clock(scalar: f64, current: u32, added: u32, ceiling: f64) -> PolicyVerdict {
     let facts = |reason: PolicyReason| {
         reason
             .with_fact("opponent_poison", i64::from(current))
@@ -325,7 +337,10 @@ fn score_clock(scalar: f64, current: u32, added: u32) -> PolicyVerdict {
     };
 
     if reaches_lethal(current, added) {
-        return PolicyVerdict::score(scalar, facts(PolicyReason::new("poison_clock_lethal")));
+        return PolicyVerdict::score(
+            scalar.min(ceiling),
+            facts(PolicyReason::new("poison_clock_lethal")),
+        );
     }
 
     let projected = current.saturating_add(added);

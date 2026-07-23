@@ -9,15 +9,17 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::combat::AttackTarget;
 use engine::game::zones::create_object;
+use engine::types::ability::ResolvedAbility;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ModalChoice, QuantityExpr, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::format::FormatConfig;
-use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, GameState, PendingCast, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
+use engine::types::mana::ManaCost;
 use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 
@@ -158,6 +160,16 @@ fn select_modes_candidate(indices: Vec<usize>) -> CandidateAction {
     CandidateAction {
         action: GameAction::SelectModes { indices },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
+    }
+}
+
+fn activate_ability_candidate(source_id: ObjectId, ability_index: usize) -> CandidateAction {
+    CandidateAction {
+        action: GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        },
+        metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }
 }
 
@@ -328,6 +340,50 @@ fn verdict_scales_direct_poison_by_clock_progress() {
     assert!(
         lethal_delta > previous,
         "reaching ten must outrank every non-lethal advance: {lethal_delta} vs {previous}"
+    );
+}
+
+/// `MIN_CLOCK_PROGRESS` floors the earliest counters onto a flat plateau: at 0
+/// and 1 existing poison the projected progress (0.1, 0.2) is below the floor,
+/// so both score the SAME delta. Deleting the floor would split them (0.50 vs
+/// 1.00), so the equality — not just a magnitude — is what pins the constant.
+#[test]
+fn verdict_floors_early_clock_progress_onto_a_plateau() {
+    let config = config();
+    let context = ai_context(&config);
+    let decision = priority_decision();
+
+    let score_at = |existing: u32| {
+        let mut state = state_with_players(2);
+        state.players[1].poison_counters = existing;
+        let spell = spell_object(
+            &mut state,
+            1,
+            vec![AbilityDefinition::new(
+                AbilityKind::Spell,
+                poison_effect(TargetFilter::Opponent),
+            )],
+        );
+        let candidate = cast_candidate(spell);
+        score_of(PoisonClockPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)))
+            .0
+    };
+
+    let at_zero = score_at(0);
+    let at_one = score_at(1);
+    assert_eq!(
+        at_zero, at_one,
+        "0 and 1 existing poison both sit on the MIN_CLOCK_PROGRESS floor"
+    );
+    // STRONG_MAX (the sub-lethal ceiling) × the 0.25 floor.
+    assert!(
+        (at_zero - crate::policies::registry::STRONG_MAX * 0.25).abs() < 1e-9,
+        "plateau delta must be STRONG_MAX × 0.25, got {at_zero}"
+    );
+    // And the plateau ends: 2 existing poison (progress 0.3) clears the floor.
+    assert!(
+        score_at(2) > at_one,
+        "the third counter must clear the floor and score higher"
     );
 }
 
@@ -565,10 +621,12 @@ fn verdict_scores_a_poison_source_attacking_a_player() {
     );
 }
 
-/// CR 104.3d: an 8-poison opponent facing a 2-power infect attacker is dead if
-/// the damage connects.
+/// CR 509.1a: an 8-poison opponent facing a 2-power infect attacker would be
+/// dead if the damage connects — but a declared attack can still be blocked or
+/// prevented, so the lethal combat swing is held at the `STRONG_MAX` ceiling,
+/// strictly below the critical band a guaranteed direct poison reaches.
 #[test]
-fn verdict_scores_a_lethal_infect_attack_as_critical() {
+fn verdict_caps_a_lethal_infect_attack_below_critical() {
     let config = config();
     let context = ai_context(&config);
     let decision = priority_decision();
@@ -580,7 +638,36 @@ fn verdict_scores_a_lethal_infect_attack_as_critical() {
     let (delta, reason) =
         score_of(PoisonClockPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)));
     assert_eq!(reason.kind, "poison_clock_lethal");
-    assert_eq!(delta, config.policy_penalties.poison_clock_pressure);
+    assert_eq!(
+        delta,
+        crate::policies::registry::STRONG_MAX,
+        "combat lethal is capped at STRONG_MAX (the swing can be blocked)"
+    );
+    assert!(
+        delta < config.policy_penalties.poison_clock_pressure,
+        "and stays strictly below the guaranteed-direct-poison magnitude"
+    );
+
+    // Control: a resolving direct-poison spell that ALSO reaches ten (from 9,
+    // +1) is a guaranteed counter, so it may enter the critical band that the
+    // blockable combat swing cannot.
+    state.players[1].poison_counters = 9;
+    let spell = spell_object(
+        &mut state,
+        9,
+        vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            poison_effect(TargetFilter::Opponent),
+        )],
+    );
+    let cast = cast_candidate(spell);
+    let (cast_delta, cast_reason) =
+        score_of(PoisonClockPolicy.verdict(&ctx(&state, &cast, &decision, &context, &config)));
+    assert_eq!(cast_reason.kind, "poison_clock_lethal");
+    assert!(
+        cast_delta > crate::policies::registry::STRONG_MAX,
+        "a guaranteed lethal counter reaches critical while a blockable combat swing does not"
+    );
 }
 
 /// Poison from several attackers pointed at one seat shares that seat's clock.
@@ -807,4 +894,177 @@ fn registry_skips_the_policy_for_an_uncommitted_deck() {
         routed_verdict(&ctx(&state, &candidate, &decision, &context, &config)).is_none(),
         "below POISON_CLOCK_FLOOR the policy must not run at all"
     );
+}
+
+/// End-to-end routing for the policy's PRIMARY seam: a direct-poison
+/// `CastSpell` under `WaitingFor::Priority` classifies to
+/// `DecisionKind::CastSpell`, which the policy declares. Without this the
+/// `CastSpell` entry in `decision_kinds()` could be deleted with the whole
+/// suite still green — the seam would be dead in production while every
+/// direct-poison test still passed by calling `verdict()` directly.
+#[test]
+fn registry_routes_cast_spell_to_the_policy() {
+    let config = config();
+    let context = committed_context(&config);
+    let mut state = state_with_players(2);
+    state.players[1].poison_counters = 9;
+    let spell = spell_object(
+        &mut state,
+        1,
+        vec![AbilityDefinition::new(
+            AbilityKind::Spell,
+            poison_effect(TargetFilter::Opponent),
+        )],
+    );
+    let decision = priority_decision();
+
+    let candidate = cast_candidate(spell);
+    let (delta, reason) = routed_verdict(&ctx(&state, &candidate, &decision, &context, &config))
+        .expect("a direct-poison cast must reach the policy through the registry");
+    assert_eq!(reason.kind, "poison_clock_lethal");
+    assert!(delta > 0.0);
+
+    // A non-poison cast is still routed under the same kind; it just scores nil.
+    let inert = spell_object(
+        &mut state,
+        2,
+        vec![AbilityDefinition::new(AbilityKind::Spell, draw_effect())],
+    );
+    let (inert_delta, inert_reason) = routed_verdict(&ctx(
+        &state,
+        &cast_candidate(inert),
+        &decision,
+        &context,
+        &config,
+    ))
+    .expect("a non-poison cast is still routed under DecisionKind::CastSpell");
+    assert_eq!(inert_reason.kind, "poison_clock_na");
+    assert!(
+        delta > inert_delta,
+        "the poison cast must outrank an inert one through the pipeline"
+    );
+}
+
+/// End-to-end routing for an activated poison ability: an
+/// `ActivateAbility` action under `WaitingFor::Priority` classifies to
+/// `DecisionKind::ActivateAbility`, exercising the `obj.abilities.get(index)`
+/// lookup that `verdict()`-direct tests bypass.
+#[test]
+fn registry_routes_activate_ability_to_the_policy() {
+    let config = config();
+    let context = committed_context(&config);
+    let mut state = state_with_players(2);
+    state.players[1].poison_counters = 9;
+    // A permanent with two activated abilities: index 0 draws, index 1 poisons.
+    let source = creature_object(&mut state, 1, Vec::new(), 1);
+    *Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities) = vec![
+        AbilityDefinition::new(AbilityKind::Activated, draw_effect()),
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            poison_effect(TargetFilter::Opponent),
+        ),
+    ];
+    let decision = priority_decision();
+
+    let (poison_delta, poison_reason) = routed_verdict(&ctx(
+        &state,
+        &activate_ability_candidate(source, 1),
+        &decision,
+        &context,
+        &config,
+    ))
+    .expect("the poison ability must reach the policy through the registry");
+    assert_eq!(poison_reason.kind, "poison_clock_lethal");
+    assert!(poison_delta > 0.0);
+
+    // The draw ability on the same object is routed but scores nothing — the
+    // per-ability `ability_index` lookup is discriminating, not the object.
+    let (draw_delta, draw_reason) = routed_verdict(&ctx(
+        &state,
+        &activate_ability_candidate(source, 0),
+        &decision,
+        &context,
+        &config,
+    ))
+    .expect("the non-poison ability is still routed");
+    assert_eq!(draw_reason.kind, "poison_clock_na");
+    assert_eq!(draw_delta, 0.0);
+
+    // An out-of-range index degrades to neutral, never panics.
+    let (oob_delta, oob_reason) = routed_verdict(&ctx(
+        &state,
+        &activate_ability_candidate(source, 9),
+        &decision,
+        &context,
+        &config,
+    ))
+    .expect("an out-of-range ability index is still routed");
+    assert_eq!(oob_reason.kind, "poison_clock_na");
+    assert_eq!(oob_delta, 0.0);
+}
+
+/// End-to-end routing for a modal SPELL (as opposed to the modal *ability*
+/// covered above): `WaitingFor::ModeChoice` carries a `PendingCast`, and the
+/// policy reads the chosen mode from the spell object's spell-kind abilities via
+/// `modal_spell_mode_ability_refs` — the sole production consumer of that new
+/// engine API. The poison and non-poison modes come out discriminated.
+#[test]
+fn registry_routes_modal_spell_mode_choice_to_the_policy() {
+    let config = config();
+    let context = committed_context(&config);
+    let mut state = state_with_players(2);
+    state.players[1].poison_counters = 9;
+
+    // A modal spell: its two printed modes are spell-kind abilities on the
+    // object (mode 0 draws, mode 1 poisons).
+    let spell = spell_object(
+        &mut state,
+        1,
+        vec![
+            AbilityDefinition::new(AbilityKind::Spell, draw_effect()),
+            AbilityDefinition::new(AbilityKind::Spell, poison_effect(TargetFilter::Opponent)),
+        ],
+    );
+    let modal = ModalChoice {
+        min_choices: 1,
+        max_choices: 1,
+        mode_count: 2,
+        ..ModalChoice::default()
+    };
+    state.objects.get_mut(&spell).unwrap().modal = Some(modal.clone());
+
+    // A `WaitingFor::ModeChoice` whose PendingCast points at that spell object.
+    let resolved = ResolvedAbility::new(draw_effect(), Vec::new(), spell, AI);
+    let pending_cast = PendingCast::new(spell, CardId(spell.0), resolved, ManaCost::zero());
+    let decision = AiDecisionContext {
+        waiting_for: WaitingFor::ModeChoice {
+            player: AI,
+            modal,
+            pending_cast: Box::new(pending_cast),
+            unavailable_modes: Vec::new(),
+        },
+        candidates: Vec::new(),
+    };
+
+    let (poison_delta, poison_reason) = routed_verdict(&ctx(
+        &state,
+        &select_modes_candidate(vec![1]),
+        &decision,
+        &context,
+        &config,
+    ))
+    .expect("the poison spell-mode must reach the policy through the registry");
+    assert_eq!(poison_reason.kind, "poison_clock_lethal");
+    assert!(poison_delta > 0.0);
+
+    let (draw_delta, draw_reason) = routed_verdict(&ctx(
+        &state,
+        &select_modes_candidate(vec![0]),
+        &decision,
+        &context,
+        &config,
+    ))
+    .expect("the non-poison spell-mode is still routed");
+    assert_eq!(draw_reason.kind, "poison_clock_na");
+    assert_eq!(draw_delta, 0.0);
 }
