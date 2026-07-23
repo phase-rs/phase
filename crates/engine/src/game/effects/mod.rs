@@ -2635,7 +2635,7 @@ pub(super) fn resolve_optional_effect_decision(
                 // carries its OWN target filter (e.g. a Chaos-Wand cleanup that
                 // returns `ExiledBySource` cards) from being clobbered with the
                 // parent's targets.
-                if should_propagate_parent_targets(ability, &resolved)
+                if should_propagate_parent_targets(&ability, &resolved)
                     && effect_refs_parent_target(&resolved.effect)
                 {
                     resolved.targets = ability.targets.clone();
