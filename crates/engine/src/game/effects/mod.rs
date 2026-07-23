@@ -14722,7 +14722,7 @@ mod tests {
     /// record. Without that fallback this returns `None`.
     #[test]
     fn sacrificed_referent_binds_zone_changed_record_on_lki_cache_miss() {
-        let mut state = GameState::new_two_player(42);
+        let state = GameState::new_two_player(42);
         let sacrificed = ObjectId(50);
         let unrelated_move = ObjectId(51);
         // Discriminator: no lki_cache entry for the sacrificed object.
