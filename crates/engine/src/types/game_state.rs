@@ -50,10 +50,12 @@ use super::resolution::{
     ResolutionFrame, ResolutionStack, ResolutionStackError, ResolutionStateWire,
 };
 use super::resolved_commands::{
-    ManaPaymentRecipient, ResolvedInformationAudience, ResolvedInformationCommand,
-    ResolvedInformationEdit, ResolvedInformationLifetime, ResolvedInformationReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedPlayerEdit, ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
+    ManaPaymentRecipient, ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedInformationAudience,
+    ResolvedInformationCommand, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedInformationReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedPlayerEdit,
+    ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
     ResolvedRngReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
@@ -13791,12 +13793,18 @@ impl GameState {
         pending: PendingContinuation,
     ) -> Result<(), ResolutionStackError> {
         let choose_zone_trigger_context = pending.trigger_context.clone();
-        self.resolution_stack.insert_parent_of_active(
-            super::resolution::ResolutionFrame::AbilityContinuation(AbilityContinuationFrame {
-                pending,
-                choose_zone_trigger_context,
-            }),
-        )
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::InsertParentOfActive {
+            frame: super::resolution::ResolutionFrame::AbilityContinuation(
+                AbilityContinuationFrame {
+                    pending,
+                    choose_zone_trigger_context,
+                },
+            ),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
     }
 
     /// Inserts the continuation outside an active general-drain/draw pair so
@@ -14872,9 +14880,12 @@ impl GameState {
         let mut drains = PostReplacementDrainStack::default();
         let installed = drains.install(drain, policy);
         if self.active_multi_draw_frame().is_some() {
-            self.resolution_stack
-                .insert_parent_of_active(ResolutionFrame::PostReplacement(drains))
-                .expect("an active multi-draw frame accepts its exact post-replacement parent");
+            self.resolve_and_apply_frame_transition(
+                ResolvedFrameTransition::InsertParentOfActive {
+                    frame: ResolutionFrame::PostReplacement(drains),
+                },
+            )
+            .expect("an active multi-draw frame accepts its exact post-replacement parent");
         } else {
             self.resolution_stack.push_post_replacement(drains);
         }
@@ -15267,6 +15278,46 @@ impl GameState {
             .record_mana_insert(command)
             .expect("stamped mana must have one unique journal producer");
         Some(unit)
+    }
+
+    /// CR 608.2c: Applies one already-resolved frame transition in the
+    /// instruction order that the resolving spell or ability established.
+    pub fn apply_resolved_frame_transition(
+        &mut self,
+        command: &ResolvedFrameTransitionCommand,
+    ) -> Result<(), ResolvedFrameTransitionReplayInvariantError> {
+        let mut resolution_stack = self.resolution_stack.clone();
+        match &command.transition {
+            ResolvedFrameTransition::Push { frame } => resolution_stack.push_inner(frame.clone()),
+            ResolvedFrameTransition::InsertParentOfActive { frame } => {
+                resolution_stack.insert_parent_of_active(frame.clone())?;
+            }
+            ResolvedFrameTransition::PopExpected { kind } => {
+                let _ = resolution_stack.pop_expected(*kind)?;
+            }
+            ResolvedFrameTransition::ReplaceActive { frame } => {
+                resolution_stack.replace_active(frame.clone())?;
+            }
+        }
+        resolution_stack.validate(&self.waiting_for)?;
+        self.resolution_stack = resolution_stack;
+        Ok(())
+    }
+
+    /// Applies and journals one bounded resolution-frame transition.
+    pub fn resolve_and_apply_frame_transition(
+        &mut self,
+        transition: ResolvedFrameTransition,
+    ) -> Result<ResolvedFrameTransitionCommand, ResolvedFrameTransitionReplayInvariantError> {
+        let command = ResolvedFrameTransitionCommand {
+            transition,
+            cause: self.current_or_begin_rules_execution_node(),
+        };
+        self.apply_resolved_frame_transition(&command)?;
+        self.resolved_rules_journal
+            .record_frame_transition(command.clone())
+            .expect("resolved frame transition must have a live journal cause");
+        Ok(command)
     }
 
     /// Applies and journals one already-resolved player resource edit.

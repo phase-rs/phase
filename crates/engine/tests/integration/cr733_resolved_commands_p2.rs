@@ -86,6 +86,11 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::Information(command) => {
             state.apply_resolved_information(command).unwrap();
         }
+        ResolvedRulesCommand::FrameTransition(command) => {
+            state
+                .apply_resolved_frame_transition(command.as_ref())
+                .unwrap();
+        }
     }
 }
 
@@ -173,7 +178,10 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ObjectCounter(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
-            | ResolvedRulesCommand::Information(_) => apply_semantic_command(&mut replay, command),
+            | ResolvedRulesCommand::Information(_)
+            | ResolvedRulesCommand::FrameTransition(_) => {
+                apply_semantic_command(&mut replay, command)
+            }
         }
     }
     assert!(

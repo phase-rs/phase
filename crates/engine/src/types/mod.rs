@@ -81,10 +81,12 @@ pub use resolution::{
 };
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
-    ResolvedLedgerEdit, ResolvedLedgerEditCommand, ResolvedLedgerEditReplayInvariantError,
-    ResolvedLibraryShuffleCommand, ResolvedLibraryShuffleReplayInvariantError,
-    ResolvedManaInsertCommand, ResolvedManaReplayInvariantError, ResolvedManaSpendCommand,
-    ResolvedManaSpentUnit, ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
+    ResolvedFrameTransition, ResolvedFrameTransitionCommand,
+    ResolvedFrameTransitionReplayInvariantError, ResolvedLedgerEdit, ResolvedLedgerEditCommand,
+    ResolvedLedgerEditReplayInvariantError, ResolvedLibraryShuffleCommand,
+    ResolvedLibraryShuffleReplayInvariantError, ResolvedManaInsertCommand,
+    ResolvedManaReplayInvariantError, ResolvedManaSpendCommand, ResolvedManaSpentUnit,
+    ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
     ResolvedObjectCounterReplayInvariantError, ResolvedObjectStatus, ResolvedObjectStatusCommand,
     ResolvedObjectStatusReplayInvariantError, ResolvedOncePerTurnPermission, ResolvedPlayerEdit,
     ResolvedPlayerEditCommand, ResolvedPlayerEditReplayInvariantError,
