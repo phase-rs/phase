@@ -36283,6 +36283,100 @@ mod namor_colored_pip_cast_trigger {
     }
 }
 
+/// CR 107.4 + CR 202.3 + CR 603.2 (issue #1718): Ovika, Enigma Goliath —
+/// runtime cast-pipeline coverage. "Whenever you cast a noncreature spell,
+/// create X 1/1 red Phyrexian Goblin creature tokens, where X is the mana value
+/// of that spell. They gain haste until end of turn." The count binds the
+/// triggering spell's mana value via the prepositional of-form anaphor
+/// (`ObjectManaValue { EventSource }`). Before the parser fix the token clause
+/// "create X … tokens, where X is the mana value of that spell" dropped to
+/// `Unimplemented`, so the trigger fired but created ZERO tokens — the exact
+/// reported symptom.
+mod ovika_noncreature_spell_token_trigger {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::mana::{ManaCost, ManaUnit};
+
+    const OVIKA_ORACLE: &str = "Flying\nWard—{3}, Pay 3 life.\nWhenever you cast a noncreature spell, create X 1/1 red Phyrexian Goblin creature tokens, where X is the mana value of that spell. They gain haste until end of turn.";
+
+    /// Count token permanents a player controls on the battlefield.
+    fn token_count(runner: &crate::game::scenario::GameRunner, player: PlayerId) -> usize {
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.controller == player && o.is_token)
+            .count()
+    }
+
+    /// Cast a benign noncreature spell of the given mana value with Ovika on the
+    /// battlefield, resolve the whole stack, and report how many tokens P0 ends
+    /// up controlling.
+    fn cast_noncreature_spell_of_mana_value(mv: u32) -> crate::game::scenario::GameRunner {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_creature_from_oracle(P0, "Ovika, Enigma Goliath", 7, 7, OVIKA_ORACLE);
+        // A noncreature spell whose only mana is generic, so its mana value is
+        // exactly `mv`. Benign resolution (gain 1 life) keeps the state simple.
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Test Filler", true, "You gain 1 life.")
+            .with_mana_cost(ManaCost::generic(mv))
+            .id();
+        // CR 601.2f: fund the generic cost from the pool so the driver auto-pays.
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(9_999), false, vec![]); mv as usize],
+        );
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        runner
+    }
+
+    #[test]
+    fn casting_mana_value_three_spell_creates_three_goblins() {
+        let runner = cast_noncreature_spell_of_mana_value(3);
+        assert_eq!(
+            token_count(&runner, P0),
+            3,
+            "X must bind the triggering spell's mana value (3), got {}",
+            token_count(&runner, P0)
+        );
+        // Every created token is a red Phyrexian Goblin, not a generic token.
+        for obj in runner
+            .state()
+            .objects
+            .values()
+            .filter(|o| o.zone == Zone::Battlefield && o.is_token && o.controller == P0)
+        {
+            assert!(
+                obj.card_types.subtypes.iter().any(|s| s == "Goblin"),
+                "token must be a Goblin, got subtypes {:?}",
+                obj.card_types.subtypes
+            );
+            assert!(
+                obj.keywords.contains(&Keyword::Haste),
+                "each token must gain haste (\"They gain haste until end of turn\"), \
+                 got keywords {:?}",
+                obj.keywords
+            );
+        }
+    }
+
+    #[test]
+    fn token_count_tracks_spell_mana_value() {
+        // Control: a mana-value-2 spell makes exactly two tokens, proving the
+        // count reads the triggering spell's mana value rather than a fixed
+        // number or the generic (amount-less) SpellCast event context.
+        let runner = cast_noncreature_spell_of_mana_value(2);
+        assert_eq!(
+            token_count(&runner, P0),
+            2,
+            "X must track the spell's mana value (2), got {}",
+            token_count(&runner, P0)
+        );
+    }
+}
+
 /// CR 701.43a / CR 701.43b / CR 502.3: Exert cost — Arena of Glory class.
 mod exert_cost {
     use super::*;

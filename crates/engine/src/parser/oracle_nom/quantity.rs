@@ -2950,11 +2950,16 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     // building block. Only fires when the phrase actually used the "target"
     // keyword; the bare "that creature's mana value" possessive stays
     // `ObjectManaValue { scope: Target }`.
+    // Optional leading article for the prepositional "the mana value of ..."
+    // form (mirrors `parse_cost_paid_object_prepositional_ref`). The possessive
+    // fallback below re-parses from the ORIGINAL `input`, so consuming the
+    // article here only affects the "of"-form branch.
+    let (of_form_input, _) = opt(tag::<_, _, OracleError<'_>>("the ")).parse(input)?;
     if let Ok((rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("mana value of "),
         tag("converted mana cost of "),
     ))
-    .parse(input)
+    .parse(of_form_input)
     {
         // CR 608.2c + CR 701.20b: "the card revealed by the other player" — the
         // OTHER revealer's revealed card in an exactly-two-target symmetric reveal
@@ -2974,13 +2979,28 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
                 },
             ));
         }
-        let (after, filter) = parse_target_with_syntax_target_keyword(rest)?;
-        return Ok((
-            after,
-            QuantityRef::TargetObjectManaValue {
-                filter: Box::new(filter),
-            },
-        ));
+        // CR 202.3 + CR 115.1: targeted of-form ("the mana value of target
+        // <filter>") reads the ref's own target slot.
+        if let Ok((after, filter)) = parse_target_with_syntax_target_keyword(rest) {
+            return Ok((
+                after,
+                QuantityRef::TargetObjectManaValue {
+                    filter: Box::new(filter),
+                },
+            ));
+        }
+        // CR 202.3 + CR 608.2c: non-target prepositional anaphor — "the mana
+        // value of that spell" (Ovika, Enigma Goliath). Delegates to the SHARED
+        // prepositional object-scope grammar `parse_object_prepositional_scope`
+        // (the one `parse_color_of_object_for_each` /
+        // `parse_object_typeline_scope` already use), so the mana-value axis
+        // inherits its full sibling coverage — `it` / `the enchanted creature` /
+        // `the equipped creature` recipient forms and the demonstrative /
+        // triggering-spell referents — instead of a parallel table that would
+        // drift. Without this branch the clause errored out and the whole
+        // "create X … tokens, where X is …" effect dropped to `Unimplemented`.
+        let (after, scope) = parse_object_prepositional_scope(rest)?;
+        return Ok((after, QuantityRef::ObjectManaValue { scope }));
     }
 
     let (rest, scope) = parse_object_possessive_scope(input)?;
@@ -4344,7 +4364,11 @@ fn parse_object_typeline_component_count_for_each(input: &str) -> OracleResult<'
 }
 
 fn parse_object_typeline_scope(input: &str) -> OracleResult<'_, ObjectScope> {
-    alt((parse_object_color_of_scope, parse_object_possessive_scope)).parse(input)
+    alt((
+        parse_object_prepositional_scope,
+        parse_object_possessive_scope,
+    ))
+    .parse(input)
 }
 
 /// CR 201.1 + CR 201.2: Parse
@@ -4381,11 +4405,11 @@ fn parse_mana_symbols_in_object_mana_cost_for_each(input: &str) -> OracleResult<
 
 /// CR 105.1 + CR 601.2f: "for each color[s] of <object>" — scoped object-color
 /// count for cost reductions and similar per-color riders. Delegates object
-/// binding to `parse_object_color_of_scope` (target/enchanted/equipped/it-
+/// binding to `parse_object_prepositional_scope` (target/enchanted/equipped/it-
 /// targets anaphors).
 fn parse_color_of_object_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((tag("color of "), tag("colors of "))).parse(input)?;
-    let (rest, scope) = parse_object_color_of_scope(rest)?;
+    let (rest, scope) = parse_object_prepositional_scope(rest)?;
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
 }
 
@@ -4417,7 +4441,7 @@ fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityR
         value(ObjectScope::EventSource, tag("colors that spell is")),
         |i| {
             let (rest, _) = tag("colors of ").parse(i)?;
-            let (rest, scope) = parse_object_color_of_scope(rest)?;
+            let (rest, scope) = parse_object_prepositional_scope(rest)?;
             Ok((rest, scope))
         },
     ))
@@ -4511,7 +4535,15 @@ fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     .parse(input)
 }
 
-fn parse_object_color_of_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+/// CR 202.3 + CR 608.2c: the shared prepositional ("of <object>") object-scope
+/// grammar — the "of"-form sibling of [`parse_object_possessive_scope`]. It is
+/// property-agnostic: colors (`parse_color_of_object_for_each`), typeline
+/// components (`parse_object_typeline_scope`) and mana value
+/// (`parse_object_mana_value_ref`) all bind their object through this one table
+/// so the anaphor coverage cannot drift per property. Callers that support a
+/// `target ...` phrase run their own `parse_target` path first; the
+/// `target creature` / `target permanent` arms here are the bare fallback.
+fn parse_object_prepositional_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
         value(ObjectScope::Recipient, tag("it")),
         value(ObjectScope::Recipient, tag("the enchanted creature")),
@@ -10675,6 +10707,63 @@ mod tests {
                 }
             ),
             "the sacrificed-permanent COST referent must stay CostPaidObject, got {q:?}"
+        );
+    }
+
+    /// CR 202.3 + CR 608.2c (issue #1718 — Ovika, Enigma Goliath): the
+    /// prepositional "the mana value of that spell" of-form must bind to the
+    /// SAME referent as the possessive front-form "that spell's mana value".
+    /// Before the fix the of-form required a "target" keyword and errored out,
+    /// dropping the whole "create X … tokens, where X is the mana value of that
+    /// spell" effect to `Unimplemented`.
+    #[test]
+    fn mana_value_of_form_mirrors_possessive_scope() {
+        // Each of-form phrase must produce the same ObjectManaValue scope as its
+        // possessive counterpart (asserted by `parse_object_possessive_scope`).
+        let cases = [
+            ("the mana value of that spell", ObjectScope::EventSource),
+            ("mana value of that spell", ObjectScope::EventSource),
+            (
+                "the mana value of the triggering spell",
+                ObjectScope::EventSource,
+            ),
+            ("the mana value of that creature", ObjectScope::Target),
+            ("the mana value of that permanent", ObjectScope::Target),
+            ("the mana value of this spell", ObjectScope::Source),
+            ("the mana value of this creature", ObjectScope::Source),
+            // Sibling recipient forms inherited from the shared prepositional
+            // object-scope table (`parse_object_prepositional_scope`) — these
+            // are the forms a mana-value-only anaphor table would have missed.
+            ("the mana value of it", ObjectScope::Recipient),
+            (
+                "the mana value of the enchanted creature",
+                ObjectScope::Recipient,
+            ),
+            (
+                "the mana value of the equipped creature",
+                ObjectScope::Recipient,
+            ),
+        ];
+        for (phrase, expected_scope) in cases {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|_| panic!("of-form {phrase:?} should bind"));
+            assert_eq!(rest, "", "of-form {phrase:?} left residue {rest:?}");
+            assert_eq!(
+                q,
+                QuantityRef::ObjectManaValue {
+                    scope: expected_scope,
+                },
+                "of-form {phrase:?} must bind ObjectManaValue{{{expected_scope:?}}}, got {q:?}"
+            );
+        }
+
+        // Negative control: the "target" of-form still routes to the target-slot
+        // reference (`TargetObjectManaValue`), never the demonstrative anaphor.
+        let (_, q) = parse_quantity_ref("mana value of target creature")
+            .expect("targeted of-form must still bind");
+        assert!(
+            matches!(q, QuantityRef::TargetObjectManaValue { .. }),
+            "targeted of-form must stay TargetObjectManaValue, got {q:?}"
         );
     }
 }
