@@ -108,7 +108,9 @@ const {
     {
       getState: () => gameStoreState,
       setState: (partial: Record<string, unknown>) => Object.assign(gameStoreState, partial),
-      subscribe: vi.fn(() => () => {}),
+      subscribe: vi.fn<(listener: (state: typeof gameStoreState) => void) => () => void>(
+        () => () => {},
+      ),
     },
   );
   const multiplayerState = {
@@ -281,6 +283,8 @@ import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useGameStore.subscribe.mockReset();
+    useGameStore.subscribe.mockImplementation(() => () => {});
     clearActiveGame.mockReset();
     ensureNativeEngine.mockReset();
     fetchAvatarArtUrl.mockReset();
@@ -353,6 +357,7 @@ describe("GameProvider native AI routing", () => {
   });
 
   it("uses each commander's name for native AI opponents", async () => {
+    gameStoreState.gameId = "native-commander-names";
     gameStoreState.gameState = {
       command_zone: [1, 2],
       objects: {
@@ -371,6 +376,52 @@ describe("GameProvider native AI routing", () => {
       expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
         expect.objectContaining({
           playerNames: new Map([[0, "Aesi"], [1, "Muldrotha"]]),
+        }),
+      );
+    });
+  });
+
+  it("waits for the new AI game state before assigning commander names", async () => {
+    let gameStateListener: ((state: typeof gameStoreState) => void) | undefined;
+    useGameStore.subscribe.mockImplementation((listener) => {
+      gameStateListener = listener;
+      return () => {};
+    });
+    gameStoreState.gameId = "previous-ai-game";
+    gameStoreState.gameState = {
+      command_zone: [1, 2],
+      objects: {
+        1: { name: "Aesi, Tyrant of Gyre Strait", owner: 0, is_commander: true },
+        2: { name: "Muldrotha, the Gravetide", owner: 1, is_commander: true },
+      },
+    } as never;
+
+    render(
+      <GameProvider gameId="next-ai-game" mode="ai">
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.initGame.mock.calls.some(([id]) => id === "next-ai-game")).toBe(true);
+    });
+    expect(useMultiplayerStore.setState).not.toHaveBeenCalled();
+
+    gameStoreState.gameId = "next-ai-game";
+    gameStoreState.gameState = {
+      command_zone: [3, 4],
+      objects: {
+        3: { name: "Tatyova, Benthic Druid", owner: 0, is_commander: true },
+        4: { name: "Krenko, Mob Boss", owner: 1, is_commander: true },
+      },
+    } as never;
+    expect(gameStateListener).toBeDefined();
+    gameStateListener!(gameStoreState);
+
+    await waitFor(() => {
+      expect(useMultiplayerStore.setState).toHaveBeenCalledWith(
+        expect.objectContaining({
+          playerNames: new Map([[0, "Tatyova"], [1, "Krenko"]]),
         }),
       );
     });

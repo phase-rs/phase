@@ -599,16 +599,19 @@ export function GameProvider({
   useEffect(() => {
     if (mode !== "ai") return;
     let applied = false;
-    const unsub = useGameStore.subscribe((state) => {
-      if (applied || !state.gameState?.command_zone?.length) return;
-      applied = true;
+    const applyCommanderAvatars = (state: ReturnType<typeof useGameStore.getState>) => {
+      if (state.gameId !== gameId || !state.gameState?.command_zone?.length) return false;
       setupCommanderAvatars(state.gameState);
+      return true;
+    };
+    const unsub = useGameStore.subscribe((state) => {
+      if (applied || !applyCommanderAvatars(state)) return;
+      applied = true;
       unsub();
     });
     const state = useGameStore.getState();
-    if (!applied && state.gameState?.command_zone?.length) {
+    if (!applied && applyCommanderAvatars(state)) {
       applied = true;
-      setupCommanderAvatars(state.gameState);
       unsub();
     }
     return unsub;
