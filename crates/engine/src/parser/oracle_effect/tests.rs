@@ -48716,3 +48716,12 @@ fn unless_extraction_offsets_survive_unicode_case_fold() {
          the boundary, and the mask must not eat the quote)"
     );
 }
+
+#[test]
+fn scratch_riptide_gearhulk_trace() {
+    let def = parse_effect_chain(
+        "for each opponent, put up to one target nonland permanent that player controls into its owner's library third from the top",
+        AbilityKind::Spell,
+    );
+    panic!("{:#?}", def);
+}
