@@ -14,6 +14,7 @@ use super::game_state::SpellCastRecord;
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
+use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
 
 /// Globally ordered identity of a resolved command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -263,11 +264,30 @@ pub struct ResolvedLibraryShuffleCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// One bounded structural transition of the resolution-frame stack.
+///
+/// This carries only the primitive operation and its native operand. It never
+/// records stack positions, frame identities, or displaced frame payloads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ResolvedFrameTransition {
+    Push { frame: ResolutionFrame },
+    InsertParentOfActive { frame: ResolutionFrame },
+    PopExpected { kind: FrameKind },
+    ReplaceActive { frame: ResolutionFrame },
+}
+
+/// One exact resolution-frame transition under its causal rules-execution node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedFrameTransitionCommand {
+    pub transition: ResolvedFrameTransition,
+    pub cause: RulesExecutionNodeRef,
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
 /// authority rather than by a central replay dispatcher.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ResolvedRulesCommand {
     ManaInsert(ResolvedManaInsertCommand),
     ManaSpend(ResolvedManaSpendCommand),
@@ -277,6 +297,14 @@ pub enum ResolvedRulesCommand {
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
+    FrameTransition(Box<ResolvedFrameTransitionCommand>),
+}
+
+/// Typed failure while applying an already-resolved frame transition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedFrameTransitionReplayInvariantError {
+    #[error(transparent)]
+    Stack(#[from] ResolutionStackError),
 }
 
 /// Typed failure while advancing the canonical ChaCha20 entropy high-water mark.
@@ -700,7 +728,7 @@ pub struct SettlementNode {
 }
 
 /// One command slot assigned to a journal node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedCommandJournalEntry {
     pub ordinal: ResolvedCommandOrdinal,
     pub node: RulesExecutionNodeRef,
@@ -781,7 +809,7 @@ impl std::fmt::Display for ResolvedRulesJournalError {
 impl std::error::Error for ResolvedRulesJournalError {}
 
 /// Persistent resolved rules journal.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResolvedRulesJournal {
     next_command_ordinal: u64,
     next_settlement_node_ordinal: u64,
@@ -1116,6 +1144,17 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::LibraryShuffle(command))
     }
 
+    /// Records one exact bounded resolution-frame transition under its causal node.
+    pub fn record_frame_transition(
+        &mut self,
+        command: ResolvedFrameTransitionCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::FrameTransition(Box::new(command)),
+        )
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -1316,7 +1355,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ObjectCounter(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
-                | ResolvedRulesCommand::LibraryShuffle(_) => {}
+                | ResolvedRulesCommand::LibraryShuffle(_)
+                | ResolvedRulesCommand::FrameTransition(_) => {}
             }
         }
         for node in &self.nodes {
@@ -1545,6 +1585,13 @@ impl ResolvedRulesJournal {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "library shuffle command has an invalid receipt or unrelated cause"
                             .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::FrameTransition(command) => {
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "frame-transition command has an unrelated cause".to_string(),
                     ));
                 }
             }
