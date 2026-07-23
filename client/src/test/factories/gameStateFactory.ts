@@ -154,7 +154,7 @@ export const buildCommanderFormatConfig = (
 
 export class PriorityWaitingForFactory extends PlayerWaitingForFactory<PriorityWaitingFor> {}
 
-export const priorityWaitingForFactory = PriorityWaitingForFactory.define<PriorityWaitingFor>(() => ({
+export const priorityWaitingForFactory = PriorityWaitingForFactory.define((): PriorityWaitingFor => ({
   type: "Priority",
   data: { player: 0 },
 }));
@@ -167,7 +167,7 @@ export const buildPriorityWaitingFor = (
 
 export class ManaPaymentWaitingForFactory extends PlayerWaitingForFactory<ManaPaymentWaitingFor> {}
 
-export const manaPaymentWaitingForFactory = ManaPaymentWaitingForFactory.define<ManaPaymentWaitingFor>(() => ({
+export const manaPaymentWaitingForFactory = ManaPaymentWaitingForFactory.define((): ManaPaymentWaitingFor => ({
   type: "ManaPayment",
   data: { player: 0 },
 }));
@@ -217,7 +217,7 @@ export const buildTargetSelectionProgress = (
 export class TargetSelectionWaitingForFactory extends PlayerWaitingForFactory<TargetSelectionWaitingFor> {}
 
 export const targetSelectionWaitingForFactory =
-  TargetSelectionWaitingForFactory.define<TargetSelectionWaitingFor>(() => ({
+  TargetSelectionWaitingForFactory.define((): TargetSelectionWaitingFor => ({
     type: "TargetSelection",
     data: {
       player: 0,
@@ -236,7 +236,7 @@ export const buildTargetSelectionWaitingFor = (
 export class TriggerTargetSelectionWaitingForFactory extends PlayerWaitingForFactory<TriggerTargetSelectionWaitingFor> {}
 
 export const triggerTargetSelectionWaitingForFactory =
-  TriggerTargetSelectionWaitingForFactory.define<TriggerTargetSelectionWaitingFor>(() => ({
+  TriggerTargetSelectionWaitingForFactory.define((): TriggerTargetSelectionWaitingFor => ({
     type: "TriggerTargetSelection",
     data: {
       player: 0,
@@ -254,7 +254,7 @@ export const buildTriggerTargetSelectionWaitingFor = (
 export class ChooseXValueWaitingForFactory extends PlayerWaitingForFactory<ChooseXValueWaitingFor> {}
 
 export const chooseXValueWaitingForFactory =
-  ChooseXValueWaitingForFactory.define<ChooseXValueWaitingFor>(() => ({
+  ChooseXValueWaitingForFactory.define((): ChooseXValueWaitingFor => ({
     type: "ChooseXValue",
     data: {
       player: 0,
@@ -280,7 +280,7 @@ export class AssistPaymentWaitingForFactory extends WaitingForFactory<AssistPaym
 }
 
 export const assistPaymentWaitingForFactory =
-  AssistPaymentWaitingForFactory.define<AssistPaymentWaitingFor>(() => ({
+  AssistPaymentWaitingForFactory.define((): AssistPaymentWaitingFor => ({
     type: "AssistPayment",
     data: {
       caster: 1,
@@ -310,7 +310,7 @@ export class CastOfferWaitingForFactory extends PlayerWaitingForFactory<CastOffe
   }
 }
 
-export const castOfferWaitingForFactory = CastOfferWaitingForFactory.define<CastOfferWaitingFor>(() => ({
+export const castOfferWaitingForFactory = CastOfferWaitingForFactory.define((): CastOfferWaitingFor => ({
   type: "CastOffer",
   data: {
     player: 0,
@@ -431,7 +431,7 @@ export class LoopShortcutWaitingForFactory extends WaitingForFactory<LoopShortcu
   }
 }
 
-export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.define<LoopShortcutWaitingFor>(() => ({
+export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.define((): LoopShortcutWaitingFor => ({
   type: "LoopShortcut",
   data: {
     proposer: 0,
@@ -479,7 +479,7 @@ export class RespondToShortcutWaitingForFactory extends PlayerWaitingForFactory<
 }
 
 export const respondToShortcutWaitingForFactory =
-  RespondToShortcutWaitingForFactory.define<RespondToShortcutWaitingFor>(() => ({
+  RespondToShortcutWaitingForFactory.define((): RespondToShortcutWaitingFor => ({
     type: "RespondToShortcut",
     data: {
       player: 0,
