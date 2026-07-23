@@ -10,9 +10,9 @@ use super::ability::{
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
-    ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CostPaidObjectSnapshot,
-    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
+    ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+    FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
     PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, SearchDestinationSplit,
     SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef,
     ThisWayCause, TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
@@ -7519,6 +7519,13 @@ pub enum WaitingFor {
         valid_targets: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_mana_value: Option<u32>,
+        /// CR 707.2 + CR 707.2c: Why this choice was raised — whether the
+        /// entering object becomes the copy (`BecomeCopy`, default for
+        /// serde back-compat) or the chosen permanent's values are latched onto
+        /// a source Aura's host (`PersistChosenAttribute`, Metamorphic
+        /// Alteration). Read at the answer in `handle_copy_target_choice`.
+        #[serde(default)]
+        purpose: CopyTargetPurpose,
     },
     /// CR 701.44d: Player chooses which of their remaining permanents explores next.
     ExploreChoice {

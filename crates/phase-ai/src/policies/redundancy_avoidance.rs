@@ -446,6 +446,9 @@ fn redundancy_delta(
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): as-enters copy choice carries no
+        // "redundant if already controlled" signal for this policy.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounterAll { .. }

@@ -6095,6 +6095,13 @@ fn apply_continuous_effect_filtered(
         };
 
         match &effect.modification {
+            // CR 707.2c + CR 613.1a: `CopyChosen` is a parse-time marker for
+            // Metamorphic Alteration's "enchanted creature is a copy of the
+            // chosen creature" static. The copy is materialized exactly once —
+            // as a latched `CopyValues` TCE installed at the
+            // `Effect::ChoosePermanent` answer (values fixed per CR 707.2c) —
+            // so applying anything here would double-install. Explicit no-op.
+            ContinuousModification::CopyChosen => {}
             ContinuousModification::CopyValues {
                 values,
                 display_source,

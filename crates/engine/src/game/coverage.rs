@@ -2333,6 +2333,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        // CR 707.2c (Metamorphic Alteration): report the copy-source choice pool.
+        Effect::ChoosePermanent { filter, .. } => {
+            d.push(("choose".into(), fmt_target(filter)));
+        }
         Effect::Destroy { target, .. }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
@@ -4165,6 +4169,9 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
     use crate::types::ability::ContinuousModification;
     match m {
         ContinuousModification::CopyValues { .. } => "copy values".into(),
+        // CR 707.2c (Metamorphic Alteration): parse-time marker for the enchanted
+        // host's copy — the runtime copy is the latched `CopyValues` TCE.
+        ContinuousModification::CopyChosen => "copy chosen".into(),
         ContinuousModification::SetName { name } => format!("set name {name}"),
         ContinuousModification::SetTextName { name } => format!("set text name {name}"),
         ContinuousModification::AddPower { value } => format!("power {:+}", value),

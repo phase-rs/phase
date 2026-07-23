@@ -890,6 +890,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::BecomeCopy { .. } => Axes::CONSERVATIVE,
+        // CR 707.2c: the chosen creature's copiable values are latched onto the
+        // Aura's host at the answer — a copy-family continuous effect, same
+        // conservative classification as `BecomeCopy`. `filter` scans no
+        // per-source projected resource (it just bounds the choice pool);
+        // `persist` is a compile-time selector.
+        Effect::ChoosePermanent { filter, persist: _ } => {
+            scan_target_filter(filter, target_ctx, mode).or(Axes::CONSERVATIVE)
+        }
         Effect::GainActivatedAbilitiesOfTarget {
             target,
             recipient,
@@ -5002,6 +5010,10 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // documented fail-safe (over-veto = missed offer). A full `TriggerDefinition`
         // walker is a follow-up.
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): the copy-marker stands in for a
+        // copy that grants the donor's whole ability set — fail-closed alongside
+        // its `CopyValues` sibling (the real grant is the installed TCE).
+        | ContinuousModification::CopyChosen
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
@@ -5174,6 +5186,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         //     recipient set ("Shards you control", CR 707.2).
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::BecomeCopy { .. }
+        //   CR 707.2c (Metamorphic Alteration): the copy target is chosen from a
+        //     battlefield-reading filter pool; defense-in-depth parity with
+        //     BecomeCopy (fail-closed census — over-vetoes the single-host shortcut).
+        | Effect::ChoosePermanent { .. }
         //   CR 708.2 / CR 708.2a (face-down permanents): `resolved_battlefield_object_
         //     ids` (effects/mod.rs) falls through to a battlefield mass scan for a
         //     non-targeted "turn each matching creature face up/down" (Illithid
@@ -5527,6 +5543,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::PhaseIn { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): parity with the `effect_target_ctx`
+        // LiveBoardCensus member added above.
+        | Effect::ChoosePermanent { .. }
         | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::MultiplyCounter { .. }
@@ -5920,6 +5939,10 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c: raises `WaitingFor::CopyTargetChoice` — prompts, fail-closed
+        // MayPrompt (never resolved through the normal chain, but classified here
+        // to keep the match exhaustive).
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -6187,6 +6210,8 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c: choosing a permanent draws on no game randomness.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }

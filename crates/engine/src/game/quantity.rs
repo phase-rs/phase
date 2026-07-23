@@ -734,6 +734,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         // magnitude. Enumerated explicitly (no wildcard) so a future
         // QuantityExpr-carrying variant forces a decision here.
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker — no dynamic magnitude.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }

@@ -3827,6 +3827,20 @@ pub fn resolve_effect(
             copy_token_blocking::resolve(state, ability, events)
         }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
+        // CR 614.12a + CR 707.2c (Metamorphic Alteration): `ChoosePermanent` is an
+        // as-enters replacement-effect choice, NOT a stack-resolution effect. It is
+        // raised by `apply_post_replacement_effect` and answered by
+        // `handle_copy_target_choice` (PersistChosenAttribute). It never enters the
+        // normal resolution chain, so reaching this dispatch arm is a bug.
+        Effect::ChoosePermanent { .. } => {
+            debug_assert!(
+                false,
+                "Effect::ChoosePermanent must be handled via the Aura-ETB \
+                 replacement path (apply_post_replacement_effect), never resolved \
+                 as a stack effect"
+            );
+            Ok(())
+        }
         Effect::GainActivatedAbilitiesOfTarget { .. } => {
             gain_activated_abilities::resolve(state, ability, events)
         }

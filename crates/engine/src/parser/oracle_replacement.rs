@@ -26,22 +26,22 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target::parse_type_phrase;
+use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::CastingPermission;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType, CombatDamageScope,
-    Comparator, ContinuousModification, ControllerRef, CopyManaValueLimit, CountScope,
-    CounterReplacementSubject, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope, FilterProp,
-    LibraryPosition, ManaModification, ManaReplacementScope, ManaSpendPermission,
-    PermissionGrantee, PlayerFilter, PreventionAmount, QuantityExpr, QuantityModification,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, CastVariantPaid, ChoiceType,
+    ChoosePermanentPersist, CombatDamageScope, Comparator, ContinuousModification, ControllerRef,
+    CopyManaValueLimit, CountScope, CounterReplacementSubject, DamageModification,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
+    Duration, Effect, EffectScope, FilterProp, LibraryPosition, ManaModification,
+    ManaReplacementScope, ManaSpendPermission, PermissionGrantee, PlayerFilter, PreventionAmount,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, ReplacementPlayerScope, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2124,7 +2124,14 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
     let (prefix_lower, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
-    let choice_type = try_parse_named_choice(choose_text)?;
+    // CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." is an
+    // as-enters OBJECT choice, not a named-attribute choice, so
+    // `try_parse_named_choice` (which only recognizes color/type/name/etc.)
+    // fails. Fall back to the object-choice combinator that lowers to
+    // `Effect::ChoosePermanent` (Metamorphic Alteration) before giving up.
+    let Some(choice_type) = try_parse_named_choice(choose_text) else {
+        return parse_as_enters_choose_permanent(choose_text, original_text);
+    };
 
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -2268,6 +2275,62 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .execute(execute)
             .valid_card(TargetFilter::SelfRef)
             // CR 614.1c: battlefield-entry-scoped (see destination-gate note above).
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+/// CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." — the
+/// as-enters OBJECT-choice analogue of `parse_as_enters_choose` (which only
+/// handles named-attribute choices: color, creature type, card name, etc.).
+/// The chosen permanent's copiable values are latched at the choice answer and
+/// installed as a Layer-1 copy on the Aura's enchanted host
+/// (`ChoosePermanentPersist::CopiableSnapshot`) — the entering Aura itself is
+/// never turned into a copy. Metamorphic Alteration.
+///
+/// `choose_text` still carries its leading "choose " (as returned by
+/// `scan_split_at_phrase`). The object phrase is parsed with the shared
+/// `parse_target` descriptor grammar; the remainder must be empty (only the
+/// choice, no trailing effect) and the filter must be a concrete object
+/// (`Typed`) filter, so this never hijacks a compound as-enters instruction or
+/// a player/zone choice.
+fn parse_as_enters_choose_permanent(
+    choose_text: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (object_phrase, _) = tag::<_, _, OracleError<'_>>("choose ")
+        .parse(choose_text)
+        .ok()?;
+    // Structural trailing-period/whitespace cleanup on the extracted object
+    // phrase (not parsing dispatch) before the descriptor grammar runs.
+    let object_phrase = object_phrase
+        .trim_end()
+        .strip_suffix('.') // allow-noncombinator: structural trailing-period cleanup, not dispatch
+        .unwrap_or(object_phrase)
+        .trim();
+    let (filter, remainder) = parse_target(object_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    // CR 707.2c: the copy source is a permanent — only a concrete object filter
+    // (never a player/zone/`Any` descriptor) is a valid copy-source pool.
+    if !matches!(filter, TargetFilter::Typed(_)) {
+        return None;
+    }
+
+    let execute = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChoosePermanent {
+            filter,
+            persist: ChoosePermanentPersist::CopiableSnapshot,
+        },
+    );
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(execute)
+            .valid_card(TargetFilter::SelfRef)
+            // CR 614.1c: battlefield-entry-scoped, mirroring the named-choice sibling.
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )

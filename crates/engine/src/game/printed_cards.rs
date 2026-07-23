@@ -849,6 +849,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         // from the provider objects at layer collection time, not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
+        // nested ability/effect carrier to walk (the copy grant is the runtime TCE).
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -1184,6 +1187,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): filter-only copy choice; no nested
+        // ability carrier to walk — a leaf for printed-card collection.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }

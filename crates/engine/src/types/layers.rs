@@ -81,6 +81,11 @@ impl ContinuousModification {
     pub fn layer(&self) -> Layer {
         match self {
             ContinuousModification::CopyValues { .. } => Layer::Copy,
+            // CR 707.2c + CR 613.1a: parse-time marker for Metamorphic
+            // Alteration's static copy. Layered at Copy purely for ordering; its
+            // `apply_continuous_effect` arm is an explicit no-op (the real copy
+            // is the latched `CopyValues` TCE installed at the choice answer).
+            ContinuousModification::CopyChosen => Layer::Copy,
             // CR 707.9b + CR 613.1a: Copy-effect name override applies in Layer 1
             // after CopyValues, per timestamp order within the layer.
             ContinuousModification::SetName { .. } => Layer::Copy,

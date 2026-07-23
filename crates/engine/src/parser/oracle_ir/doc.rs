@@ -1414,6 +1414,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::ApplyPerpetual { .. } => {}
         Effect::Intensify { .. } => {}
         Effect::DraftFromSpellbook { .. } => {}
+        // CR 707.2c (Metamorphic Alteration): no nested printed-slot carrier —
+        // the copy is materialized from the chosen donor at resolution.
+        Effect::ChoosePermanent { .. } => {}
         Effect::Unimplemented { .. } => {}
     }
 }
