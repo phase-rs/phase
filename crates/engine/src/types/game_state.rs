@@ -52,7 +52,8 @@ use super::resolution::{
 use super::resolved_commands::{
     ManaPaymentRecipient, ResolvedManaInsertCommand, ResolvedManaReplayInvariantError,
     ResolvedManaSpendCommand, ResolvedPlayerEdit, ResolvedPlayerEditCommand,
-    ResolvedPlayerEditReplayInvariantError, ResolvedRulesJournal, RulesExecutionNodeRef,
+    ResolvedPlayerEditReplayInvariantError, ResolvedRngReplayInvariantError, ResolvedRulesJournal,
+    RulesExecutionNodeRef,
 };
 use super::zones::EtbTapState;
 use super::zones::{ExileCostSourceZone, Zone};
@@ -15187,7 +15188,9 @@ impl GameState {
     /// serializing a faithfully-restorable snapshot invoke this first; the
     /// randomness logic lives here in the engine, not in transport layers.
     pub fn capture_rng_word_pos(&mut self) {
-        self.rng_word_pos = self.rng.get_word_pos();
+        let position = self.rng.get_word_pos();
+        self.advance_rng_high_water(position)
+            .expect("capturing a live ChaCha20 position must not rewind entropy");
     }
 
     /// Reconstruct `rng` from the serialized `rng_seed` and fast-forward it to
@@ -15198,6 +15201,31 @@ impl GameState {
     pub fn rehydrate_rng(&mut self) {
         self.rng = ChaCha20Rng::seed_from_u64(self.rng_seed);
         self.rng.set_word_pos(self.rng_word_pos);
+    }
+
+    /// Advances the persisted entropy high-water without rewinding the live
+    /// ChaCha20 stream. Resolved random commands use this after installing
+    /// their recorded result, so replay never samples entropy to recreate it.
+    pub(crate) fn advance_rng_high_water(
+        &mut self,
+        requested: u128,
+    ) -> Result<(), ResolvedRngReplayInvariantError> {
+        if requested < self.rng_word_pos {
+            return Err(ResolvedRngReplayInvariantError::HighWaterRegression {
+                current: self.rng_word_pos,
+                requested,
+            });
+        }
+        let current = self.rng.get_word_pos();
+        if requested < current {
+            return Err(ResolvedRngReplayInvariantError::StreamPositionRegression {
+                current,
+                requested,
+            });
+        }
+        self.rng.set_word_pos(requested);
+        self.rng_word_pos = requested;
+        Ok(())
     }
 
     /// CR 118.3a: Mint the next stable `ManaPipId` for a pool unit. Monotonic,

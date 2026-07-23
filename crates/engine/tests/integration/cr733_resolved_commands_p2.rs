@@ -79,6 +79,10 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
+        ResolvedRulesCommand::LibraryShuffle(command) => {
+            engine::game::library::apply_resolved_library_shuffle(state, command, &mut Vec::new())
+                .unwrap();
+        }
     }
 }
 
@@ -164,7 +168,10 @@ fn exact_mana_spend_rejects_a_second_removal() {
             ResolvedRulesCommand::PlayerEdit(_)
             | ResolvedRulesCommand::ObjectStatus(_)
             | ResolvedRulesCommand::ObjectCounter(_)
-            | ResolvedRulesCommand::LedgerEdit(_) => apply_semantic_command(&mut replay, command),
+            | ResolvedRulesCommand::LedgerEdit(_)
+            | ResolvedRulesCommand::LibraryShuffle(_) => {
+                apply_semantic_command(&mut replay, command)
+            }
         }
     }
     assert!(
