@@ -342,6 +342,17 @@ impl NativeEngineFiles {
         self.key_directory(key).join("data")
     }
 
+    /// Version-independent path for the server's game-persistence database.
+    /// Keyed by channel only (not the version/fingerprint that names
+    /// `key_directory`), so saved games survive engine updates within a channel
+    /// while `preview` and `release` stay isolated — they load different
+    /// content and must not share sessions.
+    fn games_db(&self, key: &NativeEngineKey) -> PathBuf {
+        self.base
+            .join("games")
+            .join(format!("{}.db", key.channel()))
+    }
+
     fn cache_directory(&self) -> PathBuf {
         self.base.join(CACHE_DIRECTORY)
     }
@@ -618,6 +629,7 @@ fn ensure_native_engine_sync(
     let (mut child, stdin) = spawn_server(
         &binary_path,
         &files.data_directory(&key),
+        &files.games_db(&key),
         port,
         key.origin(),
     )?;
@@ -1001,16 +1013,21 @@ fn reserve_port() -> Result<u16, NativeEngineError> {
 fn spawn_server(
     binary: &Path,
     data_directory: &Path,
+    games_db: &Path,
     port: u16,
     origin: &str,
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
     let mut child = Command::new(binary)
         .env("PORT", port.to_string())
         .env("PHASE_DATA_DIR", data_directory)
+        .env("PHASE_GAMES_DB", games_db)
         .args([
             "--bind",
             "127.0.0.1",
             "--exit-on-stdin-close",
+            // A desktop shell hosts one local player: keep the suspended solo
+            // game resumable until replaced (no stale purge, no reconnect expiry).
+            "--single-user",
             "--allowed-origin",
             origin,
         ])
