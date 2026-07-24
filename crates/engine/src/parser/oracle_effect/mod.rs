@@ -6556,6 +6556,13 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
         );
     }
     let original_lower = text.to_lowercase();
+    if let Some(mut clause) = try_parse_for_each_target_copy_token(text, &original_lower, ctx) {
+        peel_ctx.apply_optional(&mut clause.optional);
+        if clause.condition.is_none() {
+            clause.condition = peel_ctx.condition().cloned().or(unless_condition.clone());
+        }
+        return attach_unless_slots(clause, None, unless_pay_deferred);
+    }
     if let Some(mut clause) = try_parse_for_each_copy_token_source(text, &original_lower, ctx) {
         peel_ctx.apply_optional(&mut clause.optional);
         if clause.condition.is_none() {
@@ -6688,6 +6695,98 @@ fn try_parse_for_each_copy_token_source(
         extra_keywords,
         additional_modifications,
     }))
+}
+
+/// CR 115.1d + CR 601.2c + CR 707.2: "For each of <N> target <type>, create <M>
+/// tokens that are copies of that <noun>" — Doppelgang. The "for each of"
+/// distributor iterates an EXACT-count *targeted* set (`<N>` target permanents);
+/// the body creates `<M>` copy-tokens of each chosen target.
+///
+/// This is distinct from both sibling for-each copy paths:
+/// * `try_parse_for_each_copy_token_source` handles a NON-targeted object filter
+///   ("for each creature you control, …") — no target slot, no `MultiTargetSpec`.
+/// * Twinflame's "for each of them, create a token …" relies on a prior "Choose
+///   any number of target creatures" sentence to establish the target slot, then
+///   its body only recurses onto `ParentTarget`.
+///
+/// Here the target set is declared inline, so we lift the exact count onto the
+/// clause's `multi_target` and bind the copy source directly to the targeted
+/// `<type>` filter. The `CopyTokenOf` resolver iterates the ability's chosen
+/// targets and creates `count` copies of each (game/effects/token_copy.rs), so
+/// `N` targets × `M` copies = `N·M` tokens. The body's anaphor ("that permanent"
+/// lowers to `TriggeringSource`) has no trigger event on a spell, so it is
+/// discarded and replaced by the concrete targeted filter.
+fn try_parse_for_each_target_copy_token(
+    text: &str,
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    // "for each of <count> " distributor prefix over an exact-count target set.
+    let (after_prefix, _) = tag::<_, _, OracleError<'_>>("for each of ")
+        .parse(lower)
+        .ok()?;
+    let (after_count, target_count) = parse_multi_target_count_expr(after_prefix).ok()?;
+    let (after_count, _) = space1::<&str, OracleError<'_>>(after_count).ok()?;
+    // The iterated set must be a printed target ("target permanents"); require
+    // the "target " keyword so a bare "for each of them, …" (Twinflame) or a
+    // non-targeted filter never reaches this arm.
+    peek(tag::<_, _, OracleError<'_>>("target "))
+        .parse(after_count)
+        .ok()?;
+    // Let the target parser itself consume the filter and hand back the
+    // distributor comma + body — the parser IS the detector, so a compound
+    // filter with internal commas ("target artifact, creature, or land
+    // permanent") that a naive ", " split would truncate is handled correctly.
+    // Map the lowercase offset back onto the original-case `text` (ASCII Oracle
+    // text keeps byte offsets aligned).
+    let target_start = lower.len() - after_count.len();
+    let mut target_ctx = ctx.clone();
+    let (target, target_rem) = parse_target_with_ctx(&text[target_start..], &mut target_ctx);
+    if !matches!(target, TargetFilter::Typed(_)) {
+        return None;
+    }
+    // The distributor comma separates the target set from the body; consume it
+    // with a combinator (the target parser may or may not have already eaten
+    // it, so `opt`). `opt` never fails, so this only extracts the body slice.
+    let (body, _) = opt(tag::<_, _, OracleError<'_>>(","))
+        .parse(target_rem.trim_start())
+        .ok()?;
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+    let body_lower = body.to_lowercase();
+
+    // The body must be a bare "create <M> tokens that are copies of that <noun>"
+    // whose copy source is an anaphor (no independent target of its own).
+    let mut body_ctx = ctx.clone();
+    let effect = token::try_parse_token(&body_lower, body, &mut body_ctx)?;
+    let Effect::CopyTokenOf {
+        target: TargetFilter::ParentTarget | TargetFilter::SelfRef | TargetFilter::TriggeringSource,
+        owner,
+        source_filter: None,
+        enters_attacking,
+        tapped,
+        count,
+        extra_keywords,
+        additional_modifications,
+    } = effect
+    else {
+        return None;
+    };
+    *ctx = body_ctx;
+    let mut clause = parsed_clause(Effect::CopyTokenOf {
+        target,
+        owner,
+        source_filter: None,
+        enters_attacking,
+        tapped,
+        count,
+        extra_keywords,
+        additional_modifications,
+    });
+    clause.multi_target = Some(MultiTargetSpec::exact(target_count));
+    Some(clause)
 }
 
 /// Parse the residual of a "choose ..." head as a bare battlefield-object
@@ -7836,6 +7935,9 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    if let Some(clause) = try_parse_for_each_target_copy_token(text, &lower, ctx) {
+        return clause;
+    }
     if let Some(clause) = try_parse_for_each_copy_token_source(text, &lower, ctx) {
         return clause;
     }
