@@ -7,7 +7,7 @@ use crate::types::ability::{
     BeholdCostAction, CastTimingPermission, Comparator, CostPaidObjectSnapshot,
     CounterCostSelection, Effect, KickerVariant, ObjectProperty, QuantityExpr, QuantityRef,
     ReplacementDefinition, ResolvedAbility, SacrificeCost, SacrificeRequirement,
-    SpellCastingOptionKind, SpellStackToGraveyardReplacement, StaticCondition,
+    SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
     TapCreaturesAggregate, TargetFilter, ThisWayCause, TypeFilter, TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
@@ -358,13 +358,28 @@ fn gift_kind_for_object(state: &GameState, object_id: ObjectId) -> Option<GiftKi
     })
 }
 
-/// CR 702.174a + CR 601.2c: Propagate SpellContext (including additional_cost_paid /
-/// gift_recipient) through GiftDelivery nesting so Instead target slots see the
-/// paid flag on the parent of the Instead node.
+/// CR 702.174a + CR 601.2c: Propagate shared SpellContext facts (additional_cost_paid /
+/// gift_recipient / kickers / …) through GiftDelivery nesting so Instead target
+/// slots see the paid flag on the parent of the Instead node.
+///
+/// Per-link `announcing_opponent` (CR 115.1) must be preserved: Volcanic Offering
+/// stamps a different announcer on each opponent-choice effect group, and a full
+/// `set_context_recursive` from the root would wipe those stamps.
 fn stamp_pending_ability_context_recursive(pending: &mut PendingCast) {
-    pending
-        .ability
-        .set_context_recursive(pending.ability.context.clone());
+    let shared = pending.ability.context.clone();
+    propagate_shared_cast_context(&mut pending.ability, &shared);
+}
+
+fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellContext) {
+    let announcing_opponent = ability.context.announcing_opponent;
+    ability.context = shared.clone();
+    ability.context.announcing_opponent = announcing_opponent;
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        propagate_shared_cast_context(sub, shared);
+    }
+    if let Some(else_branch) = ability.else_ability.as_mut() {
+        propagate_shared_cast_context(else_branch, shared);
+    }
 }
 
 pub(crate) fn handle_decide_additional_cost(
