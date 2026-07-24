@@ -381,19 +381,19 @@ Final review-impl PASS head=<40-hex-sha>
 
 ## Claimed parse impact
 None.
-<!-- Optional manual quality evidence; not an admission artifact. Write `None.` when parse-diff has no changed cards. -->
+<!-- List exact card names only when the parse-diff changes cards. -->
 
 ## Scope Expansion
 None.
-<!-- Replace with the scope expansion and rationale when the change crosses the card/issue's stated scope. -->
+<!-- Describe any change that crosses the issue/card's stated scope. -->
 
 ## Validation Failures
 None.
-<!-- If Step 5 could not be made to pass after retries, replace `None.` above with the failure details. -->
+<!-- Replace with the unresolved validation failure and its evidence. -->
 
 ## CI Failures
 None.
-<!-- If Step 6 surfaced a failure the LLM could not resolve, replace `None.` above with the failure details. -->
+<!-- Replace with the unresolved CI failure and its evidence. -->
 ```
 
 **Labels classify behavior; they do not grant authority.** The upstream workflows and maintainer apply type labels (`bug`, `enhancement`, `feature`, `test`, or `refactor`), `needs-maintainer` for operational attention, and the existing `quality` label only after manual evidence review. Fork PRs must not pass `--label` to `gh pr create`. No label waives artifact or architecture scope gates.

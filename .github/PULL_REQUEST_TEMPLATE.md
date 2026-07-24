@@ -12,11 +12,12 @@
 
 ## LLM
 
-Model: <actual Frontier model identifier>
-Tier: Frontier
-Thinking: <high | max>
+Model: <actual Frontier model identifier | not-applicable (no LLM)>
+Tier: <Frontier | not-applicable (no LLM)>
+Thinking: <high | max | not-applicable (no LLM)>
 
-<!-- Keep Model and Tier as exact, standalone canonical lines. -->
+<!-- Keep Model and Tier as exact, standalone canonical lines. AI-assisted PRs
+must report their actual Frontier model, Tier: Frontier, and thinking level. -->
 
 ## Implementation method (required)
 
