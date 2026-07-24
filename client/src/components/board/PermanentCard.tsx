@@ -134,6 +134,27 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
   );
 }
 
+// CR 509.1b: compact display of the engine-authored temporary evasion marker.
+// The component only renders the derived map and resolves a supplied public
+// source object for its tooltip; it never determines whether blocking is legal.
+function CantBeBlockedBadge({ sourceName }: { sourceName?: string }) {
+  const { t } = useTranslation("game");
+  return (
+    <span className="group absolute bottom-1 left-1 z-30 inline-flex">
+      <span
+        className="flex items-center rounded bg-cyan-600/90 px-1 py-0.5 text-[10px] font-bold text-cyan-50 shadow ring-1 ring-cyan-200/60"
+        aria-label={t("permanent.cantBeBlocked")}
+      >
+        <span aria-hidden>↯</span>
+      </span>
+      <GameplayTooltip>
+        {t("permanent.cantBeBlocked")}
+        {sourceName ? ` ${t("preview.fromSource", { source: sourceName })}` : ""}
+      </GameplayTooltip>
+    </span>
+  );
+}
+
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
 // without parsing the title. Glyph palette matches the original chip
@@ -260,6 +281,9 @@ export const PermanentCard = memo(function PermanentCard({
     (s) =>
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
+  );
+  const temporaryCantBeBlockedSourceId = useGameStore(
+    (s) => s.gameState?.derived?.temporary_cant_be_blocked?.[String(objectId)],
   );
   // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
   // copiable values. Engine-classified because a copy of a permanent lives in a
@@ -571,6 +595,10 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopy =
     !obj.face_down
     && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
+  const temporaryCantBeBlockedSourceName =
+    temporaryCantBeBlockedSourceId == null
+      ? undefined
+      : gameObjects?.[String(temporaryCantBeBlockedSourceId)]?.name;
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
@@ -1049,6 +1077,10 @@ export const PermanentCard = memo(function PermanentCard({
         >
           {t("permanent.copy")}
         </div>
+      )}
+
+      {temporaryCantBeBlockedSourceId !== undefined && (
+        <CantBeBlockedBadge sourceName={temporaryCantBeBlockedSourceName} />
       )}
 
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.

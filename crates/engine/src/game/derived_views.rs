@@ -20,9 +20,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    ContinuousModification, GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry,
-    RestrictionPlayerScope, TargetRef,
+    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
+    RestrictionExpiry, RestrictionPlayerScope, TargetRef,
 };
+use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -32,6 +33,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -221,6 +223,15 @@ pub struct DerivedViews {
     /// keyword.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
+    /// CR 509.1b + CR 611.2c: creatures with a live, temporary
+    /// `CantBeBlocked` grant. The optional value is the granting source only
+    /// while that source remains a public, phased-in battlefield object; `None`
+    /// retains the badge without exposing an unavailable source.
+    ///
+    /// Keyed by recipient ObjectId; absent when no such grant is active.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub temporary_cant_be_blocked: HashMap<ObjectId, Option<ObjectId>>,
 
     /// CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
     /// currently supplied by a copy effect (Layer 1a) — Clone, Phantasmal
@@ -525,6 +536,49 @@ fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
+/// CR 509.1b + CR 611.2c + CR 613.1f: return the public source for the first
+/// live, until-end-of-turn `CantBeBlocked` modification attributed to this
+/// recipient in the current ability layer. `Some(None)` means the grant is
+/// active but its source is no longer a public, phased-in battlefield object.
+///
+/// Attribution is the layer engine's authoritative record of modifications
+/// that actually applied. Reading its indexed `EffectRef` avoids re-scanning
+/// raw effect filters, which could disagree with the resolved layer recipient.
+fn temporary_cant_be_blocked_source(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<Option<ObjectId>> {
+    let effects = state
+        .attribution
+        .get(&object_id)?
+        .by_layer
+        .get(&Layer::Ability)?;
+    effects.iter().find_map(|effect_ref| {
+        let EffectRef::Transient { id, mod_index } = effect_ref else {
+            return None;
+        };
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.id == *id)?;
+        (effect.duration == Duration::UntilEndOfTurn
+            && crate::game::layers::transient_effect_is_live(state, effect)
+            && matches!(
+                effect.modifications.get(*mod_index),
+                Some(ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlocked
+                })
+            ))
+        .then(|| {
+            state
+                .objects
+                .get(&effect.source_id)
+                .filter(|source| source.zone == Zone::Battlefield && source.is_phased_in())
+                .map(|_| effect.source_id)
+        })
+    })
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
@@ -561,6 +615,9 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .collect();
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
+            views.temporary_cant_be_blocked.insert(obj_id, source_id);
         }
         // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched
         // through the same `matches_target_filter` the layer engine uses to

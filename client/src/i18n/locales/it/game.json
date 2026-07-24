@@ -248,6 +248,7 @@
     "target": "Bersaglio",
     "copy": "Copia",
     "copyTooltip": "Copia pedina di una carta reale",
+    "cantBeBlocked": "Non può essere bloccata",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",

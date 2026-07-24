@@ -248,6 +248,7 @@
     "target": "Objetivo",
     "copy": "Copia",
     "copyTooltip": "Ficha copia de una carta real",
+    "cantBeBlocked": "No puede ser bloqueada",
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",

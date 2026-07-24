@@ -248,6 +248,7 @@
     "target": "Cible",
     "copy": "Copie",
     "copyTooltip": "Jeton-copie d'une vraie carte",
+    "cantBeBlocked": "Ne peut pas être bloquée",
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",

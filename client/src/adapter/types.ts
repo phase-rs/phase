@@ -2719,6 +2719,13 @@ export interface DerivedViews {
    */
   battlefield_keyword_badges?: Record<string, Keyword[]>;
   /**
+   * CR 509.1b: live, until-end-of-turn `CantBeBlocked` grants keyed by
+   * recipient ObjectId-as-string. A null value means the grant remains live
+   * while its source is not a public, phased-in battlefield object, so the UI
+   * shows the badge without naming an unavailable source.
+   */
+  temporary_cant_be_blocked?: Record<string, ObjectId | null>;
+  /**
    * CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
    * currently supplied by a copy effect (Clone, Phantasmal Image, Vesuvan
    * Doppelganger). Such a permanent renders identically to what it copied, so

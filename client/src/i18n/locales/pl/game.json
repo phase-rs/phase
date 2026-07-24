@@ -248,6 +248,7 @@
     "target": "Cel",
     "copy": "Kopia",
     "copyTooltip": "Kopia tokenowa prawdziwej karty",
+    "cantBeBlocked": "Nie może zostać zablokowana",
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",

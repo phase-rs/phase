@@ -248,6 +248,7 @@
     "target": "Alvo",
     "copy": "Cópia",
     "copyTooltip": "Cópia em ficha de uma carta real",
+    "cantBeBlocked": "Não pode ser bloqueada",
     "ringBearer": "Anel",
     "ringBearerTooltip": "Portador do Anel",
     "hiddenAttachments": "+{{count}} more attached",
