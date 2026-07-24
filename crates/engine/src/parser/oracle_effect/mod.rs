@@ -6745,10 +6745,13 @@ fn try_parse_for_each_target_copy_token(
     if !matches!(target, TargetFilter::Typed(_)) {
         return None;
     }
-    // The distributor comma separates the target set from the body; tolerate
-    // its optional consumption by the target parser.
-    let body = target_rem.trim_start();
-    let body = body.strip_prefix(',').unwrap_or(body).trim();
+    // The distributor comma separates the target set from the body; consume it
+    // with a combinator (the target parser may or may not have already eaten
+    // it, so `opt`). `opt` never fails, so this only extracts the body slice.
+    let (body, _) = opt(tag::<_, _, OracleError<'_>>(","))
+        .parse(target_rem.trim_start())
+        .ok()?;
+    let body = body.trim();
     if body.is_empty() {
         return None;
     }
