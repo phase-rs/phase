@@ -228,6 +228,67 @@ mod tests {
     }
 
     #[test]
+    fn gift_card_uses_source_object_recipient_when_context_is_absent() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Gift Source".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().gift_recipient = Some(PlayerId(1));
+        let card_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+
+        let mut ability = make_gift_ability(GiftKind::Card, true);
+        ability.source_id = source_id;
+        ability.context.gift_recipient = None;
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].hand.contains(&card_id));
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == PlayerId(1))
+        ));
+    }
+
+    #[test]
+    fn gift_card_noops_for_eliminated_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let card_id = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        state.players[1].is_eliminated = true;
+        let mut events = Vec::new();
+
+        let ability = make_gift_ability(GiftKind::Card, true);
+        assert_eq!(resolve_gift_recipient(&state, &ability), None);
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.players[1].library.contains(&card_id));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::CardDrawn { .. })));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GiftDelivery,
+                ..
+            }
+        )));
+    }
+
+    #[test]
     fn gift_card_noop_when_not_promised() {
         let mut state = GameState::new_two_player(42);
         let card_id = zones::create_object(
