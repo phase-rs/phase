@@ -1102,12 +1102,12 @@ function CardImagePreview({
           />
         )}
         {displayCost && (
-          <ManaCostPips
-            cost={displayCost}
-            isReduced={displayCostReduced}
-            size="lg"
-            className="absolute right-[7.00%] top-[5.25%] z-10"
-          />
+          // @container overlay sized to the frame so the pips scale with the
+          // preview's own width, which varies from a 300px hand hover to a
+          // 472px docked preview — a fixed px size can only be right at one end.
+          <div className="pointer-events-none absolute inset-0 z-10 @container">
+            <ManaCostPips cost={displayCost} isReduced={displayCostReduced} size="fluid" />
+          </div>
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">

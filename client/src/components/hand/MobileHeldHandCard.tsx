@@ -128,12 +128,7 @@ export function MobileHeldHandCard({ gesture, object }: MobileHeldHandCardProps)
         className="!h-full !w-full"
       />
       <div className="pointer-events-none absolute inset-0 @container">
-        <ManaCostPips
-          cost={displayCost}
-          isReduced={isReduced}
-          size="fluid"
-          className="absolute right-[4%] top-[2%]"
-        />
+        <ManaCostPips cost={displayCost} isReduced={isReduced} size="fluid" />
       </div>
     </motion.div>,
     document.body,
