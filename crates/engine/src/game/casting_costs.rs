@@ -4053,16 +4053,13 @@ pub(crate) fn surface_next_unpaid_interactive_activation_cost(
     };
     let source_id = pending.object_id;
 
-    if let Some((count, filter)) = super::casting::find_non_self_discard(cost) {
-        let count =
-            super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
-        let eligible =
-            super::casting::find_eligible_discard_targets(state, player, source_id, filter);
-        if eligible.len() < count {
-            return Err(EngineError::ActionNotAllowed(
-                "Not enough cards in hand to discard".into(),
-            ));
-        }
+    // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (Lion's Eye Diamond /
+    // Bomat Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
+    // helper returns `Ok(None)` so we FALL THROUGH to the next unpaid leg (the sacrifice arm
+    // below) rather than surfacing a dead `PayCost { count: 0 }`.
+    if let Some((count, eligible)) =
+        super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost)?
+    {
         return Ok(Some(WaitingFor::PayCost {
             player,
             kind: PayCostKind::Discard,

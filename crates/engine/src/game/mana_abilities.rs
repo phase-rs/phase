@@ -3571,6 +3571,16 @@ fn discard_cost_choice(
 ) -> Option<(usize, Vec<ObjectId>)> {
     let (count, filter) = find_non_self_discard_cost(cost.as_ref()?)?;
     let resolved = super::quantity::resolve_quantity(state, count, player, source_id).max(0);
+    // CR 601.2h + CR 701.9a: A resolved zero-card discard (Lion's Eye Diamond's "Discard
+    // your hand" with an empty hand — `HandSize` -> 0) is paid by doing nothing; nothing
+    // moves and no `Discarded` event fires. Surfacing a `PayCost { count: 0 }` prompt here
+    // stalls the activation forever, because submitting the empty prompt re-enters with a
+    // still-empty `chosen_discards` and re-emits the same dead prompt. Returning `None`
+    // makes the caller skip the discard leg and proceed to the source sacrifice + mana.
+    // Structural precedent: `exile_cost_choice` (the interactive non-self cost sibling).
+    if resolved == 0 {
+        return None;
+    }
     let cards = super::casting::find_eligible_discard_targets(state, player, source_id, filter);
     Some((resolved as usize, cards))
 }
@@ -6407,6 +6417,205 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+    }
+
+    /// CR 605.1a + CR 106.1: Build a Lion's-Eye-Diamond-shaped mana ability —
+    /// `Composite[Discard { HandSize }, Sacrifice(SelfRef)]` producing three mana
+    /// of one chosen color. Mirrors the real card's parsed cost
+    /// (`Discard { count: Ref HandSize(Controller), self_scope: FromHand }` +
+    /// `Sacrifice(SelfRef, 1)`), so a name change alone re-targets it to any card
+    /// in the same "discard your hand, sacrifice ~: add three mana" class.
+    fn discard_hand_sacrifice_three_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        })
+    }
+
+    /// Issue #6494 (PRIMARY revert-guard, mana path): Lion's Eye Diamond with an
+    /// EMPTY hand must be activatable — its "Discard your hand" leg with an empty
+    /// hand is a zero-card discard, paid by doing nothing (CR 601.2h + CR 701.9a).
+    ///
+    /// Oracle (Scryfall-verified): "Discard your hand, Sacrifice this artifact:
+    /// Add three mana of any one color. Activate only as an instant."
+    ///
+    /// At base the activation surfaces `WaitingFor::PayCost { Discard, count: 0 }`
+    /// (a dead prompt that re-emits forever), so the `ChooseManaColor` assertion
+    /// fails with `left: PayCost right: ChooseManaColor` — revert-sensitive to the
+    /// `mana_abilities::discard_cost_choice` `resolved == 0` guard. The 3-mana
+    /// assertion is a positive reach-guard (proves production, not a vacuous halt);
+    /// the sacrifice assertion proves the guard consumes ONLY the discard leg and
+    /// the self-sacrifice still fires.
+    #[test]
+    fn lions_eye_diamond_activates_empty_handed_and_produces_chosen_color() {
+        let mut state = GameState::new_two_player(42);
+        let led = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Lion's Eye Diamond".to_string(),
+            Zone::Battlefield,
+        );
+        // No cards in hand — HandSize(Controller) resolves to 0.
+        assert!(state.players[0].hand.is_empty());
+
+        let ability = discard_hand_sacrifice_three_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&led).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            led,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        // CR 601.2h + CR 701.9a: no dead PayCost { Discard, count: 0 } — the
+        // activation advances straight to the color choice.
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                context,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(options.len(), 5);
+                *expect_mana_ability_context(context)
+            }
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+
+        // CR 701.9a: nothing was discarded — the hand stays empty.
+        assert!(state.players[0].hand.is_empty());
+        // The self-sacrifice leg still fired — LED left the battlefield for the
+        // graveyard, and it is the ONLY card there (the zero-card discard added
+        // nothing), proving the guard consumed only the discard leg.
+        assert_eq!(state.players[0].graveyard.len(), 1);
+        assert!(state.players[0].graveyard.contains(&led));
+        assert_ne!(
+            state.objects.get(&led).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Red),
+            &mut events,
+        )
+        .unwrap();
+
+        // Positive reach-guard: production actually ran (not a vacuous halt).
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+    }
+
+    /// Issue #6494 (mana path, class not card): Diamond Lion shares Lion's Eye
+    /// Diamond's "Discard your hand, Sacrifice ~: Add three mana of any one color"
+    /// shape, so the empty-hand fix is class-wide, not keyed to one card. Only the
+    /// object name differs from the LED case above.
+    #[test]
+    fn diamond_lion_activates_empty_handed_and_produces_chosen_color() {
+        let mut state = GameState::new_two_player(7);
+        let lion = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Diamond Lion".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(state.players[0].hand.is_empty());
+
+        let ability = discard_hand_sacrifice_three_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&lion).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            lion,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { .. },
+                context,
+                ..
+            } => *expect_mana_ability_context(context),
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+        assert_ne!(
+            state.objects.get(&lion).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 3);
     }
 
     /// Helper: build a Pit-of-Offerings-style permanent with a `{T}: Add one mana
