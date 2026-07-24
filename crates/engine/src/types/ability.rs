@@ -15021,6 +15021,10 @@ impl Effect {
             // target) picked at resolution time via
             // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
             | Effect::ReturnAsAura { .. }
+            // CR 614.12a + CR 707.2c: Metamorphic Alteration's "choose a creature"
+            // is an as-enters replacement choice (WaitingFor::CopyTargetChoice),
+            // not a stack-declared target — paired with target_filter().
+            | Effect::ChoosePermanent { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseAndSacrificeRest { .. }

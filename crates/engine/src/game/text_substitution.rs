@@ -2530,6 +2530,9 @@ fn walk_continuous_modification(
             walk_quantity_expr(count, category, cursor)
         }
         ContinuousModification::CopyValues { .. }
+        // CR 707.2: copies the chosen object's values at resolution — no printed
+        // color/land/creature-type word of its own to text-change.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         // CR 612.2 + CR 612.8: a literal NAME is not a color/land/creature word
         // used as such — names are structurally excluded from the walk (sibling of
@@ -3201,6 +3204,13 @@ fn walk_effect(effect: &mut Effect, category: TextWordCategory, cursor: &mut Wor
             if let Some(f) = filter {
                 walk_target_filter(f, category, cursor);
             }
+        }
+        // CR 612.2 + CR 614.12a: Metamorphic Alteration's "choose a creature"
+        // filter can name a creature type used as a creature type, so a
+        // text-changing effect must reach it. `target_filter_mut` returns None
+        // for this resolution-time choice, so it is walked explicitly here.
+        Effect::ChoosePermanent { filter } => {
+            walk_target_filter(filter, category, cursor);
         }
         Effect::ChooseObjectsIntoTrackedSet {
             chooser, filter, ..
