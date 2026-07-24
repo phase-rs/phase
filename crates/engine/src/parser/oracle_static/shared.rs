@@ -927,6 +927,9 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::RetainAllOtherAbilitiesFromSource
         | ContinuousModification::AddSupertype { .. }
         | ContinuousModification::RemoveSupertype { .. }
+        // CR 612.1: A text-word replacement latches fixed `from`/`to` words with
+        // no game-state-derived magnitude, so it carries no `QuantityExpr`.
+        | ContinuousModification::ReplaceTextWord { .. }
         | ContinuousModification::RemoveManaCost => None,
     }
 }

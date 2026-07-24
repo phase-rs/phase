@@ -335,6 +335,7 @@ pub enum InteractionActionCode {
     ChooseBranch,
     SubmitLifeRedistribution,
     ChooseDamageSource,
+    ChooseTextWordReplacement,
     SelectModes,
     DecideOptionalCost,
     ChooseAdventureFace,

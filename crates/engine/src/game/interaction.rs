@@ -263,6 +263,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
+        | WaitingFor::TextWordReplacement { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::DefilerPayment { .. }
@@ -490,6 +491,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
+        | WaitingFor::TextWordReplacement { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
         | WaitingFor::CastOffer { .. }
@@ -3203,6 +3205,7 @@ fn selection_projection(
         | WaitingFor::OpponentGuess { .. }
         | WaitingFor::SpellbookDraft { .. }
         | WaitingFor::DamageSourceChoice { .. }
+        | WaitingFor::TextWordReplacement { .. }
         | WaitingFor::ModeChoice { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::SpliceOffer { .. }
@@ -3961,7 +3964,10 @@ fn project_action_payload(
         GameAction::ChooseReplacement { index }
         | GameAction::ChooseBranch { index }
         | GameAction::ChooseCastingVariant { index }
-        | GameAction::ChooseActivationCostBranch { index } => {
+        | GameAction::ChooseActivationCostBranch { index }
+        // CR 612.1: the text-word replacement answer is a single index into the
+        // engine-computed option list — the index is the distinguishing field.
+        | GameAction::ChooseTextWordReplacement { index } => {
             push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index)
         }
         GameAction::OrderTriggers { order } => {
@@ -4583,6 +4589,9 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
             InteractionActionCode::SubmitLifeRedistribution
         }
         GameAction::ChooseDamageSource { .. } => InteractionActionCode::ChooseDamageSource,
+        GameAction::ChooseTextWordReplacement { .. } => {
+            InteractionActionCode::ChooseTextWordReplacement
+        }
         GameAction::SelectModes { .. } => InteractionActionCode::SelectModes,
         GameAction::DecideOptionalCost { .. } => InteractionActionCode::DecideOptionalCost,
         GameAction::ChooseAdventureFace { .. } => InteractionActionCode::ChooseAdventureFace,
