@@ -1410,4 +1410,38 @@ describe("PermanentCard", () => {
     // Departed source is dropped — no fromSource span renders.
     expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
   });
+
+  // CR 201.5: the engine ships `~` as the self-reference token, so the blocked-ability
+  // tooltip must bind it to the host object's name (mirrors CardPreview, the other
+  // `blocked_abilities` consumer). Description is abridged from the reported Kilo board dump
+  // (object 110) and asserted against this fixture's own name: the engine text continues "Its
+  // controller may search their library for a basic land card, put it onto the battlefield,
+  // then shuffle." — elided because that tail carries no `~` and so moves neither assertion.
+  it("substitutes ~ with the source name in the blocked-ability tooltip", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "{T}, Sacrifice ~: Destroy target land.",
+          effect: { type: "Destroy" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [1], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Reach-guard: the row rendered, so the negative below is not vacuous. `GameplayTooltip`
+    // portals to document.body, hence the body-scoped negative.
+    expect(
+      screen.getByText(/\{T\}, Sacrifice Test Creature: Destroy target land\./),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("~");
+  });
 });

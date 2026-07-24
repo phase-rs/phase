@@ -14,11 +14,13 @@ import { useCardImage } from "../../hooks/useCardImage.ts";
 import type { SourcePrinting } from "../../hooks/useCardImage.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, useCardRulings, type ParsedItem } from "../../hooks/useEngineCardData.ts";
+import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
 import { tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -1040,7 +1042,11 @@ function CardImagePreview({
       if (action.type !== "ActivateAbility") continue;
       const ability = obj.abilities[action.data.ability_index];
       if (!ability) continue;
-      const rawLabel = abilityLabel(ability);
+      // CR 201.5: the engine ships `~` as the self-reference token; substitute the host
+      // object's name BEFORE the `seen` dedup below so the dedup key stays 1:1 with what
+      // renders. Today Pentad Prism's hover preview reads
+      // "Activate — Remove a charge counter from ~".
+      const rawLabel = renderDescription(abilityLabel(ability), obj.name);
       if (!rawLabel || seen.has(rawLabel)) continue;
       seen.add(rawLabel);
       // CR 606.1: a Loyalty ability cost renders as a mana-font badge; strip
@@ -1334,6 +1340,10 @@ function CardInfoPanel({
   const transientContinuousEffects = useGameStore(
     (s) => s.gameState?.transient_continuous_effects,
   );
+  // CR 732.2a / CR 701.34a: the ∞ mark for this object. Same engine channel
+  // PermanentCard's pill and ArtCropCard's badge read — every counter display mode
+  // must agree, or the ∞ silently drops in one of them.
+  const unboundedCounterTypes = useUnboundedCounterTypes(obj.id);
   const deref = { objects, transientContinuousEffects };
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
@@ -1433,10 +1443,15 @@ function CardInfoPanel({
       {(obj.blocked_abilities?.length ?? 0) > 0 && (
         <div className="mt-1 space-y-0.5 text-amber-300/90">
           {(obj.blocked_abilities ?? []).map((entry, i) => {
-            const abilityName =
+            // CR 201.5: same `~` binding as the activate read-out above — the blocked row
+            // shows the ability's own description, so it leaks the raw token otherwise.
+            const rawAbilityName =
               entry.ability_index < obj.abilities.length
                 ? obj.abilities[entry.ability_index]?.description
                 : undefined;
+            const abilityName = rawAbilityName
+              ? renderDescription(rawAbilityName, obj.name)
+              : undefined;
             const names = (entry.sources ?? [])
               .map((id) => objects?.[String(id)]?.name)
               .filter((n): n is string => !!n);
@@ -1496,13 +1511,19 @@ function CardInfoPanel({
       {/* Counters */}
       {counters.length > 0 && (
         <div className="mt-1 flex flex-wrap gap-x-3 text-gray-400">
-          {counters.map(([type, count]) => (
-            <CounterTooltip key={type} type={type} count={count}>
-              <span>
-                {formatCounterType(type)}: {count}
-              </span>
-            </CounterTooltip>
-          ))}
+          {counters.map(([type, count]) => {
+            // CR 732.2a / CR 701.34a: an accepted counter-growth loop pumps this counter
+            // unboundedly — render ∞ instead of the (still-finite) real count, and tell the
+            // tooltip so its summary can't contradict the row.
+            const isUnbounded = unboundedCounterTypes.includes(type);
+            return (
+              <CounterTooltip key={type} type={type} count={count} isUnbounded={isUnbounded}>
+                <span>
+                  {formatCounterType(type)}: {isUnbounded ? "∞" : count}
+                </span>
+              </CounterTooltip>
+            );
+          })}
         </div>
       )}
 

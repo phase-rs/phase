@@ -15,7 +15,9 @@ import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
@@ -75,9 +77,6 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
-// CR 732.2a / CR 701.34a: stable empty ref for the per-object ∞-counter selector so a
-// permanent with no unbounded counter (the dominant case) never re-renders on identity churn.
-const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
 
 /**
  * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
@@ -112,10 +111,15 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
       </span>
       <GameplayTooltip>
         {blocked.map((entry, i) => {
-          const abilityName =
+          // CR 201.5: `~` is the engine's self-reference token; bind it to the host
+          // object so the badge reads the card's name, not a raw tilde.
+          const rawAbilityName =
             entry.ability_index < obj.abilities.length
               ? obj.abilities[entry.ability_index]?.description
               : undefined;
+          const abilityName = rawAbilityName
+            ? renderDescription(rawAbilityName, obj.name)
+            : undefined;
           const names = (entry.sources ?? [])
             .map((id) => objects?.[String(id)]?.name)
             .filter((n): n is string => !!n);
@@ -268,14 +272,7 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopiedPermanent = useGameStore((s) =>
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
-  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
-  // counter-growth loop) for this object. Values match the object's `counters` map keys
-  // (e.g. "charge"); the pill renders ∞ instead of ×N for any type in this set.
-  const unboundedCounterTypes = useGameStore(
-    (s) =>
-      s.gameState?.derived?.unbounded_counters?.[String(objectId)]
-      ?? EMPTY_UNBOUNDED_COUNTERS,
-  );
+  const unboundedCounterTypes = useUnboundedCounterTypes(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
