@@ -16,7 +16,9 @@ const mocks = vi.hoisted(() => {
       listener = next;
       return unlisten;
     }),
-    getNativeEngineProgress: vi.fn(async () => null),
+    // Annotated to the real signature: inferring from the `null` default would
+    // pin the mock to `Promise<null>` and reject every replay value below.
+    getNativeEngineProgress: vi.fn(async (): Promise<NativeEngineProgress | null> => null),
     invoke: vi.fn(),
     unlisten,
   };
