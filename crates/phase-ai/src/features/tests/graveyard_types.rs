@@ -681,3 +681,105 @@ fn ability_chain_threshold_participates_in_highest_threshold() {
     ];
     assert_eq!(detect(&deck).highest_threshold, Some(8));
 }
+
+/// Build an ability-chain payoff whose gate is an arbitrary `AbilityCondition`
+/// on the sub-ability — the Traverse carrier, parameterized for the negation and
+/// compound cases below.
+fn ability_chain_gated_by(name: &str, condition: AbilityCondition) -> CardFace {
+    let mut sub = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    sub.condition = Some(condition);
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    root.sub_ability = Some(Box::new(sub));
+    let mut face = creature(name);
+    face.abilities = vec![root];
+    face
+}
+
+fn ability_quantity_check(comparator: Comparator, threshold: i32) -> AbilityCondition {
+    AbilityCondition::QuantityCheck {
+        lhs: own_graveyard_types(),
+        comparator,
+        rhs: QuantityExpr::Fixed { value: threshold },
+    }
+}
+
+/// CR 205.2a: negating "N or more types" is a "fewer than N" gate — the third
+/// carrier rejects it exactly like the static and trigger carriers do.
+#[test]
+fn negated_ability_chain_threshold_is_not_a_payoff() {
+    let face = ability_chain_gated_by(
+        "Anti-Delirium Chain",
+        AbilityCondition::Not {
+            condition: Box::new(ability_quantity_check(Comparator::GE, 4)),
+        },
+    );
+    let feature = detect(&[entry(face, 4)]);
+    assert_eq!(feature.threshold_payoff_count, 0);
+    assert_eq!(feature.highest_threshold, None);
+}
+
+/// A non-positive comparator on the ability carrier is rejected too.
+#[test]
+fn non_positive_comparator_in_the_ability_chain_is_not_a_payoff() {
+    let face = ability_chain_gated_by(
+        "Fewer Types Chain",
+        ability_quantity_check(Comparator::LT, 4),
+    );
+    assert_eq!(detect(&[entry(face, 4)]).threshold_payoff_count, 0);
+}
+
+/// The ability carrier follows the same combinator rules as the other two:
+/// `And` is a mandatory gate (take the max), `Or` only when every branch is a
+/// graveyard threshold.
+#[test]
+fn ability_chain_and_or_follow_the_shared_combinator_rules() {
+    let and_face = ability_chain_gated_by(
+        "Conjunctive Chain",
+        AbilityCondition::And {
+            conditions: vec![
+                ability_quantity_check(Comparator::GE, 4),
+                ability_quantity_check(Comparator::GE, 6),
+            ],
+        },
+    );
+    assert_eq!(detect(&[entry(and_face, 1)]).highest_threshold, Some(6));
+
+    let all_gy_or = ability_chain_gated_by(
+        "All-Graveyard Or Chain",
+        AbilityCondition::Or {
+            conditions: vec![
+                ability_quantity_check(Comparator::GE, 4),
+                ability_quantity_check(Comparator::GE, 6),
+            ],
+        },
+    );
+    assert_eq!(detect(&[entry(all_gy_or, 1)]).highest_threshold, Some(4));
+
+    // One branch that delirium does not gate → the payoff can fire without it.
+    let mixed_or = ability_chain_gated_by(
+        "Mixed Or Chain",
+        AbilityCondition::Or {
+            conditions: vec![
+                ability_quantity_check(Comparator::GE, 4),
+                AbilityCondition::QuantityCheck {
+                    lhs: opponent_graveyard_types(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                },
+            ],
+        },
+    );
+    assert_eq!(detect(&[entry(mixed_or, 1)]).threshold_payoff_count, 0);
+}
