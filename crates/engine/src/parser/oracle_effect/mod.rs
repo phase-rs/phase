@@ -1790,6 +1790,12 @@ fn parse_leave_battlefield_rider_ref(input: &str) -> OracleResult<'_, ()> {
     value(
         (),
         alt((
+            // CR 201.5 + CR 201.5b: `normalize_card_name_refs` (oracle_util.rs)
+            // rewrites every "this creature/permanent/land" self-reference to `~`
+            // card-wide before parsing, so a quoted rider reaching the parser reads
+            // "if ~ would leave the battlefield, ...". Match `~` first; it never
+            // prefix-collides with the "it"/"the …"/"that …"/"this …" arms below.
+            tag("~"),
             tag("it"),
             tag("the card"),
             tag("the creature"),
@@ -1807,11 +1813,77 @@ fn parse_leave_battlefield_rider_ref(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
+/// CR 614.1a + CR 614.6: The object-hosted "exile this permanent instead of
+/// letting it leave the battlefield" replacement. A `Moved` replacement whose
+/// `valid_card: SelfRef` binds it to its own host object and whose `execute`
+/// redirects any battlefield-exit to exile. Shared single authority for the
+/// #6538 targeted-rider front door (`try_parse_leave_battlefield_exile_replacement`,
+/// wrapping `target: Any`), unearth's synthesis (`database/unearth.rs`), and the
+/// #6566 reanimation-rider grant path. Callers add their own
+/// `AddTargetReplacement` / `GrantReplacement` wrapper.
+///
+/// **The returned definition is deliberately UNSTAMPED (`expiry: None`); the
+/// lifetime is the caller's decision.** The two *standalone* consumers (#6538's
+/// front door and unearth) compose `.expiry(RestrictionExpiry::UntilHostLeavesPlay)`
+/// themselves, because there the rider is a runtime effect bound to the object it
+/// was installed on. The *granted* consumer (`classify_quoted_inner` →
+/// `ContinuousModification::GrantReplacement`) must NOT: a granted replacement's
+/// lifetime is governed by the granting continuous effect's duration and is
+/// re-derived every layer pass (CR 613.1f), with the grant itself ending per
+/// CR 611.2a. A host-lifetime stamp there would be read by #6538's machinery
+/// (`is_runtime_host_lifetime_replacement` → base-install + non-copiable +
+/// host-exit prune), so the granted rider would be base-installed and outlive the
+/// continuous effect that granted it — Elemental Expressionist's until-end-of-turn
+/// grant would never lapse.
+///
+/// Production visibility is `pub(crate)`; the `test-support` feature widens it to
+/// `pub` so integration tests (compiled with that feature) assemble the exact
+/// production replacement shape instead of a hand-copied duplicate. Both arms
+/// delegate to the single `_impl` body — mirrors the `game::zones` module
+/// visibility gate in `game/mod.rs`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn leave_battlefield_exile_replacement() -> ReplacementDefinition {
+    leave_battlefield_exile_replacement_impl()
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn leave_battlefield_exile_replacement() -> ReplacementDefinition {
+    leave_battlefield_exile_replacement_impl()
+}
+
+fn leave_battlefield_exile_replacement_impl() -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .valid_card(TargetFilter::SelfRef)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+}
+
 /// CR 614.1a + CR 614.6: Detect "If it would leave the battlefield, exile it
 /// instead of putting it anywhere else." riders attached to a previously
 /// selected object. The carried `ReplacementDefinition` is installed on the
 /// parent target, where `valid_card: SelfRef` binds to that host object.
-fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> {
+///
+/// This is the STANDALONE (printed-rider) front door, so it stamps the #6538
+/// host-lifetime expiry on the shared unstamped definition. Callers that grant
+/// the rider as a continuous effect must use `leave_battlefield_exile_replacement`
+/// directly and treat this function purely as a detector — see its doc.
+pub(crate) fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> {
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
         .parse(lower)
         .ok()?;
@@ -1830,37 +1902,17 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
         .ok()?;
     parse_optional_period_and_end(rest)?;
 
-    let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
-        // CR 400.7: The rider is bound to the lifetime of the object it is
-        // installed on; stamp the expiry here so the lifetime is self-contained
+    Some(Effect::AddTargetReplacement {
+        // CR 400.7: The standalone rider is bound to the lifetime of the object it
+        // is installed on; stamp the expiry here so the lifetime is self-contained
         // (not dependent on the ability frame's duration threading) and so
         // `expiry_from_duration`'s `is_none` guard never retags it — mirrors the
         // die-exile stamp precedent at `try_parse_die_exile_rider` /
         // `parse_token_creation_replacement_effect`. Base-installed to survive
         // CR 613.1 layer reseeds, non-copiable (CR 707.2), pruned on host exit.
-        .expiry(RestrictionExpiry::UntilHostLeavesPlay)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::ChangeZone {
-                origin: Some(Zone::Battlefield),
-                destination: Zone::Exile,
-                target: TargetFilter::SelfRef,
-                owner_library: false,
-                enter_transformed: false,
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                up_to: false,
-                enter_with_counters: vec![],
-                conditional_enter_with_counters: vec![],
-                face_down_profile: None,
-                enters_modified_if: None,
-            },
-        ));
-
-    Some(Effect::AddTargetReplacement {
-        replacement: Box::new(replacement),
+        replacement: Box::new(
+            leave_battlefield_exile_replacement().expiry(RestrictionExpiry::UntilHostLeavesPlay),
+        ),
         target: TargetFilter::Any,
     })
 }

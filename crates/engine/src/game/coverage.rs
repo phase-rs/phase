@@ -4231,6 +4231,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("grant all triggered abilities of {}", fmt_target(source))
         }
         ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
+        ContinuousModification::GrantReplacement { .. } => "grant replacement".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
         ContinuousModification::AddType { core_type } => {
             format!("add type {}", fmt_core_type(core_type))
@@ -4378,6 +4379,7 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
                 m,
                 ContinuousModification::GrantTrigger { .. }
                     | ContinuousModification::GrantAbility { .. }
+                    | ContinuousModification::GrantReplacement { .. }
             )
         })
         .map(fmt_modification)
@@ -4566,6 +4568,11 @@ pub fn build_parse_details(
                 }
                 ContinuousModification::GrantAbility { definition } => {
                     children.push(build_ability_item(definition));
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        children.push(build_ability_item(execute));
+                    }
                 }
                 _ => {}
             }
@@ -5940,6 +5947,10 @@ fn static_has_unimplemented_parts(def: &StaticDefinition) -> bool {
                 ContinuousModification::GrantTrigger { trigger } => {
                     trigger_has_unimplemented_parts(trigger)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_some_and(ability_definition_has_unimplemented_parts),
                 _ => false,
             })
 }
@@ -6033,6 +6044,11 @@ fn check_statics(
                 }
                 ContinuousModification::GrantTrigger { trigger } => {
                     check_trigger(trigger, trigger_registry, missing);
+                }
+                ContinuousModification::GrantReplacement { replacement } => {
+                    if let Some(execute) = &replacement.execute {
+                        collect_ability_missing_parts(execute, missing);
+                    }
                 }
                 _ => {}
             }
@@ -6953,6 +6969,10 @@ fn is_static_supported(
                 ContinuousModification::GrantTrigger { trigger } => {
                     is_trigger_supported(trigger, trigger_registry)
                 }
+                ContinuousModification::GrantReplacement { replacement } => replacement
+                    .execute
+                    .as_deref()
+                    .is_none_or(is_ability_supported),
                 _ => true,
             })
 }
@@ -12216,6 +12236,7 @@ mod tests {
                     source_controller: None,
                     source_object: None,
                     bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -12263,6 +12284,7 @@ mod tests {
                     source_controller: None,
                     source_object: None,
                     bypass_beneficiary: None,
+                    protection_does_not_remove: None,
                 }],
                 duration: Some(Duration::UntilEndOfTurn),
                 target: None,
@@ -13398,6 +13420,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -13432,6 +13455,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(audit_card_lines(oracle, &face).is_empty());
@@ -13464,6 +13488,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let findings = audit_card_lines(oracle, &face);
@@ -13614,6 +13639,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -13646,6 +13672,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(
@@ -13688,6 +13715,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13721,6 +13749,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13756,6 +13785,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         let gaps = card_face_gaps(&face);
@@ -13797,6 +13827,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             });
         }
 
@@ -13965,6 +13996,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         });
 
         assert!(

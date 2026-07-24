@@ -211,6 +211,13 @@ interface GameStoreActions {
    * "Undo not supported in P2P games" guard.
    */
   resumeP2PHost: (gameId: string, adapter: EngineAdapter) => Promise<void>;
+  /**
+   * Resume a native-engine solo (AI) game. Like `resumeP2PHost` the game is
+   * server-authoritative — the local phase-server holds the state and the
+   * reconnecting adapter's `initialize()` yields it — so there is no local
+   * snapshot to `restoreState` and no undo history to rebuild.
+   */
+  resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
   undo: () => Promise<void>;
   reset: () => void;
@@ -280,6 +287,40 @@ export function nextGameSessionGeneration(): number {
 }
 
 export type GameStore = GameStoreState & GameStoreActions;
+
+/**
+ * Seed the store from a server-authoritative adapter whose `initialize()` has
+ * already produced the current game state (resumed P2P host, or a reconnected
+ * native solo game). These games have no client-side undo history and no local
+ * checkpoints — the server owns the state — so `stateHistory`/`turnCheckpoints`
+ * stay empty. Shared by `resumeP2PHost` and `resumeNativeSolo`.
+ */
+async function seedResumedServerGame(
+  get: () => GameStore,
+  gameId: string,
+  adapter: EngineAdapter,
+): Promise<void> {
+  // Reset stack-pacing throughput — resuming may load a different game than the
+  // one just played; stale churn must not carry across.
+  resetStackThroughput();
+  await adapter.initialize();
+  // Fetched after `initialize()` restored/attached the engine state, so the
+  // snapshot is newest-by-construction and always passes the commit gate.
+  const snapshot = await adapter.getSnapshot();
+  get().commitEngineSnapshot(snapshot, {
+    extraState: {
+      gameId,
+      adapter,
+      gameSessionGeneration: nextGameSessionGeneration(),
+      events: [],
+      eventHistory: [],
+      logHistory: [],
+      nextLogSeq: 0,
+      stateHistory: [],
+      turnCheckpoints: [],
+    },
+  });
+}
 
 const initialState: GameStoreState = {
   gameId: null,
@@ -438,30 +479,19 @@ export const useGameStore = create<GameStore>()(
     },
 
     resumeP2PHost: async (gameId, adapter) => {
-      // Reset stack-pacing throughput on entry to this game context.
-      resetStackThroughput();
-      // `adapter.initialize()` on a resumed P2PHostAdapter already
-      // called `wasm.resumeMultiplayerHostState(savedState)` — the
-      // engine is populated and in multiplayer mode. All we need here
-      // is to pull the state out and seed the store. No stateHistory
-      // (multiplayer = no undo); no checkpoints (P2P never saved them).
-      await adapter.initialize();
-      // Fetched after that `initialize()` (which is what restored the engine, per
-      // the note above), so the snapshot is newest-by-construction.
-      const snapshot = await adapter.getSnapshot();
-      get().commitEngineSnapshot(snapshot, {
-        extraState: {
-          gameId,
-          adapter,
-          gameSessionGeneration: nextGameSessionGeneration(),
-          events: [],
-          eventHistory: [],
-          logHistory: [],
-          nextLogSeq: 0,
-          stateHistory: [],
-          turnCheckpoints: [],
-        },
-      });
+      // `adapter.initialize()` on a resumed P2PHostAdapter already called
+      // `wasm.resumeMultiplayerHostState(savedState)` — the engine is populated
+      // and in multiplayer mode — so the shared helper just pulls the state out
+      // and seeds the store. No stateHistory (multiplayer = no undo); no
+      // checkpoints (P2P never saved them).
+      await seedResumedServerGame(get, gameId, adapter);
+    },
+
+    resumeNativeSolo: async (gameId, adapter) => {
+      // The reconnecting native adapter's `initialize()` sends a reconnect frame
+      // and resolves once the phase-server replays the current GameStarted
+      // state; the shared helper then seeds the store from that authority.
+      await seedResumedServerGame(get, gameId, adapter);
     },
 
     dispatch: async (action) => {

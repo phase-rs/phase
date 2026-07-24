@@ -3467,6 +3467,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -11960,6 +11961,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             }]
             .into();
         }
@@ -14737,6 +14739,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -14854,6 +14857,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         }]
         .into();
     }

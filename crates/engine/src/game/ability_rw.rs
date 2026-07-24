@@ -104,9 +104,9 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
     GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2695,6 +2695,12 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
             legacy_static_definition(definition)
         }
         ContinuousModification::GrantTrigger { trigger } => legacy_trigger_definition(trigger),
+        // A granted object-hosted replacement can nest a frozen tag in its
+        // execute body or its `valid_card` scope filter — distinct traversal from
+        // GrantTrigger (a ReplacementDefinition, not a TriggerDefinition).
+        ContinuousModification::GrantReplacement { replacement } => {
+            legacy_replacement_definition(replacement)
+        }
         ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
             legacy_target_filter(source)
@@ -2762,6 +2768,14 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
         | ContinuousModification::SetStartingLoyalty { .. }
         | ContinuousModification::RemoveManaCost => false,
     }
+}
+
+/// A granted object-hosted `ReplacementDefinition` can carry a frozen tag in its
+/// `execute` redirect body or its `valid_card` scope filter. Mirrors
+/// `legacy_trigger_definition` for the replacement-granting layer-6 case.
+fn legacy_replacement_definition(rd: &ReplacementDefinition) -> bool {
+    rd.execute.as_deref().is_some_and(legacy_definition)
+        || rd.valid_card.as_ref().is_some_and(legacy_target_filter)
 }
 
 /// A granted / emblem `TriggerDefinition` can carry a frozen tag in its firing

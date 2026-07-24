@@ -2252,6 +2252,7 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
+    crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
 }
 
@@ -6676,6 +6677,24 @@ fn apply_continuous_effect_filtered(
                     .any(|sd| sd == definition.as_ref())
                 {
                     obj.static_definitions.push(*definition.clone());
+                }
+            }
+            // CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+            // to the recipient. Mirror of `GrantStaticAbility` — push the cloned
+            // `ReplacementDefinition` onto `obj.replacement_definitions` so the
+            // granted replacement fires as a genuine replacement effect (its
+            // `valid_card: SelfRef` binds to this recipient object). Re-derived
+            // each layer pass (`obj.replacement_definitions` was reset to base at
+            // the start of the pass); structural-equality dedup keeps repeated
+            // grants (multiple sources, or a single static parsed twice)
+            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant.
+            ContinuousModification::GrantReplacement { replacement } => {
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|rd| rd == replacement.as_ref())
+                {
+                    obj.replacement_definitions.push(*replacement.clone());
                 }
             }
             ContinuousModification::AddStaticMode { mode } => {

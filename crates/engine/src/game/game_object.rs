@@ -340,6 +340,18 @@ pub struct EmblemSource {
     pub printed_ref: Option<PrintedCardRef>,
 }
 
+/// CR 702.16p: Start-time attachment exemption captured for one continuous
+/// protection modification (`static_definitions` index + `modifications` index
+/// on the grant source) and host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionStartSnapshot {
+    pub resolved_quality: crate::types::keywords::ProtectionTarget,
+    pub attachment_ids: Vec<ObjectId>,
+}
+
+/// `(static_definitions index, modifications index, host object id)`.
+pub type ProtectionEffectHostKey = (usize, usize, ObjectId);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -381,6 +393,12 @@ pub struct GameObject {
     /// `None` if unattached. See `AttachTarget` for variants.
     pub attached_to: Option<AttachTarget>,
     pub attachments: Vec<ObjectId>,
+    /// CR 702.16p: Per [`StaticGateKey::def_index`] on this source and enchanted
+    /// host, the controlled attachments matching that effect's resolved protection
+    /// quality when it first started applying to that host.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub protection_start_exempt_attachments:
+        HashMap<ProtectionEffectHostKey, ProtectionStartSnapshot>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
     /// if `A.paired_with == Some(B)`, then `B.paired_with == Some(A)`.
     /// This is independent from attachments; paired creatures are not
@@ -1249,6 +1267,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         phyrexian_life_paid: _,
         mana_spent_source_snapshots: _,
         phase_status: _,
+        protection_start_exempt_attachments: _,
     } = o;
 }
 
@@ -1981,6 +2000,7 @@ impl GameObject {
             dealt_deathtouch_damage: false,
             attached_to: None,
             attachments: Vec::new(),
+            protection_start_exempt_attachments: HashMap::new(),
             paired_with: None,
             pair_controller: None,
             counters: HashMap::new(),
@@ -2355,6 +2375,7 @@ impl GameObject {
         // CR 305.1 + CR 603.4: Land-play provenance is likewise battlefield-
         // entry scoped and must not survive a later zone change.
         self.played_from_zone = None;
+        self.protection_start_exempt_attachments.clear();
         self.convoked_creatures.clear();
         // CR 702.103f: `bestow_form` is intentionally NOT cleared here.
         // The zone-exit cleanup in `apply_zone_exit_cleanup` (zones.rs) reads

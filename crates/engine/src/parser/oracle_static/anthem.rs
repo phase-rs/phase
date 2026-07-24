@@ -440,10 +440,13 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
 
     let modifications = parse_continuous_modifications(&effective_predicate);
     if !modifications.is_empty() {
-        let mut def = StaticDefinition::continuous()
-            .affected(affected)
-            .modifications(modifications)
-            .description(text.to_string());
+        let mut def = with_protection_does_not_remove(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(text.to_string()),
+            text,
+        );
         if let Some(cond) = suffix_condition {
             def.condition = Some(cond);
         }
@@ -1088,12 +1091,13 @@ pub(crate) fn parse_continuous_gets_has(
                         modifications.extend(type_mods);
                     }
                     modifications.extend(parse_quoted_ability_modifications(description));
-                    return Some(
+                    return Some(with_protection_does_not_remove(
                         StaticDefinition::continuous()
                             .affected(affected)
                             .modifications(modifications)
                             .description(description.to_string()),
-                    );
+                        description,
+                    ));
                 }
             }
         }
@@ -1105,12 +1109,13 @@ pub(crate) fn parse_continuous_gets_has(
         return None;
     }
 
-    Some(
+    Some(with_protection_does_not_remove(
         StaticDefinition::continuous()
             .affected(affected)
             .modifications(modifications)
             .description(description.to_string()),
-    )
+        description,
+    ))
 }
 
 pub(crate) fn parse_dynamic_for_each_pt_modifications(

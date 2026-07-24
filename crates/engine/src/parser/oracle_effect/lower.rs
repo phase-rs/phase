@@ -9057,6 +9057,8 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
+        // Granted object-hosted replacement: no where-X / anaphoric magnitude.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked
@@ -9160,6 +9162,8 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
+        // Granted object-hosted replacement: no where-X / anaphoric magnitude.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked

@@ -20278,6 +20278,30 @@ pub struct StaticDefinition {
     /// serialized statics (all unrestricted) round-trip unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_beneficiary: Option<ControllerRef>,
+    /// CR 702.16n / CR 702.16p: When this continuous static grants protection,
+    /// attachments matching this exemption are not put into their owners'
+    /// graveyards as a state-based action by *this* protection instance
+    /// (Flickering Ward / Pentarch Ward / Ward cycle / Benevolent Blessing).
+    /// Other protection instances from the same quality still apply normally.
+    /// `None` = no exemption (ordinary protection). Serde-defaulted so
+    /// pre-existing card-data round-trips unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection_does_not_remove: Option<ProtectionDoesNotRemove>,
+}
+
+/// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
+/// effect does not remove via SBA (and, for the already-attached form, which
+/// may remain attached when the effect starts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProtectionDoesNotRemove {
+    /// CR 702.16n: "This effect doesn't remove this Aura." — the grant source.
+    Source,
+    /// CR 702.16n: "This effect doesn't remove Auras." (Spectra Ward).
+    Auras,
+    /// CR 702.16p: "doesn't remove Auras and Equipment you control that are
+    /// already attached to it" (Benevolent Blessing). New same-quality
+    /// attachments remain illegal; only already-attached controlled ones stay.
+    ControlledAttachmentsAlreadyAttached,
 }
 
 impl StaticDefinition {
@@ -20297,6 +20321,7 @@ impl StaticDefinition {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         }
     }
 
@@ -20311,6 +20336,12 @@ impl StaticDefinition {
 
     pub fn modifications(mut self, mods: Vec<ContinuousModification>) -> Self {
         self.modifications = mods;
+        self
+    }
+
+    /// CR 702.16n / CR 702.16p: Attach the protection SBA exemption rider.
+    pub fn protection_does_not_remove(mut self, exemption: ProtectionDoesNotRemove) -> Self {
+        self.protection_does_not_remove = Some(exemption);
         self
     }
 
@@ -21358,6 +21389,25 @@ pub enum ContinuousModification {
     /// preserved and the trigger fires correctly.
     GrantTrigger {
         trigger: Box<TriggerDefinition>,
+    },
+    /// CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+    /// effect to the affected object (Layer 6, ability-adding). The layer-6
+    /// mirror of `GrantTrigger`: where that variant pushes a `TriggerDefinition`
+    /// onto `obj.trigger_definitions`, this pushes a `ReplacementDefinition` onto
+    /// `obj.replacement_definitions` so the granted replacement's event/scope
+    /// metadata is preserved and it fires as a genuine replacement (CR 614.6).
+    ///
+    /// Models the "it gains 'If ~ would leave the battlefield, exile it instead
+    /// of putting it anywhere else'" reanimation rider (Geth, Thane of Contracts;
+    /// Llanowar Greenwidow; Realmbreaker, the Invasion Tree; Spirit-Sister's
+    /// Call; Elemental Expressionist's until-EOT grant). The rider's `~`
+    /// self-reference resolves to the object that gains the ability (CR 201.5b),
+    /// which is the reanimated permanent, not the granting source. Re-derived
+    /// each layer pass (`obj.replacement_definitions` is reset to base at the
+    /// start of the pass); structural-equality dedup keeps repeated grants
+    /// idempotent, exactly like `GrantTrigger` / `GrantStaticAbility`.
+    GrantReplacement {
+        replacement: Box<ReplacementDefinition>,
     },
     RemoveAllAbilities,
     AddType {
@@ -23903,6 +23953,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -24196,6 +24247,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

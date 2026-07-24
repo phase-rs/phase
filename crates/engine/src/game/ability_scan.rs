@@ -5017,6 +5017,10 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // its `CopyValues` sibling (the real grant is the installed TCE).
         | ContinuousModification::CopyChosen
         | ContinuousModification::GrantTrigger { .. }
+        // A granted object-hosted replacement's `ReplacementDefinition` execute
+        // is outside the scanner's traversal closure — fail-closed CONSERVATIVE,
+        // same class as GrantTrigger / GrantStaticAbility.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::AddStaticMode { .. }

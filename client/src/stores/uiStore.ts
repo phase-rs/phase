@@ -375,7 +375,16 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       }
       cancelPendingShow();
       const applyInspect = () =>
-        set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 });
+        set((s) => ({
+          inspectedObjectId: id,
+          inspectedFaceIndex: faceIndex ?? 0,
+          // Inspecting a DIFFERENT object replaces (dismisses) the previous
+          // preview, so a pinned Alt state must not leak onto the new card —
+          // Alt has to be pressed again to expand it. Re-inspecting the SAME
+          // object (e.g. a face flip or a re-hover) preserves the pin so the
+          // reader isn't kicked out mid-scroll.
+          altHeld: s.inspectedObjectId === id ? s.altHeld : false,
+        }));
       // Configurable hover latency (cardPreviewHoverDelayMs). The delay gates only
       // the FIRST appearance on a hover-capable device: while a preview is already
       // open, sweeping to an adjacent card switches instantly, and the "shift"

@@ -855,6 +855,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
     match modification {
         ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
         ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
+        ContinuousModification::GrantReplacement { replacement } => {
+            walk_replacement(replacement, out)
+        }
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
         ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
