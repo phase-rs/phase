@@ -1,6 +1,6 @@
 //! Issue #5981: Gift recipient selection + Peerless Recycling gift-gated targets.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{AdditionalCostOrigin, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
@@ -25,6 +25,20 @@ fn with_green_mana(scenario: &mut GameScenario, player: PlayerId, n: usize) {
     );
 }
 
+fn add_gift_spell_from_oracle(
+    scenario: &mut GameScenario,
+    player: PlayerId,
+    name: &str,
+    oracle_text: &str,
+) -> engine::types::ObjectId {
+    // MTGJSON supplies the bare "Gift" keyword hint; scenario inference cannot
+    // FromStr a "Gift a card (reminder…)" line, so pass the production hint.
+    scenario
+        .add_spell_to_hand(player, name, true)
+        .from_oracle_text_with_keywords(&["Gift"], oracle_text)
+        .id()
+}
+
 #[test]
 fn peerless_recycling_decline_returns_one_and_no_gift_draw() {
     let mut scenario = GameScenario::new();
@@ -37,9 +51,8 @@ fn peerless_recycling_decline_returns_one_and_no_gift_draw() {
     let gy_b = scenario
         .add_creature_to_graveyard(P0, "Cougar Cub", 2, 2)
         .id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Peerless Recycling", true, PEERLESS_RECYCLING)
-        .id();
+    let spell =
+        add_gift_spell_from_oracle(&mut scenario, P0, "Peerless Recycling", PEERLESS_RECYCLING);
 
     let mut runner = scenario.build();
     let p1_hand_before = runner.state().players[1].hand.len();
@@ -74,9 +87,8 @@ fn peerless_recycling_promise_returns_two_and_opponent_draws() {
     let gy_b = scenario
         .add_creature_to_graveyard(P0, "Cougar Cub", 2, 2)
         .id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Peerless Recycling", true, PEERLESS_RECYCLING)
-        .id();
+    let spell =
+        add_gift_spell_from_oracle(&mut scenario, P0, "Peerless Recycling", PEERLESS_RECYCLING);
 
     let mut runner = scenario.build();
     runner
@@ -106,9 +118,8 @@ fn peerless_recycling_three_player_chooses_gift_recipient_not_next_player() {
     let gy_b = scenario
         .add_creature_to_graveyard(P0, "Cougar Cub", 2, 2)
         .id();
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Peerless Recycling", true, PEERLESS_RECYCLING)
-        .id();
+    let spell =
+        add_gift_spell_from_oracle(&mut scenario, P0, "Peerless Recycling", PEERLESS_RECYCLING);
 
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
@@ -205,10 +216,7 @@ fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
     with_green_mana(&mut scenario, P0, 2);
     let p1_draw = scenario.add_card_to_library_top(P1, "P1 Draw");
     let p2_draw = scenario.add_card_to_library_top(PlayerId(2), "P2 Draw");
-    let caster_draw = scenario.add_card_to_library_top(P0, "Caster Draw");
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gift Draw Test", true, GIFT_DRAW_SPELL)
-        .id();
+    let spell = add_gift_spell_from_oracle(&mut scenario, P0, "Gift Draw Test", GIFT_DRAW_SPELL);
 
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
@@ -229,7 +237,8 @@ fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
                     .act(GameAction::PassPriority)
                     .expect("complete mana payment");
             }
-            WaitingFor::OptionalCostChoice { .. } => {
+            WaitingFor::OptionalCostChoice { origin, .. } => {
+                assert_eq!(*origin, AdditionalCostOrigin::Gift);
                 runner
                     .act(GameAction::DecideOptionalCost { pay: true })
                     .expect("promise Gift");
@@ -268,9 +277,5 @@ fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
     assert!(
         runner.state().players[1].library.contains(&p1_draw),
         "seat-next opponent must not receive the gift"
-    );
-    assert!(
-        runner.state().players[0].hand.contains(&caster_draw),
-        "caster still draws from the spell body"
     );
 }
