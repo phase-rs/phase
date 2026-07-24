@@ -1,12 +1,12 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, CardPlayMode,
-    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, CostObjectCount,
-    CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp, GameRestriction,
-    ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    CardSelectionMode, CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification,
+    CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp,
+    GameRestriction, ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
+    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -15240,16 +15240,21 @@ pub(super) fn find_battlefield_exile_cost(cost: &AbilityCost) -> Option<(u32, &T
     }
 }
 
+/// Sole detector for a non-self "discard from hand" cost leg. Returns the count
+/// expression, optional card filter, and the `CardSelectionMode` (player-chosen
+/// vs. game-selected) so a single authority drives both the casting/activation
+/// resolver and the mana-ability path. `SourceCard` "discard this card" is never
+/// matched (see [`resolve_non_self_discard_requirement`]); recurses `Composite`.
 pub(crate) fn find_non_self_discard(
     cost: &AbilityCost,
-) -> Option<(&QuantityExpr, Option<&TargetFilter>)> {
+) -> Option<(&QuantityExpr, Option<&TargetFilter>, CardSelectionMode)> {
     match cost {
         AbilityCost::Discard {
             count,
             filter,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            ..
-        } => Some((count, filter.as_ref())),
+            selection,
+        } => Some((count, filter.as_ref(), *selection)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard),
         _ => None,
     }
@@ -15278,7 +15283,10 @@ pub(crate) fn resolve_non_self_discard_requirement(
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> Result<Option<(usize, Vec<ObjectId>)>, EngineError> {
-    let Some((count, filter)) = find_non_self_discard(cost) else {
+    // The activation/casting path handles ANY `FromHand` discard selection mode; the
+    // mana-ability path (see `mana_abilities::discard_cost_choice`) is the only caller
+    // that gates on `Chosen`. Keep this resolver selection-agnostic.
+    let Some((count, filter, _selection)) = find_non_self_discard(cost) else {
         return Ok(None);
     };
     let count = super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
