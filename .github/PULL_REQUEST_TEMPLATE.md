@@ -2,6 +2,22 @@
 
 <!-- What this PR changes and why. One or two sentences. -->
 
+## Files changed
+
+<!-- Every changed path, as a short bullet list. -->
+
+## Track
+
+<Developer | Non-developer>
+
+## LLM
+
+Model: <actual Frontier model identifier>
+Tier: Frontier
+Thinking: <high | max>
+
+<!-- Keep Model and Tier as exact, standalone canonical lines. -->
+
 ## Implementation method (required)
 
 Method: /engine-implementer
@@ -42,5 +58,20 @@ Final review-impl PASS head=<40-hex-sha>
 
 ## Claimed parse impact
 
-- <Exact Card Name>
-<!-- Optional manual quality evidence; not an admission artifact. -->
+None.
+<!-- List exact card names only when the parse-diff changes cards. -->
+
+## Scope Expansion
+
+None.
+<!-- Describe any change that crosses the issue/card's stated scope. -->
+
+## Validation Failures
+
+None.
+<!-- Replace with the unresolved validation failure and its evidence. -->
+
+## CI Failures
+
+None.
+<!-- Replace with the unresolved CI failure and its evidence. -->
