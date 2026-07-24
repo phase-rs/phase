@@ -1,12 +1,19 @@
 name: MTGJSON cache key
 description: >
   Derive the mtgjson-full cache-key suffix from MTGJSON's published release
-  version, so the cache rolls exactly when new data is published.
+  version, so the cache rolls exactly when new data is published, plus the
+  paired draft-pool suffix for the artifact generated from that same data.
 
 outputs:
   suffix:
     description: Published MTGJSON version (sanitized), or a week-based fallback.
     value: ${{ steps.probe.outputs.suffix }}
+  draft_pools_suffix:
+    description: >
+      Cache-key suffix for the generated draft-pools.json — the MTGJSON data
+      version plus a hash of the sources and gating config that define the
+      output.
+    value: ${{ steps.pools.outputs.suffix }}
 
 runs:
   using: composite
@@ -44,3 +51,50 @@ runs:
           suffix="week-$(date -u +%Y-W%V)"
         fi
         echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+
+    - name: Derive draft-pool cache suffix
+      id: pools
+      shell: bash
+      env:
+        MTGJSON_SUFFIX: ${{ steps.probe.outputs.suffix }}
+      # draft-pools.json is a pure function of four inputs, and all four are in
+      # this suffix so a restored pool is current by construction:
+      #
+      #   1. the MTGJSON per-set files      → MTGJSON_SUFFIX (above)
+      #   2. the draft-core crate           → src_hash
+      #   3. engine's set catalog + gating  → src_hash
+      #   4. GATED_SETS (+ its as-of date)  → gate
+      #
+      # Deliberately narrow on the engine side: `extraction.rs` deserializes
+      # MTGJSON directly and never calls into engine, so the only engine code
+      # that can move the output is the set catalog / release gate the bin
+      # reads. Routine parser churn under crates/engine therefore does NOT
+      # roll this key. Widen it here if draft-pool-gen ever reads more.
+      run: |
+        set -euo pipefail
+        # `git ls-files -s` yields the tracked blob SHAs of the checked-out
+        # tree — a content hash with no file reads.
+        srcs="$(git ls-files -s \
+          crates/draft-core \
+          crates/engine/src/database/set_catalog.rs \
+          crates/engine/src/database/set_gating.rs)"
+        # Empty means the paths were moved or renamed. Fail loudly: a constant
+        # hash silently pins every consumer to the first pool ever cached.
+        if [ -z "$srcs" ]; then
+          echo "::error::draft-pool source paths matched no tracked files — update .github/actions/mtgjson-cache-key"
+          exit 1
+        fi
+        src_hash="$(printf '%s' "$srcs" | sha256sum | cut -c1-16)"
+        # Release gating is generation-time input, and gated sets auto-unlock
+        # once their release date passes as of GATED_SETS_AS_OF (default UTC
+        # today — see engine::database::set_gating). So while gating is active
+        # the key must roll daily, or a cached pool would keep hiding a set
+        # that has since released. Unset (the CI default) → no date in the
+        # key, and the entry survives across days. Commas are not cache-key
+        # material, so they become underscores.
+        if [ -n "${GATED_SETS:-}" ]; then
+          gate="$(printf '%s' "$GATED_SETS" | tr -d '[:space:]' | tr ',' '_')-${GATED_SETS_AS_OF:-$(date -u +%Y-%m-%d)}"
+        else
+          gate="ungated"
+        fi
+        echo "suffix=${MTGJSON_SUFFIX}-${src_hash}-${gate}" >> "$GITHUB_OUTPUT"

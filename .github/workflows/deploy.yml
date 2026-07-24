@@ -31,7 +31,20 @@ jobs:
     name: Card data & R2
     if: ${{ github.repository == 'phase-rs/phase' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Sized for the MTGJSON-publish day, not the steady state. When MTGJSON
+    # ships a new version the key rolls, and the first run to see it pays the
+    # whole cold path: ~6m30s of token-set downloads, two back-to-back engine
+    # compiles (~5m35s each — tokens-gen regenerates known-tokens.toml, which
+    # build.rs embeds, forcing a rebuild), ~2m20s of draft-set downloads and a
+    # ~5m30s draft-core compile. Observed 29-30m; run 30114030288 was killed at
+    # 30m12s mid-R2-upload.
+    #
+    # That kill is self-perpetuating and is why the ceiling matters more than
+    # it looks: actions/cache declares `post-if: success()`, so a timed-out run
+    # saves NOTHING. The next run recomputes the same missing key and pays the
+    # same cold path again. The budget has to clear the cold path, or the cache
+    # can never be seeded at all.
+    timeout-minutes: 50
     permissions:
       actions: write
       contents: read
@@ -64,7 +77,20 @@ jobs:
         id: mtgjson-key
         uses: ./.github/actions/mtgjson-cache-key
 
-      - name: Cache MTGJSON data
+      # ── Cache restores ─────────────────────────────────────────────────────
+      # Every cache in this job is restore-only, with an explicit save placed
+      # at the step where its data is complete — NOT the combined
+      # `actions/cache` action.
+      #
+      # The combined action registers its save as a post step declared
+      # `post-if: success()`, so a job that dies anywhere downstream saves
+      # NOTHING. That turned a routine MTGJSON publish into a self-sustaining
+      # outage on 2026-07-24: the key rolled, the run paid ~28m of cold
+      # downloads, got killed by the job timeout mid-R2-upload, saved nothing,
+      # and every following run recomputed the same missing key and paid the
+      # same 28m again (run 30114030288). Saving the instant the data is whole
+      # makes that cost one-time no matter what fails afterwards.
+      - name: Restore MTGJSON data
         # Full data/mtgjson dir under the `mtgjson-full-` namespace: this job
         # runs gen-card-data.sh, which populates every file (AtomicCards, Meta,
         # SetList, token sets, decks). Kept distinct from ci.yml's partial
@@ -78,7 +104,7 @@ jobs:
         # missing); a restore-keys fallback would pin the file-existence-gated
         # fetches to stale data forever.
         id: mtgjson-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: data/mtgjson
           key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
@@ -88,8 +114,9 @@ jobs:
       # pin them to old data forever. Exact-key-only means a new day misses,
       # the scripts re-fetch, and same-day deploys reuse the fetch — cutting
       # Scryfall API load (and the Cloudflare-throttle flakiness it causes).
-      - name: Cache Scryfall bulk data
-        uses: actions/cache@v4
+      - name: Restore Scryfall bulk data
+        id: scryfall-cache
+        uses: actions/cache/restore@v4
         with:
           path: data/scryfall
           key: scryfall-${{ steps.cache-keys.outputs.day }}
@@ -118,15 +145,106 @@ jobs:
           ./scripts/gen-card-data.sh
 
       - name: Download draft set data
+        id: draft-sets
         # fetch-draft-sets.sh needs SetList.json (produced by gen-card-data.sh).
-        # Per-set files land in data/mtgjson/sets/, covered by the mtgjson cache.
-        run: ./scripts/fetch-draft-sets.sh
+        # Per-set files land in data/mtgjson/sets/, covered by the mtgjson cache
+        # (a hit downloads nothing — 244 skipped in ~2s). Left unconditional
+        # even when the pool cache below hits: this is what keeps the mtgjson
+        # entry whole, and it is the only step that repopulates sets/ after an
+        # eviction.
+        #
+        # The script treats a failed set download as non-fatal (warn, count,
+        # exit 0) so one flaky set can't kill a deploy. That makes the reported
+        # failure count load-bearing for the pool cache below: pools built from
+        # a short sets/ dir must not be frozen under an immutable key. The
+        # count is republished as a step output; the summary line is a stable
+        # contract of a script in this repo.
+        run: |
+          set -o pipefail
+          ./scripts/fetch-draft-sets.sh | tee draft-sets.log
+          failed=$(sed -n 's/^Summary: .*failed \([0-9][0-9]*\)$/\1/p' draft-sets.log | tail -1)
+          echo "failed=${failed:-0}" >> "$GITHUB_OUTPUT"
+          echo "set downloads failed: ${failed:-0}"
+
+      - name: Save MTGJSON data
+        # THE earliest point data/mtgjson is complete: fetch-draft-sets.sh is
+        # the last writer into it (gen-card-data.sh fetches AtomicCards, Meta,
+        # SetList, token sets and decks; this adds the draft sets). Saving here
+        # rather than at job end means a failure in pool generation, the
+        # semantic audit or the R2 upload never re-costs the ~9m of downloads.
+        #
+        # Not earlier: a save mid-population would freeze a partial sets/ dir
+        # under an immutable key, and the later fetches would be skipped by
+        # their own file-existence guards forever.
+        #
+        # Deliberately NOT `always()`. As an inline step this runs in sequence,
+        # so a later failure cannot cancel it — it has already banked the
+        # download. `always()` would only add the case where an *earlier* step
+        # failed, i.e. exactly when the directory is incomplete and must not be
+        # frozen under an immutable key. Default `success()` is the correct
+        # "the data is whole" gate. cache-hit gating skips a redundant save,
+        # which would otherwise just warn that the key already exists.
+        if: ${{ steps.mtgjson-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/mtgjson
+          key: mtgjson-full-${{ steps.mtgjson-key.outputs.suffix }}
+
+      - name: Restore draft pools
+        # Paired with the MTGJSON cache: same `mtgjson-` prefix (so
+        # /clear-caches mtgjson sweeps both) and a suffix built from the same
+        # published-data version — see the mtgjson-cache-key action, which is
+        # the single authority for both keys.
+        #
+        # A separate entry rather than folding draft-pools.json into the
+        # `data/mtgjson` path above, because actions/cache writes only on a key
+        # miss: a pool-affecting draft-core change must roll the key, and the
+        # data-version key alone cannot see source changes.
+        #
+        # NO restore-keys: every input to the output is in the key, so an
+        # inexact hit is by construction a stale pool.
+        id: draft-pools-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: client/public/draft-pools.json
+          key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
 
       - name: Generate draft pools
+        # ~2s of extraction behind a ~5m30s compile of engine + draft-core:
+        # draft-pool-gen can't take --features cli, so it never reuses the
+        # units gen-card-data.sh built and pays a full cold compile every run.
+        # Skipping that on a cache hit is the whole point of the step above.
+        #
+        # Gate on file existence, not `cache-hit` (same reasoning as "Download
+        # MTGJSON data"): a poisoned or partial entry reports a hit with no
+        # file, and skipping on that would ship a deploy with no pools at all.
+        # Absent file → regenerate, so the cache self-heals.
+        #
         # Profile `tool`, not `release`: a one-shot JSON transform. draft-pool-gen
         # lives in draft-core and can't take --features cli, so it gets its own
         # [tool,default] engine fingerprint; tool keeps that compile cheap.
-        run: cargo run --profile tool --bin draft-pool-gen
+        run: |
+          if [ -f client/public/draft-pools.json ]; then
+            echo "draft-pools.json restored from cache — skipping draft-pool-gen"
+          else
+            cargo run --profile tool --bin draft-pool-gen
+          fi
+
+      - name: Save draft pools
+        # Banked the moment the file exists, so the ~5m30s compile is never
+        # paid twice for the same inputs even if the rest of the job fails.
+        #
+        # Skipped when any set download failed. A short sets/ dir yields a pool
+        # missing those sets, and the pool key is derived from the MTGJSON data
+        # version — so caching it would pin the short pool for the whole key
+        # window. Not saving preserves the existing self-heal: sets/ is
+        # file-existence-gated, so the next run fetches only the sets that are
+        # still missing and regenerates a complete pool.
+        if: ${{ steps.draft-pools-cache.outputs.cache-hit != 'true' && steps.draft-sets.outputs.failed == '0' }}
+        uses: actions/cache/save@v4
+        with:
+          path: client/public/draft-pools.json
+          key: mtgjson-draft-pools-${{ steps.mtgjson-key.outputs.draft_pools_suffix }}
 
       - name: Validate card-data against engine schema
         # Deploy gate — parse the freshly produced card-data through the same
@@ -171,6 +289,16 @@ jobs:
           ./scripts/gen-scryfall-token-images.sh
           ./scripts/gen-scryfall-sets.sh
           ./scripts/gen-scryfall-printings.sh
+
+      - name: Save Scryfall bulk data
+        # data/scryfall is complete once the four generators have run. Banking
+        # it here keeps a later failure from re-hitting the Scryfall API on the
+        # next run — the throttle flakiness this cache exists to avoid.
+        if: ${{ steps.scryfall-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/scryfall
+          key: scryfall-${{ steps.cache-keys.outputs.day }}
 
       - name: Generate coverage badge endpoints
         # --profile tool --features cli matches gen-card-data.sh → cache hit.
