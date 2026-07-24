@@ -25,6 +25,14 @@
     "ready": "Silnik natywny jest gotowy",
     "failed": "Nie można przygotować silnika natywnego"
   },
+  "engineBadge": {
+    "native": "Silnik natywny",
+    "nativeTooltip": "Ta gra korzysta z natywnego silnika aplikacji desktopowej.",
+    "inBrowser": "Silnik przeglądarki",
+    "inBrowserTooltip": "Silnik natywny niedostępny — ta gra działa w przeglądarce.",
+    "versionMismatchTooltip": "Niezgodna wersja silnika natywnego — ta gra działa w przeglądarce.",
+    "notAttemptedTooltip": "Ta gra działa w przeglądarce — silnik natywny nie został użyty."
+  },
   "buildBadge": {
     "downloading": "pobieranie… {{progress}}%",
     "checking": "sprawdzanie…",

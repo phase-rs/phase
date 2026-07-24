@@ -33,7 +33,7 @@ const { mockClearPromptOverlayState, mockSetGameState } = vi.hoisted(() => ({
   mockSetGameState: vi.fn(),
 }));
 
-const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
+const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
     serverInfo: null,
     activePlayerId: null,
@@ -41,7 +41,8 @@ const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } =
     playerAvatars: new Map<string, string>(),
     connectionStatus: "disconnected",
     isSpectator: false,
-    toasts: [] as unknown[],
+    // Keyed Map, matching the real store — ConnectionToast reads `.size`.
+    toasts: new Map<string, { message: string; expiresAt: number; showCountdown: boolean }>(),
     hostGameCode: null,
     hostingStatus: "idle",
     playerSlots: [] as unknown[],
@@ -402,5 +403,41 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     });
 
     expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
+  });
+});
+
+describe("GamePage — toast surface", () => {
+  const FALLBACK_NOTICE = "Native engine unavailable — this game is running in-browser.";
+
+  function seedToast(): void {
+    mockMultiplayerState.toasts = new Map([
+      ["generic", { message: FALLBACK_NOTICE, expiresAt: Date.now() + 5_000, showCountdown: false }],
+    ]);
+  }
+
+  afterEach(() => {
+    mockMultiplayerState.toasts = new Map();
+  });
+
+  it("shows a solo game's toast", () => {
+    // The native-engine fallback notice is raised in `ai` mode. This surface
+    // used to be gated on online mode, so the notice was written to the store
+    // and then rendered by nothing at all.
+    seedToast();
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(screen.getByText(FALLBACK_NOTICE)).toBeInTheDocument();
+  });
+
+  it("offers a solo game no Retry, since there is no server to re-dial", () => {
+    seedToast();
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    // Settings is the reach guard: it proves the toast's button row rendered,
+    // so Retry's absence is the omitted prop rather than an unmounted toast.
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 });

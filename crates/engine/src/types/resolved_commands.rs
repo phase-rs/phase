@@ -243,6 +243,26 @@ pub enum ResolvedLedgerEdit {
         source: super::identifiers::ObjectId,
         permission: ResolvedOncePerTurnPermission,
     },
+    /// CR 121.1 + CR 121.2 + CR 121.4: Install one settled draw's bookkeeping
+    /// after its zone transition has already been resolved. `drawn_object` is
+    /// `None` only for an attempted draw from an empty library.
+    CardsDrawn {
+        player: PlayerId,
+        drawn_object: Option<ObjectIncarnationRef>,
+        attempted_empty_library: bool,
+        expected_has_drawn_this_turn: bool,
+        resulting_has_drawn_this_turn: bool,
+        expected_cards_drawn_this_turn: u32,
+        resulting_cards_drawn_this_turn: u32,
+        expected_cards_drawn_this_step: u32,
+        resulting_cards_drawn_this_step: u32,
+        expected_drew_from_empty_library: bool,
+        resulting_drew_from_empty_library: bool,
+        expected_drawn_cards_len: u32,
+        resulting_drawn_cards_len: u32,
+        expected_first_card_drawn_this_turn: Option<ObjectId>,
+        resulting_first_card_drawn_this_turn: Option<ObjectId>,
+    },
 }
 
 /// One exact per-event ledger mutation with its causal node.
@@ -728,8 +748,17 @@ pub enum ResolvedLedgerEditReplayInvariantError {
     UnknownPlayer(PlayerId),
     SpellCastPreconditionMismatch,
     AbilityActivationPreconditionMismatch,
+    CardsDrawnPreconditionMismatch,
+    DrawnObjectMismatch {
+        expected: ObjectIncarnationRef,
+        found: Option<ObjectIncarnationRef>,
+    },
+    DrawnObjectStillInLibrary(ObjectIncarnationRef),
     TriggerAlreadyRecorded,
-    TriggerCountPreconditionMismatch { expected: u32, found: u32 },
+    TriggerCountPreconditionMismatch {
+        expected: u32,
+        found: u32,
+    },
     PermissionAlreadyConsumed(ResolvedOncePerTurnPermission),
     CounterOverflow,
 }
@@ -747,6 +776,18 @@ impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
             Self::AbilityActivationPreconditionMismatch => write!(
                 f,
                 "resolved activated-ability command does not match its ledger prefix"
+            ),
+            Self::CardsDrawnPreconditionMismatch => write!(
+                f,
+                "resolved draw-bookkeeping command does not match its ledger prefix"
+            ),
+            Self::DrawnObjectMismatch { expected, found } => write!(
+                f,
+                "resolved drawn-object occurrence mismatch: expected {expected:?}, found {found:?}"
+            ),
+            Self::DrawnObjectStillInLibrary(object) => write!(
+                f,
+                "resolved drawn-object occurrence remained in its library: {object:?}"
             ),
             Self::TriggerAlreadyRecorded => {
                 write!(
@@ -1805,7 +1846,7 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
         || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
 }
 
-fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
+pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
     match edit {
         ResolvedLedgerEdit::SpellCast {
             expected_game_count,
@@ -1826,6 +1867,59 @@ fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
             expected_game_count,
             ..
         } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::CardsDrawn {
+            drawn_object,
+            attempted_empty_library,
+            expected_has_drawn_this_turn,
+            resulting_has_drawn_this_turn,
+            expected_cards_drawn_this_turn,
+            resulting_cards_drawn_this_turn,
+            expected_cards_drawn_this_step,
+            resulting_cards_drawn_this_step,
+            expected_drew_from_empty_library,
+            resulting_drew_from_empty_library,
+            expected_drawn_cards_len,
+            resulting_drawn_cards_len,
+            expected_first_card_drawn_this_turn,
+            resulting_first_card_drawn_this_turn,
+            ..
+        } => {
+            let settled_card = drawn_object.is_some();
+            let expected_first = if let Some(object) = drawn_object {
+                expected_first_card_drawn_this_turn.or(Some(object.object_id))
+            } else {
+                *expected_first_card_drawn_this_turn
+            };
+            (!settled_card && !attempted_empty_library)
+                || *resulting_has_drawn_this_turn
+                    != if settled_card {
+                        true
+                    } else {
+                        *expected_has_drawn_this_turn
+                    }
+                || *resulting_cards_drawn_this_turn
+                    != if settled_card {
+                        expected_cards_drawn_this_turn.saturating_add(1)
+                    } else {
+                        *expected_cards_drawn_this_turn
+                    }
+                || *resulting_cards_drawn_this_step
+                    != if settled_card {
+                        expected_cards_drawn_this_step.saturating_add(1)
+                    } else {
+                        *expected_cards_drawn_this_step
+                    }
+                || *resulting_drew_from_empty_library
+                    != (*expected_drew_from_empty_library || *attempted_empty_library)
+                || *expected_drawn_cards_len == u32::MAX
+                || *resulting_drawn_cards_len
+                    != if settled_card {
+                        expected_drawn_cards_len + 1
+                    } else {
+                        *expected_drawn_cards_len
+                    }
+                || *resulting_first_card_drawn_this_turn != expected_first
+        }
         ResolvedLedgerEdit::TriggerFired {
             edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old },
             ..
@@ -1840,6 +1934,12 @@ fn ledger_edit_has_legacy_object_identity(edit: &ResolvedLedgerEdit) -> bool {
         edit,
         ResolvedLedgerEdit::TriggerFired { trigger, .. }
             if trigger.source.incarnation == LEGACY_INCARNATION
+    ) || matches!(
+        edit,
+        ResolvedLedgerEdit::CardsDrawn {
+            drawn_object: Some(object),
+            ..
+        } if object.incarnation == LEGACY_INCARNATION
     )
 }
 

@@ -25,6 +25,14 @@
     "ready": "Moteur natif prêt",
     "failed": "Impossible de préparer le moteur natif"
   },
+  "engineBadge": {
+    "native": "Moteur natif",
+    "nativeTooltip": "Cette partie utilise le moteur natif de l'application de bureau.",
+    "inBrowser": "Moteur du navigateur",
+    "inBrowserTooltip": "Moteur natif indisponible — cette partie s'exécute dans le navigateur.",
+    "versionMismatchTooltip": "Version du moteur natif incompatible — cette partie s'exécute dans le navigateur.",
+    "notAttemptedTooltip": "Cette partie s'exécute dans le navigateur — le moteur natif n'a pas été utilisé."
+  },
   "buildBadge": {
     "downloading": "téléchargement… {{progress}} %",
     "checking": "vérification…",

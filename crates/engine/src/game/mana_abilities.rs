@@ -2491,20 +2491,28 @@ fn settle_mana_ability_cost_events(
     // The typed cursor has already collected the events emitted by this action.
     // Claim their exact occurrences through the normal post-action authority so
     // a Priority resume cannot scan the same events a second time.
-    state.consumed_before_priority_trigger_events.extend(
-        events
-            .iter()
-            .enumerate()
-            .skip(current_start)
-            .map(
-                |(index, event)| crate::game::triggers::ConsumedTriggerEventOccurrence {
-                    event: event.clone(),
-                    occurrence: events[..index]
-                        .iter()
-                        .filter(|prior| *prior == event)
-                        .count(),
-                },
-            ),
+    let occurrences = events
+        .iter()
+        .enumerate()
+        .skip(current_start)
+        .map(
+            |(index, event)| crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: events[..index]
+                    .iter()
+                    .filter(|prior| *prior == event)
+                    .count(),
+            },
+        )
+        .collect();
+    super::triggers::resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect(
+        "mana-ability cost-settlement consumed-before-priority trigger journal cause must be live",
     );
 }
 
