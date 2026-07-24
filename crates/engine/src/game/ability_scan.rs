@@ -893,6 +893,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc
         }
         Effect::BecomeCopy { .. } => Axes::CONSERVATIVE,
+        // CR 707.2c: the chosen creature's copiable values are latched onto the
+        // Aura's host at the answer — a copy-family continuous effect, same
+        // conservative classification as `BecomeCopy`. `filter` scans no
+        // per-source projected resource (it just bounds the choice pool).
+        Effect::ChoosePermanent { filter } => {
+            scan_target_filter(filter, target_ctx, mode).or(Axes::CONSERVATIVE)
+        }
         Effect::GainActivatedAbilitiesOfTarget {
             target,
             recipient,
@@ -5005,6 +5012,10 @@ fn scan_continuous_modification(m: &ContinuousModification, mode: ScanMode) -> A
         // documented fail-safe (over-veto = missed offer). A full `TriggerDefinition`
         // walker is a follow-up.
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): the copy-marker stands in for a
+        // copy that grants the donor's whole ability set — fail-closed alongside
+        // its `CopyValues` sibling (the real grant is the installed TCE).
+        | ContinuousModification::CopyChosen
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
@@ -5180,6 +5191,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         //     recipient set ("Shards you control", CR 707.2).
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::BecomeCopy { .. }
+        //   CR 707.2c (Metamorphic Alteration): the copy target is chosen from a
+        //     battlefield-reading filter pool; defense-in-depth parity with
+        //     BecomeCopy (fail-closed census — over-vetoes the single-host shortcut).
+        | Effect::ChoosePermanent { .. }
         //   CR 708.2 / CR 708.2a (face-down permanents): `resolved_battlefield_object_
         //     ids` (effects/mod.rs) falls through to a battlefield mass scan for a
         //     non-targeted "turn each matching creature face up/down" (Illithid
@@ -5495,7 +5510,7 @@ enum CensusRole {
 #[cfg(test)]
 fn effect_census_role(e: &Effect) -> CensusRole {
     match e {
-        // -- CENSUS (28): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
+        // -- CENSUS (29): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
         // arm - mass battlefield population reads that scale with growth.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -5537,6 +5552,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::PhaseIn { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): parity with the `effect_target_ctx`
+        // LiveBoardCensus member added above.
+        | Effect::ChoosePermanent { .. }
         | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::MultiplyCounter { .. }
@@ -5933,6 +5951,10 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c: raises `WaitingFor::CopyTargetChoice` — prompts, fail-closed
+        // MayPrompt (never resolved through the normal chain, but classified here
+        // to keep the match exhaustive).
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -6202,6 +6224,8 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c: choosing a permanent draws on no game randomness.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -6891,7 +6915,7 @@ mod tests {
     }
 
     /// guard#3 (mitigation #3): the `LiveBoardCensus` tag set of `effect_target_ctx`
-    /// == EXACTLY the enumeration-derived MASS-POPULATION set (28). Source-scanned, not
+    /// == EXACTLY the enumeration-derived MASS-POPULATION set (29). Source-scanned, not
     /// hand-counted (the hand-count is what produced the earlier "relax=4" miss). Under
     /// B's SnapshotOrEvent default this is the primary false-certificate gate: only a
     /// census tag vetoes a mass read that ESCALATES over inert token growth (which
@@ -6927,6 +6951,7 @@ mod tests {
             "ChangeZoneAll",
             "ChooseAndSacrificeRest",
             "ChooseObjectsIntoTrackedSet",
+            "ChoosePermanent",
             "CounterAll",
             "DamageAll",
             "DamageEachPlayer",
@@ -6966,7 +6991,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 28, "exactly 28 mass-population census tags");
+        assert_eq!(got.len(), 29, "exactly 29 mass-population census tags");
     }
 
     /// A7' (mitigation #4, replaces the void census-default A7): with SnapshotOrEvent the
@@ -7077,7 +7102,7 @@ mod tests {
     /// with `effect_target_ctx` on the Census/Relax boundary, closing the F1 gap where a
     /// census-ROLE slot silently in the generic relax `|`-chain (exactly R1's Suspect{All})
     /// is invisible to the census-arm-only guards. Structural: both functions' `Census`
-    /// name-sets are source-scanned and asserted IDENTICAL (== the 28). Behavioral: the
+    /// name-sets are source-scanned and asserted IDENTICAL (== the 29). Behavioral: the
     /// two oracles agree on every discriminator, incl. BOTH Suspect/Unsuspect scopes.
     ///
     /// REVERT-PROBE (discrimination proof): moving `Suspect{All}` out of the census arm of
@@ -7092,7 +7117,7 @@ mod tests {
         use crate::types::ability::{EffectScope, TapStateChange};
         use ScanMode::LoopFirewall;
 
-        // -- Structural: the two census name-sets are byte-identical (and == 28).
+        // -- Structural: the two census name-sets are byte-identical (and == 29).
         fn census_names(fnsrc: &str, terminator: &str) -> Vec<String> {
             let end = fnsrc.find(terminator).expect("census terminator");
             let block = &fnsrc[..end];
@@ -7121,7 +7146,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 28, "exactly 28 census members");
+        assert_eq!(ecr_census.len(), 29, "exactly 29 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`

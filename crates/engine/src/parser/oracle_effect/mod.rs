@@ -1318,11 +1318,21 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     let effect_lower = after.lower;
 
     // Check for "that creature enters with an additional +1/+1 counter on it" pattern
-    let inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
+    let mut inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
         parsed
     } else {
         parse_effect_chain(effect_text, AbilityKind::Spell)
     };
+    // CR 608.2k: In a "when you next cast a <spell> this turn" delayed trigger the
+    // "that <spell>" anaphor in the body names the newly-cast spell object (the
+    // trigger's event source), NOT a chosen target — a `WhenNextEvent` delayed
+    // trigger has no parent target to inherit. `parse_target` returns the
+    // subject-position anaphor as `ParentTarget` because trigger context is not
+    // threaded through the effect parser; lift it to `TriggeringSource` so the
+    // runtime binds the grant via `resolve_event_context_target` (effect.rs:259)
+    // instead of the empty chain-tracked set (effect.rs:474). Mirrors the
+    // `lift_parent_target_to_triggering_source` family in oracle_trigger.rs.
+    lift_generic_effect_parent_target_to_triggering_source_in_ability(&mut inner);
 
     if let Some((spell_filter, ability_filter)) =
         try_parse_when_next_spell_or_activate_disjunction(condition_fragment)
@@ -1363,6 +1373,42 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
         optional: false,
         unless_pay: None,
     })
+}
+
+/// CR 608.2k: Lift `StaticDefinition.affected: ParentTarget` →
+/// `TriggeringSource` on every `Effect::GenericEffect` in a `WhenNextEvent`
+/// delayed trigger's body, recursing through chained `sub_ability` links.
+///
+/// A `WhenNextEvent` ("when you next cast a <spell> this turn, that spell
+/// gains <keyword>") has no chosen/parent target — the just-cast spell object
+/// IS the referent of "that spell". The effect parser lowers the subject-
+/// position "that spell" anaphor to `ParentTarget` (oracle_target.rs) because
+/// trigger context is not threaded through it. Left as `ParentTarget`, the
+/// runtime registers the transient grant against `chain_tracked_set_id`, which
+/// is empty for a delayed trigger, so the grant silently never lands (#5337,
+/// Solar Array / Lux Artillery's when-next form). Rebinding to
+/// `TriggeringSource` routes it through `resolve_event_context_target`
+/// (effect.rs:259) — the same path Lux Artillery's non-delayed "it gains
+/// sunburst" already uses. Only `GenericEffect`-borne grants are affected;
+/// other effect variants (e.g. a delayed `ChangeZone` on the cast spell) are
+/// out of scope for this class and left untouched.
+fn lift_generic_effect_parent_target_to_triggering_source_in_ability(
+    ability: &mut AbilityDefinition,
+) {
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if let Effect::GenericEffect {
+            static_abilities, ..
+        } = link.effect.as_mut()
+        {
+            for static_def in static_abilities.iter_mut() {
+                if matches!(static_def.affected, Some(TargetFilter::ParentTarget)) {
+                    static_def.affected = Some(TargetFilter::TriggeringSource);
+                }
+            }
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
 }
 
 /// CR 603.7: Parse a generic non-cast "when you next <condition> this turn,
@@ -1786,6 +1832,14 @@ fn try_parse_leave_battlefield_exile_replacement(lower: &str) -> Option<Effect> 
 
     let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
         .valid_card(TargetFilter::SelfRef)
+        // CR 400.7: The rider is bound to the lifetime of the object it is
+        // installed on; stamp the expiry here so the lifetime is self-contained
+        // (not dependent on the ability frame's duration threading) and so
+        // `expiry_from_duration`'s `is_none` guard never retags it — mirrors the
+        // die-exile stamp precedent at `try_parse_die_exile_rider` /
+        // `parse_token_creation_replacement_effect`. Base-installed to survive
+        // CR 613.1 layer reseeds, non-copiable (CR 707.2), pruned on host exit.
+        .expiry(RestrictionExpiry::UntilHostLeavesPlay)
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
@@ -19720,6 +19774,7 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::Opponent
         | TargetFilter::ScopedPlayer
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner

@@ -182,7 +182,9 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         | ContinuousModification::AddCounterOnEnter { count: value, .. } => {
             expr_references_chosen_x(value)
         }
-        ContinuousModification::SetName { .. }
+        // CR 707.2c (Metamorphic Alteration): inert copy marker references no X.
+        ContinuousModification::CopyChosen
+        | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
         | ContinuousModification::AddToughness { .. }

@@ -977,6 +977,13 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
         tag::<_, _, OracleError<'_>>("enters").parse(i)
     })
     .is_some();
+    // Named-attribute choices only ("choose a creature type", "choose a color").
+    // Object choices ("choose a creature" — Metamorphic Alteration, Dauntless
+    // Bodyguard, Scheming Fence) are NOT replacement-classified here: claiming
+    // them as Moved without a proven CopyChosen consumer changes unsupported
+    // card shape for the whole class. Metamorphic's ChoosePermanent is injected
+    // only by `LinkedChoiceKind::CopyChosenHost` after the companion static
+    // parses.
     let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
         verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
             try_parse_named_choice(i).is_some()

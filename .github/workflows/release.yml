@@ -961,4 +961,11 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           body_path: changelog.md
           fail_on_unmatched_files: true
+          # Never the "Latest" release. Every asset here is a machine artifact
+          # the desktop shell provisions for itself; the web app ships by
+          # deploy, not by download. These fire far more often than shell
+          # releases, so leaving the badge to default sends anyone visiting
+          # /releases/latest to a page of server binaries with no installer.
+          # The desktop release claims the badge instead (shell-release.yml).
+          make_latest: "false"
           files: ${{ steps.release-assets.outputs.files }}

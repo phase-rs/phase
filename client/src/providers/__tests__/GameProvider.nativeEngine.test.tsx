@@ -337,6 +337,11 @@ describe("GameProvider native AI routing", () => {
       expect.objectContaining({ id: "native-parity", mode: "ai" }),
     );
     expect(wasmAdapters).toHaveLength(1);
+    // The fallback is otherwise silent, and a version mismatch is a different
+    // user problem than an engine that could not start at all.
+    expect(multiplayerState.showToast).toHaveBeenCalledWith(
+      "Native engine version mismatch — this game is running in-browser.",
+    );
   });
 
   it("does not write a resume pointer for a native game and concedes on exit", async () => {
@@ -475,8 +480,11 @@ describe("GameProvider native AI routing", () => {
       </GameProvider>,
     );
 
+    // `native-ai` is set immediately before the game loop starts, so it is the
+    // signal that the session is live — the point from which a terminal socket
+    // event is a real lost connection rather than a setup failure.
     await waitFor(() => {
-      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("native");
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
       expect(nativeAdapters).toHaveLength(1);
     });
 
@@ -494,6 +502,34 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("keeps a native setup failure off the terminal connection surface", async () => {
+    // The socket dying during the native handshake emits a terminal event and
+    // then rejects initialization. The rejection is handled by falling back to
+    // WASM, so forwarding the event would leave GamePage's connection-lost
+    // banner pinned over the local game that took over.
+    const onWsEvent = vi.fn();
+    nativeAdapterInitialize.mockImplementation(async () => {
+      nativeAdapters[0]!.emit({ type: "reconnectFailed" });
+      throw new Error("Connection closed before game started");
+    });
+
+    render(
+      <GameProvider gameId="native-setup-failure" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setEngineMode).toHaveBeenCalledWith("wasm", expect.anything());
+    });
+    expect(wasmAdapters).toHaveLength(1);
+    expect(onWsEvent).not.toHaveBeenCalled();
+    // Silent to the banner, but not silent to the player.
+    expect(multiplayerState.showToast).toHaveBeenCalledWith(
+      "Native engine unavailable — this game is running in-browser.",
+    );
   });
 
   it("clears prompt overlays when a draft match unmounts", () => {

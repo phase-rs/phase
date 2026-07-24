@@ -513,7 +513,13 @@ pub(crate) fn complete_per_category_exile(
     events: &mut Vec<GameEvent>,
 ) {
     if !chosen.is_empty() {
-        super::publish_tracked_set(state, chosen);
+        super::publish_tracked_set_with_causes(
+            state,
+            chosen
+                .iter()
+                .map(|&id| (id, Some(crate::types::ability::ThisWayCause::Exiled)))
+                .collect(),
+        );
     }
     let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
 }
@@ -556,6 +562,12 @@ fn resolve_category_pool(state: &GameState, ability: &ResolvedAbility) -> Vec<Ob
             crate::game::targeting::latest_tracked_set_id(state)
                 .and_then(|id| state.tracked_object_sets.get(&id).cloned())
         })
+        // CR 701.20b + CR 608.2c: Reveal-only Dig / RevealTop may leave the
+        // revealed pile only in `last_revealed_ids` when no TrackedSet consumer
+        // forced publication (Portent of Calamity: Dig → ForEachCategory →
+        // LastRevealed rest-move). Prefer the live reveal window over an empty
+        // ability-target fallback.
+        .or_else(|| (!state.last_revealed_ids.is_empty()).then(|| state.last_revealed_ids.clone()))
         .unwrap_or_else(|| {
             ability
                 .targets

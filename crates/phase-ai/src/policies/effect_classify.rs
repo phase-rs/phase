@@ -246,6 +246,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ChooseFromZone { .. }
         | Effect::ChooseObjectsIntoTrackedSet { .. }
         | Effect::ChooseOneOf { .. }
+        | Effect::ChoosePermanent { .. }
         | Effect::Clash
         | Effect::Cleanup { .. }
         | Effect::Cloak { .. }

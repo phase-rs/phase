@@ -1416,6 +1416,9 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::DraftFromSpellbook { .. } => {}
         // CR 612.1: text-change carries no printed-slot self-reference.
         Effect::ChangeTextWords { .. } => {}
+        // CR 707.2c (Metamorphic Alteration): no nested printed-slot carrier —
+        // the copy is materialized from the chosen donor at resolution.
+        Effect::ChoosePermanent { .. } => {}
         Effect::Unimplemented { .. } => {}
     }
 }

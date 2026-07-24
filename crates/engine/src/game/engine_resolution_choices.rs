@@ -4971,6 +4971,14 @@ pub(super) fn handle_resolution_choice(
                             &library_position,
                             events,
                         );
+                        if let Some(next_owner) =
+                            effects::change_zone::resume_next_mass_library_order_choice(state)
+                        {
+                            state.priority_player = next_owner;
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     } else {
                         // The selected EffectZoneChoice is now consumed. Clear it
                         // before the pipeline may park a CR 616.1 prompt; otherwise
@@ -6863,6 +6871,10 @@ fn finish_effect_zone_put_at_library_position(
         &library_position,
         events,
     );
+    if let Some(next_owner) = effects::change_zone::resume_next_mass_library_order_choice(state) {
+        state.priority_player = next_owner;
+        return;
+    }
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state

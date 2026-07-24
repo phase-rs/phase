@@ -11643,6 +11643,72 @@ fn effect_chain_then_conjugated_draws() {
     );
 }
 
+/// CR 601.2c + CR 608.2c: a bare continuation after an "any number of target
+/// opponents each" subject inherits the chosen-player target set. The following
+/// sentence remains a controller-only instruction.
+#[test]
+fn wheel_and_deal_implicit_draw_inherits_each_targeted_opponent() {
+    let def = parse_effect_chain(
+        "Any number of target opponents each discard their hands, then draw seven cards.\nDraw a card.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        def.multi_target.is_some()
+            && def
+                .effect
+                .target_filter()
+                .is_some_and(target_filter_can_target_player),
+        "the first sentence must remain a multi-target player instruction: {def:?}"
+    );
+    let per_opponent_draw = def
+        .sub_ability
+        .as_ref()
+        .expect("discard must continue to the seven-card draw");
+    assert!(
+        matches!(
+            &*per_opponent_draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 7 },
+                target: TargetFilter::ParentTarget,
+            }
+        ),
+        "expected the seven-card draw to inherit ParentTarget, got {:?}; full definition: {def:?}",
+        per_opponent_draw.effect
+    );
+    let controller_draw = per_opponent_draw
+        .sub_ability
+        .as_ref()
+        .expect("the second sentence must remain a trailing draw");
+    assert!(matches!(
+        &*controller_draw.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+}
+
+/// CR 608.2c: the lexical conjugation is load-bearing. A fresh imperative
+/// subject (`you`) after the same multi-target head must remain controller-only.
+#[test]
+fn multi_target_player_subject_does_not_capture_explicit_controller_draw() {
+    let def = parse_effect_chain(
+        "Any number of target opponents each discard their hands, then you draw a card.",
+        AbilityKind::Spell,
+    );
+    let controller_draw = def
+        .sub_ability
+        .as_ref()
+        .expect("the explicit controller draw must remain a continuation");
+    assert!(matches!(
+        &*controller_draw.effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        }
+    ));
+}
+
 #[test]
 fn windfall_draw_uses_previous_discard_max_for_each_player() {
     let def = parse_effect_chain(
@@ -37272,6 +37338,48 @@ fn when_next_cast_spell_with_x_in_cost_parses() {
     assert!(matches!(&*effect.effect, Effect::Draw { .. }));
 }
 
+/// #5337 gap 1 (CR 608.2k): in a "when you next cast <spell> this turn" delayed
+/// grant, the subject-position "that spell" anaphor names the newly-cast spell
+/// (the trigger's event source) — a `WhenNextEvent` delayed trigger has no
+/// parent target, so `affected` must lower to `TriggeringSource`. Left as
+/// `ParentTarget`, the runtime registers the grant against the (empty)
+/// chain-tracked set and it silently never lands (Solar Array).
+#[test]
+fn when_next_cast_that_spell_grant_binds_triggering_source() {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::keywords::Keyword;
+    let def = parse_effect_chain(
+        "When you next cast an artifact spell this turn, that spell gains sunburst.",
+        AbilityKind::Activated,
+    );
+    let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect else {
+        panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+    };
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = &*effect.effect
+    else {
+        panic!("expected GenericEffect grant body, got {:?}", effect.effect);
+    };
+    assert_eq!(static_abilities.len(), 1, "one grant static expected");
+    let grant = &static_abilities[0];
+    assert_eq!(
+        grant.affected,
+        Some(TargetFilter::TriggeringSource),
+        "the 'that spell' grant must bind the event source, not ParentTarget"
+    );
+    assert!(
+        grant.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Sunburst
+            }
+        )),
+        "the grant must add Sunburst: {:?}",
+        grant.modifications
+    );
+}
+
 /// CR 603.7 + CR 707.10: Magus Lucea Kane Psychic Stimulus delayed copy.
 #[test]
 fn magus_lucea_kane_psychic_stimulus_parses_delayed_copy() {
@@ -39296,6 +39404,14 @@ fn leave_battlefield_exile_rider_adds_replacement() {
             assert_eq!(replacement.event, ReplacementEvent::Moved);
             assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
             assert_eq!(replacement.destination_zone, None);
+            // CR 400.7 (issue #5976): the parsed rider is stamped with the
+            // host-lifetime expiry so it is base-installed, non-copiable, and
+            // pruned on host exit.
+            assert_eq!(
+                replacement.expiry,
+                Some(crate::types::ability::RestrictionExpiry::UntilHostLeavesPlay),
+                "the parsed leaves-battlefield rider must carry UntilHostLeavesPlay"
+            );
 
             let execute = replacement
                 .execute
