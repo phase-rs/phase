@@ -18,10 +18,14 @@ const PIP_SIZES: Record<PipSize, { container: string; gap: string; backdrop: str
   // The badge stands in for the card's PRINTED mana cost (it shows the engine's
   // effective cost), so its geometry is calibrated against that cost rather than
   // against any fixed px size. Measured on M15-frame art, a printed symbol is
-  // ~5.2% of the card's width. 7cqi keeps a legibility margin over that while
-  // still fitting inside the title bar, so even a five-symbol cost clears the
+  // ~5.2% of the card's width, so the 0.4cqi padding sizes the symbol to exactly
+  // that and the 6cqi disk reads as a thin ring around it. The printed symbols
+  // on the same card are legible at this size, which is what makes it enough.
+  //
+  // Keep the three values solving 5*container + 4*gap = 32cqi: that is the
+  // widest cost the frame carries (five symbols), and 32cqi is what clears the
   // card name instead of running through it.
-  fluid: { container: "w-[7cqi] h-[7cqi] p-[0.6cqi]", gap: "gap-[0.6cqi]", backdrop: "-inset-x-[0.6cqi] -top-[0.6cqi] -bottom-[1.2cqi]" },
+  fluid: { container: "w-[6cqi] h-[6cqi] p-[0.4cqi]", gap: "gap-[0.5cqi]", backdrop: "-inset-x-[0.5cqi] -top-[0.5cqi] -bottom-[1cqi]" },
 };
 
 // Where the printed cost sits on an M15 frame: right edge ~7% in from the card's
