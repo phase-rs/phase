@@ -463,6 +463,11 @@ pub struct PolicyPenalties {
     /// scalar.)
     #[serde(default = "default_loop_shortcut_winning_declare_bonus")]
     pub loop_shortcut_winning_declare_bonus: f64,
+    /// CR 104.3d: card-equivalent weight for advancing the poison clock.
+    /// Critical band when the action reaches ten poison (a win), scaled by
+    /// clock progress below that.
+    #[serde(default = "default_poison_clock_pressure")]
+    pub poison_clock_pressure: f64,
     /// CR 205.2a: card-equivalent weight for advancing graveyard card-type
     /// diversity toward a delirium/descend threshold. Strong band when the
     /// action supplies the last missing type.
@@ -532,6 +537,7 @@ impl Default for PolicyPenalties {
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
+            poison_clock_pressure: default_poison_clock_pressure(),
             graveyard_types_progress: default_graveyard_types_progress(),
         }
     }
@@ -546,6 +552,12 @@ fn default_graveyard_types_progress() -> f64 {
 
 fn default_wasted_cast_penalty() -> f64 {
     -8.0
+}
+/// CR 104.3d. Shared by `Default` and `#[serde(default)]` so a tuning artifact
+/// written before this field existed still deserializes (`ai_tune` reads the
+/// `policy_penalties` section directly into this struct).
+fn default_poison_clock_pressure() -> f64 {
+    6.0
 }
 fn default_untap_own_tapped_bonus() -> f64 {
     8.0
@@ -737,6 +749,12 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "poison_clock_pressure",
+        "CR 104.3d win-detector weight — a critical-band term whose magnitude is \
+         load-bearing for correctness, not taste. Promote to ACTIVE only with a \
+         paired-seed ai-gate calibration.",
+    ),
     (
         "graveyard_types_progress",
         "CR 205.2a delirium-threshold progress weight — awaiting a paired-seed \
@@ -1510,6 +1528,37 @@ mod tests {
         let p = PolicyPenalties::default();
         assert_eq!(p.cycling_patience_penalty, -1.0);
         assert_eq!(p.cycling_needed_land_penalty, -2.0);
+    }
+
+    /// Artifact compatibility: `ai_tune` deserializes a persisted
+    /// `policy_penalties` section straight into `PolicyPenalties`
+    /// (`bin/ai_tune.rs`, `TuneGroup::Penalties`), so an artifact written
+    /// before `poison_clock_pressure` existed must still load — with its own
+    /// tuned values intact and the new field filled from the shared default.
+    #[test]
+    fn policy_penalties_load_pre_poison_clock_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("poison_clock_pressure")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-poison_clock_pressure artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.poison_clock_pressure,
+            default_poison_clock_pressure(),
+            "absent field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().poison_clock_pressure,
+            default_poison_clock_pressure(),
+            "Default and serde must share one source of truth"
+        );
     }
 
     /// Artifact compatibility: `ai_tune` deserializes a persisted

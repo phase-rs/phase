@@ -427,13 +427,11 @@ pub fn apply_draw_after_replacement(
     // `select_cards_to_draw` authority so a `DrawFromBottom` static is honored.
     let cards_to_draw = select_cards_to_draw(state, player_id, allowed_count as usize);
 
-    // CR 704.5b: If library has fewer cards than requested, mark the player.
-    // CR 121.4: Partial draws are legal — draw what's available.
-    if allowed_count > 0 && cards_to_draw.len() < allowed_count as usize {
-        if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-            player.drew_from_empty_library = true;
-        }
-    }
+    // CR 704.5b: If library has fewer cards than requested, the ledger edit for
+    // this settled draw owns the player's empty-library fact. CR 121.4: partial
+    // draws are legal — draw what's available.
+    let mut attempted_empty_library =
+        allowed_count > 0 && cards_to_draw.len() < allowed_count as usize;
 
     let drawn_count = cards_to_draw.len() as u32;
 
@@ -493,63 +491,60 @@ pub fn apply_draw_after_replacement(
              a swallowed NeedsChoice or otherwise failed to deliver, yet CardDrawn \
              and the draw counters fire below"
         );
-        // CR 121.1 + CR 504.1: Increment per-step + per-turn counters BEFORE
-        // emitting the event so the ordinal embedded in `CardDrawn` reflects
-        // this draw (1-indexed). Triggers/replacements that gate on "first
-        // draw of the draw step" read this ordinal.
+        let drawn_object = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state
+                .objects
+                .get(&obj_id)
+                .expect("settled draw object remains live for its ledger edit"),
+        );
+        let established_first_draw = crate::game::ledger::resolve_and_apply_cards_drawn(
+            state,
+            player_id,
+            Some(drawn_object),
+            std::mem::take(&mut attempted_empty_library),
+        )
+        .expect("settled draw bookkeeping must have a live player and journal cause");
+        // CR 121.1 + CR 504.1: The exact ledger edit increments the counters
+        // before `CardDrawn` is emitted, so its ordinal is 1-indexed.
+        let player = state
+            .players
+            .iter()
+            .find(|player| player.id == player_id)
+            .expect("settled draw player remains live after its ledger edit");
         let (nth_in_turn, nth_in_step) =
-            if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
-                // CR 121.1: This driver is the single authority for every
-                // settled draw, so it is the single place that marks the
-                // player as having drawn a card this turn — broadened from
-                // the pre-migration "took the draw-step draw" reading (the
-                // only production setter, deleted by the turns.rs/gift
-                // migration onto this driver) to "drew at least one card
-                // this turn". No production reader distinguishes the two;
-                // `turns.rs` clears it at turn start and
-                // `analysis/resource.rs` ignores it entirely.
-                player.has_drawn_this_turn = true;
-                player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
-                player.cards_drawn_this_step = player.cards_drawn_this_step.saturating_add(1);
-                (player.cards_drawn_this_turn, player.cards_drawn_this_step)
-            } else {
-                (1, 1)
-            };
+            (player.cards_drawn_this_turn, player.cards_drawn_this_step);
         events.push(GameEvent::CardDrawn {
             player_id,
             object_id: obj_id,
             nth_in_turn,
             nth_in_step,
         });
-        super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
-        record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
+        if established_first_draw {
+            enqueue_miracle_offer_for_first_draw(state, player_id, obj_id);
+        }
+    }
+
+    if attempted_empty_library {
+        crate::game::ledger::resolve_and_apply_cards_drawn(state, player_id, None, true)
+            .expect("empty-library draw bookkeeping must have a live player and journal cause");
     }
 
     drawn_count
 }
 
-/// CR 702.94a + CR 603.11: Shared first-draw hook — record the drawn
-/// `ObjectId` as `player`'s first-of-turn if absent, and if the drawn card has
-/// `Keyword::Miracle(cost)`, enqueue a `MiracleOffer` for the priority-entry
-/// flush to surface as `WaitingFor::MiracleReveal`. Subsequent draws do NOT
-/// overwrite the first-draw entry and do NOT enqueue more offers (the static
-/// ability only functions for the first-drawn card per CR 702.94a).
-pub(crate) fn record_first_draw_and_enqueue_miracle(
+/// CR 702.94a + CR 603.11: Continuation-only first-draw hook. The ledger edit
+/// has already recorded `object_id` as this player's first card drawn this
+/// turn; this function only enqueues the deferred miracle offer.
+fn enqueue_miracle_offer_for_first_draw(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     object_id: crate::types::identifiers::ObjectId,
 ) {
-    // Only the FIRST draw of the turn per player establishes the miracle
-    // eligibility condition. `or_insert_with` returns a `&mut V` indicating
-    // whether the entry was freshly set; compare against `object_id` to know.
-    let is_first = !state.first_card_drawn_this_turn.contains_key(&player);
-    state
-        .first_card_drawn_this_turn
-        .entry(player)
-        .or_insert(object_id);
-    if !is_first {
-        return;
-    }
+    debug_assert_eq!(
+        state.first_card_drawn_this_turn.get(&player),
+        Some(&object_id),
+        "first-draw continuation must follow the matching ledger edit"
+    );
     let Some(obj) = state.objects.get(&object_id) else {
         return;
     };

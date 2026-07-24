@@ -15,6 +15,24 @@
     "enter": "Attiva schermo intero",
     "exit": "Esci da schermo intero"
   },
+  "nativeEngineProgress": {
+    "title": "Aggiornamento del motore nativo",
+    "resolving": "Ricerca del server locale corretto…",
+    "downloadingBinary": "Download del server aggiornato…",
+    "verifying": "Verifica del server…",
+    "downloadingData": "Download dei dati di gioco…",
+    "spawning": "Avvio del server locale…",
+    "ready": "Motore nativo pronto",
+    "failed": "Impossibile preparare il motore nativo"
+  },
+  "engineBadge": {
+    "native": "Motore nativo",
+    "nativeTooltip": "Questa partita usa il motore nativo dell'app desktop.",
+    "inBrowser": "Motore del browser",
+    "inBrowserTooltip": "Motore nativo non disponibile: questa partita è in esecuzione nel browser.",
+    "versionMismatchTooltip": "Versione del motore nativo non corrispondente: questa partita è in esecuzione nel browser.",
+    "notAttemptedTooltip": "Questa partita è in esecuzione nel browser: il motore nativo non è stato usato."
+  },
   "buildBadge": {
     "downloading": "download in corso… {{progress}}%",
     "checking": "controllo…",
@@ -247,7 +265,13 @@
     "youPlayFirst": "Giochi per primo",
     "playerPlaysFirst": "{{name}} gioca per primo",
     "heads": "Testa",
-    "tails": "Croce"
+    "tails": "Croce",
+    "coinFlip": "Lancio della moneta",
+    "wonCoinFlip": "{{name}} ha vinto il lancio",
+    "lostCoinFlip": "{{name}} ha perso il lancio",
+    "turnOrder": "Ordine dei turni",
+    "turnOrderItem": "Turno {{turn}}: {{name}}",
+    "youTakeTurn": "Giochi il turno {{turn}}"
   },
   "chrome": {
     "back": "Indietro",

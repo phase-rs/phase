@@ -43521,6 +43521,7 @@ fn conditional_cost_reduction_applies_only_when_condition_met() {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
 
     let condition = parse_restriction_condition("you control a legendary creature")
         .expect("test condition must parse");
@@ -43540,6 +43541,7 @@ fn conditional_cost_reduction_applies_only_when_condition_met() {
             },
         });
         def.cost_reduction = Some(CostReduction {
+            mode: CostModifyMode::Reduce,
             amount_per: 3,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(condition.clone()),
@@ -43671,6 +43673,110 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
         generic_of(&def_off),
         1,
         "on an opponent's turn the reduction does not apply"
+    );
+}
+
+/// CR 602.2b + CR 601.2f: Loreseeker's Stone —
+/// "{3}, {T}: Draw three cards. This ability costs {1} more to activate
+/// for each card in your hand." The {3} generic component is {3} with an
+/// empty hand and {8} with five cards in hand. Parsed from the real Oracle
+/// clause and applied through production `apply_cost_reduction` (the same
+/// seam `can_activate_ability_now` / activation cost determination use).
+///
+/// Discriminating assertion: `generic_of(&def)` scales 3 → 8 with hand size.
+/// Reverting the Raise apply arm leaves generic at {3} for every hand size
+/// (the Discord report: activating for {3} with five cards in hand).
+#[test]
+fn loreseekers_stone_raise_cost_scales_with_hand_size() {
+    use crate::parser::oracle_cost::try_parse_cost_reduction;
+    use crate::types::ability::{Effect, QuantityExpr, QuantityRef, ZoneRef};
+
+    let reduction = try_parse_cost_reduction(
+        "this ability costs {1} more to activate for each card in your hand",
+    )
+    .expect("Loreseeker's Stone cost-increase clause must parse");
+    assert_eq!(reduction.mode, CostModifyMode::Raise);
+    assert_eq!(reduction.amount_per, 1);
+    match &reduction.count {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    ..
+                },
+        }
+        | QuantityExpr::Ref {
+            qty: QuantityRef::HandSize { .. },
+        } => {}
+        other => panic!("expected hand-size count, got {other:?}"),
+    }
+
+    let make_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "draw".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+        });
+        def.cost_reduction = Some(reduction.clone());
+        def
+    };
+    let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => *generic,
+        other => panic!("expected Mana cost, got {other:?}"),
+    };
+
+    let build_state = |hand_cards: usize| -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(6500);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loreseeker's Stone".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&src).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+        }
+        for i in 0..hand_cards {
+            create_object(
+                &mut state,
+                CardId(100 + i as u64),
+                PlayerId(0),
+                format!("Hand Card {i}"),
+                Zone::Hand,
+            );
+        }
+        (state, src)
+    };
+
+    let (state0, src0) = build_state(0);
+    let mut def0 = make_def();
+    apply_cost_reduction(&state0, &mut def0, PlayerId(0), src0);
+    assert_eq!(generic_of(&def0), 3, "empty hand: {{3}} + {{0}} = {{3}}");
+
+    let (state5, src5) = build_state(5);
+    let mut def5 = make_def();
+    apply_cost_reduction(&state5, &mut def5, PlayerId(0), src5);
+    assert_eq!(
+        generic_of(&def5),
+        8,
+        "five cards in hand: {{3}} + {{5}} = {{8}} (Discord report)"
+    );
+    assert_ne!(
+        generic_of(&def0),
+        generic_of(&def5),
+        "paid generic must differ across hand sizes (revert leaves both at {{3}})"
     );
 }
 

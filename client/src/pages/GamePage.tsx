@@ -844,13 +844,22 @@ function GamePageContent({
   // identity-ref latch makes the consume idempotent under React StrictMode's
   // double-invoke and after the clear (the re-run sees `null`).
   const startingContest = useGameStore((s) => s.startingContest);
+  const openingTurnOrder = useGameStore((s) => s.gameState?.derived?.turn_order);
+  const openingViewerTurnNumber = useGameStore(
+    (s) => s.gameState?.derived?.viewer_turn_number,
+  );
   const consumedContestRef = useRef<typeof startingContest>(null);
   useEffect(() => {
     if (!startingContest || consumedContestRef.current === startingContest) return;
     consumedContestRef.current = startingContest;
-    flashStartingPlayerContest(startingContest.events, startingContest.startingPlayer);
+    flashStartingPlayerContest(
+      startingContest.events,
+      startingContest.startingPlayer,
+      openingTurnOrder,
+      openingViewerTurnNumber,
+    );
     useGameStore.getState().clearStartingContest();
-  }, [startingContest]);
+  }, [openingTurnOrder, openingViewerTurnNumber, startingContest]);
   // CR 103.1 before CR 103.5: the starting-player contest must finish before the
   // mulligan UI appears (the roll determines who's on the play, which precedes
   // drawing opening hands). True from `initGame` setting the carrier through the
@@ -1532,13 +1541,15 @@ function GamePageContent({
       <HelpSheet />
       <CardReportDialog />
 
-      {/* Connection failure toast */}
-      {isOnlineMode && (
-        <ConnectionToast
-          onRetry={() => window.location.reload()}
-          onSettings={() => setPreferencesOpen({})}
-        />
-      )}
+      {/* The page's toast surface, not an online-only one: solo games raise
+          toasts too (the native-engine fallback notice). Only online games get
+          a Retry — reloading re-dials the server, but a solo game has nothing
+          to re-dial and would just restart itself. */}
+      <ConnectionToast
+        onRetry={isOnlineMode ? () => window.location.reload() : undefined}
+        onSettings={() => setPreferencesOpen({})}
+      />
+
 
 
       {/*

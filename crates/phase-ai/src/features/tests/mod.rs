@@ -10,4 +10,5 @@ pub mod graveyard_types;
 pub mod lifegain;
 pub mod mill;
 pub mod no_name_matching;
+pub mod poison;
 pub mod reanimator;

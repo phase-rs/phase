@@ -30,6 +30,7 @@ use super::payoff::{
     EQUIPMENT_PAYOFF, LIFEGAIN_PAYOFF, MILL_PAYOFF, REANIMATOR_PAYOFF,
 };
 use super::plus_one_counters::PlusOneCountersPolicy;
+use super::poison::PoisonClockPolicy;
 use super::ramp_timing::RampTimingPolicy;
 use super::reactive_self_protection::ReactiveSelfProtectionPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
@@ -130,6 +131,8 @@ pub enum PolicyId {
     SeparatePilesTiming,
     XCastGate,
     LoopShortcut,
+    /// CR 104.3d: the alternate poison win clock.
+    PoisonClock,
     /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
     GraveyardTypes,
 }
@@ -323,6 +326,7 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ARTIFACT_SYNERGY)),
             Box::new(BoardDevelopmentPolicy),
             Box::new(EtbValuePolicy),
+            Box::new(PoisonClockPolicy),
             Box::new(GraveyardTypesPolicy),
             Box::new(PayoffPolicy::new(&ENCHANTMENTS_PAYOFF)),
             Box::new(PayoffPolicy::new(&EQUIPMENT_PAYOFF)),

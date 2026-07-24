@@ -39,6 +39,7 @@ mod payment_selection;
 mod payoff;
 mod planeswalker_loyalty;
 mod plus_one_counters;
+mod poison;
 mod ramp_timing;
 mod reactive_self_protection;
 mod recursion_awareness;

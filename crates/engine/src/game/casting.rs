@@ -17930,8 +17930,9 @@ pub(crate) fn loyalty_ability_gains_mana_tax(
     !matches!(probe.cost, Some(AbilityCost::Loyalty { .. }))
 }
 
-/// CR 601.2f: Apply self-referential cost reduction to an ability definition's cost.
-/// Mutates `ability_def.cost` in place, reducing generic mana by `amount_per * count`.
+/// CR 601.2f: Apply self-referential cost reduction/increase to an ability definition's cost.
+/// Mutates `ability_def.cost` in place by `amount_per * count` in `cost_reduction.mode`'s
+/// direction (`Reduce` floors at {0}; `Raise` adds generic mana).
 fn apply_cost_reduction(
     state: &GameState,
     ability_def: &mut AbilityDefinition,
@@ -17939,7 +17940,7 @@ fn apply_cost_reduction(
     source_id: ObjectId,
 ) {
     if let Some(ref reduction) = ability_def.cost_reduction {
-        // CR 602.2b + CR 601.2f: A conditional flat reduction ("costs {N} less … if [cond]")
+        // CR 602.2b + CR 601.2f: A conditional flat modification ("costs {N} less/more … if [cond]")
         // applies only when its gate holds at cost-determination time. `None` =
         // unconditional (the "for each" scaling form and all legacy reductions).
         let condition_met = reduction.condition.as_ref().is_none_or(|cond| {
@@ -17948,10 +17949,17 @@ fn apply_cost_reduction(
         if condition_met {
             let count =
                 super::quantity::resolve_quantity(state, &reduction.count, player, source_id);
-            let reduce_by = (reduction.amount_per as i32 * count).max(0) as u32;
-            if reduce_by > 0 {
+            let delta = (reduction.amount_per as i32 * count).max(0) as u32;
+            if delta > 0 {
                 if let Some(ref mut cost) = ability_def.cost {
-                    reduce_generic_in_cost(cost, reduce_by);
+                    // CR 601.2f + CR 118.7: self-referential text uses the same
+                    // Reduce/Raise axis as external ability-cost statics.
+                    // `Minimum` is not emitted for self `CostReduction`.
+                    match reduction.mode {
+                        CostModifyMode::Reduce => reduce_generic_in_cost(cost, delta),
+                        CostModifyMode::Raise => increase_generic_in_cost(cost, delta),
+                        CostModifyMode::Minimum => {}
+                    }
                 }
             }
         }

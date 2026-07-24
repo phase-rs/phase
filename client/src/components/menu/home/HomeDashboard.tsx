@@ -188,21 +188,28 @@ function ActiveDeckCard() {
   const count = randomDeckSelected ? 0 : getDeckCardCount(name);
   const colors = randomDeckSelected ? [] : getDeckColorIdentity(name);
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => navigate("/my-decks")}
-      className="group flex appearance-none cursor-pointer flex-col overflow-hidden rounded-card border border-hairline surface-card text-left transition-colors hover:border-hairline-hover"
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          navigate("/my-decks");
+        }
+      }}
+      className="group flex cursor-pointer flex-col overflow-hidden rounded-card border border-hairline surface-card text-left transition-colors hover:border-hairline-hover"
     >
       {/* Art header: representative card art with the section label and the
           color-identity mana pips overlaid on a scrim — the pips carry the same
           dark backing chip so they stay legible over any artwork. */}
-      <div className="relative isolate h-24 overflow-hidden">
+      <div className="relative h-24 overflow-hidden">
         {artSrc ? (
-          <img src={artSrc} alt="" className="absolute inset-0 z-0 h-full w-full object-cover" />
+          <img src={artSrc} alt="" className="absolute inset-0 h-full w-full object-cover" />
         ) : (
-          <div className="absolute inset-0 z-0 animate-pulse bg-gray-800" />
+          <div className="absolute inset-0 animate-pulse bg-gray-800" />
         )}
-        <div className="absolute inset-0 z-[1] bg-gradient-to-t from-black/85 via-black/25 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/25 to-transparent" />
         <div className={`${SECTION_LABEL} absolute left-3 top-2.5 z-10 drop-shadow-[0_1px_2px_rgba(0,0,0,0.7)]`}>
           {t("home.dashboard.activeDeck")}
         </div>
@@ -219,7 +226,7 @@ function ActiveDeckCard() {
           <span className="text-xs text-fg-muted tabular-nums">{t("home.dashboard.cards", { count })}</span>
         )}
       </div>
-    </button>
+    </div>
   );
 }
 

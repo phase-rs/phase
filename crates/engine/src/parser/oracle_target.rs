@@ -13,7 +13,7 @@ use crate::types::ability::{
     Comparator, ControllerRef, CountScope, DamageKindFilter, FilterProp, ObjectProperty,
     ObjectScope, ParitySource, PlayerFilter, PtStat, PtValueScope, QuantityExpr, QuantityRef,
     SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -1024,6 +1024,24 @@ pub fn parse_target_with_syntax<'a>(
         .parse(input)
     }) {
         return (filter, rest, syntax);
+    }
+
+    // CR 608.2c + CR 607.2a (Portent of Calamity): "the rest of the exiled cards"
+    // names the cards still linked to this resolution's exile step — not the bare
+    // "the rest" tracked-set anaphor, which can absorb unrelated chain members
+    // after an intervening revealed-library cleanup publishes to the chain set.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("the rest of the exiled cards").parse(lower.as_str())
+    {
+        return (
+            TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter: Box::new(TargetFilter::Any),
+                caused_by: Some(ThisWayCause::Exiled),
+            },
+            &text[lower.len() - rest.len()..],
+            syntax,
+        );
     }
 
     // CR 603.7: Anaphoric tracked-set pronouns
