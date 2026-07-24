@@ -1,4 +1,4 @@
-use crate::game::zones;
+use crate::game::{players, zones};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
@@ -105,11 +105,7 @@ fn resolve_gift_recipient(state: &GameState, ability: &ResolvedAbility) -> Optio
             .and_then(|obj| obj.gift_recipient)
     })?;
     // CR 800.4: Only deliver if the chosen player is still in the game.
-    state
-        .players
-        .iter()
-        .any(|p| p.id == candidate && !p.is_eliminated)
-        .then_some(candidate)
+    players::is_alive(state, candidate).then_some(candidate)
 }
 
 /// Deliver "gift a card" — opponent draws one card.
