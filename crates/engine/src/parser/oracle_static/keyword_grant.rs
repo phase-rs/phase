@@ -1926,6 +1926,31 @@ pub(crate) fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModific
         return static_modifications;
     }
 
+    // CR 614.1a + CR 614.6 + CR 201.5b: Object-hosted replacement rider — "If ~
+    // would leave the battlefield, exile it instead of putting it anywhere else."
+    // (`~` because `normalize_card_name_refs` rewrote the "this creature/permanent/
+    // land" self-reference card-wide). The parser IS the detector: route through
+    // the shared `try_parse_leave_battlefield_exile_replacement` combinator and,
+    // on a hit, grant the replacement to the recipient via `GrantReplacement` so
+    // the `~` binds to the object that gains the ability (the reanimated
+    // permanent), not the granting source.
+    //
+    // CR 611.2a + CR 613.1f: the granted definition is built from the UNSTAMPED
+    // `leave_battlefield_exile_replacement` constructor, never from the detector's
+    // `AddTargetReplacement` payload — that standalone payload carries
+    // `RestrictionExpiry::UntilHostLeavesPlay` (#6538). A granted replacement's
+    // lifetime is governed by the granting continuous effect's duration and is
+    // re-derived every layer pass, so it must not carry a host-lifetime stamp:
+    // #6538's `is_runtime_host_lifetime_replacement` keys base-install /
+    // non-copiable / host-exit-prune off exactly that stamp, and a base-installed
+    // granted rider would survive the granting effect lapsing (Elemental
+    // Expressionist's "until end of turn" grant would become permanent).
+    if super::oracle_effect::try_parse_leave_battlefield_exile_replacement(&lower).is_some() {
+        return vec![ContinuousModification::GrantReplacement {
+            replacement: Box::new(super::oracle_effect::leave_battlefield_exile_replacement()),
+        }];
+    }
+
     // CR 113 / CR 117 fallback: spell/activated text → GrantAbility.
     vec![ContinuousModification::GrantAbility {
         definition: Box::new(parse_quoted_ability(&ability_text)),

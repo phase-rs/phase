@@ -1889,6 +1889,11 @@ fn build_nodes(faces: &[&CardFace]) -> Vec<AbilityNode> {
                             nodes.push(build_node(&face.name, def, trigger_axis(trigger)));
                         }
                     }
+                    ContinuousModification::GrantReplacement { replacement } => {
+                        if let Some(def) = &replacement.execute {
+                            nodes.push(build_node(&face.name, def, None));
+                        }
+                    }
                     _ => {}
                 }
             }

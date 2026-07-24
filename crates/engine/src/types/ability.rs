@@ -20666,6 +20666,25 @@ pub enum ContinuousModification {
     GrantTrigger {
         trigger: Box<TriggerDefinition>,
     },
+    /// CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+    /// effect to the affected object (Layer 6, ability-adding). The layer-6
+    /// mirror of `GrantTrigger`: where that variant pushes a `TriggerDefinition`
+    /// onto `obj.trigger_definitions`, this pushes a `ReplacementDefinition` onto
+    /// `obj.replacement_definitions` so the granted replacement's event/scope
+    /// metadata is preserved and it fires as a genuine replacement (CR 614.6).
+    ///
+    /// Models the "it gains 'If ~ would leave the battlefield, exile it instead
+    /// of putting it anywhere else'" reanimation rider (Geth, Thane of Contracts;
+    /// Llanowar Greenwidow; Realmbreaker, the Invasion Tree; Spirit-Sister's
+    /// Call; Elemental Expressionist's until-EOT grant). The rider's `~`
+    /// self-reference resolves to the object that gains the ability (CR 201.5b),
+    /// which is the reanimated permanent, not the granting source. Re-derived
+    /// each layer pass (`obj.replacement_definitions` is reset to base at the
+    /// start of the pass); structural-equality dedup keeps repeated grants
+    /// idempotent, exactly like `GrantTrigger` / `GrantStaticAbility`.
+    GrantReplacement {
+        replacement: Box<ReplacementDefinition>,
+    },
     RemoveAllAbilities,
     AddType {
         core_type: CoreType,

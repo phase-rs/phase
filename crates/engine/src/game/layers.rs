@@ -6659,6 +6659,24 @@ fn apply_continuous_effect_filtered(
                     obj.static_definitions.push(*definition.clone());
                 }
             }
+            // CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+            // to the recipient. Mirror of `GrantStaticAbility` — push the cloned
+            // `ReplacementDefinition` onto `obj.replacement_definitions` so the
+            // granted replacement fires as a genuine replacement effect (its
+            // `valid_card: SelfRef` binds to this recipient object). Re-derived
+            // each layer pass (`obj.replacement_definitions` was reset to base at
+            // the start of the pass); structural-equality dedup keeps repeated
+            // grants (multiple sources, or a single static parsed twice)
+            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant.
+            ContinuousModification::GrantReplacement { replacement } => {
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|rd| rd == replacement.as_ref())
+                {
+                    obj.replacement_definitions.push(*replacement.clone());
+                }
+            }
             ContinuousModification::AddStaticMode { mode } => {
                 // CR 509.1b + CR 105.4 + CR 609.6 (issue #327): When the
                 // granted static mode carries an `IsChosenColor` filter prop,

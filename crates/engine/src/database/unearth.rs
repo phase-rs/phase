@@ -38,13 +38,12 @@
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
-    Duration, Effect, ReplacementDefinition, RestrictionExpiry, StaticDefinition, TargetFilter,
+    Duration, Effect, RestrictionExpiry, StaticDefinition, TargetFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
-use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 /// CR 702.84a: Synthesize the graveyard-activated reanimation ability for every
@@ -162,13 +161,13 @@ fn delayed_exile_step() -> AbilityDefinition {
 /// reseeds, kept non-copiable (CR 707.2), and pruned on the host's battlefield
 /// exit (CR 400.7) — see the variant doc in `types/ability.rs`.
 fn leaves_battlefield_exile_step() -> AbilityDefinition {
-    let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
-        .expiry(RestrictionExpiry::UntilHostLeavesPlay)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            exile_self_from_battlefield_effect(),
-        ));
+    // Shares the single unstamped `leave_battlefield_exile_replacement` authority
+    // (#6538 / #6566); this site keeps its own `target: SelfRef` wrapper +
+    // description and composes the #6538 host-lifetime stamp itself. The stamp is
+    // applied per-consumer, not baked into the constructor, because the granted
+    // path (#6566) must NOT carry it — see the constructor doc.
+    let replacement = crate::parser::oracle_effect::leave_battlefield_exile_replacement()
+        .expiry(RestrictionExpiry::UntilHostLeavesPlay);
 
     AbilityDefinition::new(
         AbilityKind::Spell,

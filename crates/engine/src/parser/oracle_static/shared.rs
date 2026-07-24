@@ -914,6 +914,8 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::AddColor { .. }
         | ContinuousModification::AddStaticMode { .. }
         | ContinuousModification::GrantStaticAbility { .. }
+        // Granted object-hosted replacement: no dynamic magnitude.
+        | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::SwitchPowerToughness
         | ContinuousModification::AssignDamageFromToughness
         | ContinuousModification::AssignDamageAsThoughUnblocked

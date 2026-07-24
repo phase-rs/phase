@@ -111,6 +111,9 @@ impl ContinuousModification {
             | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
             | ContinuousModification::GrantTrigger { .. }
+            // CR 613.1f + CR 614.6: granting an object-hosted replacement is an
+            // ability-adding effect (Layer 6), beside GrantTrigger.
+            | ContinuousModification::GrantReplacement { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
             | ContinuousModification::GrantStaticAbility { .. } => Layer::Ability,
