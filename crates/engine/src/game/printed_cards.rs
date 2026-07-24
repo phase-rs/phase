@@ -456,6 +456,13 @@ pub fn self_etb_counter_replacements(
 }
 
 pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
+    // CR 707.2 + CR 710.2: a flipped flip permanent's `base_*` fields hold the
+    // ALTERNATIVE half (written there by `flip::apply_flipped_face_to_object`),
+    // but flipped is a status (CR 110.5) and status is not copied. The copiable
+    // values are the normal half, which `flip` keeps stashed in `back_face`.
+    if let Some(values) = crate::game::flip::flipped_normal_copiable_values(obj) {
+        return values;
+    }
     CopiableValues {
         name: obj.base_name.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -855,6 +862,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
     match modification {
         ContinuousModification::GrantAbility { definition } => walk_ability_def(definition, out),
         ContinuousModification::GrantTrigger { trigger } => walk_trigger(trigger, out),
+        ContinuousModification::GrantReplacement { replacement } => {
+            walk_replacement(replacement, out)
+        }
         ContinuousModification::GrantStaticAbility { definition } => walk_static(definition, out),
         ContinuousModification::CopyValues { values, .. } => walk_copiable_values(values, out),
         // Remaining modifications carry no nested ability/effect carriers.
@@ -1222,6 +1232,8 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: no nested ability carrier and no conjured card name.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
@@ -1442,6 +1454,13 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
             CardLayout::Modal(_, back) => Some((LayoutKind::Modal, back)),
             CardLayout::Meld(_, back) => Some((LayoutKind::Meld, back)),
             CardLayout::Omen(_, back) => Some((LayoutKind::Omen, back)),
+            // CR 710.1b: a flip card's alternative name, text box, type line,
+            // power, and toughness live on its bottom half. Stored in the same
+            // `back_face` slot so `flip::flip_permanent` can apply it — the
+            // `LayoutKind::Flip` tag is what keeps it out of every double-faced
+            // path (`transform::is_double_faced_permanent`,
+            // `transform::transform_permanent`, MDFC/Adventure face choice).
+            CardLayout::Flip(_, back) => Some((LayoutKind::Flip, back)),
             // CR 722: Preparation cards expose prepare-spell characteristics.
             CardLayout::Prepare(_, back) => Some((LayoutKind::Prepare, back)),
             _ => None,
@@ -1775,6 +1794,10 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                             CardLayout::Modal(..) => Some(LayoutKind::Modal),
                             CardLayout::Meld(..) => Some(LayoutKind::Meld),
                             CardLayout::Omen(..) => Some(LayoutKind::Omen),
+                            // CR 710.1b: restore the flip tag so a reloaded
+                            // flip permanent's stashed alternative face stays
+                            // excluded from the double-faced paths.
+                            CardLayout::Flip(..) => Some(LayoutKind::Flip),
                             // CR 702.xxx: Prepare (Strixhaven) — treat like Adventure for
                             // back-face layout tracking. Assign when WotC publishes SOS CR update.
                             CardLayout::Prepare(..) => Some(LayoutKind::Prepare),
@@ -1789,6 +1812,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                         });
                 }
             }
+
+            // CR 710.1c: a flip card's color and mana cost don't change if the
+            // permanent is flipped. A flipped permanent's `printed_ref` names
+            // the ALTERNATIVE half, which carries no printed mana cost, so the
+            // `apply_card_face_to_object` reapply above would blank it on every
+            // reload. Restore both from the (just-refreshed) normal half stashed
+            // in `back_face` — the same values `flip::flip_permanent`
+            // deliberately left untouched when it flipped the permanent.
+            crate::game::flip::restore_normal_cost_and_color_if_flipped(obj);
 
             if is_face_down_battlefield {
                 // CR 708.2a: This reload path only runs while `printed_ref` is
@@ -2241,6 +2273,105 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    /// CR 710.1c: a flip card's color and mana cost don't change if the
+    /// permanent is flipped — including across a state reload.
+    ///
+    /// A flipped permanent's `printed_ref` names the ALTERNATIVE half, which (on
+    /// every real flip card) has no printed mana cost. Without the
+    /// `restore_normal_cost_and_color_if_flipped` call in
+    /// `reapply_printed_faces_from_card_db`, the reapply blanks the cost and the
+    /// permanent silently becomes a {0} object on load. Reverting that call
+    /// fails the mana-cost assertion below.
+    #[test]
+    fn rehydrate_keeps_a_flipped_permanents_mana_cost_and_color() {
+        let normal_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+        let mut normal_half = test_face(
+            "Rehydrate Flip Normal",
+            "rehydrate-flip-oracle-id",
+            vec![CoreType::Creature],
+            normal_cost.clone(),
+        );
+        normal_half.color_override = Some(vec![ManaColor::White]);
+        // CR 710.1b: the alternative half has no printed mana cost and no
+        // printed color indicator — exactly as MTGJSON reports face b.
+        let mut alternative_half = test_face(
+            "Rehydrate Flip Alternative",
+            "rehydrate-flip-oracle-id",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        alternative_half.color_override = Some(vec![]);
+        let db = db_from_faces(&[normal_half.clone(), alternative_half.clone()]);
+
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Rehydrate Flip Alternative".to_string(),
+            Zone::Battlefield,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        // Post-flip state, exactly as `flip::flip_permanent` leaves it: the
+        // alternative half is displayed, the normal half is stashed, and the
+        // mana cost / color are still the normal half's (CR 710.1c).
+        object.flipped = true;
+        object.printed_ref = printed_ref_from_face(&alternative_half);
+        object.base_printed_ref = object.printed_ref.clone();
+        object.mana_cost = normal_cost.clone();
+        object.base_mana_cost = normal_cost.clone();
+        object.color = vec![ManaColor::White];
+        object.base_color = vec![ManaColor::White];
+        object.back_face = Some(BackFaceData {
+            name: normal_half.name.clone(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            card_types: normal_half.card_type.clone(),
+            mana_cost: normal_cost.clone(),
+            keywords: vec![],
+            abilities: vec![],
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
+            color: vec![ManaColor::White],
+            printed_ref: printed_ref_from_face(&normal_half),
+            modal: None,
+            additional_cost: None,
+            strive_cost: None,
+            casting_restrictions: vec![],
+            casting_options: vec![],
+            layout_kind: None,
+        });
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let object = &state.objects[&id];
+        assert!(
+            object.flipped,
+            "reach guard: the permanent is still flipped"
+        );
+        assert_eq!(
+            object.name, "Rehydrate Flip Alternative",
+            "reach guard: the reapply really did run over the alternative half"
+        );
+        assert_eq!(
+            object.mana_cost, normal_cost,
+            "CR 710.1c: reloading must not blank a flipped permanent's mana cost"
+        );
+        assert_eq!(object.base_mana_cost, normal_cost);
+        assert_eq!(
+            object.color,
+            vec![ManaColor::White],
+            "CR 710.1c: reloading must not blank a flipped permanent's color"
+        );
+        assert_eq!(object.base_color, vec![ManaColor::White]);
     }
 
     /// CR 604.3: explicit all-zone color data is authoritative even when a face

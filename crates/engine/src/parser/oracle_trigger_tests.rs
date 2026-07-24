@@ -8257,6 +8257,46 @@ fn trigger_you_plays_a_card_does_not_match_play_card() {
     assert_ne!(def.mode, TriggerMode::PlayCard);
 }
 
+// CR 601.1a + CR 701.18b: "play a land or cast a spell" is the same event pair
+// as "play a card" (a player plays a card by playing it as a land OR casting it
+// as a spell), so the explicitly-spelled-out form routes to the unified
+// `PlayCard` mode. Regression for The Endstone / Flubs / Infernal Sovereign.
+#[test]
+fn trigger_you_play_a_land_or_cast_a_spell_is_play_card() {
+    let def = parse_trigger_line(
+        "Whenever you play a land or cast a spell, draw a card.",
+        "The Endstone",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayCard);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    // No origin restriction → fires on any land play or spell cast.
+    assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
+    assert!(def.valid_card.is_none());
+}
+
+// CR 601.1a + CR 601.2a + #6387: Shadow of the Goblin — the "from anywhere
+// other than your hand" origin clause modifies BOTH the land-play and
+// spell-cast halves of "play a land or cast a spell". Before the fix the
+// land-play arm shadowed this line and dropped both the cast half and the
+// origin, so it dealt damage on every land played from hand. It must parse as
+// `PlayCard` with `NotEquals(Hand)` so the shared origin gate excludes plays
+// and casts from the hand.
+#[test]
+fn trigger_shadow_of_the_goblin_play_or_cast_from_non_hand() {
+    let def = parse_trigger_line(
+        "Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
+        "Shadow of the Goblin",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayCard);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.spell_cast_origin,
+        OriginConstraint::NotEquals(Zone::Hand)
+    );
+    // No card-type narrowing — any land/spell from a non-hand zone qualifies.
+    assert!(def.valid_card.is_none());
+}
+
 #[test]
 fn trigger_you_cast_target_player_mill_instead_keeps_chosen_player() {
     let def = parse_trigger_line(
@@ -25070,4 +25110,67 @@ fn ketramose_exile_trigger_gated_on_source_zones_and_own_turn() {
         "must be gated to the controller's own turn, got {:?}",
         trigger.constraint
     );
+}
+
+/// CR 303.4b + CR 301.5a + CR 603.2 (issue: Sigil of Sleep freeze):
+/// An article-less damage-source subject — the Aura/Equipment self-referential
+/// determiners "enchanted creature" / "equipped creature" — must still be
+/// recognized as a "deals damage to a player" trigger so a later "that player"
+/// anaphor binds to the DAMAGED (triggering) player. Before the fix,
+/// `parse_damage_source_subject` required a leading article, so these subjects
+/// failed the strict `is_damage_done_trigger_pattern` check and fell through to
+/// the `condition_introduces_target_player` branch, yielding the wrong
+/// `TargetPlayer` scope (which surfaces a spurious companion Player target slot
+/// at runtime). Building-block test: assert the single-authority scope resolver
+/// itself, so every card in the class is covered — not just one.
+#[test]
+fn relative_player_scope_binds_article_less_damage_source_to_triggering_player() {
+    for cond in [
+        "enchanted creature deals damage to a player",
+        "equipped creature deals combat damage to a player",
+    ] {
+        assert!(
+            is_damage_done_trigger_pattern(cond),
+            "article-less subject must be a DamageDone pattern: {cond:?}",
+        );
+        assert_eq!(
+            relative_player_scope_for_condition(cond),
+            Some(ControllerRef::TriggeringPlayer),
+            "\"that player\" in {cond:?} must bind to the damaged (triggering) player",
+        );
+    }
+}
+
+/// CR 120.3 + CR 603.7c: Sigil of Sleep's bounce must target a creature the
+/// DAMAGED player controls (`ControllerRef::TriggeringPlayer`), not a
+/// separately-chosen `TargetPlayer`. The `TargetPlayer` mis-scoping made the
+/// runtime surface a phantom Player target slot, freezing the game (the reported
+/// bug). Uses the card's verbatim Oracle text.
+#[test]
+fn parse_sigil_of_sleep_bounce_targets_triggering_player_controlled_creature() {
+    let def = parse_trigger_line(
+        "Whenever enchanted creature deals damage to a player, return target creature that player controls to its owner's hand.",
+        "Sigil of Sleep",
+    );
+
+    let execute = def.execute.as_ref().expect("execute must be Some");
+    match &*execute.effect {
+        Effect::Bounce { target, .. } => match target {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::TriggeringPlayer),
+                    "bounce target must be controlled by the damaged (triggering) player, got {:?}",
+                    tf.controller,
+                );
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "bounce target must be a creature, got {:?}",
+                    tf.type_filters,
+                );
+            }
+            other => panic!("bounce target must be a Typed creature filter, got {other:?}"),
+        },
+        other => panic!("Sigil of Sleep effect must be Bounce, got {other:?}"),
+    }
 }

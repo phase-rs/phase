@@ -167,6 +167,9 @@ fn continuous_modification_references_x(modification: &ContinuousModification) -
         ContinuousModification::GrantStaticAbility { definition } => {
             static_definition_references_x(definition)
         }
+        ContinuousModification::GrantReplacement { replacement } => {
+            replacement_definition_references_x(replacement)
+        }
         // RC1: dynamic P/T, keyword, and enter-counter magnitudes may reference
         // the chosen X either directly (`Variable "X"`) or via `CostXPaid` (the
         // announced X carried on the granting object — Mirror Entity's

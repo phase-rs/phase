@@ -49,6 +49,22 @@ pub fn transform_permanent(
         return Ok(());
     }
 
+    // CR 701.27a + CR 701.27c: only permanents represented by double-faced
+    // tokens and double-faced cards can transform; if a spell or ability
+    // instructs a player to transform anything else, nothing happens. A CR 710
+    // flip card is a SINGLE-faced card whose alternative characteristics are
+    // reached by flipping (CR 710.4), never by transforming — and applying the
+    // double-faced applicator to one would swap the mana cost and color that
+    // CR 710.1c holds fixed. `flip::is_flip_permanent` is the single authority:
+    // `flip::stash_flip_face` re-stamps `LayoutKind::Flip` on WHICHEVER half is
+    // parked in `back_face`, so the tag survives a flip, a zone exit (which
+    // reverts the flip and re-stashes the alternative half), and a later return
+    // to the battlefield. The `flipped` status is kept as a redundant second
+    // arm so a stash that some other path zeroed still cannot be transformed.
+    if obj.flipped || crate::game::flip::is_flip_permanent(obj) {
+        return Ok(());
+    }
+
     let back_face = obj
         .back_face
         .clone()
@@ -90,15 +106,19 @@ pub fn transform_permanent(
 
 /// CR 712.16 + CR 730.2j: True when `obj` is a double-faced permanent
 /// (transform/modal/meld DFC) or a melded permanent — none of which can be
-/// turned face down. Used by `effects::turn_face_down` to enforce the no-op.
+/// turned face down. Used by `effects::turn_face_down` to enforce the no-op,
+/// and by presentation adapters that need the engine's authoritative
+/// "is this permanent double-faced?" answer instead of re-deriving one.
 ///
 /// Keys on the typed layout/merge discriminants rather than `back_face.is_some()`
 /// so that single-faced layouts that may legally be turned face down — Adventure,
 /// Omen, Split, Flip — are NOT blocked (they carry no Transform/Modal/Meld
-/// `layout_kind`). A DFC currently showing its back face is caught by the
+/// `layout_kind`). CR 710 flip cards in particular put their alternative half in
+/// the same `back_face` slot, so `back_face.is_some()` would report all 21 of
+/// them as double-faced. A DFC currently showing its back face is caught by the
 /// `transformed` flag, because `snapshot_object_face` zeroes `layout_kind` when
 /// the front face is stashed in `back_face` during a transform.
-pub(crate) fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
+pub fn is_double_faced_permanent(obj: &crate::game::game_object::GameObject) -> bool {
     use crate::types::card::LayoutKind;
     // CR 730.2j: a face-up melded permanent contains a double-faced component.
     if obj.merge_kind == Some(crate::game::game_object::MergeKind::Meld) {

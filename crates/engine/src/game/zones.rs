@@ -289,6 +289,22 @@ pub(crate) fn apply_zone_exit_cleanup(
             }
         }
 
+        // CR 710.4 + CR 110.5: A flipped permanent that leaves the battlefield
+        // retains no memory of its status, and in every zone other than the
+        // battlefield a flip card has only its normal characteristics
+        // (CR 710.2). Restore the normal half and clear the flipped status.
+        //
+        // Ordered AFTER the CR 708.9 face-down restore on purpose: a flipped
+        // permanent that was then turned face down (Ixidron, Cyber Conversion)
+        // shares this one `back_face` slot between both statuses.
+        // `effects::turn_face_down` keeps the flip stash (the normal half) in
+        // it, so the face-down restore above already puts the normal half back
+        // on the object; this call then only has to clear the flipped status
+        // (its `back_face == None` branch). Running it first would instead
+        // consume the flip stash and leave the face-down 2/2 shell to be
+        // restored into the graveyard.
+        crate::game::flip::revert_flip_on_zone_exit(obj_mut);
+
         // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
         // (prevents re-casting if the card returns to exile via a different effect).
         if from == Zone::Exile {

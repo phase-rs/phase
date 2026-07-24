@@ -104,9 +104,9 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
     GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2695,6 +2695,12 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
             legacy_static_definition(definition)
         }
         ContinuousModification::GrantTrigger { trigger } => legacy_trigger_definition(trigger),
+        // A granted object-hosted replacement can nest a frozen tag in its
+        // execute body or its `valid_card` scope filter — distinct traversal from
+        // GrantTrigger (a ReplacementDefinition, not a TriggerDefinition).
+        ContinuousModification::GrantReplacement { replacement } => {
+            legacy_replacement_definition(replacement)
+        }
         ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
             legacy_target_filter(source)
@@ -2761,6 +2767,14 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
     }
 }
 
+/// A granted object-hosted `ReplacementDefinition` can carry a frozen tag in its
+/// `execute` redirect body or its `valid_card` scope filter. Mirrors
+/// `legacy_trigger_definition` for the replacement-granting layer-6 case.
+fn legacy_replacement_definition(rd: &ReplacementDefinition) -> bool {
+    rd.execute.as_deref().is_some_and(legacy_definition)
+        || rd.valid_card.as_ref().is_some_and(legacy_target_filter)
+}
+
 /// A granted / emblem `TriggerDefinition` can carry a frozen tag in its firing
 /// filters (`valid_card`/`valid_source`), its intervening-if condition, or its
 /// execute body.
@@ -2807,6 +2821,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::HideawayConceal { target }
         | Effect::ChooseCard { target, .. }
         | Effect::Transform { target }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
         | Effect::TargetOnly { target }
@@ -4897,6 +4913,10 @@ fn rw_effect(
         } => obj(StateKind::ObjectPt, target),
         Effect::SwitchPT { target } => obj(StateKind::ObjectPt, target),
         Effect::Transform { target } => obj(StateKind::ObjectPt, target),
+        // CR 710.1b: flipping replaces the permanent's power and toughness
+        // (along with its name, type line, and text box) — the same
+        // `ObjectPt` write axis `Transform` records.
+        Effect::FlipPermanent { target } => obj(StateKind::ObjectPt, target),
         Effect::BecomeCopy {
             target,
             recipient,

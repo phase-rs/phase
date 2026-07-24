@@ -900,6 +900,9 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: a flip instruction carries no nested ability edge, exactly
+        // like `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }
@@ -1890,6 +1893,11 @@ fn build_nodes(faces: &[&CardFace]) -> Vec<AbilityNode> {
                     ContinuousModification::GrantTrigger { trigger } => {
                         if let Some(def) = &trigger.execute {
                             nodes.push(build_node(&face.name, def, trigger_axis(trigger)));
+                        }
+                    }
+                    ContinuousModification::GrantReplacement { replacement } => {
+                        if let Some(def) = &replacement.execute {
+                            nodes.push(build_node(&face.name, def, None));
                         }
                     }
                     _ => {}

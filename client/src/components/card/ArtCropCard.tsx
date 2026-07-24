@@ -9,7 +9,7 @@ import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImage
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
-import { COUNTER_COLORS, computePTDisplay, toRoman } from "../../viewmodel/cardProps.ts";
+import { COUNTER_COLORS, computePTDisplay, hasOtherPrintedFace, toRoman } from "../../viewmodel/cardProps.ts";
 import { CounterTooltip } from "../ui/CounterTooltip.tsx";
 import { LoyaltyBadge } from "../ui/LoyaltyBadge.tsx";
 import { CardArtFallback } from "./CardArtFallback.tsx";
@@ -83,7 +83,10 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   const src = obj.face_down ? CARD_BACK_URL : cardSrc;
   const isLoading = obj.face_down ? false : cardLoading;
-  const hasDfc = !obj.face_down && obj.back_face != null;
+  // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
+  // Kamigawa flip card stores its alternative half in the same slot and has no
+  // face 1 to inspect. Use the engine-provided layout discriminant.
+  const hasDfc = !obj.face_down && hasOtherPrintedFace(obj);
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
   const devotionValue = obj.devotion ?? null;

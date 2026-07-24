@@ -121,6 +121,7 @@ pub mod explore;
 pub mod extra_turn;
 pub mod fight;
 pub mod flip_coin;
+pub mod flip_permanent;
 pub mod forage;
 pub mod force_attack;
 pub mod force_block;
@@ -3964,6 +3965,9 @@ pub fn resolve_effect(
         Effect::Discard { .. } => discard::resolve(state, ability, events),
         Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
         Effect::Transform { .. } => transform_effect::resolve(state, ability, events),
+        // CR 710.4: Kamigawa flip cards — a separate resolver from Transform
+        // because CR 710.1c keeps color and mana cost unchanged.
+        Effect::FlipPermanent { .. } => flip_permanent::resolve(state, ability, events),
         Effect::SearchLibrary { .. } => search_library::resolve(state, ability, events),
         Effect::SearchOutsideGame { .. } => search_outside_game::resolve(state, ability, events),
         Effect::Seek { .. } => seek::resolve(state, ability, events),
@@ -6334,6 +6338,8 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Attach { target, .. }
         | Effect::UnattachAll { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
