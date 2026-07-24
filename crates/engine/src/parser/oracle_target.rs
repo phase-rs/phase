@@ -2534,20 +2534,40 @@ pub fn parse_type_phrase_with_ctx<'a>(
                     };
                     (Some(tf), Some(sub_name))
                 } else if let TypeFilter::Subtype(second) = tf {
-                    // CR 205.3a: two consecutive subtype words ("Elder Dragon",
-                    // "Elf Warrior", "Human Wizard") are BOTH real subtypes
-                    // stacked on the same permanent, not one compound word —
-                    // chain the second as an additional AND-combined type
-                    // filter instead of silently dropping it. Reuses the
-                    // existing `subtype` slot (already flows into
-                    // `base_type_filters` below), so `card_type` keeps the
-                    // first subtype and this fills the second (Fate Reforged
-                    // chapter II — "a copy of any Elder Dragon…", issue #6321
-                    // / PR #6533: without this, "any " strips down to
-                    // `Subtype("Elder")` alone, dropping "Dragon").
-                    let ct_len = rest_after.len() - ct_rest.len();
-                    pos += ws + ct_len;
-                    (card_type, Some(second))
+                    if matches!(&card_type, Some(TypeFilter::Subtype(s)) if s.ends_with("'s")) {
+                        // "Urza's" (the ONLY possessive-suffixed entry in the
+                        // whole subtype vocabulary — LAND_SUBTYPES,
+                        // card_type.rs) is a name FRAGMENT meant to attach to
+                        // a following noun ("Urza's Mine"/"Tower"/
+                        // "Power-Plant"), not an independently AND-combinable
+                        // subtype like "Elder"/"Elf"/"Human" below. Chaining
+                        // it here would fully consume "an urza's mine" into
+                        // one `Typed{Subtype("Urza's"), Subtype("Mine")}`
+                        // filter with an empty remainder, which changes which
+                        // downstream condition-builder claims the clause and
+                        // regresses the dedicated Urza-lands
+                        // `ControllerControlsMatching` parser (issue #6321 /
+                        // PR #6533 review — urzas_lands_share_delta_shape /
+                        // legacy_misparses_are_now_honest_gaps). Decline; the
+                        // specialized handler still gets the untouched text.
+                        (card_type, subtype)
+                    } else {
+                        // CR 205.3a: two consecutive subtype words ("Elder
+                        // Dragon", "Elf Warrior", "Human Wizard") are BOTH
+                        // real subtypes stacked on the same permanent, not
+                        // one compound word — chain the second as an
+                        // additional AND-combined type filter instead of
+                        // silently dropping it. Reuses the existing `subtype`
+                        // slot (already flows into `base_type_filters`
+                        // below), so `card_type` keeps the first subtype and
+                        // this fills the second (Fate Reforged chapter II —
+                        // "a copy of any Elder Dragon…", issue #6321 / PR
+                        // #6533: without this, "any " strips down to
+                        // `Subtype("Elder")` alone, dropping "Dragon").
+                        let ct_len = rest_after.len() - ct_rest.len();
+                        pos += ws + ct_len;
+                        (card_type, Some(second))
+                    }
                 } else {
                     (card_type, subtype)
                 }
@@ -15405,6 +15425,38 @@ mod tests {
                 tf.type_filters
             );
         }
+    }
+
+    /// CR 205.3i: "Urza's" (LAND_SUBTYPES, `card_type.rs`) is the ONE
+    /// possessive-suffixed entry in the whole subtype vocabulary — a name
+    /// FRAGMENT meant to attach to a following noun ("Urza's Mine"/"Tower"/
+    /// "Power-Plant"), not an independently AND-combinable subtype like
+    /// "Elder"/"Elf"/"Human" above. The two-word subtype chain must NOT fire
+    /// for it: chaining would fully consume "urza's mine" into one
+    /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
+    /// remainder, which changes which downstream condition-builder claims the
+    /// clause and regresses the dedicated Urza-lands
+    /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
+    /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
+    /// oracle_condition.rs — issue #6321 / PR #6533 review). "mine" must stay
+    /// unconsumed in the remainder so the specialized handler still sees it.
+    #[test]
+    fn parse_type_phrase_urzas_possessive_prefix_does_not_chain() {
+        let (filter, rest) = parse_type_phrase("urza's mine");
+        assert_eq!(
+            rest.trim(),
+            "mine",
+            "\"mine\" must stay unconsumed, not chained into the type filter"
+        );
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Urza's".to_string())],
+            "only the possessive fragment may be consumed here, got {:?}",
+            tf.type_filters
+        );
     }
 
     /// CR 201.2 + CR 115.10a: Naming Screen — "Each creature you control that
