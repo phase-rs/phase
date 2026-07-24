@@ -1,12 +1,12 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
-    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, CardPlayMode,
-    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, CostObjectCount,
-    CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp, GameRestriction,
-    ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
+    AdditionalCost, CardPlayMode, CastTimingPermission, CastingPermission, ChoiceType,
+    ContinuousModification, CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection,
+    Duration, Effect, FilterProp, GameRestriction, ModalSelectionCondition, ObjectScope,
+    PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility,
+    RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -21,7 +21,8 @@ use crate::types::game_state::{
 use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{
-    ManaColor, ManaCost, ManaCostShard, ManaSpellGrant, PaymentContext, SpecialAction, SpellMeta,
+    ActivationManaColorConstraint, ManaColor, ManaCost, ManaCostShard, ManaSpellGrant,
+    PaymentContext, SpecialAction, SpellMeta,
 };
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::ManaPaymentRecipient;
@@ -234,6 +235,41 @@ fn runtime_granted_top_of_library_plot_abilities(
     )]
 }
 
+/// CR 702.49: Ninjutsu-family keywords function from Hand (and commander
+/// ninjutsu from Command). Card loading normally synthesizes their marker
+/// ability, but runtime keyword sets and scenario objects need the identical
+/// effective definition so activation payment can resolve the exact index.
+fn runtime_ninjutsu_family_marker_abilities(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<AbilityDefinition> {
+    let Some(obj) = state.objects.get(&source_id) else {
+        return Vec::new();
+    };
+    if !matches!(obj.zone, Zone::Hand | Zone::Command) {
+        return Vec::new();
+    }
+
+    // The off-zone collector is authoritative for printed and granted
+    // characteristics. Include the object's current keyword set as well: test
+    // scenarios and runtime-only objects can deliberately provide a synthesized
+    // Ninjutsu keyword without mirroring it into `base_keywords`.
+    let mut keywords =
+        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, source_id);
+    for keyword in &obj.keywords {
+        if !keywords.contains(keyword) {
+            keywords.push(keyword.clone());
+        }
+    }
+    keywords
+        .into_iter()
+        .filter_map(|keyword| {
+            crate::database::synthesis::ninjutsu_family_marker_ability_for_keyword(&keyword)
+        })
+        .filter(|candidate| !obj.abilities.iter().any(|printed| printed == candidate))
+        .collect()
+}
+
 pub fn activated_ability_definitions(
     state: &GameState,
     source_id: ObjectId,
@@ -257,6 +293,9 @@ pub fn activated_ability_definitions(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            // CR 702.49: runtime/effective Ninjutsu markers must share this
+            // index space with the payment-context lookup below.
+            .chain(runtime_ninjutsu_family_marker_abilities(state, source_id))
             // CR 702.6: statically granted equip (Bram, Bludgeon Brawl) chained
             // LAST — the identical append order is REQUIRED in
             // `activation_ability_definition` so `ability_index` stays consistent.
@@ -280,8 +319,8 @@ fn activation_ability_definition(
         // Must match the append order in `activated_ability_definitions`: printed
         // abilities first, then runtime-granted cycling, then runtime-granted
         // graveyard activated (Encore/Scavenge), then runtime-granted
-        // plot-from-library (Fblthp). Identical order is REQUIRED for
-        // `ability_index` consistency.
+        // plot-from-library (Fblthp), then Ninjutsu-family, then equip.
+        // Identical order is REQUIRED for `ability_index` consistency.
         runtime_granted_cycling_abilities(state, source_id)
             .into_iter()
             .chain(runtime_granted_graveyard_activated_abilities(
@@ -290,6 +329,7 @@ fn activation_ability_definition(
             .chain(runtime_granted_top_of_library_plot_abilities(
                 state, source_id,
             ))
+            .chain(runtime_ninjutsu_family_marker_abilities(state, source_id))
             .chain(runtime_granted_equip_abilities(state, source_id))
             .nth(offset)?
     };
@@ -1979,6 +2019,7 @@ pub(super) fn build_spell_meta(
         // still in its origin zone) a non-fused split spell is not over-combined.
         mana_value: Some(obj.spell_mana_value()),
         color_count: Some(obj.spell_colors().len() as u32),
+        colors: obj.spell_colors(),
         // CR 107.3 + CR 202.3e: structural "has {X}" property of the printed cost,
         // detected from shards (mana value alone can't reveal it — X contributes 0
         // off the stack).
@@ -2035,31 +2076,18 @@ pub fn pending_phyrexian_route_is_payable(
         return false;
     };
 
-    let (source_types, source_subtypes, activation_tag) = pending
+    let activation_context = pending
         .activation_ability_index
-        .map(|ability_index| {
-            let (types, subtypes) = activation_source_types(state, spell_object);
-            (
-                types,
-                subtypes,
-                Some(activation_ability_tag(state, spell_object, ability_index)),
-            )
-        })
-        .unwrap_or_default();
+        .map(|ability_index| activation_payment_context(state, spell_object, ability_index));
     let spell_meta = pending
         .activation_ability_index
         .is_none()
         .then(|| build_spell_meta(state, player, spell_object))
         .flatten();
-    let payment_context = if pending.activation_ability_index.is_some() {
-        Some(PaymentContext::Activation {
-            source_types: &source_types,
-            source_subtypes: &source_subtypes,
-            ability_tag: activation_tag.flatten(),
-        })
-    } else {
-        spell_meta.as_ref().map(PaymentContext::Spell)
-    };
+    let payment_context = activation_context
+        .as_ref()
+        .map(ActivationPaymentContext::as_payment_context)
+        .or_else(|| spell_meta.as_ref().map(PaymentContext::Spell));
     let any_color = player_can_spend_as_any_color_for_payment(
         state,
         player,
@@ -13964,12 +13992,14 @@ pub fn can_pay_ability_mana_cost_after_auto_tap(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
 ) -> bool {
     can_pay_ability_mana_cost_after_auto_tap_excluding(
         state,
         player,
         source_id,
+        ability_index,
         cost,
         &HashSet::new(),
     )
@@ -13979,23 +14009,15 @@ pub fn can_pay_ability_mana_cost_after_auto_tap_excluding(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
     excluded_sources: &HashSet<ObjectId>,
 ) -> bool {
     let mut simulated = state.clone();
     super::layers::flush_layers(&mut simulated);
 
-    let (source_types, source_subtypes) = activation_source_types(&simulated, source_id);
-    // CR 106.6: All current callers of this preview path are tag-`None`
-    // activations (mana abilities, ninjutsu, AI affordability). The real
-    // tag-scoped gate (Quinjet power-up restriction) runs at payment time in
-    // `pay_ability_mana_cost_*`, since `is_payable` defers mana affordability to
-    // the payment step (CR 601.2g).
-    let activation_ctx = PaymentContext::Activation {
-        source_types: &source_types,
-        source_subtypes: &source_subtypes,
-        ability_tag: None,
-    };
+    let activation_context = activation_payment_context(&simulated, source_id, ability_index);
+    let activation_ctx = activation_context.as_payment_context();
 
     can_pay_mana_cost_after_auto_tap_with_context(
         simulated,
@@ -14418,16 +14440,16 @@ pub(super) fn pay_ability_mana_cost(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
     pay_ability_mana_cost_excluding(
         state,
         player,
         source_id,
+        ability_index,
         cost,
-        ability_tag,
         events,
         &HashSet::new(),
         None,
@@ -14439,8 +14461,8 @@ pub(super) fn pay_ability_mana_cost_excluding(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
     // CR 107.4b + CR 118.10: When this ability is paying its mana sub-cost while
@@ -14453,8 +14475,8 @@ pub(super) fn pay_ability_mana_cost_excluding(
         state,
         player,
         source_id,
+        ability_index,
         cost,
-        ability_tag,
         events,
         excluded_sources,
         sub_cost_demand,
@@ -14469,8 +14491,8 @@ pub(super) fn pay_ability_mana_cost_excluding_with_parent(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
     sub_cost_demand: Option<&mana_payment::ColorDemand>,
@@ -14480,8 +14502,8 @@ pub(super) fn pay_ability_mana_cost_excluding_with_parent(
         state,
         player,
         source_id,
+        ability_index,
         cost,
-        ability_tag,
         None,
         events,
         excluded_sources,
@@ -14498,8 +14520,8 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding_and_resume(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
@@ -14510,8 +14532,8 @@ pub(super) fn pay_ability_mana_cost_with_choices_excluding_and_resume(
         state,
         player,
         source_id,
+        ability_index,
         cost,
-        ability_tag,
         phyrexian_choices,
         events,
         excluded_sources,
@@ -14526,8 +14548,8 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &crate::types::mana::ManaCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
     phyrexian_choices: Option<&[crate::types::game_state::ShardChoice]>,
     events: &mut Vec<GameEvent>,
     excluded_sources: &HashSet<ObjectId>,
@@ -14537,12 +14559,8 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
 ) -> Result<(), EngineError> {
     super::layers::flush_layers(state);
 
-    let (source_types, source_subtypes) = activation_source_types(state, source_id);
-    let activation_ctx = PaymentContext::Activation {
-        source_types: &source_types,
-        source_subtypes: &source_subtypes,
-        ability_tag,
-    };
+    let activation_context = activation_payment_context(state, source_id, ability_index);
+    let activation_ctx = activation_context.as_payment_context();
 
     let _spent_units = auto_tap_and_pay_cost_excluding(
         state,
@@ -14959,38 +14977,72 @@ pub(super) fn mana_ability_cost_payment_is_paused(state: &GameState) -> bool {
     )
 }
 
-/// CR 106.6: Build (core-types, subtypes) slices for a `PaymentContext::Activation`
-/// from the source object. Mirrors `build_spell_meta`'s type extraction so
-/// `allows_activation` and `allows_spell` consult identically-shaped strings.
-pub(super) fn activation_source_types(
-    state: &GameState,
-    source_id: ObjectId,
-) -> (Vec<String>, Vec<String>) {
-    state
-        .objects
-        .get(&source_id)
-        .map(|obj| {
-            let types = object_type_names(obj);
-            let subtypes = obj.card_types.subtypes.clone();
-            (types, subtypes)
-        })
-        .unwrap_or_default()
+/// Owned backing for one exact activated-ability payment context. All payment
+/// routes construct this through [`activation_payment_context`] so they use the
+/// live source, actual ability index, tag, and color-payment rider together.
+pub(super) struct ActivationPaymentContext {
+    source_types: Vec<String>,
+    source_subtypes: Vec<String>,
+    ability_tag: Option<AbilityTag>,
+    mana_color_constraint: ActivationManaColorConstraint,
 }
 
-/// CR 106.6: Read the keyword tag of the ability at `ability_index` on
-/// `source_id`. Threaded into `PaymentContext::Activation` so tag-scoped mana
-/// spend restrictions (Quinjet: "spend this mana only to activate power-up
-/// abilities") can gate which mana is eligible for the activation being paid.
-pub(super) fn activation_ability_tag(
+impl ActivationPaymentContext {
+    pub(super) fn as_payment_context(&self) -> PaymentContext<'_> {
+        PaymentContext::Activation {
+            source_types: &self.source_types,
+            source_subtypes: &self.source_subtypes,
+            ability_tag: self.ability_tag,
+            mana_color_constraint: self.mana_color_constraint,
+        }
+    }
+}
+
+/// CR 106.6 + CR 602.2b: Build the sole activation-payment context from the
+/// source's live characteristics and the exact ability being activated. A
+/// missing source or a missing required chosen color fails closed. An absent
+/// definition on an otherwise live source carries no activation-cost rider;
+/// this preserves ordinary generic-cost evaluation and runtime-synthesized
+/// keyword activations.
+pub(super) fn activation_payment_context(
     state: &GameState,
     source_id: ObjectId,
     ability_index: usize,
-) -> Option<crate::types::ability::AbilityTag> {
-    state
-        .objects
-        .get(&source_id)
-        .and_then(|obj| obj.abilities.get(ability_index))
-        .and_then(|def| def.ability_tag)
+) -> ActivationPaymentContext {
+    let Some(source) = state.objects.get(&source_id) else {
+        return ActivationPaymentContext {
+            source_types: Vec::new(),
+            source_subtypes: Vec::new(),
+            ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Impossible,
+        };
+    };
+    let source_types = object_type_names(source);
+    let source_subtypes = source.card_types.subtypes.clone();
+    // Use the same effective-ability lookup as activation itself: runtime-granted
+    // cycling, graveyard, plot, Ninjutsu-family, and equip abilities live after
+    // the printed `obj.abilities` slice but retain their enumerated indices.
+    let Some(ability) = activation_ability_definition(state, source_id, ability_index) else {
+        return ActivationPaymentContext {
+            source_types,
+            source_subtypes,
+            ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
+        };
+    };
+    let mana_color_constraint = match ability.activation_mana_payment_restriction {
+        None => ActivationManaColorConstraint::Unrestricted,
+        Some(ActivationManaPaymentRestriction::OnlySourceChosenColor) => source
+            .chosen_color()
+            .map(ActivationManaColorConstraint::Only)
+            .unwrap_or(ActivationManaColorConstraint::Impossible),
+    };
+    ActivationPaymentContext {
+        source_types,
+        source_subtypes,
+        ability_tag: ability.ability_tag,
+        mana_color_constraint,
+    }
 }
 
 /// CR 106.6: When mana with spell grants is spent to cast a spell, apply those
@@ -15669,11 +15721,11 @@ pub(crate) fn payable_one_of_activation_branches(
     player: PlayerId,
     source_id: ObjectId,
     costs: &[AbilityCost],
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: usize,
 ) -> Vec<AbilityCost> {
     costs
         .iter()
-        .filter(|branch| can_pay_ability_cost_now(state, player, source_id, branch, ability_tag))
+        .filter(|branch| can_pay_ability_cost_now(state, player, source_id, branch, ability_index))
         .cloned()
         .collect()
 }
@@ -15687,10 +15739,10 @@ fn activation_cost_passes_early_affordability_gate(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: usize,
 ) -> bool {
     if find_one_of_cost(cost).is_some() {
-        can_pay_ability_cost_now(state, player, source_id, cost, ability_tag)
+        can_pay_ability_cost_now(state, player, source_id, cost, ability_index)
     } else {
         cost.is_payable(state, player, source_id)
     }
@@ -16131,7 +16183,7 @@ pub(crate) fn can_pay_ability_cost_now(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
-    ability_tag: Option<crate::types::ability::AbilityTag>,
+    ability_index: usize,
 ) -> bool {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     super::costs::can_pay(
@@ -16141,7 +16193,7 @@ pub(crate) fn can_pay_ability_cost_now(
         cost,
         &super::costs::PaymentScope::Activation {
             excluded_sources: &excluded_sources,
-            ability_tag,
+            ability_index,
         },
     )
 }
@@ -16293,7 +16345,7 @@ pub fn can_activate_ability_now_with_restriction_gates(
         .clone()
         .map(|cost| activation_cost_for_affordability(cost, ability_def.ability_tag));
     if affordability_cost.as_ref().is_some_and(|cost| {
-        !can_pay_ability_cost_now(state, player, source_id, cost, ability_def.ability_tag)
+        !can_pay_ability_cost_now(state, player, source_id, cost, ability_index)
     }) {
         return false;
     }
@@ -16497,12 +16549,8 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
         .as_ref()
         .map(|tail| ability_mana_payment_excluded_sources(tail, pending.object_id))
         .unwrap_or_default();
-    let (source_types, source_subtypes) = activation_source_types(state, pending.object_id);
-    let activation_ctx = PaymentContext::Activation {
-        source_types: &source_types,
-        source_subtypes: &source_subtypes,
-        ability_tag: activation_ability_tag(state, pending.object_id, ability_index),
-    };
+    let activation_context = activation_payment_context(state, pending.object_id, ability_index);
+    let activation_ctx = activation_context.as_payment_context();
     pending.cost = mana_cost.clone();
     pending.activation_cost = remaining;
     pending.activation_ability_index = Some(ability_index);
@@ -16546,12 +16594,8 @@ pub(super) fn finalize_pending_activation_mana_payment(
         .as_ref()
         .map(|tail| ability_mana_payment_excluded_sources(tail, pending.object_id))
         .unwrap_or_default();
-    let (source_types, source_subtypes) = activation_source_types(state, pending.object_id);
-    let activation_ctx = PaymentContext::Activation {
-        source_types: &source_types,
-        source_subtypes: &source_subtypes,
-        ability_tag: activation_ability_tag(state, pending.object_id, ability_index),
-    };
+    let activation_context = activation_payment_context(state, pending.object_id, ability_index);
+    let activation_ctx = activation_context.as_payment_context();
     let source_id = pending.object_id;
     state.pending_cast = Some(Box::new(pending));
     if let Some(waiting) = casting_costs::maybe_pause_for_phyrexian_choice(
@@ -16687,7 +16731,7 @@ pub fn handle_activate_ability(
             player,
             source_id,
             cost,
-            ability_def.ability_tag,
+            ability_index,
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay activation cost".to_string(),
@@ -17159,13 +17203,8 @@ pub fn handle_activate_ability(
 
         // CR 118.12a: Pre-check for OneOf costs — detour to WaitingFor before any cost payment.
         if let Some(costs) = find_one_of_cost(cost) {
-            let payable = payable_one_of_activation_branches(
-                state,
-                player,
-                source_id,
-                costs,
-                ability_def.ability_tag,
-            );
+            let payable =
+                payable_one_of_activation_branches(state, player, source_id, costs, ability_index);
             if payable.is_empty() {
                 return Err(EngineError::ActionNotAllowed(
                     "Cannot pay activation cost".to_string(),
@@ -17383,7 +17422,7 @@ pub fn handle_activate_ability(
                     player,
                     source_id,
                     cost,
-                    activation_ability_tag(state, source_id, ability_index),
+                    ability_index,
                     events,
                 )? {
                     let pending = pending_activation_after_cost_pause(
@@ -17507,14 +17546,9 @@ pub fn handle_activate_ability(
         )? {
             return Ok(waiting);
         }
-        if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
-            state,
-            player,
-            source_id,
-            cost,
-            activation_ability_tag(state, source_id, ability_index),
-            events,
-        )? {
+        if let PaymentOutcome::Paused { remaining_cost } =
+            pay_ability_cost_for_activation(state, player, source_id, cost, ability_index, events)?
+        {
             let pending = pending_activation_after_cost_pause(
                 source_id,
                 resolved.clone(),

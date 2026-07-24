@@ -10,12 +10,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationRestriction, AdditionalCost, CastTimingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, ManaProduction,
-    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
+    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CastTimingPermission,
+    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    CostReduction, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{EscapeCost, FlashbackCost, Keyword, KeywordKind};
@@ -6207,6 +6207,8 @@ fn parse_activated_ability_definition(
     current_ability_index: Option<PrintedAbilityIndex>,
     ctx: &mut ParseContext,
 ) -> (AbilityDefinition, String) {
+    let (effect_text, activation_mana_payment_restriction) =
+        strip_activated_mana_payment_restriction(effect_text);
     let (effect_text, constraints) = strip_activated_constraints(effect_text);
     // CR 207.2c / CR 207.2d: drop a leading ability-/flavor-word label so the cost
     // after the em-dash parses (covers 5–6-word Universes-Beyond flavor names that
@@ -6249,6 +6251,7 @@ fn parse_activated_ability_definition(
     if !constraints.restrictions.is_empty() {
         def.activation_restrictions = constraints.restrictions;
     }
+    def.activation_mana_payment_restriction = activation_mana_payment_restriction;
     def.activator_filter = constraints.activator_filter.or_else(|| {
         constraints
             .any_player_may_activate
@@ -6257,6 +6260,32 @@ fn parse_activated_ability_definition(
     extract_cost_reduction_from_chain(&mut def);
     extract_mana_spend_trigger_from_chain(&mut def);
     (def, effect_text)
+}
+
+/// CR 106.6: Strip the exact terminal rider "Spend only mana of the chosen
+/// color to activate this ability." from an activated ability's effect body.
+/// This is intentionally an all-consuming nom grammar: other possessives,
+/// colors, subjects, or trailing words stay in the effect text and therefore
+/// remain an explicit residual parse gap rather than weakening a cost rule.
+fn strip_activated_mana_payment_restriction(
+    text: &str,
+) -> (&str, Option<ActivationManaPaymentRestriction>) {
+    const SUFFIX: &str = ". spend only mana of the chosen color to activate this ability";
+    let lower = text.to_lowercase();
+    let parsed = nom_on_lower(text, &lower, |input| {
+        let (input, prefix) = take_until(SUFFIX).parse(input)?;
+        let (input, _) = tag(SUFFIX).parse(input)?;
+        let (input, _) = opt(tag(".")).parse(input)?;
+        let (input, _) = all_consuming(multispace0).parse(input)?;
+        Ok((input, prefix.len()))
+    });
+    match parsed {
+        Some((prefix_len, _)) => (
+            text[..prefix_len].trim_end(),
+            Some(ActivationManaPaymentRestriction::OnlySourceChosenColor),
+        ),
+        None => (text, None),
+    }
 }
 
 /// Parse Oracle text into structured ability definitions.

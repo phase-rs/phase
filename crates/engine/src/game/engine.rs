@@ -6154,17 +6154,9 @@ fn apply_action(
                     .ok_or_else(|| EngineError::InvalidAction("Player not found".to_string()))?;
                 let activation_ability_index = pending_ref.activation_ability_index;
                 let current_shards = if let Some(ability_index) = activation_ability_index {
-                    let (source_types, source_subtypes) =
-                        casting::activation_source_types(state, spell_object);
-                    let activation_ctx = crate::types::mana::PaymentContext::Activation {
-                        source_types: &source_types,
-                        source_subtypes: &source_subtypes,
-                        ability_tag: casting::activation_ability_tag(
-                            state,
-                            spell_object,
-                            ability_index,
-                        ),
-                    };
+                    let activation_context =
+                        casting::activation_payment_context(state, spell_object, ability_index);
+                    let activation_ctx = activation_context.as_payment_context();
                     let any_color = casting::player_can_spend_as_any_color_for_payment(
                         state,
                         player,
@@ -9578,19 +9570,11 @@ pub(super) fn handle_spend_pool_mana(
     // is correctly eligible to pin when it can legally pay the activation.
     // Owned holders so the context's borrowed slices outlive the eligibility check.
     let spell_meta;
-    let source_types;
-    let source_subtypes;
-    let ability_tag;
+    let activation_context;
     let ctx = if let Some(ability_index) = activation_ability_index {
-        let (types, subtypes) = super::casting::activation_source_types(state, object_id);
-        source_types = types;
-        source_subtypes = subtypes;
-        ability_tag = super::casting::activation_ability_tag(state, object_id, ability_index);
-        Some(crate::types::mana::PaymentContext::Activation {
-            source_types: &source_types,
-            source_subtypes: &source_subtypes,
-            ability_tag,
-        })
+        activation_context =
+            super::casting::activation_payment_context(state, object_id, ability_index);
+        Some(activation_context.as_payment_context())
     } else {
         spell_meta = super::casting::build_spell_meta(state, player, object_id);
         spell_meta
@@ -9637,7 +9621,7 @@ fn mana_unit_eligible_for_cost(
 
     // CR 106.6: a unit whose restrictions reject this context can pay nothing here.
     if let Some(ctx) = ctx {
-        if !unit.restrictions.iter().all(|r| r.allows(ctx)) {
+        if !mana_payment::mana_unit_permits_payment_context(unit, ctx) {
             return false;
         }
     }

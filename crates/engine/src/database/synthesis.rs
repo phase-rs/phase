@@ -718,27 +718,33 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
     let abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
-        .filter_map(|kw| {
-            let (variant, cost) = match kw {
-                Keyword::Ninjutsu(c) => (NinjutsuVariant::Ninjutsu, c),
-                Keyword::CommanderNinjutsu(c) => (NinjutsuVariant::CommanderNinjutsu, c),
-                _ => return None,
-            };
-            Some(
-                AbilityDefinition::new(
-                    AbilityKind::Activated,
-                    Effect::RuntimeHandled {
-                        handler: RuntimeHandler::NinjutsuFamily,
-                    },
-                )
-                .cost(AbilityCost::NinjutsuFamily {
-                    variant,
-                    mana_cost: cost.clone(),
-                }),
-            )
-        })
+        .filter_map(ninjutsu_family_marker_ability_for_keyword)
         .collect();
     face.abilities.extend(abilities);
+}
+
+/// CR 702.49: Build the marker activated ability for one Ninjutsu-family
+/// keyword. The runtime ability gather uses this too, so a keyword provided by
+/// a scenario or a continuous effect has the same activation identity as one
+/// synthesized while card data is loaded.
+pub fn ninjutsu_family_marker_ability_for_keyword(keyword: &Keyword) -> Option<AbilityDefinition> {
+    let (variant, cost) = match keyword {
+        Keyword::Ninjutsu(cost) => (NinjutsuVariant::Ninjutsu, cost),
+        Keyword::CommanderNinjutsu(cost) => (NinjutsuVariant::CommanderNinjutsu, cost),
+        _ => return None,
+    };
+    Some(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::RuntimeHandled {
+                handler: RuntimeHandler::NinjutsuFamily,
+            },
+        )
+        .cost(AbilityCost::NinjutsuFamily {
+            variant,
+            mana_cost: cost.clone(),
+        }),
+    )
 }
 
 // Warp is handled at runtime via Keyword::Warp(ManaCost):

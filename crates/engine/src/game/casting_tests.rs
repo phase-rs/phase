@@ -1059,11 +1059,16 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
         Zone::Battlefield,
     );
     let cost = ManaCost::generic(1);
+    Arc::make_mut(&mut state.objects.get_mut(&ability_source).unwrap().abilities).push(
+        AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+            .cost(AbilityCost::Mana { cost: cost.clone() }),
+    );
 
     assert!(can_pay_ability_mana_cost_after_auto_tap(
         &state,
         PlayerId(0),
         ability_source,
+        0,
         &cost
     ));
 
@@ -1072,8 +1077,8 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
         &mut state,
         PlayerId(0),
         ability_source,
+        0,
         &cost,
-        None,
         &mut events,
     )
     .unwrap();
@@ -25839,7 +25844,7 @@ fn can_pay_sacrifice_cost_with_eligible() {
         PlayerId(0),
         source,
         &cost,
-        None
+        0
     ));
 }
 
@@ -25865,7 +25870,7 @@ fn cannot_pay_sacrifice_cost_no_eligible() {
         PlayerId(0),
         source,
         &cost,
-        None
+        0
     ));
 }
 
@@ -31075,7 +31080,7 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, None, &mut events)
+    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, 0, &mut events)
         .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
@@ -33079,7 +33084,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, 0, &mut events)
             .expect("cost should pay with 2 +1/+1 counters available");
         let remaining = state
             .objects
@@ -33121,7 +33126,7 @@ mod remove_counter_cost {
             "cost must be unpayable when the source has no +1/+1 counters"
         );
         assert!(
-            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, None),
+            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, 0),
             "can_pay_ability_cost_now must reject an unpayable remove-counter cost"
         );
     }
@@ -33158,7 +33163,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
+        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, 0, &mut events)
             .unwrap();
         let removed_count = events
             .iter()
@@ -34607,7 +34612,7 @@ mod unattach_cost {
             PlayerId(0),
             equipment,
             &cost,
-            None,
+            0,
             &mut Vec::new(),
         )
         .expect("attached Equipment should be able to unattach as a cost");
@@ -36322,7 +36327,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            0,
             &mut events,
         )
         .expect("exert cost pays");
@@ -36382,7 +36387,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            0,
             &mut events,
         )
         .expect("first exert");
@@ -36391,7 +36396,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            0,
             &mut events,
         )
         .expect("second exert");
@@ -36439,7 +36444,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            0,
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -36459,7 +36464,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            0,
             &mut events,
         )
         .expect("exert cost pays");

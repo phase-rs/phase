@@ -89,7 +89,7 @@ fn issue_2862_teferi_cast_minus_three_pays_loyalty_cost() {
         P0,
         teferi,
         &AbilityCost::Loyalty { amount: -3 },
-        None,
+        0,
         &mut events,
     )
     .expect("pay [-3] loyalty cost through activation payment seam");

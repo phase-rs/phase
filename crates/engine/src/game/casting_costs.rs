@@ -1803,7 +1803,7 @@ fn finish_selected_return_to_hand_after_automatic(
             player,
             pending.object_id,
             &cost,
-            super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+            ability_index,
             events,
         )? {
             super::casting::PaymentOutcome::Paid => {}
@@ -2032,7 +2032,7 @@ pub(crate) fn handle_activation_cost_one_of_choice(
         player,
         pending.object_id,
         chosen_cost,
-        pending.ability.context.ability_tag,
+        pending.activation_ability_index.unwrap_or(usize::MAX),
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Chosen cost branch is not payable".to_string(),
@@ -2901,7 +2901,7 @@ pub(crate) fn handle_return_to_hand_for_cost(
                     player,
                     pending.object_id,
                     &cost,
-                    super::casting::activation_ability_tag(state, pending.object_id, ability_index),
+                    ability_index,
                     events,
                 )? {
                     super::casting::PaymentOutcome::Paid => {}
@@ -3066,14 +3066,12 @@ pub(crate) fn handle_remove_counter_for_cost(
             // pay the automatic residual through the outcome-aware authority.
             // If a self-move pauses, the typed continuation resumes this pending
             // activation only after the selected counter was paid exactly once.
-            let ability_tag =
-                super::casting::activation_ability_tag(state, pending.object_id, ability_index);
             match super::casting::pay_ability_cost_for_activation(
                 state,
                 player,
                 pending.object_id,
                 &cost,
-                ability_tag,
+                ability_index,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -3240,14 +3238,12 @@ pub(crate) fn handle_remove_counter_distribution_for_cost(
             // CR 601.2h + CR 602.2b: The assigned counter payment is complete
             // before an automatic residual can pause on a self-move replacement,
             // so its typed continuation cannot replay the selected distribution.
-            let ability_tag =
-                super::casting::activation_ability_tag(state, pending.object_id, ability_index);
             match super::casting::pay_ability_cost_for_activation(
                 state,
                 player,
                 pending.object_id,
                 &cost,
-                ability_tag,
+                ability_index,
                 events,
             )? {
                 super::casting::PaymentOutcome::Paid => {}
@@ -4311,7 +4307,7 @@ pub(super) fn push_activated_ability_to_stack(
                 player,
                 source_id,
                 cost,
-                super::casting::activation_ability_tag(state, source_id, ability_index),
+                ability_index,
                 events,
             )?
         {
@@ -10127,13 +10123,9 @@ fn auto_tap_mana_sources_inner(
                     excluded_sources
                 };
                 if let Some(sub_cost) = sub_cost {
-                    let (source_types, source_subtypes) =
-                        super::casting::activation_source_types(state, option.object_id);
-                    let activation_ctx = PaymentContext::Activation {
-                        source_types: &source_types,
-                        source_subtypes: &source_subtypes,
-                        ability_tag: ability_def.ability_tag,
-                    };
+                    let activation_context =
+                        super::casting::activation_payment_context(state, option.object_id, idx);
+                    let activation_ctx = activation_context.as_payment_context();
                     auto_tap_mana_sources_inner(
                         state,
                         player,
@@ -11026,17 +11018,9 @@ fn finalize_mana_payment_with_resume(
                     )
                 })
                 .unwrap_or_default();
-            let (source_types, source_subtypes) =
-                super::casting::activation_source_types(state, source_id);
-            let activation_ctx = PaymentContext::Activation {
-                source_types: &source_types,
-                source_subtypes: &source_subtypes,
-                ability_tag: super::casting::activation_ability_tag(
-                    state,
-                    source_id,
-                    ability_index,
-                ),
-            };
+            let activation_context =
+                super::casting::activation_payment_context(state, source_id, ability_index);
+            let activation_ctx = activation_context.as_payment_context();
             if let Some(waiting) = maybe_pause_for_phyrexian_choice(
                 state,
                 player,
@@ -11097,8 +11081,8 @@ fn finalize_mana_payment_with_resume(
                 state,
                 player,
                 pending.object_id,
+                ability_index,
                 &pending.cost,
-                super::casting::activation_ability_tag(state, pending.object_id, ability_index),
                 None,
                 events,
                 &excluded_sources,
@@ -11422,8 +11406,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 state,
                 player,
                 pending.object_id,
+                ability_index,
                 &pending.cost,
-                super::casting::activation_ability_tag(state, pending.object_id, ability_index),
                 Some(phyrexian_choices),
                 events,
                 &excluded_sources,

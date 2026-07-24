@@ -109,7 +109,7 @@ impl TacticalPolicy for LandAnimationPolicy {
         // manland for mana to help pay its own {1}{W}{B} animation cost and
         // turns it into a useless tapped creature. Strongly disprefer any
         // activation that leaves the source tapped.
-        if animation_leaves_source_tapped(ctx, *source_id, obj, ability_def) {
+        if animation_leaves_source_tapped(ctx, *source_id, *ability_index, obj, ability_def) {
             // Route the critical penalty through the band helper (CR-equivalent
             // score contract) rather than a raw Score literal so the delta stays
             // clamped to the critical band before `activation` scaling.
@@ -277,6 +277,7 @@ fn ability_taps_source(ability: &AbilityDefinition) -> bool {
 fn animation_leaves_source_tapped(
     ctx: &PolicyContext<'_>,
     source_id: ObjectId,
+    ability_index: usize,
     source: &game_object::GameObject,
     ability: &AbilityDefinition,
 ) -> bool {
@@ -294,7 +295,7 @@ fn animation_leaves_source_tapped(
         return false;
     }
 
-    !can_pay_cost_excluding_source(ctx, source_id, cost)
+    !can_pay_cost_excluding_source(ctx, source_id, ability_index, cost)
 }
 
 /// True iff the AI can pay `cost` for `source_id`'s ability without tapping the
@@ -303,6 +304,7 @@ fn animation_leaves_source_tapped(
 fn can_pay_cost_excluding_source(
     ctx: &PolicyContext<'_>,
     source_id: ObjectId,
+    ability_index: usize,
     cost: &ManaCost,
 ) -> bool {
     let excluded = HashSet::from([source_id]);
@@ -310,6 +312,7 @@ fn can_pay_cost_excluding_source(
         ctx.state,
         ctx.ai_player,
         source_id,
+        ability_index,
         cost,
         &excluded,
     )

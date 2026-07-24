@@ -317,11 +317,26 @@ pub(crate) fn resolve_restrictions(
             ManaSpendRestriction::SpellType(t) => {
                 Some(ManaRestriction::OnlyForSpellType(t.clone()))
             }
+            // Preserve the historical behavior of this older template: it is
+            // omitted when the source has no creature-type choice. The newer
+            // `SpellOfSourceChosenColor` below deliberately differs; its
+            // missing choice must make the produced mana unspendable.
             ManaSpendRestriction::ChosenCreatureType => state
                 .objects
                 .get(&source_id)
                 .and_then(|obj| obj.chosen_creature_type())
                 .map(|ct| ManaRestriction::OnlyForCreatureType(ct.to_string())),
+            // CR 105.2 + CR 106.6: The spell's color must equal the mana
+            // source's live chosen color. A missing source/choice is not an
+            // omitted restriction; it makes this produced mana unspendable.
+            ManaSpendRestriction::SpellOfSourceChosenColor => Some(
+                state
+                    .objects
+                    .get(&source_id)
+                    .and_then(|obj| obj.chosen_color())
+                    .map(ManaRestriction::OnlyForSpellColor)
+                    .unwrap_or(ManaRestriction::Impossible),
+            ),
             // CR 106.6: Combined spell type + ability activation restriction.
             ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type,
@@ -393,12 +408,12 @@ pub(crate) fn resolve_restrictions(
                     crate::types::mana::SpecialAction::TurnFaceUp,
                 ))
             }
-            // CR 106.6: Disjunction — recursively lower each branch. If every branch
-            // dropped (e.g. an unresolvable `ChosenCreatureType` with no chosen type),
-            // the disjunction has no payable cases, so drop it too.
+            // CR 106.6: Disjunction — recursively lower each branch. The
+            // chosen-color branch preserves its fail-closed `Impossible`; the
+            // legacy chosen-creature-type branch retains its historical drop.
             ManaSpendRestriction::Any(subs) => {
                 let inner = resolve_restrictions(subs, state, source_id);
-                (!inner.is_empty()).then_some(ManaRestriction::OnlyForAny(inner))
+                Some(ManaRestriction::OnlyForAny(inner))
             }
         })
         .collect()

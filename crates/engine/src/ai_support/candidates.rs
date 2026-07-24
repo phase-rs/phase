@@ -2100,7 +2100,7 @@ pub fn candidate_actions_broad_with_probe(
                     *player,
                     pending_cast.object_id,
                     cost,
-                    pending_cast.ability.context.ability_tag,
+                    pending_cast.activation_ability_index.unwrap_or(usize::MAX),
                 )
             })
             .map(|(i, _)| {
@@ -4014,6 +4014,13 @@ pub(crate) fn priority_actions_with_probe(
                     state,
                     player,
                     *ninjutsu_object_id,
+                    casting::activated_ability_definitions(state, *ninjutsu_object_id)
+                        .into_iter()
+                        .find_map(|(index, ability)| {
+                            crate::game::keywords::is_ninjutsu_family_marker_ability(&ability)
+                                .then_some(index)
+                        })
+                        .unwrap_or(usize::MAX),
                     cost,
                 );
                 if !can_afford {

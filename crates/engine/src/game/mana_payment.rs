@@ -2046,13 +2046,24 @@ pub fn land_subtype_to_mana_type(subtype: &str) -> Option<ManaType> {
 /// Arisen Necropolis). Under such a spell-payment context, real pool mana is
 /// ineligible — only convoke/delve stand-in units may pay. Layered on top of the
 /// unit's own spend restrictions so both gates apply.
-fn ctx_permits_unit(ctx: &PaymentContext<'_>, unit: &ManaUnit) -> bool {
+/// CR 106.6: Shared eligibility predicate for a concrete mana unit in a typed
+/// payment context. The ability rider checks the unit's actual mana type before
+/// unit restrictions; cost permissions such as "spend as though" are applied
+/// later and cannot make an off-color unit satisfy an activation rider.
+pub(crate) fn mana_unit_permits_payment_context(unit: &ManaUnit, ctx: &PaymentContext<'_>) -> bool {
+    if !ctx.permits_actual_mana_type(unit.color) {
+        return false;
+    }
     if let PaymentContext::Spell(meta) = ctx {
         if meta.cant_spend_mana && !unit.is_convoke_payment() {
             return false;
         }
     }
     unit.restrictions.iter().all(|r| r.allows(ctx))
+}
+
+fn ctx_permits_unit(ctx: &PaymentContext<'_>, unit: &ManaUnit) -> bool {
+    mana_unit_permits_payment_context(unit, ctx)
 }
 
 /// `ctx_permits_unit` lifted over an optional context: no context means every
@@ -2668,7 +2679,7 @@ mod tests {
     use crate::types::game_state::LayersDirty;
     use crate::types::identifiers::CardId;
     use crate::types::identifiers::ObjectId;
-    use crate::types::mana::{ManaRestriction, SpellMeta};
+    use crate::types::mana::{ManaColor, ManaRestriction, SpellMeta};
     use crate::types::zones::Zone;
 
     /// The building-block predicate must classify each shape the parser can produce.
@@ -2841,6 +2852,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana,
@@ -3840,6 +3852,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3864,6 +3877,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3914,6 +3928,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3937,6 +3952,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3981,6 +3997,7 @@ mod tests {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
             ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
         };
         assert!(can_pay_for_spell(
             &pool,
@@ -3996,6 +4013,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4033,20 +4051,16 @@ mod tests {
         .expect("Hydraulic Helper's spend restriction must parse");
         assert_eq!(
             ast,
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
                 ability: AbilityActivationScope::Any,
-            },
+            }],
             "negative nonartifact restriction must keep ability activation unrestricted"
         );
 
         // Lower through the real runtime resolver (state-independent for this variant).
         let state = GameState::new_two_player(42);
-        let runtime = crate::game::effects::mana::resolve_restrictions(
-            std::slice::from_ref(&ast),
-            &state,
-            ObjectId(1),
-        );
+        let runtime = crate::game::effects::mana::resolve_restrictions(&ast, &state, ObjectId(1));
 
         // The produced {U} carries the lowered restriction.
         let mut pool = ManaPool::default();
@@ -4074,6 +4088,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4100,6 +4115,8 @@ mod tests {
                     source_types: &creature_types,
                     source_subtypes: &no_subtypes,
                     ability_tag: None,
+                    mana_color_constraint:
+                        crate::types::mana::ActivationManaColorConstraint::Unrestricted,
                 }),
                 crate::types::mana::CostPermissionContext::default(),
             ),
@@ -4114,6 +4131,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4215,6 +4233,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4238,6 +4257,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4284,6 +4304,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Graveyard),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4307,6 +4328,7 @@ mod tests {
             cast_from_zone: Some(crate::types::zones::Zone::Hand),
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -4355,6 +4377,50 @@ mod tests {
                 life_colors: crate::types::mana::LifePaymentColors::EMPTY
             }
         ));
+    }
+
+    /// CR 106.6: an activation's own chosen-color rider is checked against the
+    /// actual unit before any "spend as though" permission. A blue unit cannot
+    /// pay Throne of Eldraine's draw ability after red was chosen, even when an
+    /// outside effect would otherwise let blue mana pay a red cost.
+    #[test]
+    fn chosen_color_activation_rider_rejects_off_color_even_with_any_color() {
+        let source_types = vec!["Artifact".to_string()];
+        let source_subtypes = Vec::new();
+        let context = PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag: None,
+            mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Only(
+                ManaColor::Red,
+            ),
+        };
+        let blue_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        };
+        let as_though_any_color = crate::types::mana::CostPermissionContext {
+            any_color: true,
+            ..crate::types::mana::CostPermissionContext::default()
+        };
+        assert!(
+            !can_pay_for_spell(
+                &pool_with(&[(ManaType::Blue, 1)]),
+                &blue_cost,
+                Some(&context),
+                as_though_any_color,
+            ),
+            "an as-though permission must not change blue's actual mana color"
+        );
+        assert!(
+            can_pay_for_spell(
+                &pool_with(&[(ManaType::Red, 1)]),
+                &blue_cost,
+                Some(&context),
+                as_though_any_color,
+            ),
+            "a red unit remains eligible before the as-though permission matches the shard"
+        );
     }
 
     #[test]

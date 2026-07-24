@@ -14738,7 +14738,8 @@ fn mana_spend_restriction_activate_only() {
     use crate::types::ability::ManaSpendRestriction;
     let result = parse_mana_spend_restriction("spend this mana only to activate abilities");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::ActivateOnly)
     );
 }
@@ -14749,7 +14750,8 @@ fn mana_spend_restriction_noncreature_spells() {
     use crate::types::ability::ManaSpendRestriction;
     let result = parse_mana_spend_restriction("spend this mana only to cast noncreature spells");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellType("Noncreature".to_string()))
     );
 }
@@ -14760,7 +14762,8 @@ fn mana_spend_restriction_spell_only() {
         "spend this mana only to cast spells",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellOnly)
     );
 }
@@ -14778,7 +14781,8 @@ fn mana_spend_restriction_negative_nonartifact() {
     let result =
         parse_mana_spend_restriction("this mana can't be spent to cast nonartifact spells");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
             ability: AbilityActivationScope::Any,
@@ -14795,7 +14799,8 @@ fn mana_spend_restriction_negative_article_singular_nonartifact() {
         "this mana can't be spent to cast a nonartifact spell",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(
             crate::types::ability::ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
@@ -14815,7 +14820,8 @@ fn mana_spend_restriction_negative_noncreature() {
     let result =
         parse_mana_spend_restriction("this mana can't be spent to cast noncreature spells");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Creature".to_string(),
             ability: AbilityActivationScope::Any,
@@ -14939,7 +14945,8 @@ fn mana_spend_restriction_x_cost_only() {
     use crate::types::ability::ManaSpendRestriction;
     let result = parse_mana_spend_restriction("spend this mana only on costs that include {x}");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::XCostOnly)
     );
 }
@@ -14951,7 +14958,8 @@ fn mana_spend_restriction_instant_or_sorcery() {
     let result =
         parse_mana_spend_restriction("spend this mana only to cast instant or sorcery spells");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellType(
             "Instant or Sorcery".to_string()
         ))
@@ -14968,7 +14976,8 @@ fn mana_spend_restriction_instant_and_sorcery() {
     let result =
         parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellType(
             "Instant and Sorcery".to_string()
         ))
@@ -14983,7 +14992,8 @@ fn mana_spend_restriction_colorless_eldrazi_spell_or_activation() {
             "spend this mana only to cast colorless eldrazi spells or activate abilities of colorless eldrazi",
         );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Colorless Eldrazi".to_string(),
             ability: crate::types::mana::AbilityActivationScope::OfSpellType,
@@ -14997,7 +15007,8 @@ fn mana_spend_restriction_singular_source_ability_activation() {
             "spend this mana only to cast an artifact spell or activate an ability of an artifact source",
         );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
             ability: crate::types::mana::AbilityActivationScope::OfSpellType,
@@ -15011,7 +15022,8 @@ fn mana_spend_restriction_or_to_activate_source_ability() {
             "spend this mana only to cast an assassin spell or to activate an ability of an assassin source",
         );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Assassin".to_string(),
             ability: crate::types::mana::AbilityActivationScope::OfSpellType,
@@ -15029,7 +15041,8 @@ fn mana_spend_restriction_bare_activation_or_is_any_ability() {
         "spend this mana only to cast an artifact spell or activate an ability",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
             ability: crate::types::mana::AbilityActivationScope::Any,
@@ -15046,7 +15059,8 @@ fn mana_spend_restriction_colorless_or_to_activate_any_ability() {
         "spend this mana only to cast a colorless spell or to activate an ability",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Colorless".to_string(),
             ability: crate::types::mana::AbilityActivationScope::Any,
@@ -15060,7 +15074,8 @@ fn mana_spend_restriction_any_activation_tail_preserves_inner_or_spell_type() {
         "spend this mana only to cast an instant or sorcery spell or activate an ability",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Instant or Sorcery".to_string(),
             ability: crate::types::mana::AbilityActivationScope::Any,
@@ -15074,7 +15089,8 @@ fn mana_spend_restriction_any_activation_tail_accepts_to_activate_plural() {
         "spend this mana only to cast artifact spells or to activate abilities",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Artifact".to_string(),
             ability: crate::types::mana::AbilityActivationScope::Any,
@@ -15088,7 +15104,8 @@ fn mana_spend_restriction_ally_spell_or_source_activation() {
         "spend this mana only to cast an ally spell or activate an ability of an ally source",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellTypeOrAbilityActivation {
             spell_type: "Ally".to_string(),
             ability: crate::types::mana::AbilityActivationScope::OfSpellType,
@@ -15101,7 +15118,8 @@ fn mana_spend_restriction_flashback_spells() {
     use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
     let result = parse_mana_spend_restriction("spend this mana only to cast spells with flashback");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithKeywordKind(
             KeywordKind::Flashback,
         ))
@@ -15115,7 +15133,8 @@ fn mana_spend_restriction_flashback_spells_from_graveyard() {
         "spend this mana only to cast spells with flashback from a graveyard",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithKeywordKindFromZone {
             kind: KeywordKind::Flashback,
             zone: Zone::Graveyard,
@@ -15131,7 +15150,8 @@ fn mana_spend_restriction_mana_value_ge() {
         "spend this mana only to cast spells with mana value 5 or greater",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithManaValue {
             comparator: Comparator::GE,
             value: 5,
@@ -15147,7 +15167,8 @@ fn mana_spend_restriction_mana_value_le() {
         "spend this mana only to cast spells with mana value 3 or less",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithManaValue {
             comparator: Comparator::LE,
             value: 3,
@@ -15163,7 +15184,8 @@ fn mana_spend_restriction_mana_value_singular_spell_ge() {
         "spend this mana only to cast a spell with mana value 4 or greater",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithManaValue {
             comparator: Comparator::GE,
             value: 4,
@@ -15188,7 +15210,8 @@ fn mana_spend_restriction_color_count_exactly() {
         "spend this mana only to cast spells with exactly three colors",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithColorCount {
             comparator: Comparator::EQ,
             count: 3,
@@ -15203,7 +15226,8 @@ fn mana_spend_restriction_color_count_exactly_one_color() {
     let result =
         parse_mana_spend_restriction("spend this mana only to cast a spell with exactly one color");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithColorCount {
             comparator: Comparator::EQ,
             count: 1,
@@ -15218,7 +15242,8 @@ fn mana_spend_restriction_color_count_or_more() {
     let result =
         parse_mana_spend_restriction("spend this mana only to cast spells with two or more colors");
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithColorCount {
             comparator: Comparator::GE,
             count: 2,
@@ -15234,7 +15259,8 @@ fn mana_spend_restriction_color_count_or_fewer() {
         "spend this mana only to cast spells with two or fewer colors",
     );
     assert_eq!(
-        result.map(|(r, _)| r),
+        result.and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellWithColorCount {
             comparator: Comparator::LE,
             count: 2,
@@ -15249,7 +15275,8 @@ fn mana_spend_restriction_from_graveyard() {
         crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
             "spend this mana only to cast a spell from your graveyard"
         )
-        .map(|(r, _)| r),
+        .and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
             zone: Zone::Graveyard,
             polarity: ZoneSpendPolarity::From,
@@ -15259,7 +15286,8 @@ fn mana_spend_restriction_from_graveyard() {
         crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
             "spend this mana only to cast spells from exile"
         )
-        .map(|(r, _)| r),
+        .and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
             zone: Zone::Exile,
             polarity: ZoneSpendPolarity::From,
@@ -15276,7 +15304,8 @@ fn mana_spend_restriction_not_from_hand() {
         crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
             "spend this mana only to cast a spell from anywhere other than your hand"
         )
-        .map(|(r, _)| r),
+        .and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
             zone: Zone::Hand,
             polarity: ZoneSpendPolarity::NotFrom,
@@ -15291,7 +15320,8 @@ fn mana_spend_restriction_on_costs_that_contain_x() {
         crate::parser::oracle_effect::mana::parse_mana_spend_restriction(
             "spend this mana only on costs that contain {x}"
         )
-        .map(|(r, _)| r),
+        .and_then(|(mut restrictions, _)| (restrictions.len() == 1)
+            .then(|| restrictions.pop().expect("one restriction"))),
         Some(ManaSpendRestriction::XCostOnly)
     );
 }
@@ -15306,10 +15336,10 @@ fn mana_spend_restriction_disjunction_two_spell_types() {
     .expect("disjunction should parse");
     assert_eq!(
         restriction,
-        ManaSpendRestriction::Any(vec![
+        vec![ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::SpellType("Dragon".to_string()),
             ManaSpendRestriction::SpellType("Omen".to_string()),
-        ])
+        ])]
     );
     assert!(grants.is_empty());
 }
@@ -15326,14 +15356,14 @@ fn mana_spend_restriction_disjunction_three_way_heterogeneous() {
         .expect("three-way disjunction should parse");
     assert_eq!(
         restriction,
-        ManaSpendRestriction::Any(vec![
+        vec![ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::SpellType("Assassin".to_string()),
             ManaSpendRestriction::SpellWithKeywordKind(KeywordKind::Freerunning),
             ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Assassin".to_string(),
                 ability: AbilityActivationScope::OfSpellType,
             },
-        ])
+        ])]
     );
 }
 
@@ -15359,7 +15389,9 @@ fn mana_spend_restriction_type_union_stays_single_clause() {
             .expect("type union should parse as a single SpellType");
     assert_eq!(
         restriction,
-        ManaSpendRestriction::SpellType("Instant or Sorcery".to_string())
+        vec![ManaSpendRestriction::SpellType(
+            "Instant or Sorcery".to_string()
+        )]
     );
 }
 
@@ -15372,7 +15404,7 @@ fn mana_spend_restriction_chosen_type_cant_be_countered() {
             "spend this mana only to cast a creature spell of the chosen type, and that spell can't be countered",
         );
     let (restriction, grants) = result.expect("should parse");
-    assert_eq!(restriction, ManaSpendRestriction::ChosenCreatureType);
+    assert_eq!(restriction, vec![ManaSpendRestriction::ChosenCreatureType]);
     assert_eq!(grants, vec![ManaSpellGrant::CantBeCountered]);
 }
 
@@ -15387,7 +15419,7 @@ fn mana_spend_restriction_legendary_cant_be_countered() {
     let (restriction, grants) = result.expect("should parse");
     assert_eq!(
         restriction,
-        ManaSpendRestriction::SpellType("Legendary".to_string())
+        vec![ManaSpendRestriction::SpellType("Legendary".to_string())]
     );
     assert_eq!(grants, vec![ManaSpellGrant::CantBeCountered]);
 }
@@ -15403,10 +15435,10 @@ fn mana_spend_restriction_activation_first_disjunction() {
     .expect("activation-first disjunction should parse");
     assert_eq!(
         restriction,
-        ManaSpendRestriction::Any(vec![
+        vec![ManaSpendRestriction::Any(vec![
             ManaSpendRestriction::ActivateOnly,
             ManaSpendRestriction::SpellType("Artifact".to_string()),
-        ])
+        ])]
     );
     assert!(grants.is_empty());
 }
@@ -22648,5 +22680,61 @@ fn bbfu10_ledger_variant_reaches_filter_prop_scan() {
     assert!(
         !super::quantity_ref_uses_filter_prop(&without_prop, &pred),
         "negative control: a prop-free ledger filter must still read false",
+    );
+}
+
+/// CR 105.2a + CR 106.6 + CR 602.2b: Throne of Eldraine owns both a
+/// source-chosen-color mana-production restriction and a differently-scoped
+/// activated-ability payment rider. Both must lower as typed data with no
+/// residual `Unimplemented` node.
+#[test]
+fn throne_of_eldraine_parses_all_chosen_color_mana_riders() {
+    use crate::types::ability::{
+        ActivationManaPaymentRestriction, Comparator, ManaSpendRestriction,
+    };
+
+    let parsed = parse_oracle_text(
+        "As Throne of Eldraine enters, choose a color.\n{T}: Add four mana of the chosen color. Spend this mana only to cast monocolored spells of that color.\n{3}, {T}: Draw two cards. Spend only mana of the chosen color to activate this ability.",
+        "Throne of Eldraine",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|ability| !super::has_unimplemented(ability)),
+        "all three lines must be typed: {:#?}",
+        parsed.abilities
+    );
+
+    let mana = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.effect.as_ref(), Effect::Mana { .. }))
+        .expect("mana ability");
+    let Effect::Mana { restrictions, .. } = mana.effect.as_ref() else {
+        unreachable!();
+    };
+    assert_eq!(
+        restrictions,
+        &vec![
+            ManaSpendRestriction::SpellWithColorCount {
+                comparator: Comparator::EQ,
+                count: 1,
+            },
+            ManaSpendRestriction::SpellOfSourceChosenColor,
+        ],
+    );
+
+    let draw = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(ability.effect.as_ref(), Effect::Draw { .. }))
+        .expect("draw ability");
+    assert_eq!(
+        draw.activation_mana_payment_restriction,
+        Some(ActivationManaPaymentRestriction::OnlySourceChosenColor),
     );
 }

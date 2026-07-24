@@ -709,6 +709,10 @@ pub fn activate_ninjutsu(
     // CR 702.49a/d: Extract the activation cost (validated after all other checks, paid before mutations)
     let mana_cost =
         ninjutsu_family_cost(ninjutsu_obj).ok_or("Ninjutsu-family card has no mana cost")?;
+    let ability_index = super::casting::activated_ability_definitions(state, ninjutsu_obj_id)
+        .into_iter()
+        .find_map(|(index, ability)| is_ninjutsu_family_marker_ability(&ability).then_some(index))
+        .ok_or("Ninjutsu-family card has no activated ability marker")?;
 
     // Validate timing
     if !ninjutsu_timing_ok(&state.phase, &variant) {
@@ -772,7 +776,7 @@ pub fn activate_ninjutsu(
         &AbilityCost::Mana {
             cost: effective_cost,
         },
-        None,
+        ability_index,
         events,
     )
     .map_err(|e| e.to_string())?
@@ -1978,6 +1982,18 @@ mod tests {
         }
 
         (state, attacker_id, ninja_id)
+    }
+
+    #[test]
+    fn effective_abilities_include_runtime_ninjutsu_marker() {
+        let (state, _attacker_id, ninja_id) = setup_ninjutsu_scenario();
+
+        assert!(
+            crate::game::casting::activated_ability_definitions(&state, ninja_id)
+                .into_iter()
+                .any(|(_, ability)| is_ninjutsu_family_marker_ability(&ability)),
+            "a Ninjutsu keyword without a stored marker must still occupy the effective activation space"
+        );
     }
 
     /// CR 702.49c + CR 616.1 discriminating test (fail-first): a ninja whose

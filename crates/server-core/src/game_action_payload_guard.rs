@@ -176,6 +176,7 @@ fn guard_mana_restrictions_payload(
                 pending.extend(children);
             }
             ManaRestriction::OnlyForSpell
+            | ManaRestriction::OnlyForSpellColor(_)
             | ManaRestriction::OnlyForActivation
             | ManaRestriction::OnlyForTaggedActivation(_)
             | ManaRestriction::OnlyForXCosts
@@ -192,6 +193,7 @@ fn guard_mana_restrictions_payload(
             | ManaRestriction::OnlyForSpellFromZone(_)
             | ManaRestriction::OnlyForFaceDownSpell
             | ManaRestriction::OnlyForSpecialAction(_)
+            | ManaRestriction::Impossible
             | ManaRestriction::ConvokePayment => {}
         }
     }

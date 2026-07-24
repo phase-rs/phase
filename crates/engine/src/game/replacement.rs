@@ -1501,15 +1501,31 @@ fn pay_replacement_may_cost(
                 Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
         }
-        _ => match crate::game::casting::pay_ability_cost_for_activation(
-            state, player, source_id, cost, None, events,
-        ) {
-            Ok(crate::game::costs::PaymentOutcome::Paid) => true,
-            Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
-                return MayCostOutcome::PausedForChoice { remaining_cost };
+        // A replacement's may-cost is paid while applying the replacement; it
+        // is not an activation of `source_id`. Use the dedicated resolution
+        // payment authority so it neither invents an ability index nor applies
+        // an unrelated activation-only mana rider.
+        _ => {
+            let ability = ResolvedAbility::new(
+                crate::types::ability::Effect::PayCost {
+                    cost: cost.clone(),
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                player,
+            );
+            match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => true,
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
-            Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
-        },
+        }
     };
     if paid {
         MayCostOutcome::Paid

@@ -282,7 +282,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 *player,
                 pending_cast.object_id,
                 cost,
-                pending_cast.ability.context.ability_tag,
+                pending_cast.activation_ability_index.unwrap_or(usize::MAX),
             )
         }),
         (

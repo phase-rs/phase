@@ -834,6 +834,7 @@ mod the_kingpin_of_crime_combat_damage;
 mod the_ur_dragon_eminence;
 mod the_who_opponent_guess_resolution;
 mod thoughtweft_trample_regression;
+mod throne_of_eldraine_mana_riders;
 mod throw_instead_tail_class;
 mod timely_ward_regression;
 mod tinybones_joins_up_multi_target;

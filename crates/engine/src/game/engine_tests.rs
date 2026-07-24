@@ -2056,6 +2056,7 @@ fn unlock_door_restricted_mana_rejected_for_effect_and_spell_payments() {
         source_types: &["Artifact".to_string()],
         source_subtypes: &["Equipment".to_string()],
         ability_tag: None,
+        mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
     }));
     let _ = ManaType::Red;
 }

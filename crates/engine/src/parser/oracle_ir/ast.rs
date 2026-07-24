@@ -233,7 +233,7 @@ pub(crate) enum ContinuationAst {
         choice_optional: bool,
     },
     ManaRestriction {
-        restriction: ManaSpendRestriction,
+        restrictions: Vec<ManaSpendRestriction>,
         grants: Vec<crate::types::mana::ManaSpellGrant>,
     },
     /// CR 106.6: "that spell can't be countered" — adds grants to the preceding
