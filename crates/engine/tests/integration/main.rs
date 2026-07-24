@@ -46,6 +46,7 @@ mod betor_lifelink_counters_repro;
 mod birgi;
 mod bishop_of_binding_where_x_exiled_card_power;
 mod blessed_orator_other_anthem;
+mod bloodthirsty_blade_goad_5973;
 mod bolas_citadel_regression;
 mod boneyard_parley_pile_separation;
 mod boon_reflection_gain_life_drain;
