@@ -3965,8 +3965,10 @@ fn project_action_payload(
         | GameAction::ChooseBranch { index }
         | GameAction::ChooseCastingVariant { index }
         | GameAction::ChooseActivationCostBranch { index }
-        // CR 612.1: the text-word replacement answer is a single index into the
-        // engine-computed option list — the index is the distinguishing field.
+        // Protocol projection: the text-word replacement answer is a single index
+        // into the engine-computed option list — the index is the distinguishing
+        // field. (Not a rules citation; the CR 612 text-change logic lives in the
+        // effect resolver, not this surface projection.)
         | GameAction::ChooseTextWordReplacement { index } => {
             push_value_surface(surfaces, InteractionRoleCode::OptionIndex, index)
         }
