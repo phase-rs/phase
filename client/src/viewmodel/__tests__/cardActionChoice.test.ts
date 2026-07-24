@@ -58,7 +58,7 @@ function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   };
 }
 
-function tapLandAction(objectId: number): GameAction {
+function tapLandAction(objectId: number): Extract<GameAction, { type: "TapLandForMana" }> {
   return {
     type: "TapLandForMana",
     data: {

@@ -13,7 +13,20 @@ describe("RichLabel", () => {
   it("keeps non-mana brace content as text", () => {
     render(<RichLabel text="Pay Fixed { value: 2 } life" />);
 
-    expect(screen.getByText("{ value: 2 }")).toBeInTheDocument();
+    expect(screen.getByText("Pay Fixed { value: 2 } life")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  it.each(["2/W", "W/U/P"])("renders supported composite notation %s as a symbol", (shard) => {
+    render(<RichLabel text={`Pay {${shard}}.`} />);
+
+    expect(screen.getByAltText(shard)).toBeInTheDocument();
+  });
+
+  it.each(["W/X", "2/X"])("keeps unsupported composite notation %s as text", (shard) => {
+    render(<RichLabel text={`Pay {${shard}}.`} />);
+
+    expect(screen.getByText(`Pay {${shard}}.`)).toBeInTheDocument();
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 });

@@ -1041,8 +1041,12 @@ fn optional_replacement_choice_labels(
 
     replacement_definition_for_id(state, replacement_id)
         .map(|replacement| match &replacement.mode {
-            ReplacementMode::MayCost { cost, .. } => {
-                (replacement_cost_description(cost), "Decline".to_string())
+            ReplacementMode::MayCost { cost, decline } => {
+                let decline = decline
+                    .as_ref()
+                    .and_then(|effect| effect.description.clone())
+                    .unwrap_or_else(|| "Decline".to_string());
+                (replacement_cost_description(cost), decline)
             }
             // CR 702.136a (Riot) / CR 702.98a (Unleash): label an optional
             // replacement's accept branch by its source description, falling
@@ -10413,14 +10417,17 @@ mod tests {
                 cost: AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: amount },
                 },
-                decline: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::SetTapState {
-                        target: TargetFilter::SelfRef,
-                        scope: EffectScope::Single,
-                        state: TapStateChange::Tap,
-                    },
-                ))),
+                decline: Some(
+                    Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::SetTapState {
+                            target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        },
+                    ))
+                    .description("It enters tapped".to_string()),
+                ),
             })
             .valid_card(TargetFilter::SelfRef)
     }
@@ -10461,6 +10468,17 @@ mod tests {
             result,
             ReplacementResult::NeedsChoice(PlayerId(0))
         ));
+        let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+            panic!("expected replacement choice prompt");
+        };
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.description.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Pay 2 life", "It enters tapped"],
+            "the decline choice must describe its branch outcome"
+        );
 
         let result = continue_replacement(&mut state, 1, &mut events);
         let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
@@ -11633,37 +11651,47 @@ mod tests {
     }
 
     #[test]
-    fn commander_library_replacement_labels_both_destinations() {
+    fn commander_hand_or_library_replacement_labels_both_destinations() {
         let commander = ObjectId(21);
-        let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
-        state.pending_replacement = Some(PendingReplacement {
-            proposed: ProposedEvent::zone_change(commander, Zone::Battlefield, Zone::Library, None),
-            sacrifice_provenance: None,
-            candidates: vec![commander_hand_or_library_return_replacement_id(commander)],
-            search_found_candidates: Vec::new(),
-            depth: 0,
-            is_optional: true,
-            library_placement: None,
-            excess_recipient: None,
-            lifelink_bonus: 0,
-            may_cost_paid: false,
-            may_cost_remaining: None,
-        });
+        for (destination, decline_label) in [
+            (Zone::Hand, "Put into hand"),
+            (Zone::Library, "Put into library"),
+        ] {
+            let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
+            state.pending_replacement = Some(PendingReplacement {
+                proposed: ProposedEvent::zone_change(
+                    commander,
+                    Zone::Battlefield,
+                    destination,
+                    None,
+                ),
+                sacrifice_provenance: None,
+                candidates: vec![commander_hand_or_library_return_replacement_id(commander)],
+                search_found_candidates: Vec::new(),
+                depth: 0,
+                is_optional: true,
+                library_placement: None,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+                may_cost_paid: false,
+                may_cost_remaining: None,
+            });
 
-        let WaitingFor::ReplacementChoice { candidates, .. } =
-            replacement_choice_waiting_for(PlayerId(0), &state)
-        else {
-            panic!("expected commander replacement choice");
-        };
+            let WaitingFor::ReplacementChoice { candidates, .. } =
+                replacement_choice_waiting_for(PlayerId(0), &state)
+            else {
+                panic!("expected commander replacement choice for {destination:?}");
+            };
 
-        assert_eq!(
-            candidates
-                .iter()
-                .map(|candidate| candidate.description.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Move to command zone", "Put into library"],
-            "CR 903.9b choices must name the resulting zone, not generic accept/decline"
-        );
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.description.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Move to command zone", decline_label],
+                "CR 903.9b choices must name the resulting zone, not generic accept/decline"
+            );
+        }
     }
 
     #[test]
