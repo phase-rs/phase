@@ -5676,6 +5676,8 @@ mod tests {
                 repeatability: engine::types::ability::AdditionalCostRepeatability::Repeatable,
             },
             times_kicked: 0,
+            origin: engine::types::ability::AdditionalCostOrigin::Kicker,
+            gift_kind: None,
             pending_cast: Box::new(pending),
         };
         state
