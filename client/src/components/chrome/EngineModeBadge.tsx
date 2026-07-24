@@ -7,19 +7,21 @@ import { usePreferencesStore } from "../../stores/preferencesStore";
 /**
  * Why this game is in-browser, in the vocabulary `setEngineMode` records.
  *
- * A null reason is not a failure: it is every game that never asked for the
- * native engine (draft matches, a chosen first player, resuming a WASM save),
- * where claiming the engine is unavailable would be false on a machine whose
- * native engine is working fine.
+ * Only a null reason means the game never asked for the native engine (draft
+ * matches, a chosen first player, resuming a WASM save); claiming the engine
+ * is unavailable there would be false on a machine whose native engine works
+ * fine. Every non-null reason is a failed attempt, so an unrecognized one must
+ * still read as unavailable — a future reason silently downgraded to "never
+ * asked" would be the same false claim in the opposite direction.
  */
 function inBrowserTooltipKey(fallbackReason: string | null): string {
   switch (fallbackReason) {
+    case null:
+      return "engineBadge.notAttemptedTooltip";
     case "server_version_mismatch":
       return "engineBadge.versionMismatchTooltip";
-    case "native_engine_unavailable":
-      return "engineBadge.inBrowserTooltip";
     default:
-      return "engineBadge.notAttemptedTooltip";
+      return "engineBadge.inBrowserTooltip";
   }
 }
 

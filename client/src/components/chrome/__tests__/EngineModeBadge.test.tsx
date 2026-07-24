@@ -83,6 +83,20 @@ describe("EngineModeBadge", () => {
     );
   });
 
+  it("still reports an unrecognized fallback reason as a failure", () => {
+    // Every non-null reason means an attempt failed. A reason this build has
+    // not heard of must not be downgraded to "never asked for it".
+    mocks.gameState.engineMode = "wasm";
+    mocks.gameState.nativeEngineFallbackReason = "some_future_reason";
+
+    render(<EngineModeBadge />);
+
+    expect(screen.getByText("In-browser engine")).toHaveAttribute(
+      "title",
+      "Native engine unavailable — this game is running in-browser.",
+    );
+  });
+
   it("stays out of games that never had a native option", () => {
     // Web builds and non-AI games are in-browser by definition, so the badge
     // would be permanent noise rather than a signal.
