@@ -477,7 +477,10 @@ mod tests {
         assert_eq!(obj.toughness, Some(4));
         assert!(obj.card_types.supertypes.contains(&Supertype::Legendary));
         assert!(obj.card_types.subtypes.iter().any(|s| s == "Samurai"));
-        assert!(obj.keywords.contains(&Keyword::DoubleStrike));
+        assert!(crate::game::keywords::has_keyword(
+            obj,
+            &Keyword::DoubleStrike
+        ));
         assert!(state.layers_dirty.is_dirty());
         assert_eq!(events, vec![GameEvent::Flipped { object_id: id }]);
     }
@@ -739,7 +742,7 @@ mod tests {
         );
         assert_eq!((obj.base_power, obj.base_toughness), (Some(1), Some(1)));
         assert!(
-            !obj.keywords.contains(&Keyword::Flying),
+            !crate::game::keywords::has_keyword(obj, &Keyword::Flying),
             "CR 613.1: a granted keyword must not be baked into the normal half"
         );
         assert!(
@@ -747,7 +750,7 @@ mod tests {
             "CR 613.1: a granted keyword must not be baked into the printed baseline"
         );
         assert!(
-            obj.keywords.contains(&Keyword::Bushido(1)),
+            crate::game::keywords::has_keyword(obj, &Keyword::Bushido(1)),
             "reach guard: the printed keyword set really was restored"
         );
     }
@@ -869,7 +872,7 @@ mod tests {
             "CR 710.1b: the Legendary supertype lives only on the alternative half"
         );
         assert!(
-            !copy.keywords.contains(&Keyword::DoubleStrike),
+            !crate::game::keywords::has_keyword(copy, &Keyword::DoubleStrike),
             "CR 707.2: the alternative half's text box is not a copiable value"
         );
         assert_eq!(
