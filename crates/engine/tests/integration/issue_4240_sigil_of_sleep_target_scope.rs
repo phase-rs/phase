@@ -33,6 +33,9 @@ fn sigil_of_sleep_uses_damaged_player_for_its_single_creature_target() {
     let damaged_players_creature = scenario
         .add_creature(P1, "Damaged Player's Creature", 2, 2)
         .id();
+    let second_damaged_creature = scenario
+        .add_creature(P1, "Damaged Player's Second Creature", 3, 3)
+        .id();
     let controller_creature = scenario
         .add_creature(P0, "Controller's Creature", 2, 2)
         .id();
@@ -45,9 +48,11 @@ fn sigil_of_sleep_uses_damaged_player_for_its_single_creature_target() {
 
     for _ in 0..30 {
         match runner.state().waiting_for {
-            WaitingFor::Priority { .. } => runner
-                .act(GameAction::PassPriority)
-                .expect("passing priority must advance Sigil's trigger"),
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("passing priority must advance Sigil's trigger");
+            }
             WaitingFor::TriggerTargetSelection { .. } => break,
             ref other => {
                 panic!("Sigil's combat-damage trigger must reach target selection, got {other:?}")
@@ -66,8 +71,11 @@ fn sigil_of_sleep_uses_damaged_player_for_its_single_creature_target() {
     );
     assert_eq!(
         target_slots[0].legal_targets,
-        vec![TargetRef::Object(damaged_players_creature)],
-        "the only legal target must be a creature controlled by the damaged player"
+        vec![
+            TargetRef::Object(damaged_players_creature),
+            TargetRef::Object(second_damaged_creature),
+        ],
+        "every legal target must be a creature controlled by the damaged player"
     );
     assert!(
         !target_slots[0]
