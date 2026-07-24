@@ -578,6 +578,7 @@ mod tests {
                     shards: vec![ManaCostShard::Red],
                 },
                 reduction: Box::new(CostReduction {
+                    mode: crate::types::statics::CostModifyMode::Reduce,
                     amount_per: 1,
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::ZoneCardCount {

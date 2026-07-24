@@ -2384,20 +2384,28 @@ fn settle_sacrifice_for_cost_events(
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
     }
-    state.consumed_before_priority_trigger_events.extend(
-        events[current_start..current_end]
-            .iter()
-            .enumerate()
-            .map(|(offset, event)| {
-                let index = current_start + offset;
-                crate::game::triggers::ConsumedTriggerEventOccurrence {
-                    event: event.clone(),
-                    occurrence: events[..index]
-                        .iter()
-                        .filter(|prior| *prior == event)
-                        .count(),
-                }
-            }),
+    let occurrences = events[current_start..current_end]
+        .iter()
+        .enumerate()
+        .map(|(offset, event)| {
+            let index = current_start + offset;
+            crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: events[..index]
+                    .iter()
+                    .filter(|prior| *prior == event)
+                    .count(),
+            }
+        })
+        .collect();
+    crate::game::triggers::resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect(
+        "sacrifice-cost settlement consumed-before-priority trigger journal cause must be live",
     );
 }
 
@@ -9572,11 +9580,24 @@ fn collect_sorted_auto_tap_source_options(
         .filter(|oid| !excluded_sources.contains(oid))
         .filter_map(|&oid| {
             let obj = state.objects.get(&oid)?;
+            if obj.controller != player {
+                return None;
+            }
+            // CR 106.12 + CR 302.6: The tapped prefilter only holds for `{T}`
+            // sources. A permanent whose payable mana ability is an unambiguous
+            // self-sacrifice (Gold's "Sacrifice this token: Add one mana of any
+            // color.") can still pay while tapped, so it must reach
+            // `auto_tap_mana_options`, which re-applies the per-ability `{T}`
+            // gate. Every other tapped source is dropped here as before.
+            if obj.tapped && !mana_sources::object_has_tapless_self_sacrifice_mana_ability(obj) {
+                return None;
+            }
             // CR 701.26a + CR 508.1f: a "can't become tapped" mana source (e.g. a
-            // goaded mana dork) can't be auto-tapped to pay for a spell.
-            if obj.controller != player
-                || obj.tapped
-                || crate::game::restrictions::object_cant_tap(state, oid)
+            // goaded mana dork) can't be auto-tapped for its `{T}` ability. A
+            // self-sacrifice source needs no tap, so this restriction does not
+            // apply to it; the per-ability gate keeps `{T}` costs off-limits.
+            if crate::game::restrictions::object_cant_tap(state, oid)
+                && !mana_sources::object_has_tapless_self_sacrifice_mana_ability(obj)
             {
                 return None;
             }
@@ -13283,7 +13304,7 @@ mod tests {
             &mut state,
             CardId(100),
             caster,
-            "Spawn-Funded Spell".to_string(),
+            "Ironworks-Funded Spell".to_string(),
             Zone::Hand,
         );
         state.objects.get_mut(&spell).unwrap().card_types.core_types = vec![CoreType::Instant];
@@ -13323,18 +13344,21 @@ mod tests {
                 .cost(AbilityCost::Tap),
             );
         }
+        // CR 605.3a + CR 701.21: an ambiguous sacrifice cost (choosing among
+        // multiple artifacts, not just the source itself) still requires a
+        // manual player choice, so it must not be auto-tapped — unlike a
+        // self-sacrifice mana source (Gold, Treasure), which auto-tap can
+        // now select on its own (issue #6157).
         let spawn = create_object(
             &mut state,
             CardId(102),
             caster,
-            "Eldrazi Spawn".to_string(),
+            "Krark-Clan Ironworks".to_string(),
             Zone::Battlefield,
         );
         {
             let obj = state.objects.get_mut(&spawn).unwrap();
-            obj.card_types.core_types.push(CoreType::Creature);
-            obj.card_types.subtypes.push("Eldrazi".to_string());
-            obj.card_types.subtypes.push("Spawn".to_string());
+            obj.card_types.core_types.push(CoreType::Artifact);
             Arc::make_mut(&mut obj.abilities).push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
@@ -13349,7 +13373,7 @@ mod tests {
                     },
                 )
                 .cost(AbilityCost::Sacrifice(SacrificeCost::count(
-                    TargetFilter::SelfRef,
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
                     1,
                 ))),
             );

@@ -75,6 +75,26 @@ After any delegated approval/label/enqueue operation, independently run `gh pr v
 
 Use `wrong-or-stale-cr-annotation` for an incorrect, unrelated, or stale CR citation and `duplicated-domain-vocabulary` when a PR creates a second name/type/helper for an existing domain concept. If a recorded signal was factually wrong, append `review_correction` with `corrects_event_id` and only the mistaken signal subset; never compensate by adding praise.
 
+## Dispatching Review Agents
+
+When a sweep fans `review` candidates out to subagents, the charter must carry these or the reports do not arrive:
+
+- **A subagent's final assistant text is NOT delivered to the lead.** Findings reach you only when the agent calls `SendMessage` addressed to the lead. State this verbatim in every charter: *"Your final text is not delivered — report by calling SendMessage. If you do not call it, your work is lost."* Without that line, agents routinely finish a full review and go idle holding it.
+- **Idle means resumable, not finished, and not dead.** An `idle_notification` with no report is the normal shape of an agent that is still working or has finished without sending. Do not respawn on silence, and do not conclude the agent failed.
+- **Do not substitute for a slow agent.** Reviewing a PR yourself because its agent has not reported wastes the agent's work and produces a rushed review from a lead holding many PRs of context. Ping with an explicit "call SendMessage now" and wait. If you have already posted a substitute review when the agent's report lands, treat the report as a mandatory re-check of your own comment and post a correction for anything it overturns — do not quietly prefer your own version.
+- **Require the head OID in every report**, and re-verify it against the live head before posting anything. A head that moved mid-review invalidates the findings; the contributor may have already fixed the blocker. This is the freshness invariant applied to review dispatch.
+- **Require file:line for every claim, and independently verify the load-bearing ones before posting.** Agents produce confident, well-formatted, wrong findings. Verify at minimum: every CR citation, every claimed failing check, every "this is dead/unreachable" claim, and any finding you are about to call a blocker.
+- **An agent that corrects the lead's briefing is doing its job.** Charter briefings carry the lead's own errors into the review. When an agent pushes back on a premise you supplied, verify its correction rather than defending the brief.
+
+## Verifying the Review's Own Evidence
+
+The evidence bar in this skill binds the reviewer exactly as it binds the contributor. A review comment is a published artifact with the maintainer's authority behind it; a wrong citation in it is worse than a wrong citation in a PR, because the contributor will act on it.
+
+- **Grep-verify every CR number the review itself cites**, not only the ones the PR cites, and quote the rule text rather than paraphrasing it. Never cite from memory. This applies with full force to a CR number you are using to tell a contributor that *their* CR number is wrong.
+- **Prefer the dedicated rule over an adjacent general one, and check repo convention first.** Before proposing a citation, grep the codebase for how this rule is already cited (`rg "CR 115\.3" crates/`). If the repo standardises a pairing at many sites, match it. Proposing a different-but-defensible rule than the twenty existing sites use creates exactly the drift the annotation rule exists to prevent.
+- **Confirm the rule says what the claim needs.** A rule number that exists, in roughly the right section, is not verification — read it. Adjacent subrules in the same section routinely cover unrelated single cards (CR 612.5 is Exchange of Words; CR 612.6 is Volrath's Shapeshifter), and layer placement often lives in a different section entirely from the effect it orders (CR 613.1c, not CR 612.x).
+- **When a correction is warranted, post it plainly to the same PR** and record a corrected event. State what was wrong and what is right, do not re-litigate, and make clear which parts of the earlier comment still stand so the contributor knows what to act on.
+
 ## Review Freshness
 
 Approval freshness is attached to a head, not to a PR number. A post-approval force-push, same-head newer blocking maintainer activity, author follow-up after review, or queue drop must re-surface the PR. A terminal local event never overrides newer GitHub activity.
@@ -93,6 +113,10 @@ The CLI models freshness using:
 
 **Freshness invariant.** Before accepting `held`, `blocked`, `queued`, or a previously approved no-action result, the sweep must compare the current `headRefOid` with the most recent locally recorded head. A different head is a mandatory re-review candidate (or `update_branch_for_handler` when it conflicts), never an inherited hold. Likewise, an author comment/review created **or edited** after the latest GitHub-visible maintainer comment/review is an unacknowledged follow-up even if a later local event recorded a hold. Local event timestamps are observations, not contributor responses. If the scanner cannot prove that it has the relevant recent comment history, it must surface the PR for review rather than preserve the state. Explicit capability-policy deferrals and self/standing skips remain policy decisions, not inherited review states.
 
+**Stale approval plus armed auto-merge is a safety defect, not bookkeeping.** When dismiss-stale-reviews is not enabled on the repo, GitHub keeps reporting `reviewDecision: APPROVED` after a new commit lands, so an unreviewed head can sit armed to merge with nothing surfacing it — the scanner's `head_changed_since_local_event` is the only signal. Treat this as a priority case, not a formality: compare the approving review's `commit.oid` against the live `headRefOid`, and when they differ, review the delta before anything merges. Resolve it by making the record honest — review the new commit and re-approve on the current head, or disarm auto-merge — never by leaving the stale approval to carry.
+
+This applies with *more* force when the post-approval commit is maintainer-authored (a fixup pushed onto the contributor's branch). Maintainer commits are the least likely to receive a second look and frequently carry rules-correctness changes and cross-file renames. Verify a maintainer fixup to the same standard as contributor code — grep-verify its CR claims, confirm rename censuses via the compiler rather than `rg`, and check that any newly exercised code path has a test — before re-approving on it.
+
 ## Maintainer-Caused Staleness
 
 Before blocking a PR on "needs rebase", classify **why** it went stale. Causation, not size, decides who does the work.
@@ -101,6 +125,31 @@ Before blocking a PR on "needs rebase", classify **why** it went stale. Causatio
 - **Contributor-caused** — fork hygiene (unrelated history, an orphan or force-pushed branch, no merge-base), or the author's own change colliding with long-settled main code. Bounce it, unless it is mechanically cheap to fix, in which case just fix it.
 
 A PR can be stale for both reasons at once, and can also carry substantive blockers of its own. Rebasing it does not clear those — resolve the staleness, then re-review the delta on the new head.
+
+**A compile error is not proof of contributor fault — check ancestry first.** `E0004` non-exhaustive-match failures from a PR's own new enum variants look exactly like contributor sloppiness ("you added a variant and missed the match arms") and are the easiest misattribution in the whole loop. They are frequently ours: main adds a *new* match site over an existing enum after the branch was written, and a PR that was complete when authored is now missing an arm in a file it never touched.
+
+The question to answer is not "which is newer" but **"did the branch ever contain the failing code?"** Ask it by ancestry, never by timestamp — commit dates are author/committer metadata, not push time, so a rebase, an amend, or a long-delayed push all skew a date comparison, and a squash-merged main commit carries a date unrelated to when its content landed:
+
+```bash
+# 1. Did the failing file even exist at the PR head? Often the whole answer.
+git cat-file -e <headOid>:<file-with-the-error> 2>/dev/null \
+  || echo "file absent at head — the branch never had it"
+
+# 2. Which commit introduced the match site, and is it in the branch's history?
+site=$(git log -S '<missing-symbol>' --format=%H -1 -- <file-with-the-error>)
+git merge-base --is-ancestor "$site" <headOid> \
+  && echo "in the branch's history — the author could have covered it" \
+  || echo "NOT in the branch's history — maintainer-caused"
+
+# 3. Is the file in the PR's own diff at all?
+gh api repos/<owner>/<repo>/pulls/<PR>/files --paginate --jq '[.[].filename]'
+```
+
+If the failing site is not an ancestor of the head, or the file is absent from the head or from the PR's own file list, the contributor could not have covered it: this is maintainer-caused staleness, **we** port it at any size, and the review must say so explicitly rather than leaving a blocker the author cannot act on. Tell them not to rebase on our account.
+
+Sanity-check the probe before trusting a clean result: a commit you know *is* in the branch's history (`git merge-base origin/main <headOid>`) must report `ancestor`. A check that returns "not an ancestor" for everything is broken, not exonerating. Timestamps remain useful as human-readable colour in the review comment — label them "committed at", never "pushed at" — but they must not be the test.
+
+The same procedure applies to a whole board of red jobs sharing one root cause: diagnose the single cause before attributing eight failures to the author.
 
 **Textual vs semantic staleness.** `mergeStateStatus` is a textual check and is not evidence the branch is healthy:
 
@@ -124,6 +173,18 @@ The bar is still owned by `review-impl` and `pr-contribution-handler`:
 - no unresolved blocking feedback.
 
 The CLI may recommend that a PR is ready for handler execution only when its structured gates say so, but the recommendation is advisory. Queue readiness is never satisfied from cache; the executor must live-check GitHub.
+
+### Judging the seam
+
+**"Reuses existing machinery" is not the same as "correct seam."** A PR that adds no enum variant, no `bool`, and no new enforcement code reads as architecturally clean and will pass a quick review — but reusing the *wrong* existing mechanism is still a wrong-seam defect, and it is harder to spot precisely because every proliferation heuristic says yes.
+
+Before crediting a seam as correct, ask which existing authority already claims this rule, and whether the PR extended that one:
+
+- **Grep for the rule, not the symbol.** `rg "CR 115\.3" crates/engine/` finds the code that already asserts ownership of the behavior. If an authority already cites the rule the PR is implementing, the PR belongs *there* — extending it — not beside it.
+- **Check whether the existing authority is one type-parameter short.** The common shape is an authority that implements half a rule (`HashSet<ObjectId>` where the rule says "object **or player**") and silently drops the other half via a `_ => None`. Widening it fixes the whole class at once; bolting on a parallel mechanism entrenches the split.
+- **Two mechanisms for one rule is the defect.** If after the PR one half of a rule is enforced on one path set and the other half on a different path set, that is wrong-seam regardless of how little code was added. Trace both the selection path and the validation path before concluding a fix is complete.
+- **Look for the repo asking for the primitive.** Strict-fail comments, `EnginePrerequisiteMissing` gaps, and `needed_variant` markers are the codebase naming the general primitive it is waiting for. A PR that special-cases around such a marker instead of satisfying it is adding call sites to unwind later; cite the marker in the review.
+- **Weigh serialized-versus-live reach.** A fix written into a serialized field (`card-data.json`) is inert until data regen and only reaches abilities built by that one producer; the equivalent fix in the runtime authority is live immediately and covers every producer. Prefer the runtime authority when both are available.
 
 ### Test-only and regression-test PRs
 

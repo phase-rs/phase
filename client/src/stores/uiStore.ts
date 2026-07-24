@@ -3,6 +3,7 @@ import type {
   GameAction,
   ObjectId,
   PlayerId,
+  TurnOrderSlotView,
 } from "../adapter/types";
 import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
@@ -25,6 +26,12 @@ export type DiceRollPayload =
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
+      /** Engine-authored opening turn sequence for multiplayer games. The
+       *  overlay renders this directly so every seat can see its first-turn
+       *  position without reconstructing turn order from raw state. */
+      turnOrder?: TurnOrderSlotView[];
+      /** Engine-authored one-based turn position for the current viewer. */
+      viewerTurnNumber?: number;
       /** Starting-player contest only (CR 103.1): the roll-off by round. Round 0
        *  is every seat; each later round is the previous round's tied-max group
        *  that rerolled. Rendered round-by-round so the winner is always the high

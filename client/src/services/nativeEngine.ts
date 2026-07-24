@@ -8,6 +8,20 @@ export interface NativeEngineReady {
   port: number;
 }
 
+export type NativeEngineProgressPhase =
+  | "resolving"
+  | "downloading_binary"
+  | "verifying"
+  | "downloading_data"
+  | "spawning"
+  | "ready"
+  | "failed";
+
+export interface NativeEngineProgress {
+  phase: NativeEngineProgressPhase;
+  detail?: string;
+}
+
 /**
  * Returns the shell-verifiable artifact key for this first-party origin.
  * Preview builds without a stamped fingerprint intentionally return `null` so
@@ -37,4 +51,22 @@ export function canAttemptNativeEngine(enabled: boolean): boolean {
 export async function ensureNativeEngine(key: NativeEngineKey): Promise<NativeEngineReady> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<NativeEngineReady>("ensure_native_engine", { key });
+}
+
+/** Returns progress emitted before this webview registered its listener. */
+export async function getNativeEngineProgress(): Promise<NativeEngineProgress | null> {
+  if (!isTauri()) return null;
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<NativeEngineProgress | null>("native_engine_progress");
+}
+
+/** Subscribes to the shell's native-engine provisioning progress. */
+export async function subscribeNativeEngineProgress(
+  listener: (progress: NativeEngineProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<NativeEngineProgress>("native-engine-progress", ({ payload }) => listener(payload));
 }
