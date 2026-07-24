@@ -140,7 +140,7 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
 function CantBeBlockedBadge({ sourceName }: { sourceName?: string }) {
   const { t } = useTranslation("game");
   return (
-    <span className="group absolute bottom-1 left-1 z-30 inline-flex">
+    <span className="group absolute bottom-1 left-1/2 z-30 inline-flex -translate-x-1/2">
       <span
         className="flex items-center rounded bg-cyan-600/90 px-1 py-0.5 text-[10px] font-bold text-cyan-50 shadow ring-1 ring-cyan-200/60"
         aria-label={t("permanent.cantBeBlocked")}

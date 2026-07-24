@@ -214,8 +214,13 @@ describe("PermanentCard", () => {
 
     renderPermanent();
 
-    expect(screen.getByLabelText("Can't be blocked")).toBeInTheDocument();
-    expect(screen.getByText("(from Test Equipment)")).toBeInTheDocument();
+    const badge = screen.getByLabelText("Can't be blocked");
+    fireEvent.pointerEnter(badge.closest(".group")!);
+
+    expect(screen.getByRole("tooltip")).toBeVisible();
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Can't be blocked (from Test Equipment)",
+    );
   });
 
   it("renders the engine-authored temporary can't-be-blocked badge on a face-down recipient without source attribution", () => {
@@ -237,6 +242,7 @@ describe("PermanentCard", () => {
 
     renderPermanent();
 
+    expect(screen.getByLabelText("Test Creature")).toBeInTheDocument();
     expect(screen.queryByLabelText("Can't be blocked")).not.toBeInTheDocument();
   });
 

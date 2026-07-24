@@ -5,6 +5,7 @@ use engine::game::derived_views::{
     derive_filtered_views, derive_views, ClientGameState, ClientGameStateRef,
 };
 use engine::game::filter_state_for_viewer;
+use engine::game::functioning_abilities::active_static_definitions;
 use engine::game::game_object::PhaseOutCause;
 use engine::game::layers::evaluate_layers;
 use engine::game::phasing::phase_out_object;
@@ -66,15 +67,19 @@ fn derives_only_the_live_until_end_of_turn_cant_be_blocked_attribution() {
     );
     evaluate_layers(runner.state_mut());
 
+    let state = runner.state();
     assert!(
-        runner.state().objects[&recipient]
-            .static_definitions
-            .iter()
+        active_static_definitions(state, &state.objects[&recipient])
             .any(|definition| definition.mode == StaticMode::CantBeBlocked),
         "reach guard: Layer 6 applied the temporary CantBeBlocked modification"
     );
+    assert!(
+        active_static_definitions(state, &state.objects[&permanent_recipient])
+            .any(|definition| definition.mode == StaticMode::CantBeBlocked),
+        "reach guard: Layer 6 applied the permanent CantBeBlocked modification"
+    );
 
-    let views = derive_views(runner.state(), None);
+    let views = derive_views(state, None);
     assert_eq!(
         views.temporary_cant_be_blocked.get(&recipient),
         Some(&Some(source)),
