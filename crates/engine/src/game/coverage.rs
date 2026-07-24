@@ -2356,6 +2356,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::ForceBlock { target }
         | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
+        // CR 710.4: the flipping permanent is the effect's single reported target.
+        | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
         | Effect::Regenerate { target }

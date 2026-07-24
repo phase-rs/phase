@@ -4851,6 +4851,8 @@ fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) 
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }

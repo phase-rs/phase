@@ -96,10 +96,6 @@ function flushPendingShow(): void {
   pendingShow = null;
   apply();
 }
-let lastPointer = { x: 0, y: 0 };
-if (typeof window !== "undefined") {
-  window.addEventListener("pointermove", (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, { passive: true });
-}
 
 // Serial FIFO for dice/coin overlays. Full-screen "moment" overlays are mutually
 // exclusive (you can't show two rolls at once), so simultaneous/back-to-back
@@ -438,11 +434,18 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         // traverse the gap from the card to the panel and click "Report a Problem"
         // or scroll rulings. Toggling Alt off (or a click outside) still dismisses.
         if (get().altHeld) return;
-        const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
         // Keep the preview (and finish a delay that already elapsed) when the
-        // pointer is still over an inspectable card or the preview panel. This
-        // makes stale leaves from Framer Motion layout updates harmless.
-        if (el?.closest("[data-card-hover], [data-card-preview]")) {
+        // pointer is still over an inspectable card. Ask the browser for its own
+        // `:hover` element rather than sampling elementFromPoint() against a
+        // JS-tracked pointer: that coordinate is only as fresh as the last
+        // `pointermove`, and over sparse/coalesced streams (remote-desktop / RDP
+        // webviews) it lands a few px off the card while the OS cursor is still
+        // on it — so a spurious Framer-Motion mouseleave's 50ms clear would
+        // false-fire and cancel a live preview (visible only with a non-zero
+        // hover delay, where the re-show is deferred rather than instant).
+        // `:hover` is the engine's continuous hit-test, correct with no
+        // pointermove event at all.
+        if (document.querySelector("[data-card-hover]:hover") != null) {
           flushPendingShow();
           return;
         }

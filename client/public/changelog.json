@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "id": 180,
+      "date": "2026-07-24",
+      "title": "Resume solo games on desktop",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Unearthed creatures and similar \"exile it instead\" riders now exile correctly whenever they leave the battlefield, including replacements granted by another permanent (Rotting Rats, Geth, Thane of Contracts)\n• Wilhelt, the Rotcleaver no longer makes Zombies when a decayed creature dies; Toxrill, the Corrosive counts slime counters on each affected creature\n• Depthshaker Titan leaves itself alone when you choose zero artifacts, while Conjurer’s Mantle, Consuming Vapors, Lictor’s Pheromone Trail, Portent, Volcanic Vision, Wheel and Deal, Fevered Visions, Riptide Gearhulk, and Aura/Equipment damage triggers now follow their printed targets and effects\n• Metamorphic Alteration now lets you choose a creature as it enters and makes the enchanted creature a copy; Sunburst and Bloodthirst granted to a spell now work as it enters (Solar Array, Lux Artillery, Bloodlord of Vaasgoth)\n• Flickering Ward and other protection effects preserve Auras that the protection specifically exempts\n\n⚔️ Combat & Gameplay\n• Auto-pay can use choice-free self-sacrificing mana sources such as Gold tokens, even when they are tapped or summoning sick, without skipping real costs such as Lion’s Eye Diamond’s discard\n• Adventure cards now present only their legal cast face\n\n🖥️ Interface\n• Desktop solo games using the native engine can be resumed after leaving the game; Windows now starts draft pools reliably, and a failed native connection visibly falls back to the browser engine\n• Hosted peer-to-peer games can use the native engine, while the desktop app better shows provisioning progress, engine replay, shell art, fullscreen, and turn-order results\n• Mobile hand cards support hold, scrub, and drag previews; Alt-pinned card previews reset cleanly when you inspect another card\n• Opponent hand visibility, active deck art, and several WebKit rendering details are restored\n\n🤖 AI\n• AI now recognizes poison-counter and graveyard-type-diversity game plans, improving choices around infect, toxic, proliferate, delirium, and graveyard payoffs\n\n🌐 Multiplayer\n• Native commander opponents retain their names, and the client restores split opponent-hand visibility",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1530253950669029406"
+    },
+    {
       "id": 179,
       "date": "2026-07-22",
       "title": "Plargg and Nassari’s chaos spell works",

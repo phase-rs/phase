@@ -369,6 +369,9 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::TargetOnly { .. }
         | Effect::TimeTravel
         | Effect::Transform { .. }
+        // CR 710.4: like Transform, flipping swaps a permanent's characteristics
+        // wholesale — whether the alternative half is better is card-specific.
+        | Effect::FlipPermanent { .. }
         | Effect::Tribute { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::TurnFaceUp { .. }

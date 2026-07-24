@@ -11215,6 +11215,27 @@ pub enum Effect {
         #[serde(default = "default_target_filter_self_ref")]
         target: TargetFilter,
     },
+    /// CR 710.4: Flip a Kamigawa flip permanent — a one-way status change
+    /// (CR 110.5) after which the card's alternative name, text box, type line,
+    /// power, and toughness apply (CR 710.1b) while it remains on the
+    /// battlefield.
+    ///
+    /// Deliberately a sibling of [`Effect::Transform`] rather than a
+    /// parameterization of it: CR 701.27a restricts transforming to permanents
+    /// represented by double-faced cards, and CR 710.1c holds a flipped
+    /// permanent's color and mana cost FIXED where transforming swaps them.
+    /// The two live in different CR sections (701.27 vs 710) with different
+    /// copiable-value semantics, so the shared "turn the card over" surface is
+    /// not a single parameterized axis.
+    ///
+    /// Every printed flip instruction names the permanent itself ("flip this
+    /// creature" / "flip it" / "flip <name>"), so `target` is `SelfRef` for the
+    /// whole corpus; it is a `TargetFilter` for uniformity with `Transform` and
+    /// so an anaphoric trigger subject can bind the flipping permanent.
+    FlipPermanent {
+        #[serde(default = "default_target_filter_self_ref")]
+        target: TargetFilter,
+    },
     /// Search a player's library for card(s) matching a filter.
     /// The destination is handled by the sub_ability chain (ChangeZone + Shuffle).
     SearchLibrary {
@@ -14140,6 +14161,9 @@ impl Effect {
             | Effect::Discard { target, .. }
             | Effect::Shuffle { target, .. }
             | Effect::Transform { target, .. }
+            // CR 710.4: the flipping permanent is named by the effect's target
+            // slot exactly like `Transform`'s.
+            | Effect::FlipPermanent { target, .. }
             | Effect::RevealHand { target, .. }
             | Effect::Reveal { target, .. }
             | Effect::TargetOnly { target, .. }
@@ -14762,6 +14786,7 @@ impl Effect {
             | Effect::SetRoomDoorLock { .. }
             | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
             | Effect::Reveal { .. }
             | Effect::TargetOnly { .. }
@@ -15017,6 +15042,7 @@ impl Effect {
             | Effect::SetRoomDoorLock { .. }
             | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
             | Effect::Reveal { .. }
             | Effect::TargetOnly { .. }
@@ -15230,6 +15256,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Discard { .. } => "Discard",
         Effect::Shuffle { .. } => "Shuffle",
         Effect::Transform { .. } => "Transform",
+        Effect::FlipPermanent { .. } => "FlipPermanent",
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::SearchOutsideGame { .. } => "SearchOutsideGame",
         Effect::RevealHand { .. } => "RevealHand",
@@ -15612,6 +15639,8 @@ pub enum EffectKind {
     DraftFromSpellbook,
     ChooseOneOf,
     ChooseCounterAdjustment,
+    /// CR 710.4: a Kamigawa flip permanent was flipped to its alternative face.
+    FlipPermanent,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -15733,6 +15762,7 @@ impl From<&Effect> for EffectKind {
             Effect::Discard { .. } => EffectKind::Discard,
             Effect::Shuffle { .. } => EffectKind::Shuffle,
             Effect::Transform { .. } => EffectKind::Transform,
+            Effect::FlipPermanent { .. } => EffectKind::FlipPermanent,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::SearchOutsideGame { .. } => EffectKind::SearchOutsideGame,
             Effect::RevealHand { .. } => EffectKind::Reveal,

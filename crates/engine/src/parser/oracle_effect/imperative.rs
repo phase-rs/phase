@@ -5054,6 +5054,71 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     }
 }
 
+/// CR 710.4 + CR 608.2k: Which anaphor class names the permanent in a
+/// "flip &lt;x&gt;" instruction. The two classes bind differently — a self-deictic
+/// always names the object the ability is on, while a bare object pronoun
+/// routes through `resolve_pronoun_target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlipSubjectAnaphor {
+    SelfDeictic,
+    ObjectPronoun,
+}
+
+/// CR 710.4: `flip`/`flips` + the permanent being flipped, anchored at `eof`.
+///
+/// This covers the ENTIRE printed flip-card corpus (21 cards), which uses
+/// exactly three surface forms:
+/// - "flip this creature" — Budoka Gardener, Bushi Tenderfoot, Initiate of
+///   Blood, Jushi Apprentice, Nezumi Graverobber, Nezumi Shortfang, Orochi
+///   Eggwatcher
+/// - "flip it" — Akki Lavarunner, Kitsune Mystic, Student of Elements, and the
+///   five ki-counter Ascendants (Budoka Pupil, Callow Jushi, Cunning Bandit,
+///   Faithful Squire, Hired Muscle)
+/// - "flip &lt;name&gt;" — Erayo, Kuon, Rune-Tail, Sasaya; `normalize_card_name_refs`
+///   has already rewritten the legendary short name to `~` before this runs
+///
+/// CR 710 defines no "flip target &lt;permanent&gt;" form — a flip instruction is
+/// always self-referential — so this recognizer is deliberately closed over
+/// self-references and the bare object pronoun rather than falling through to
+/// `parse_target`. That closure is also what keeps CR 705.1 coin flips out:
+/// "flip a coin" matches no arm here, and the coin recognizers in
+/// `parse_imperative_family_ast` are tried first regardless.
+fn parse_flip_permanent_subject(input: &str) -> OracleResult<'_, FlipSubjectAnaphor> {
+    let (input, _) = alt((tag("flip "), tag("flips "))).parse(input)?;
+    let (input, anaphor) = alt((
+        // Longest-match first: with the `eof` anchor outside this `alt`, a bare
+        // "it" arm would consume the head of "itself" and then fail without
+        // backtracking.
+        value(
+            FlipSubjectAnaphor::ObjectPronoun,
+            alt((tag("itself"), tag("it"))),
+        ),
+        value(FlipSubjectAnaphor::SelfDeictic, tag("~")),
+        // CR 700.7: "this" / "this <permanent type>" self-deictics ("this
+        // [something]" refers to that particular object), nested on the shared
+        // "this" prefix.
+        value(
+            FlipSubjectAnaphor::SelfDeictic,
+            preceded(
+                tag("this"),
+                opt(preceded(
+                    tag(" "),
+                    alt((
+                        tag("creature"),
+                        tag("permanent"),
+                        tag("artifact"),
+                        tag("enchantment"),
+                        tag("land"),
+                    )),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((input, anaphor))
+}
+
 pub(super) fn parse_utility_imperative_ast(
     text: &str,
     lower: &str,
@@ -5255,6 +5320,25 @@ pub(super) fn parse_utility_imperative_ast(
         if !matches!(target, TargetFilter::Any) {
             return Some(UtilityImperativeAst::Transform { target });
         }
+    }
+    // CR 710.4: the Kamigawa flip-card instruction. See
+    // `parse_flip_permanent_subject` for the corpus and the coin-flip
+    // separation (CR 705.1).
+    if let Some(anaphor) = nom_parse_lower(lower, parse_flip_permanent_subject) {
+        return Some(UtilityImperativeAst::FlipPermanent {
+            target: match anaphor {
+                // CR 700.7 + CR 201.5: a self-deictic always names the object
+                // the ability is on — CR 700.7 governs the "this <type>" form
+                // ("this [something]" refers to that particular object), CR
+                // 201.5 the "~" name form (text referring to the object by name).
+                FlipSubjectAnaphor::SelfDeictic => TargetFilter::SelfRef,
+                // CR 608.2k: the bare object pronoun binds through the same
+                // anaphor dispatch as "transform it" — a typed trigger subject
+                // resolves to the triggering source, self-ref/any/none stays on
+                // the source.
+                FlipSubjectAnaphor::ObjectPronoun => resolve_pronoun_target(ctx, "it"),
+            },
+        });
     }
     // CR 613.4d: switch power and toughness — two surface forms (sibling branches):
     //   - prepositional: "switch the power and toughness of <target>" (Inversion
@@ -5664,6 +5748,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
+        // CR 710.4: Kamigawa flip cards.
+        UtilityImperativeAst::FlipPermanent { target } => Effect::FlipPermanent { target },
         UtilityImperativeAst::Attach {
             attachment, target, ..
         } => Effect::Attach { attachment, target },
@@ -10057,6 +10143,15 @@ pub(super) fn parse_imperative_family_ast(
             .parse(lower)
             .ok()
             .map(|(_, ast)| ast)
+            // CR 710.4 vs CR 705.1: every coin-flip form is tried first, so the
+            // Kamigawa flip-card instruction ("flip this creature" / "flip it" /
+            // "flip <name>") can only reach this fallback once no coin arm has
+            // matched. `parse_flip_permanent_subject` is itself closed over
+            // self-references, so the two mechanics cannot collide either way.
+            .or_else(|| {
+                parse_utility_imperative_ast(text, lower, ctx)
+                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
+            })
         }
         // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
         "roll" | "rolls" => {

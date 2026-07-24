@@ -3588,15 +3588,39 @@ pub(crate) fn target_filter_is_single_object_target(filter: &TargetFilter) -> bo
     }
 }
 
+/// #5994: whether the per-opponent fanout slot is optional (min 0) or
+/// mandatory (min 1), for verbs that fall through to this detector because
+/// they aren't in `MULTI_TARGET_VERBS` (e.g. "put", "gain control of") — a
+/// `MULTI_TARGET_VERBS` verb like "exile" takes its min from
+/// `stripped_multi_target` upstream and never reaches this function. Scans at
+/// word boundaries for an "up to N target …" quantifier anywhere in the
+/// clause, not just immediately after the verb, so one detector covers every
+/// non-`MULTI_TARGET_VERBS` verb instead of each needing its own hardcoded
+/// prefix (the prior version only recognized "gain control of "). This does
+/// NOT recognize "any number of target …" — that arm lives in
+/// `strip_leading_quantifier`, which this function doesn't call; no card in
+/// the per-opponent-fanout class currently uses that form. Reusing
+/// `strip_optional_target_prefix` (rather than the bare `strip_leading_quantifier`
+/// used by `MULTI_TARGET_VERBS`) is the safety property this relies on: it only
+/// accepts a quantifier immediately followed by "target "/"other target "/
+/// "another target ", so it can't misfire on a resource-count quantifier that
+/// happens to precede the object noun (e.g. "put up to three +1/+1 counters on
+/// target creature" — the quantity there modifies the counters, not the
+/// target, and the "target " guard declines it).
 fn per_opponent_target_fanout_min(text: &str) -> usize {
     let lower = text.to_ascii_lowercase();
-    let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
-        value((), tag("gain control of ")).parse(input)
-    }) else {
-        return 1;
-    };
-    let (_, spec) = strip_optional_target_prefix(rest);
-    if spec.is_some_and(|spec| spec.min_is_fixed_zero()) {
+    let found_optional_target_slot =
+        nom_primitives::scan_at_word_boundaries(lower.as_str(), |input| {
+            match strip_optional_target_prefix(input) {
+                (rest, Some(spec)) if spec.min_is_fixed_zero() => Ok((rest, ())),
+                _ => Err(nom::Err::Error(OracleError::new(
+                    input,
+                    nom::error::ErrorKind::Fail,
+                ))),
+            }
+        })
+        .is_some();
+    if found_optional_target_slot {
         0
     } else {
         1

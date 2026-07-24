@@ -1208,6 +1208,14 @@ pub(crate) enum UtilityImperativeAst {
     Transform {
         target: TargetFilter,
     },
+    /// CR 710.4: the Kamigawa flip-card instruction ("flip this creature" /
+    /// "flip it" / "flip <name>"). A sibling of [`UtilityImperativeAst::Transform`]
+    /// rather than a parameterization of it because CR 701.27a and CR 710 are
+    /// different game actions with different copiable-value semantics
+    /// (CR 710.1c holds color and mana cost fixed).
+    FlipPermanent {
+        target: TargetFilter,
+    },
     Attach {
         attachment: TargetFilter,
         target: TargetFilter,

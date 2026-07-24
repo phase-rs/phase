@@ -900,6 +900,9 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: a flip instruction carries no nested ability edge, exactly
+        // like `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
         | Effect::RevealFromHand { .. }

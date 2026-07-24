@@ -32140,6 +32140,62 @@ fn effect_for_each_opponent_gain_control_uses_per_opponent_target_fanout() {
     }
 }
 
+/// #5994: Riptide Gearhulk's ETB — "for each opponent, put up to one target
+/// nonland permanent that player controls into its owner's library third
+/// from the top." The per-opponent fanout already binds the target's
+/// controller to `TargetPlayer` correctly here (`Effect::PutAtLibraryPosition`
+/// is wired into `Effect::target_filter()`, and the noun phrase is structurally
+/// identical to the working `GainControl`/`ChangeZone` fanout precedents), so
+/// the caster-vs-opponent aliasing half of the bug was already fixed upstream.
+/// What survived was `MultiTargetSpec.min`: `per_opponent_target_fanout_min`
+/// only recognized the min-0 ("up to") shape after a literal "gain control of "
+/// prefix, so every other per-opponent-fanout verb ("put", "exile", …) fell
+/// back to `min: 1` — forcing a target from every opponent's permanents even
+/// though "up to one" should allow skipping — which is the "fizzles if
+/// skipped" half of the report.
+#[test]
+fn effect_for_each_opponent_put_at_library_position_uses_optional_per_opponent_fanout() {
+    let def = parse_effect_chain(
+        "for each opponent, put up to one target nonland permanent that player controls into its owner's library third from the top.",
+        AbilityKind::Spell,
+    );
+
+    assert!(def.repeat_for.is_none());
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::bounded(
+            0,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        )),
+        "an \"up to one\" per-opponent slot must be optional (min 0), not mandatory"
+    );
+    match &*def.effect {
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::Typed(tf),
+            position: LibraryPosition::NthFromTop { n },
+            ..
+        } => {
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::TargetPlayer),
+                "target must be scoped to the iterated opponent, not the caster"
+            );
+            assert!(tf
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::Permanent)));
+            assert_eq!(*n, 3);
+        }
+        other => {
+            panic!("expected PutAtLibraryPosition TargetPlayer nonland permanent, got {other:?}")
+        }
+    }
+}
+
 #[test]
 fn choose_two_target_creatures_controlled_by_different_players_sets_target_constraints() {
     let def = parse_effect_chain(

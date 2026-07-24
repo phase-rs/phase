@@ -1047,6 +1047,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
+        // CR 710.4: identical scan shape to `Transform` — the only read is the
+        // effect's own target filter.
+        Effect::FlipPermanent { target } => {
+            let mut acc = Axes::NONE;
+            acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc
+        }
         Effect::SearchLibrary { .. } => Axes::CONSERVATIVE,
         Effect::SearchOutsideGame {
             filter,
@@ -5305,6 +5312,8 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: same single-target read context as `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
@@ -5689,6 +5698,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: a flip reads only its own self-referential target — not a
+        // board census, mirroring `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -5963,6 +5975,9 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: `flip_permanent` offers no resolution-time choice (it is a
+        // status change or a silent no-op), exactly like `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealHand { .. }
@@ -6231,6 +6246,8 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Mana { .. }
         | Effect::Shuffle { .. }
         | Effect::Transform { .. }
+        // CR 710.4: flipping is deterministic — no RNG draw, mirroring `Transform`.
+        | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
         | Effect::RevealFromHand { .. }
