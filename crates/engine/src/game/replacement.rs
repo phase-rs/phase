@@ -900,123 +900,77 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                         .iter()
                         .all(|candidate| candidate.is_optional);
                 let count = pending_replacement_option_count(state, p);
-                let cands: Vec<ReplacementCandidateSummary> =
-                    if p.is_optional && !p.search_found_candidates.is_empty() {
-                        let candidate = &p.search_found_candidates[0];
-                        vec![
-                            ReplacementCandidateSummary {
-                                source_id: candidate.disposition.source.object_id,
-                                source_name: candidate.source_name.clone(),
-                                description: candidate.description.clone(),
-                            },
-                            ReplacementCandidateSummary {
-                                source_id: candidate.disposition.source.object_id,
-                                source_name: candidate.source_name.clone(),
-                                description: "Decline".to_string(),
-                            },
-                        ]
-                    } else if !p.search_found_candidates.is_empty() {
-                        let mut candidates: Vec<_> = p
-                            .search_found_candidates
-                            .iter()
-                            .map(|candidate| ReplacementCandidateSummary {
-                                source_id: candidate.disposition.source.object_id,
-                                source_name: candidate.source_name.clone(),
-                                description: candidate.description.clone(),
-                            })
-                            .collect();
-                        if all_search_found_candidates_optional {
-                            candidates.push(ReplacementCandidateSummary {
-                                source_id: ObjectId(0),
-                                source_name: String::new(),
-                                description: "Use the original found-card destination".to_string(),
-                            });
-                        }
-                        candidates
-                    } else if p.is_optional {
-                        // CR 616.1: replacement-effect choices belong to the affected
-                        // object's controller/owner or the affected player. An optional
-                        // "you may" is one source shown as two branches — both carry
-                        // `candidates[0].source`.
-                        let source_id = p.candidates.first().map(|rid| rid.source);
-                        let (accept_desc, decline_desc) = p
-                            .candidates
-                            .first()
-                            .and_then(|rid| replacement_definition_for_id(state, *rid))
-                            .map(|repl| match &repl.mode {
-                                ReplacementMode::MayCost { cost, .. } => {
-                                    (replacement_cost_description(cost), "Decline".to_string())
-                                }
-                                // CR 702.136a (Riot) / CR 702.98a (Unleash): label an
-                                // Optional replacement's accept branch by the
-                                // replacement's own `description` (which names its source
-                                // keyword, e.g. "Riot — ..." / "Unleash — ..."), falling
-                                // back to the `execute` effect text when there is none.
-                                // The decline branch, when it is a distinct outcome
-                                // (e.g. Riot's "It gains haste"), is labeled by that
-                                // outcome rather than a bare "Decline" — the reported
-                                // bug was that declining silently granted haste with no
-                                // indication; a decline-less Optional (Unleash) keeps a
-                                // plain "Decline".
-                                ReplacementMode::Optional { decline } => {
-                                    let accept = if repl.event
-                                        == crate::types::replacements::ReplacementEvent::Draw
-                                    {
-                                        "Accept".to_string()
-                                    } else {
-                                        repl.description
-                                            .clone()
-                                            .or_else(|| {
-                                                repl.execute
-                                                    .as_ref()
-                                                    .and_then(|e| e.description.clone())
-                                            })
-                                            .unwrap_or_else(|| "Accept".to_string())
-                                    };
-                                    let decline_label = decline
-                                        .as_ref()
-                                        .and_then(|d| d.description.clone())
-                                        .unwrap_or_else(|| "Decline".to_string());
-                                    (accept, decline_label)
-                                }
-                                ReplacementMode::Mandatory => (
-                                    repl.description
-                                        .clone()
-                                        .unwrap_or_else(|| "Accept".to_string()),
-                                    "Decline".to_string(),
-                                ),
-                            })
-                            .unwrap_or_else(|| ("Accept".to_string(), "Decline".to_string()));
-                        let source_id = source_id.unwrap_or(ObjectId(0));
-                        let source_name = name_of(source_id);
-                        vec![
-                            ReplacementCandidateSummary {
-                                source_id,
-                                source_name: source_name.clone(),
-                                description: accept_desc,
-                            },
-                            ReplacementCandidateSummary {
-                                source_id,
-                                source_name,
-                                description: decline_desc,
-                            },
-                        ]
-                    } else {
-                        // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
-                        // outcome-descriptive label derived from its `execute`
-                        // effect, or from its synthetic shield-counter kind.
-                        // `map` (not `filter_map`) guarantees the vec is never
-                        // shorter than `candidate_count`, so the frontend index
-                        // lookup stays aligned.
-                        p.candidates
-                            .iter()
-                            .map(|rid| ReplacementCandidateSummary {
-                                source_id: rid.source,
-                                source_name: name_of(rid.source),
-                                description: replacement_choice_label_for_rid(state, *rid),
-                            })
-                            .collect()
-                    };
+                let cands: Vec<ReplacementCandidateSummary> = if p.is_optional
+                    && !p.search_found_candidates.is_empty()
+                {
+                    let candidate = &p.search_found_candidates[0];
+                    vec![
+                        ReplacementCandidateSummary {
+                            source_id: candidate.disposition.source.object_id,
+                            source_name: candidate.source_name.clone(),
+                            description: candidate.description.clone(),
+                        },
+                        ReplacementCandidateSummary {
+                            source_id: candidate.disposition.source.object_id,
+                            source_name: candidate.source_name.clone(),
+                            description: "Decline".to_string(),
+                        },
+                    ]
+                } else if !p.search_found_candidates.is_empty() {
+                    let mut candidates: Vec<_> = p
+                        .search_found_candidates
+                        .iter()
+                        .map(|candidate| ReplacementCandidateSummary {
+                            source_id: candidate.disposition.source.object_id,
+                            source_name: candidate.source_name.clone(),
+                            description: candidate.description.clone(),
+                        })
+                        .collect();
+                    if all_search_found_candidates_optional {
+                        candidates.push(ReplacementCandidateSummary {
+                            source_id: ObjectId(0),
+                            source_name: String::new(),
+                            description: "Use the original found-card destination".to_string(),
+                        });
+                    }
+                    candidates
+                } else if p.is_optional {
+                    // CR 616.1: replacement-effect choices belong to the affected
+                    // object's controller/owner or the affected player. An optional
+                    // "you may" is one source shown as two branches — both carry
+                    // `candidates[0].source`.
+                    let source_id = p.candidates.first().map(|rid| rid.source);
+                    let (accept_desc, decline_desc) = optional_replacement_choice_labels(state, p);
+                    let source_id = source_id.unwrap_or(ObjectId(0));
+                    let source_name = name_of(source_id);
+                    vec![
+                        ReplacementCandidateSummary {
+                            source_id,
+                            source_name: source_name.clone(),
+                            description: accept_desc,
+                        },
+                        ReplacementCandidateSummary {
+                            source_id,
+                            source_name,
+                            description: decline_desc,
+                        },
+                    ]
+                } else {
+                    // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
+                    // outcome-descriptive label derived from its `execute`
+                    // effect, or from its synthetic shield-counter kind.
+                    // `map` (not `filter_map`) guarantees the vec is never
+                    // shorter than `candidate_count`, so the frontend index
+                    // lookup stays aligned.
+                    p.candidates
+                        .iter()
+                        .map(|rid| ReplacementCandidateSummary {
+                            source_id: rid.source,
+                            source_name: name_of(rid.source),
+                            description: replacement_choice_label_for_rid(state, *rid),
+                        })
+                        .collect()
+                };
                 (count, cands)
             }
         })
@@ -1058,14 +1012,97 @@ pub fn park_waiting_for(state: &mut GameState, player: PlayerId) {
     state.waiting_for = replacement_choice_waiting_for(player, state);
 }
 
-/// CR 614.12a: Human-readable accept-label for a `MayCost` replacement prompt.
+/// Labels the two outcomes of an optional replacement choice.
+fn optional_replacement_choice_labels(
+    state: &GameState,
+    pending: &PendingReplacement,
+) -> (String, String) {
+    let Some(replacement_id) = pending.candidates.first().copied() else {
+        return ("Accept".to_string(), "Decline".to_string());
+    };
+
+    if is_commander_hand_or_library_return_replacement(replacement_id) {
+        // CR 903.9b: this rules-source replacement redirects the commander to
+        // the command zone instead of the proposed hand/library destination.
+        return match &pending.proposed {
+            ProposedEvent::ZoneChange { to: Zone::Hand, .. } => (
+                "Move to command zone".to_string(),
+                "Put into hand".to_string(),
+            ),
+            ProposedEvent::ZoneChange {
+                to: Zone::Library, ..
+            } => (
+                "Move to command zone".to_string(),
+                "Put into library".to_string(),
+            ),
+            _ => ("Accept".to_string(), "Decline".to_string()),
+        };
+    }
+
+    replacement_definition_for_id(state, replacement_id)
+        .map(|replacement| match &replacement.mode {
+            ReplacementMode::MayCost { cost, .. } => {
+                (replacement_cost_description(cost), "Decline".to_string())
+            }
+            // CR 702.136a (Riot) / CR 702.98a (Unleash): label an optional
+            // replacement's accept branch by its source description, falling
+            // back to its execute effect. A distinct decline outcome names that
+            // outcome rather than using a bare "Decline".
+            ReplacementMode::Optional { decline } => {
+                let accept = if replacement.event == ReplacementEvent::Draw {
+                    "Accept".to_string()
+                } else {
+                    replacement
+                        .description
+                        .clone()
+                        .or_else(|| {
+                            replacement
+                                .execute
+                                .as_ref()
+                                .and_then(|effect| effect.description.clone())
+                        })
+                        .unwrap_or_else(|| "Accept".to_string())
+                };
+                let decline = decline
+                    .as_ref()
+                    .and_then(|effect| effect.description.clone())
+                    .unwrap_or_else(|| "Decline".to_string());
+                (accept, decline)
+            }
+            ReplacementMode::Mandatory => (
+                replacement
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Accept".to_string()),
+                "Decline".to_string(),
+            ),
+        })
+        .unwrap_or_else(|| ("Accept".to_string(), "Decline".to_string()))
+}
+
+/// Human-readable accept-label for a `MayCost` replacement prompt.
 /// Returns a complete imperative phrase (the caller no longer prepends "Pay ")
 /// so non-mana costs read naturally. Exhaustive — a new `AbilityCost` variant
 /// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
-        AbilityCost::Mana { cost } => format!("Pay {cost:?}"),
-        AbilityCost::PayLife { amount } => format!("Pay {amount:?} life"),
+        AbilityCost::Mana { cost } => match cost {
+            crate::types::mana::ManaCost::NoCost => "Pay no mana".to_string(),
+            crate::types::mana::ManaCost::Cost { shards, generic } => {
+                let generic = (*generic > 0).then(|| format!("{{{generic}}}"));
+                let symbols = shards.iter().map(|shard| format!("{{{}}}", shard.symbol()));
+                format!("Pay {}", generic.into_iter().chain(symbols).collect::<String>())
+            }
+            crate::types::mana::ManaCost::SelfManaCost => "Pay its mana cost".to_string(),
+            crate::types::mana::ManaCost::SelfManaValue => "Pay its mana value".to_string(),
+            crate::types::mana::ManaCost::SelfManaCostReduced { reduction } => {
+                format!("Pay its mana cost reduced by {{{reduction}}}")
+            }
+        },
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value },
+        } => format!("Pay {value} life"),
+        AbilityCost::PayLife { .. } => "Pay life".to_string(),
         // CR 614.12a: Karoo self-ETB cost lands.
         AbilityCost::Sacrifice(cost) => match &cost.requirement {
             crate::types::ability::SacrificeRequirement::Count { count } => {
@@ -11592,6 +11629,50 @@ mod tests {
         assert!(
             candidates.iter().all(|c| c.source_id == ObjectId(20)),
             "both accept and decline must carry the source object (ObjectId(20))"
+        );
+    }
+
+    #[test]
+    fn commander_library_replacement_labels_both_destinations() {
+        let commander = ObjectId(21);
+        let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
+        state.pending_replacement = Some(PendingReplacement {
+            proposed: ProposedEvent::zone_change(commander, Zone::Battlefield, Zone::Library, None),
+            sacrifice_provenance: None,
+            candidates: vec![commander_hand_or_library_return_replacement_id(commander)],
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: true,
+            library_placement: None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+        });
+
+        let WaitingFor::ReplacementChoice { candidates, .. } =
+            replacement_choice_waiting_for(PlayerId(0), &state)
+        else {
+            panic!("expected commander replacement choice");
+        };
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.description.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Move to command zone", "Put into library"],
+            "CR 903.9b choices must name the resulting zone, not generic accept/decline"
+        );
+    }
+
+    #[test]
+    fn fixed_life_may_cost_uses_a_display_label() {
+        assert_eq!(
+            replacement_cost_description(&AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            }),
+            "Pay 2 life"
         );
     }
 

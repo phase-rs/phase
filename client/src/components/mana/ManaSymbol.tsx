@@ -12,6 +12,16 @@ const SIZE_CLASSES = {
 } as const;
 
 const SCRYFALL_SVG_BASE = "https://svgs.scryfall.io/card-symbols";
+const SINGLE_SYMBOL_CODES = new Set([
+  "W", "U", "B", "R", "G", "C", "S", "T", "Q", "E", "P", "X", "Y", "Z", "A", "∞", "½", "CHAOS",
+]);
+
+/** True when `shard` has a corresponding Scryfall card-symbol SVG. */
+export function isManaSymbolShard(shard: string): boolean {
+  if (/^\d+$/.test(shard) || SINGLE_SYMBOL_CODES.has(shard)) return true;
+  const parts = shard.split("/");
+  return parts.length > 1 && parts.every((part) => SINGLE_SYMBOL_CODES.has(part) || /^\d+$/.test(part));
+}
 
 /** Map our internal shard notation to the Scryfall SVG filename (without .svg). */
 function shardToScryfallCode(shard: string): string {

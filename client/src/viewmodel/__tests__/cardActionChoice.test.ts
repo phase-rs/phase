@@ -345,7 +345,7 @@ describe("abilityChoiceLabel", () => {
     ).toBe("Tap for {1}");
   });
 
-  it("labels TapLandForMana as Tap for Mana", () => {
+  it("labels TapLandForMana with the engine-selected mana", () => {
     const object = makeGameObject({
       name: "Emergence Zone",
       card_types: {
@@ -360,7 +360,14 @@ describe("abilityChoiceLabel", () => {
         tapLandAction(1),
         object,
       ).label,
-    ).toBe("Tap for Mana");
+    ).toBe("Tap for {G}");
+  });
+
+  it("labels an atomic mana combination with every mana it produces", () => {
+    const action = tapLandAction(1);
+    action.data.selection.atomic_combination = ["White", "Blue"];
+
+    expect(abilityChoiceLabel(action, makeGameObject()).label).toBe("Tap for {W}{U}");
   });
 
   it("labels the spell face cast action with the front-face name", () => {

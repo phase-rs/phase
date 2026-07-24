@@ -402,6 +402,14 @@ export function abilityChoiceLabel(
       description: `Tap ${object.name} to help pay this spell's cost.`,
     };
   }
+  if (action.type === "TapLandForMana") {
+    const mana = action.data.selection.atomic_combination ?? [action.data.selection.mana_type];
+    const symbols = mana
+      .map((manaType) => MANA_COLOR_ABBREVIATION[manaType] ?? "C")
+      .map((symbol) => `{${symbol}}`)
+      .join("");
+    return { label: `Tap for ${symbols}` };
+  }
   if (action.type === "ActivateAbility") {
     const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost
