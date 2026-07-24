@@ -3589,12 +3589,17 @@ pub(crate) fn target_filter_is_single_object_target(filter: &TargetFilter) -> bo
 }
 
 /// #5994: whether the per-opponent fanout slot is optional (min 0) or
-/// mandatory (min 1). Scans at word boundaries for an "up to N target …" /
-/// "any number of target …" quantifier anywhere in the clause — not just
-/// after "gain control of" — so every verb in the per-opponent-target-fanout
-/// class ("gain control of up to one target …", "exile up to one target …",
-/// "put up to one target … into its owner's library …") shares one min-0
-/// detector instead of each verb needing its own hardcoded prefix. Reusing
+/// mandatory (min 1), for verbs that fall through to this detector because
+/// they aren't in `MULTI_TARGET_VERBS` (e.g. "put", "gain control of") — a
+/// `MULTI_TARGET_VERBS` verb like "exile" takes its min from
+/// `stripped_multi_target` upstream and never reaches this function. Scans at
+/// word boundaries for an "up to N target …" quantifier anywhere in the
+/// clause, not just immediately after the verb, so one detector covers every
+/// non-`MULTI_TARGET_VERBS` verb instead of each needing its own hardcoded
+/// prefix (the prior version only recognized "gain control of "). This does
+/// NOT recognize "any number of target …" — that arm lives in
+/// `strip_leading_quantifier`, which this function doesn't call; no card in
+/// the per-opponent-fanout class currently uses that form. Reusing
 /// `strip_optional_target_prefix` (rather than the bare `strip_leading_quantifier`
 /// used by `MULTI_TARGET_VERBS`) is the safety property this relies on: it only
 /// accepts a quantifier immediately followed by "target "/"other target "/
