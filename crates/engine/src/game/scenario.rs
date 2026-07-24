@@ -3173,27 +3173,34 @@ fn drive_resolution(
                     &mut events,
                 )?;
             }
-            // CR 608.2d: an untargeted resolution-time recipient choice (e.g. a
-            // `PutCounter` "any creature you control" instruction — Kathril,
-            // Aspect Warper, issue #6321 / PR #6533). Reuses the same declared-
-            // object pool as `TriggerTargetSelection`/`TargetSelection` so a
-            // test can pin which of several legal recipients a given
-            // instruction picks by declaring that object first.
+            // CR 608.2d: an untargeted resolution-time choice from a candidate
+            // set — e.g. a `PutCounter` "any creature you control" instruction
+            // (Kathril, Aspect Warper, issue #6321 / PR #6533) as well as this
+            // variant's pre-existing tracked-set uses. Reuses the same
+            // declared-object pool as `TriggerTargetSelection`/
+            // `TargetSelection` so a test can pin which of several legal
+            // recipients a given instruction picks by declaring that object
+            // first; any remainder defaults to the front of the legal set,
+            // mirroring `ScryChoice`/`SurveilChoice`/
+            // `ArrangePlanarDeckTopChoice`'s own defaults above, so a test
+            // that never needed to pin this specific choice keeps working
+            // unchanged.
             WaitingFor::ChooseFromZoneChoice { cards, count, .. } => {
-                let chosen: Vec<ObjectId> = remaining_objects
+                let mut chosen: Vec<ObjectId> = remaining_objects
                     .iter()
                     .filter(|o| cards.contains(o))
                     .take(*count)
                     .copied()
                     .collect();
-                assert!(
-                    chosen.len() == *count,
-                    "ChooseFromZoneChoice needs {count} declared object target(s) in its \
-                     legal set, found {} — declare more via ResolutionPolicy.targets_objects.\n  \
-                     legal: {cards:?}\n  declared: {remaining_objects:?}",
-                    chosen.len()
-                );
                 remaining_objects.retain(|o| !chosen.contains(o));
+                for &id in cards {
+                    if chosen.len() == *count {
+                        break;
+                    }
+                    if !chosen.contains(&id) {
+                        chosen.push(id);
+                    }
+                }
                 act_collect(
                     runner,
                     GameAction::SelectCards { cards: chosen },
