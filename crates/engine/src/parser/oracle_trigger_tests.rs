@@ -8257,6 +8257,46 @@ fn trigger_you_plays_a_card_does_not_match_play_card() {
     assert_ne!(def.mode, TriggerMode::PlayCard);
 }
 
+// CR 601.1a + CR 701.18b: "play a land or cast a spell" is the same event pair
+// as "play a card" (a player plays a card by playing it as a land OR casting it
+// as a spell), so the explicitly-spelled-out form routes to the unified
+// `PlayCard` mode. Regression for The Endstone / Flubs / Infernal Sovereign.
+#[test]
+fn trigger_you_play_a_land_or_cast_a_spell_is_play_card() {
+    let def = parse_trigger_line(
+        "Whenever you play a land or cast a spell, draw a card.",
+        "The Endstone",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayCard);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    // No origin restriction → fires on any land play or spell cast.
+    assert_eq!(def.spell_cast_origin, OriginConstraint::Any);
+    assert!(def.valid_card.is_none());
+}
+
+// CR 601.1a + CR 601.2a + #6387: Shadow of the Goblin — the "from anywhere
+// other than your hand" origin clause modifies BOTH the land-play and
+// spell-cast halves of "play a land or cast a spell". Before the fix the
+// land-play arm shadowed this line and dropped both the cast half and the
+// origin, so it dealt damage on every land played from hand. It must parse as
+// `PlayCard` with `NotEquals(Hand)` so the shared origin gate excludes plays
+// and casts from the hand.
+#[test]
+fn trigger_shadow_of_the_goblin_play_or_cast_from_non_hand() {
+    let def = parse_trigger_line(
+        "Whenever you play a land or cast a spell from anywhere other than your hand, this enchantment deals 1 damage to each opponent.",
+        "Shadow of the Goblin",
+    );
+    assert_eq!(def.mode, TriggerMode::PlayCard);
+    assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    assert_eq!(
+        def.spell_cast_origin,
+        OriginConstraint::NotEquals(Zone::Hand)
+    );
+    // No card-type narrowing — any land/spell from a non-hand zone qualifies.
+    assert!(def.valid_card.is_none());
+}
+
 #[test]
 fn trigger_you_cast_target_player_mill_instead_keeps_chosen_player() {
     let def = parse_trigger_line(

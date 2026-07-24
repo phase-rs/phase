@@ -16750,9 +16750,16 @@ fn is_land_play_filter(tf: &TypedFilter) -> bool {
 /// tail: "you play a card from exile" yields an exile-origin constraint, while
 /// bare "you play a card" yields the unrestricted (`Any`) origin. The subject
 /// must be followed only by end-of-input, the effect comma, or that zone tail.
-/// Restricted to the exact second-person bare-card form. Qualified variants
-/// such as "a player plays a card exiled with ~" need additional linked-card
-/// filtering before they can safely share this parser arm.
+///
+/// CR 601.1a + CR 701.18b: The explicitly-spelled-out "play a land or cast a
+/// spell" is the same event pair as "play a card" — a player plays a card by
+/// playing it as a land OR casting it as a spell — so it routes to the identical
+/// `PlayCard` trigger with the shared origin tail gating both halves
+/// (Shadow of the Goblin — "from anywhere other than your hand"; Flubs, the
+/// Fool / Infernal Sovereign / The Endstone — no tail → `Any`). Restricted to
+/// the exact second-person forms. Qualified variants such as "a player plays a
+/// card exiled with ~" need additional linked-card filtering before they can
+/// safely share this parser arm.
 fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
@@ -16766,9 +16773,12 @@ fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
     )
     .parse(after_prefix)
     .ok()?;
-    let (after_card, _) = tag::<_, _, OracleError<'_>>("a card")
-        .parse(after_verb)
-        .ok()?;
+    let (after_card, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("a card")),
+        value((), tag("a land or cast a spell")),
+    ))
+    .parse(after_verb)
+    .ok()?;
     // CR 601.1a + CR 400.1: An optional "from <zone>" tail restricts the play
     // origin ("whenever you play a card from exile"). The shared cast-origin
     // combinator consumes the "from " prefix and the zone phrase; absent a
