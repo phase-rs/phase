@@ -574,8 +574,9 @@ impl ApprovedZoneChange {
 /// was never destroyed (verified against `reset_for_battlefield_entry` and the
 /// field's writer set; the capture/restore was a defensive no-op since PR
 /// #1119 introduced it). The cast-link family that IS cleared on entry
-/// (CR 400.7d: kicker / additional-cost / convoke / cast-timing memory) is
-/// preserved structurally by the delivery itself — see [`CastLinkSnapshot`].
+/// (CR 400.7d: kicker / Gift recipient / additional-cost / convoke / cast-timing
+/// memory) is preserved structurally by the delivery itself — see
+/// [`CastLinkSnapshot`].
 pub(crate) struct DeliveryCtx {
     pub source_id: Option<ObjectId>,
     pub exile_links: ExileLinkSpec,
@@ -604,6 +605,8 @@ struct CastLinkSnapshot {
     cast_controller: Option<PlayerId>,
     cast_timing_permission: Option<CastTimingPermission>,
     kickers_paid: Vec<KickerVariant>,
+    /// CR 702.174a: Opponent promised the Gift when this spell was cast.
+    gift_recipient: Option<PlayerId>,
     additional_cost_payment_count: u32,
     additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
@@ -2198,6 +2201,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cast_controller: obj.cast_controller,
                     cast_timing_permission: obj.cast_timing_permission.map(|(p, _)| p),
                     kickers_paid: obj.kickers_paid.clone(),
+                    gift_recipient: obj.gift_recipient,
                     additional_cost_payment_count: obj.additional_cost_payment_count,
                     additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
@@ -2339,6 +2343,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     obj.cast_timing_permission = Some((permission, state.turn_number));
                 }
                 obj.kickers_paid = link.kickers_paid;
+                obj.gift_recipient = link.gift_recipient;
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
                 obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;

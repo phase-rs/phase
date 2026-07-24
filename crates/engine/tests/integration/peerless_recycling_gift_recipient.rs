@@ -25,6 +25,20 @@ fn with_green_mana(scenario: &mut GameScenario, player: PlayerId, n: usize) {
     );
 }
 
+fn with_mana(
+    scenario: &mut GameScenario,
+    player: PlayerId,
+    units: impl IntoIterator<Item = ManaType>,
+) {
+    scenario.with_mana_pool(
+        player,
+        units
+            .into_iter()
+            .map(|mana_type| ManaUnit::new(mana_type, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+}
+
 fn add_gift_spell_from_oracle(
     scenario: &mut GameScenario,
     player: PlayerId,
@@ -277,5 +291,104 @@ fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
     assert!(
         runner.state().players[1].library.contains(&p1_draw),
         "seat-next opponent must not receive the gift"
+    );
+}
+
+/// CR 400.7 + CR 702.174a: Gift recipient stamped on a permanent at cast must
+/// not survive blink / reanimation — the re-entering object is a new object
+/// with no memory of the prior Gift promise.
+#[test]
+fn gift_recipient_clears_across_blink_and_reanimate() {
+    const GIFT_BEAR: &str =
+        "Gift a card (You may promise an opponent a gift as you cast this spell. \
+If you do, they draw a card before its other effects.)";
+    const CLOUDSHIFT: &str =
+        "Exile target creature you control, then return that card to the battlefield under your control.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Gift bears are free/generic in the fixture; Cloudshift needs {W}; Murder /
+    // Zombify are free oracle stubs. Pad with colorless for any residual costs.
+    with_mana(
+        &mut scenario,
+        P0,
+        [
+            ManaType::White,
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ],
+    );
+    scenario.add_card_to_library_top(P1, "Gift Card A");
+    scenario.add_card_to_library_top(P1, "Gift Card B");
+    let gift_bear = scenario
+        .add_creature_to_hand(P0, "Gift Bear", 2, 2)
+        .from_oracle_text_with_keywords(&["Gift"], GIFT_BEAR)
+        .id();
+    let gift_bear_b = scenario
+        .add_creature_to_hand(P0, "Gift Bear B", 2, 2)
+        .from_oracle_text_with_keywords(&["Gift"], GIFT_BEAR)
+        .id();
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT)
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Plain Murder", true, "Destroy target creature.")
+        .id();
+    let zombify = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Plain Zombify",
+            false,
+            "Return target creature card from your graveyard to the battlefield.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+
+    // --- Blink half ---
+    runner.cast(gift_bear).accept_optional().resolve();
+    assert_eq!(runner.state().objects[&gift_bear].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&gift_bear].gift_recipient,
+        Some(P1),
+        "cast-time Gift promise must stamp gift_recipient via CastLinkSnapshot"
+    );
+
+    runner.cast(cloudshift).target_object(gift_bear).resolve();
+    assert_eq!(runner.state().objects[&gift_bear].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&gift_bear].gift_recipient.is_none(),
+        "blinked permanent must not keep prior Gift recipient (CR 400.7)"
+    );
+
+    // --- Destroy + reanimate half ---
+    runner.cast(gift_bear_b).accept_optional().resolve();
+    assert_eq!(
+        runner.state().objects[&gift_bear_b].gift_recipient,
+        Some(P1),
+        "second Gift cast must stamp recipient"
+    );
+
+    runner.cast(murder).target_object(gift_bear_b).resolve();
+    assert_eq!(runner.state().objects[&gift_bear_b].zone, Zone::Graveyard);
+    assert!(
+        runner.state().objects[&gift_bear_b]
+            .gift_recipient
+            .is_none(),
+        "battlefield exit must clear gift_recipient before GY residency"
+    );
+
+    runner.cast(zombify).target_object(gift_bear_b).resolve();
+    assert_eq!(runner.state().objects[&gift_bear_b].zone, Zone::Battlefield);
+    assert!(
+        runner.state().objects[&gift_bear_b]
+            .gift_recipient
+            .is_none(),
+        "reanimated permanent must not restore Gift recipient (CR 400.7)"
     );
 }
