@@ -91,6 +91,12 @@ type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
+#[cfg(windows)]
+// Windows gives the process' primary thread a comparatively small stack. A
+// persisted game is a deeply nested rules snapshot, so restore it on a
+// purpose-sized thread rather than letting one saved session prevent the
+// server from reaching its health endpoint on the next launch.
+const PERSISTED_SESSION_RESTORE_STACK_BYTES: usize = 16 * 1024 * 1024;
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -106,6 +112,30 @@ type SharedDraftSpectators = Arc<
 >;
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+
+#[cfg(windows)]
+fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
+    let json = json.to_owned();
+    let restore = std::thread::Builder::new()
+        .name("phase-session-restore".to_owned())
+        .stack_size(PERSISTED_SESSION_RESTORE_STACK_BYTES)
+        .spawn(move || {
+            let persisted = serde_json::from_str::<server_core::PersistedSession>(&json)
+                .map_err(|error| error.to_string())?;
+            Ok(GameSession::from_persisted(persisted, db.as_ref()))
+        })
+        .map_err(|error| format!("could not start restore thread: {error}"))?;
+    restore
+        .join()
+        .map_err(|_| "persisted session restore thread panicked".to_owned())?
+}
+
+#[cfg(not(windows))]
+fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
+    let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
+        .map_err(|error| error.to_string())?;
+    Ok(GameSession::from_persisted(persisted, db.as_ref()))
+}
 
 async fn reserve_lobby_subscriber_slot(
     lobby_subscribers: &SharedLobbySubscribers,
@@ -1003,12 +1033,11 @@ async fn main() {
                 let mut restored = 0u32;
 
                 for (game_code, json) in &persisted_games {
-                    match serde_json::from_str::<server_core::PersistedSession>(json) {
-                        Ok(ps) => {
-                            let lobby_meta = ps.lobby_meta.clone();
-                            let is_started = ps.game_started;
-                            let session =
-                                server_core::session::GameSession::from_persisted(ps, db.as_ref());
+                    info!(game = %game_code, bytes = json.len(), "restoring persisted session");
+                    match restore_persisted_session(json, db.clone()) {
+                        Ok(session) => {
+                            let lobby_meta = session.lobby_meta.clone();
+                            let is_started = session.game_started;
 
                             // Register all non-AI human players as disconnected
                             // to start the 120s grace period from now
