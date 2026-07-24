@@ -19,7 +19,9 @@
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -297,13 +299,33 @@ fn kathril_offers_each_matching_counter_its_own_independent_recipient() {
     );
     let mut runner = scenario.build();
 
-    let outcome = runner
-        .cast(kathril)
-        .target_objects(&[second_recipient, kathril])
-        .resolve();
-    outcome.assert_zone(&[kathril], Zone::Battlefield);
+    // `.resolve()` stops at the first `WaitingFor::ChooseFromZoneChoice` and
+    // hands control back here — the shared test driver deliberately does NOT
+    // auto-drive this variant (it also carries the pre-existing CR 608.2d
+    // tracked-set choice, e.g. Portent of Calamity's per-type exile picks,
+    // whose own tests rely on manually driving one prompt at a time). Declare
+    // the two independent recipients explicitly, in the order the two
+    // instructions actually resolve: flying (the head) first, trample
+    // (reached past the intervening false gates) second.
+    let _outcome = runner.cast(kathril).resolve();
+    let declared_recipients = [second_recipient, kathril];
+    let mut next_recipient = declared_recipients.iter();
+    while let WaitingFor::ChooseFromZoneChoice { .. } = &runner.state().waiting_for {
+        let pick = *next_recipient
+            .next()
+            .expect("exactly two independent recipient prompts (flying, trample)");
+        runner
+            .act(GameAction::SelectCards { cards: vec![pick] })
+            .expect("per-instruction recipient choice");
+    }
 
-    let state = outcome.state();
+    assert_eq!(
+        runner.state().objects[&kathril].zone,
+        Zone::Battlefield,
+        "Kathril must resolve onto the battlefield"
+    );
+
+    let state = runner.state();
     let count_on =
         |id: ObjectId, ct: CounterType| state.objects[&id].counters.get(&ct).copied().unwrap_or(0);
     let flying_ct = CounterType::Keyword(Keyword::Flying.kind());
