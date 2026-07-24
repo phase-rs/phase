@@ -25,6 +25,17 @@ pre-release-replacements = [
   { file = "../../client/package.json", search = '"version": "[^"]*"', replace = '"version": "{{version}}"' },
   { file = "../../client/src-tauri/tauri.conf.json", search = '"version": "[^"]*"', replace = '"version": "{{version}}"' },
   { file = "../../client/src-tauri/Cargo.toml", search = '^version = "[^"]*"', replace = 'version = "{{version}}"' },
+  # client/src-tauri is its OWN cargo workspace, so bumping its Cargo.toml above leaves its
+  # Cargo.lock pinning the previous version. The Tauri CI job builds with `cargo check --locked`,
+  # which then refuses to update the lock and fails — and because tauri-check is a `needs:` of the
+  # required "Rust (fmt, clippy, test, coverage-gate)" aggregator, that reds main and every
+  # merge-group ref built on the release commit. v0.35.2 shipped exactly that way (fixed in #6568).
+  # The two-line anchor keeps this from matching any other package's version; cargo-release's
+  # default min=1 makes a lockfile format change fail the release loudly instead of silently.
+  # The newline lives in a capture group, never in the replacement: the regex crate expands only
+  # ${1}-style references in a replacement, so a literal \n there would be inserted verbatim and
+  # would splice the two lines together.
+  { file = "../../client/src-tauri/Cargo.lock", search = '(name = "phase-tauri"\nversion = )"[^"]*"', replace = '${1}"{{version}}"' },
 ]
 publish = false
 

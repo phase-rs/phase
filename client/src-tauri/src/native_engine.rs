@@ -503,8 +503,17 @@ pub async fn ensure_native_engine(
             detail: error.to_string(),
         })
         .and_then(|result| result);
-    if result.is_err() {
-        emit_progress(&progress_app, NativeEngineProgressPhase::Failed, None);
+    // Single authority for the terminal phase. `ensure_native_engine_sync`
+    // returns early on both the healthy-in-process and adopted-record paths,
+    // so emitting `Ready` inside it would leave those runs ending on a
+    // non-terminal phase — and a listener waiting for one would wait forever.
+    match &result {
+        Ok(ready) => emit_progress(
+            &progress_app,
+            NativeEngineProgressPhase::Ready,
+            Some(ready.port.to_string()),
+        ),
+        Err(_) => emit_progress(&progress_app, NativeEngineProgressPhase::Failed, None),
     }
     result
 }
@@ -640,11 +649,6 @@ fn ensure_native_engine_sync(
     if let Err(error) = gc_after_successful_spawn(&files, &key) {
         eprintln!("native engine GC after successful spawn failed: {error:?}");
     }
-    emit_progress(
-        app,
-        NativeEngineProgressPhase::Ready,
-        Some(port.to_string()),
-    );
     Ok(NativeEngineReady { port })
 }
 

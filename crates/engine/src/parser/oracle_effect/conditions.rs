@@ -11,7 +11,8 @@ use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
+    inject_controller_you, parse_cast_using_teamwork_phrase,
+    parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -5793,6 +5794,34 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(maybe_negate(cond, negated));
     }
 
+    // CR 102.2 / CR 102.3 + CR 603.2b + CR 608.2c: A phase trigger over
+    // "each player's" step binds `ScopedPlayer`; a later leading condition can
+    // constrain that SAME player by both relationship and scalar state:
+    // "the player is your opponent and has <hand/life predicate>".
+    //
+    // The grammar returns both independent legs. Compose them here from
+    // existing conditions: `ScopedPlayerMatches(Opponent)` plus the bridged
+    // `HandSize/LifeTotal { ScopedPlayer }` quantity check. Full consumption
+    // and the exact context equality are both required. Other relative-player
+    // contexts (triggering/target/defending/chosen/etc.) deliberately fall
+    // through unchanged rather than reinterpreting their referent as a
+    // per-player phase iteration.
+    if matches!(
+        ctx.relative_player_scope.as_ref(),
+        Some(ControllerRef::ScopedPlayer)
+    ) {
+        if let Ok((_, (filter, scalar))) =
+            all_consuming(parse_scoped_player_opponent_and_has_condition).parse(lower.as_str())
+        {
+            return Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::ScopedPlayerMatches { filter },
+                    static_condition_to_ability_condition(&scalar, ctx)?,
+                ],
+            });
+        }
+    }
+
     let (rest, condition) = parse_inner_condition(&lower).ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -6947,6 +6976,7 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
+    use crate::types::ability::PlayerFilter;
     use crate::types::counter::{CounterMatch, CounterType};
 
     /// CR 400.7 + CR 608.2c: S07 Batch 1 — the leading-"if" active-voice
@@ -7106,6 +7136,83 @@ mod tests {
             ),
             "got {cond:?}"
         );
+    }
+
+    /// CR 102.2 / CR 102.3 + CR 603.2b + CR 608.2c: a leading
+    /// relationship-qualified phase-player condition is preserved with its
+    /// body and lowers to both existing condition legs. This exercises the
+    /// production leading-condition splitter, not just the leaf bridge.
+    #[test]
+    fn scoped_phase_player_opponent_and_hand_gate_preserves_leading_body() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let (condition, body) = strip_leading_general_conditional(
+            "If the player is your opponent and has four or more cards in hand, this enchantment deals 2 damage to that player",
+            &mut ctx,
+        );
+
+        assert_eq!(
+            body, "this enchantment deals 2 damage to that player",
+            "the leading gate must be peeled without changing the body"
+        );
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::Opponent,
+                    },
+                    AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::ScopedPlayer,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 4 },
+                    },
+                ],
+            })
+        );
+    }
+
+    /// The relationship grammar itself succeeds for every row (the reach
+    /// guard), but the effect bridge must decline unless the surrounding
+    /// context is exactly `ScopedPlayer`. This prevents an early grammar
+    /// failure from making any negative assertion vacuous.
+    #[test]
+    fn scoped_phase_player_opponent_bridge_declines_other_relative_scopes() {
+        let input = "the player is your opponent and has four or more cards in hand";
+        let assert_declines = |scope: Option<ControllerRef>| {
+            assert!(
+                all_consuming(parse_scoped_player_opponent_and_has_condition)
+                    .parse(input)
+                    .is_ok(),
+                "reach guard: the direct relationship grammar must succeed"
+            );
+            let mut ctx = ParseContext {
+                relative_player_scope: scope.clone(),
+                ..Default::default()
+            };
+            assert_eq!(
+                try_nom_condition_as_ability_condition(input, &mut ctx),
+                None,
+                "non-scoped relative player must be declined: {scope:?}"
+            );
+        };
+
+        for scope in [
+            Some(ControllerRef::TriggeringPlayer),
+            Some(ControllerRef::TargetPlayer),
+            Some(ControllerRef::ParentTargetController),
+            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::SourceChosenPlayer),
+            None,
+        ] {
+            assert_declines(scope);
+        }
     }
 
     #[test]

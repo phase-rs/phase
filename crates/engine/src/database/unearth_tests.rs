@@ -14,7 +14,7 @@ use crate::game::triggers::check_delayed_triggers;
 use crate::game::zones::create_object;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, DelayedTriggerCondition, Effect,
-    TargetFilter,
+    RestrictionExpiry, TargetFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -360,6 +360,41 @@ fn unearth_installs_leaves_battlefield_exile_replacement() {
         ),
         "the replacement must redirect the card to exile, got {:?}",
         execute.effect
+    );
+    // CR 400.7 + CR 702.84a: the rider is stamped `UntilHostLeavesPlay` so its
+    // lifetime is bound to the returned object.
+    assert_eq!(
+        repl.expiry,
+        Some(RestrictionExpiry::UntilHostLeavesPlay),
+        "the leaves-battlefield rider must carry the host-lifetime expiry stamp"
+    );
+
+    // CR 613.1: the rider is also written to `base_replacement_definitions` so it
+    // survives a layer reseed (which rebuilds live defs from base). Without the
+    // base copy, the first `evaluate_layers` would silently drop the redirect.
+    let base = &state.objects[&source].base_replacement_definitions;
+    let base_repl = base
+        .iter()
+        .find(|r| r.event == ReplacementEvent::Moved)
+        .expect("the rider must be base-installed to survive a layer reseed");
+    assert_eq!(
+        base_repl.expiry,
+        Some(RestrictionExpiry::UntilHostLeavesPlay),
+        "the base-installed rider must carry the host-lifetime expiry stamp"
+    );
+    assert_eq!(base_repl.valid_card, Some(TargetFilter::SelfRef));
+
+    // Discriminating runtime check: after a real layer pass, the live rider must
+    // still be present (repopulated from base). This is the exact reseed that
+    // dropped the live-only rider before the fix.
+    crate::game::layers::evaluate_layers(&mut state);
+    assert!(
+        state.objects[&source]
+            .replacement_definitions
+            .iter_all()
+            .any(|r| r.event == ReplacementEvent::Moved
+                && r.expiry == Some(RestrictionExpiry::UntilHostLeavesPlay)),
+        "the rider must survive a layer reseed (repopulated from base)"
     );
 }
 

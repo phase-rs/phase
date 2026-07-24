@@ -1541,13 +1541,15 @@ function GamePageContent({
       <HelpSheet />
       <CardReportDialog />
 
-      {/* Connection failure toast */}
-      {isOnlineMode && (
-        <ConnectionToast
-          onRetry={() => window.location.reload()}
-          onSettings={() => setPreferencesOpen({})}
-        />
-      )}
+      {/* The page's toast surface, not an online-only one: solo games raise
+          toasts too (the native-engine fallback notice). Only online games get
+          a Retry — reloading re-dials the server, but a solo game has nothing
+          to re-dial and would just restart itself. */}
+      <ConnectionToast
+        onRetry={isOnlineMode ? () => window.location.reload() : undefined}
+        onSettings={() => setPreferencesOpen({})}
+      />
+
 
 
       {/*

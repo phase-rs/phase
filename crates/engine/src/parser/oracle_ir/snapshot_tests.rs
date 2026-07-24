@@ -907,6 +907,18 @@ fn dark_confidant() {
 }
 
 #[test]
+fn fevered_visions() {
+    let (ir, lowered) = parse_two_layer(
+        "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, this enchantment deals 2 damage to that player.",
+        "Fevered Visions",
+        &["Enchantment"],
+        &[],
+    );
+    insta::assert_json_snapshot!("fevered_visions_ir", &ir);
+    insta::assert_json_snapshot!("fevered_visions_lowered", &lowered);
+}
+
+#[test]
 fn eidolon_of_the_great_revel() {
     let (ir, lowered) = parse_two_layer(
         "Whenever a player casts a spell with mana value 3 or less, this creature deals 2 damage to that player.",

@@ -2359,10 +2359,13 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enter_with_counters,
         } => {
-            let origin = if matches!(target, TargetFilter::ExiledBySource) {
-                Some(Zone::Exile)
-            } else {
-                origin
+            let origin = match &target {
+                TargetFilter::ExiledBySource => Some(Zone::Exile),
+                TargetFilter::TrackedSetFiltered {
+                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                    ..
+                } => Some(Zone::Exile),
+                _ => origin,
             };
             Effect::ChangeZoneAll {
                 origin,
@@ -6524,17 +6527,31 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             choice_count: _,
             enter_with_counters,
         } => {
-            // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
-            // objects without individual targeting — use ChangeZoneAll.
+            // CR 610.3: Mass filters (ExiledBySource, TrackedSet,
+            // TrackedSetFiltered) act on all matching objects without individual
+            // targeting — use ChangeZoneAll. Bounded "up to N" picks from the
+            // tracked set ("put up to one land discarded this way") remain
+            // `ChangeZone` so the player selects a subset at resolution.
             // ExiledBySource always originates from Exile regardless of inferred zone.
             // CR 122.1: ChangeZoneAll has no counter-stamping channel — those
             // patterns are single-target only in current Oracle text, so the
             // mass-filter branch deliberately drops `enter_with_counters`.
             if matches!(
                 target,
-                TargetFilter::ExiledBySource | TargetFilter::TrackedSet { .. }
+                TargetFilter::ExiledBySource
+                    | TargetFilter::TrackedSet { .. }
+                    | TargetFilter::TrackedSetFiltered { .. }
             ) && enter_with_counters.is_empty()
+                && !up_to
             {
+                let origin = match target {
+                    TargetFilter::TrackedSetFiltered {
+                        caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                        ..
+                    } => origin.or(Some(Zone::Exile)),
+                    TargetFilter::TrackedSetFiltered { .. } => origin,
+                    _ => origin.or(Some(Zone::Exile)),
+                };
                 Effect::ChangeZoneAll {
                     // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
                     // defaults to scanning Exile (cascade, impulse-draw, and the
@@ -6543,7 +6560,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     // (Breach the Multiverse's graveyard choose stamps
                     // `origin: Some(Graveyard)` in `parse_put_ast`), honor it so
                     // the chosen cards are read out of the right zone.
-                    origin: origin.or(Some(Zone::Exile)),
+                    origin,
                     destination,
                     target,
                     // CR 110.2a: Preserve the parsed entering-controller override
