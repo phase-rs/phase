@@ -25,6 +25,14 @@ use crate::native_bridge::BridgeHandle;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// `CREATE_NO_WINDOW` — suppress the console window Windows allocates for a
+/// console-subsystem child when spawned from this GUI-subsystem shell. Without
+/// it, launching the native `phase-server.exe` flashes/leaves a cmd window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const SERVER_ARTIFACT_PUBLIC_KEY: &str = "RWRDZxG2otNoKLblrgD00kM0a8U0CRZUGHpNCr3W+3ik1E84XHcB6hZe";
 const NATIVE_ENGINE_DIRECTORY: &str = "native-engine";
@@ -1017,7 +1025,8 @@ fn spawn_server(
     port: u16,
     origin: &str,
 ) -> Result<(Child, ChildStdin), NativeEngineError> {
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .env("PORT", port.to_string())
         .env("PHASE_DATA_DIR", data_directory)
         .env("PHASE_GAMES_DB", games_db)
@@ -1033,11 +1042,16 @@ fn spawn_server(
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| NativeEngineError::Spawn {
-            detail: error.to_string(),
-        })?;
+        .stderr(Stdio::null());
+
+    // The shell is a GUI-subsystem app but phase-server is console-subsystem, so
+    // Windows would otherwise pop a console window for the child on every launch.
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let mut child = command.spawn().map_err(|error| NativeEngineError::Spawn {
+        detail: error.to_string(),
+    })?;
     let stdin = child.stdin.take().ok_or_else(|| NativeEngineError::Spawn {
         detail: "native engine stdin pipe was unavailable".to_owned(),
     })?;
@@ -1141,6 +1155,7 @@ fn kill_recorded_process_if_ours(record: &SpawnRecord, files: &NativeEngineFiles
     {
         let _ = Command::new("taskkill")
             .args(["/PID", &record.pid.to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
             .status();
     }
 }
@@ -1180,6 +1195,7 @@ fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
 fn process_is_plausibly_ours(pid: u32, binary: &Path) -> bool {
     let output = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
     let Ok(output) = output else {
         return false;
