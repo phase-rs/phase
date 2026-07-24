@@ -15,7 +15,7 @@ use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
+    AbilityDefinition, AbilityKind, AdditionalCost, Effect, EffectKind, PtValue, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
     TriggerDefinition,
 };
@@ -1495,6 +1495,36 @@ impl GameRunner {
             // with an empty stack while triggers wait to be dispatched.
             if matches!(self.state.waiting_for, WaitingFor::OrderTriggers { .. }) {
                 super::triggers::drain_order_triggers_with_identity(&mut self.state);
+                continue;
+            }
+            // CR 401.4: mass library-bottom placement parks `EffectZoneChoice` even
+            // when the stack is empty (Teferi's Puzzle Box draw-step trigger). Tests
+            // that drive phase advancement without an explicit `.effect_zone()` policy
+            // submit the engine-listed card order so resolution can finish.
+            if let WaitingFor::EffectZoneChoice {
+                cards,
+                count,
+                min_count,
+                up_to,
+                effect_kind,
+                ..
+            } = &self.state.waiting_for
+            {
+                if *effect_kind != EffectKind::PutAtLibraryPosition {
+                    break;
+                }
+                if *up_to || cards.len() < *min_count {
+                    break;
+                }
+                let chosen: Vec<_> = cards.iter().take(*count).copied().collect();
+                if chosen.len() != *count {
+                    break;
+                }
+                if apply_as_current(&mut self.state, GameAction::SelectCards { cards: chosen })
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
             if self.state.stack.is_empty() {

@@ -2602,6 +2602,19 @@ pub enum RestrictionExpiry {
     UntilEndOfNextTurnOf {
         player: PlayerId,
     },
+    /// CR 614.1a + CR 400.7: a runtime-installed replacement bound to the
+    /// lifetime of the OBJECT hosting it (the "if it would leave the
+    /// battlefield, exile it instead" rider of Unearth / Gruesome Encore /
+    /// Whip of Erebos, CR 702.84a). It is ONLY meaningful on an object-hosted
+    /// `ReplacementDefinition::expiry`; it is meaningless for the state-hosted
+    /// `GameRestriction` / `pending_damage_replacements` that share this enum,
+    /// and it is NEVER pruned by turn machinery (no untap/cleanup step ends it).
+    /// It lapses solely via the battlefield-exit prune
+    /// (`zones.rs` -> `layers.rs::prune_controller_controls_source_on_leave`).
+    /// Three operational consequences follow: it is base-installed so it
+    /// survives CR 613.1 layer reseeds; it is non-copiable (CR 707.2); and its
+    /// base+live copies are pruned together when the host leaves play.
+    UntilHostLeavesPlay,
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.

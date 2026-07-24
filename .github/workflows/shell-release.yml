@@ -387,9 +387,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.SHELL_TAG }}
-          name: Phase Desktop v${{ env.SHELL_VERSION }}
+          name: phase.rs Desktop v${{ env.SHELL_VERSION }}
+          # The installer is the only thing a human comes to /releases for, so
+          # it holds the "Latest" badge; web releases opt out (release.yml).
+          make_latest: "true"
           body: |
-            ## Install Phase Desktop
+            ## Install phase.rs Desktop
 
             Download the installer for your platform:
 

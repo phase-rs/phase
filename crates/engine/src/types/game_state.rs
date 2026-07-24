@@ -3582,6 +3582,22 @@ pub struct PendingPerPlayerZoneChoice {
     pub accumulated: bool,
 }
 
+/// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
+/// `ChangeZoneAll` instruction that places multiple owners' cards at the same
+/// library position with `random_order: false`. The first owner's batch is
+/// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
+/// batches drain after each batch completes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingMassLibraryOrderChoice {
+    pub source_id: ObjectId,
+    pub library_position: crate::types::ability::LibraryPosition,
+    pub track_exiled_by_source: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<crate::types::ability::Duration>,
+    /// Remaining (owner, cards) batches in APNAP order after the current prompt.
+    pub remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 101.4: If players make choices for one instruction, they choose in
 /// APNAP order before the simultaneous action happens.
 /// CR 701.21a: To sacrifice a permanent, its controller moves it from the
@@ -12242,6 +12258,10 @@ pub struct GameState {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 401.4: Remaining per-owner library-order batches for a mass
+    /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_mass_library_order_choice: Option<PendingMassLibraryOrderChoice>,
     /// CR 101.4 + CR 701.23i: Pending private selections for a simultaneous
     /// scoped self-library search. Kept separate from the generic continuation
     /// so the action phase cannot begin before every player has chosen.
@@ -16207,6 +16227,7 @@ impl GameState {
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
@@ -17540,6 +17561,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     Priority`, effects/mod.rs:759) or a constant direct-assigned count across a real
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
         pending_search_found_batch: _,
@@ -17739,6 +17761,8 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_mass_library_order_choice
+                == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch

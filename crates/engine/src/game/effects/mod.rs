@@ -338,7 +338,14 @@ pub(crate) fn matches_player_scope(
                     PlayerFilter::AllExcept { exclude } => {
                         !matches_player_scope(state, p.id, exclude, controller, source_id)
                     }
-                    PlayerFilter::Opponent => p.id != controller,
+                    // CR 102.2 / CR 102.3: "opponent" is a game-topology
+                    // relation, not raw player-ID inequality. In team
+                    // multiplayer a teammate is neither the controller nor an
+                    // opponent, so effect-recipient enumeration must route
+                    // through the canonical `players::is_opponent` authority.
+                    PlayerFilter::Opponent => {
+                        crate::game::players::is_opponent(state, controller, p.id)
+                    }
                     PlayerFilter::DefendingPlayer => {
                         crate::game::targeting::resolve_event_context_target_for_event_or_state(
                             state,
@@ -351,10 +358,12 @@ pub(crate) fn matches_player_scope(
                         )
                     }
                     PlayerFilter::OpponentLostLife => {
-                        p.id != controller && p.life_lost_this_turn > 0
+                        crate::game::players::is_opponent(state, controller, p.id)
+                            && p.life_lost_this_turn > 0
                     }
                     PlayerFilter::OpponentGainedLife => {
-                        p.id != controller && p.life_gained_this_turn > 0
+                        crate::game::players::is_opponent(state, controller, p.id)
+                            && p.life_gained_this_turn > 0
                     }
                     // CR 104.5 / CR 800.4: Players who lost have left the game;
                     // this filter is quantity-only and has no live effect recipient.
@@ -382,7 +391,7 @@ pub(crate) fn matches_player_scope(
                     ),
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
-                        p.id != controller
+                        crate::game::players::is_opponent(state, controller, p.id)
                             && state
                                 .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
@@ -393,7 +402,7 @@ pub(crate) fn matches_player_scope(
                     // never appear in `combat.attackers` for `DefendingPlayer`),
                     // resolved via the shared event-context target resolver.
                     PlayerFilter::OpponentAttackingEnchantedPlayer => {
-                        p.id != controller
+                        crate::game::players::is_opponent(state, controller, p.id)
                             && enchanted_player_anchor(state, source_id).is_some_and(|enchanted| {
                                 state.player_attacked_player_this_combat(p.id, enchanted)
                             })
@@ -4742,8 +4751,17 @@ fn affected_objects_from_events(
         // CR 701.20b + CR 608.2c: Reveal instructions do not move cards, so they
         // emit `CardsRevealed` rather than `ZoneChanged`. Publish the revealed
         // card ids for downstream "from among the revealed cards"
-        // `ChooseFromZone` continuations (Atraxa, Grand Unifier class).
-        Effect::RevealTop { .. } | Effect::RevealHand { .. } | Effect::Clash => events
+        // `ChooseFromZone` / `ForEachCategory` continuations (Atraxa, Portent of
+        // Calamity). Reveal-only Digs with `keep_count: 0` take the same path —
+        // they never emit ZoneChanged either.
+        Effect::RevealTop { .. }
+        | Effect::RevealHand { .. }
+        | Effect::Clash
+        | Effect::Dig {
+            reveal: true,
+            keep_count: Some(0),
+            ..
+        } => events
             .iter()
             .filter_map(|event| match event {
                 GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
@@ -10780,9 +10798,9 @@ pub(crate) fn evaluate_condition(
 /// `quantity::resolve_player_count`, but applied to one already-bound iteration
 /// player rather than a fold over all players. Set-valued / event-context
 /// variants that have no single-player semantic outside an iteration loop fail
-/// closed — `ScopedPlayerMatches` is only emitted by the parser for `All` /
-/// `Opponent` / `Controller` today (the canonical decline-tail scopes), so the
-/// fall-through is defensive rather than load-bearing.
+/// closed. `ScopedPlayerMatches` is emitted for decline tails and for
+/// relationship-qualified scoped phase-player conditions; both surfaces use
+/// the same printed-controller-relative player relation semantics.
 fn scoped_player_matches_filter(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -10802,7 +10820,10 @@ fn scoped_player_matches_filter(
     let controller = ability.original_controller.unwrap_or(ability.controller);
     match filter {
         PlayerFilter::Controller => candidate == controller,
-        PlayerFilter::Opponent => candidate != controller,
+        // CR 102.2 / CR 102.3: "opponent" is a game-topology relation, not raw
+        // player-ID inequality. In team multiplayer, a teammate is neither the
+        // controller nor an opponent.
+        PlayerFilter::Opponent => crate::game::players::is_opponent(state, controller, candidate),
         PlayerFilter::All => true,
         // CR 608.2c + CR 109.4: candidate matches unless it matches the anchor.
         // Recursive against the same printed-controller-relative predicate;
@@ -10811,7 +10832,7 @@ fn scoped_player_matches_filter(
             !scoped_player_matches_filter(state, ability, candidate, exclude)
         }
         PlayerFilter::OpponentLostLife => {
-            candidate != controller
+            crate::game::players::is_opponent(state, controller, candidate)
                 && state
                     .players
                     .iter()
@@ -10819,7 +10840,7 @@ fn scoped_player_matches_filter(
                     .is_some_and(|p| p.life_lost_this_turn > 0)
         }
         PlayerFilter::OpponentGainedLife => {
-            candidate != controller
+            crate::game::players::is_opponent(state, controller, candidate)
                 && state
                     .players
                     .iter()
@@ -25696,6 +25717,70 @@ mod tests {
                     source,
                 ),
                 "without a trigger event the caster anchor is undefined; {pid:?} must not match"
+            );
+        }
+    }
+
+    /// CR 102.2 / CR 102.3 + CR 109.5: the production
+    /// `ScopedPlayerMatches` evaluator uses canonical team topology and the
+    /// printed controller preserved in `original_controller`. This test covers
+    /// only the relation predicate; it does not claim full Fevered Visions
+    /// support under CR 805.4d's multi-trigger fanout.
+    #[test]
+    fn scoped_player_matches_filter_uses_team_opponents_and_original_controller() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let mut ability = build_resolved_from_def(&definition, ObjectId(9000), PlayerId(0));
+
+        // Model the live player-scope iteration: the driver has rebound the
+        // acting controller to opponent P2, while the printed controller P0 is
+        // retained as the relationship authority.
+        ability.controller = PlayerId(2);
+        ability.original_controller = Some(PlayerId(0));
+
+        for (candidate, expected) in [
+            (PlayerId(0), false),
+            (PlayerId(1), false),
+            (PlayerId(2), true),
+            (PlayerId(3), true),
+        ] {
+            assert_eq!(
+                scoped_player_matches_filter(&state, &ability, candidate, &PlayerFilter::Opponent),
+                expected,
+                "2HG opponent relation mismatch for {candidate:?}"
+            );
+        }
+
+        // Both the teammate and one opponent have matching history. The
+        // teammate must still fail the relation leg; the other opponent lacks
+        // history and must fail the history leg.
+        for player in state.players.iter_mut() {
+            if matches!(player.id, PlayerId(1) | PlayerId(2)) {
+                player.life_lost_this_turn = 1;
+                player.life_gained_this_turn = 1;
+            }
+        }
+        for filter in [
+            PlayerFilter::OpponentLostLife,
+            PlayerFilter::OpponentGainedLife,
+        ] {
+            assert!(
+                !scoped_player_matches_filter(&state, &ability, PlayerId(1), &filter),
+                "teammate history must not satisfy an opponent-history filter"
+            );
+            assert!(
+                scoped_player_matches_filter(&state, &ability, PlayerId(2), &filter),
+                "opponent with matching history must satisfy {filter:?}"
+            );
+            assert!(
+                !scoped_player_matches_filter(&state, &ability, PlayerId(3), &filter),
+                "opponent without matching history must fail {filter:?}"
             );
         }
     }
