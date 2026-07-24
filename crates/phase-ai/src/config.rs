@@ -473,6 +473,12 @@ pub struct PolicyPenalties {
     /// action supplies the last missing type.
     #[serde(default = "default_graveyard_types_progress")]
     pub graveyard_types_progress: f64,
+    /// CR 700.5: card-equivalent value of one primary-color pip a cast adds
+    /// toward the deck's devotion payoffs (preference band, per pip).
+    pub devotion_pip_progress: f64,
+    /// CR 700.5: extra value when a cast crosses a god's `DevotionGE`
+    /// threshold, turning a non-creature enchantment into a body.
+    pub devotion_god_activation: f64,
 }
 
 impl Default for PolicyPenalties {
@@ -539,6 +545,8 @@ impl Default for PolicyPenalties {
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
             poison_clock_pressure: default_poison_clock_pressure(),
             graveyard_types_progress: default_graveyard_types_progress(),
+            devotion_pip_progress: 0.35,
+            devotion_god_activation: 2.5,
         }
     }
 }
@@ -749,6 +757,14 @@ pub const ACTIVE_POLICY_PENALTY_FIELDS: &[&str] = &[
 /// Policy penalties intentionally not present in an active CMA-ES parameter
 /// vector yet.
 pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
+    (
+        "devotion_pip_progress",
+        "CR 700.5 per-pip devotion progress weight — awaiting a paired-seed ai-gate calibration.",
+    ),
+    (
+        "devotion_god_activation",
+        "CR 700.5 god-threshold-crossing swing weight — awaiting a paired-seed ai-gate calibration.",
+    ),
     (
         "poison_clock_pressure",
         "CR 104.3d win-detector weight — a critical-band term whose magnitude is \
