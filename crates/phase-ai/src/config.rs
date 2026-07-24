@@ -475,9 +475,11 @@ pub struct PolicyPenalties {
     pub graveyard_types_progress: f64,
     /// CR 700.5: card-equivalent value of one primary-color pip a cast adds
     /// toward the deck's devotion payoffs (preference band, per pip).
+    #[serde(default = "default_devotion_pip_progress")]
     pub devotion_pip_progress: f64,
     /// CR 700.5: extra value when a cast crosses a god's `DevotionGE`
     /// threshold, turning a non-creature enchantment into a body.
+    #[serde(default = "default_devotion_god_activation")]
     pub devotion_god_activation: f64,
 }
 
@@ -545,8 +547,8 @@ impl Default for PolicyPenalties {
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
             poison_clock_pressure: default_poison_clock_pressure(),
             graveyard_types_progress: default_graveyard_types_progress(),
-            devotion_pip_progress: 0.35,
-            devotion_god_activation: 2.5,
+            devotion_pip_progress: default_devotion_pip_progress(),
+            devotion_god_activation: default_devotion_god_activation(),
         }
     }
 }
@@ -620,6 +622,14 @@ fn default_lethality_tapout_penalty() -> f64 {
 }
 fn default_sacrifice_land_penalty() -> f64 {
     4.0
+}
+
+fn default_devotion_pip_progress() -> f64 {
+    0.35
+}
+
+fn default_devotion_god_activation() -> f64 {
+    2.5
 }
 fn default_sacrifice_token_cost() -> f64 {
     0.5
@@ -1604,6 +1614,40 @@ mod tests {
         assert_eq!(
             PolicyPenalties::default().graveyard_types_progress,
             default_graveyard_types_progress(),
+            "Default and serde must share one source of truth"
+        );
+    }
+
+    #[test]
+    fn policy_penalties_load_pre_devotion_artifact() {
+        let mut artifact = serde_json::to_value(PolicyPenalties::default()).unwrap();
+        let object = artifact.as_object_mut().expect("serializes as object");
+        object
+            .remove("devotion_pip_progress")
+            .expect("field must be present before removal");
+        object
+            .remove("devotion_god_activation")
+            .expect("field must be present before removal");
+        // A value CMA-ES could plausibly have tuned, to prove the round-trip
+        // reads the artifact rather than silently falling back to Default.
+        object.insert("wasted_cast_penalty".into(), serde_json::json!(-3.5));
+
+        let loaded: PolicyPenalties = serde_json::from_value(artifact)
+            .expect("a pre-devotion artifact must still deserialize");
+        assert_eq!(loaded.wasted_cast_penalty, -3.5, "tuned value preserved");
+        assert_eq!(
+            loaded.devotion_pip_progress,
+            default_devotion_pip_progress(),
+            "absent pip field must fall back to the shared default"
+        );
+        assert_eq!(
+            loaded.devotion_god_activation,
+            default_devotion_god_activation(),
+            "absent god-activation field must fall back to the shared default"
+        );
+        assert_eq!(
+            PolicyPenalties::default().devotion_pip_progress,
+            default_devotion_pip_progress(),
             "Default and serde must share one source of truth"
         );
     }

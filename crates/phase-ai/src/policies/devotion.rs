@@ -30,7 +30,6 @@
 
 use engine::game::devotion::count_devotion;
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
@@ -83,7 +82,13 @@ impl TacticalPolicy for DevotionPolicy {
         let Some(obj) = ctx.state.objects.get(object_id) else {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_na"));
         };
-        if !is_permanent(&obj.card_types.core_types) {
+        // CR 110.4: only a permanent contributes devotion.
+        if !obj
+            .card_types
+            .core_types
+            .iter()
+            .any(|t| t.is_permanent_type())
+        {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_na"));
         }
         let added = obj.mana_cost.count_colored_pips(Some(color)).max(0) as u32;
@@ -95,18 +100,24 @@ impl TacticalPolicy for DevotionPolicy {
         let current = count_devotion(ctx.state, ctx.ai_player, &[color]);
         let pip_scalar = ctx.config.policy_penalties.devotion_pip_progress;
 
-        // CR 700.5 + the god's `DevotionGE` gate: does this cast cross a god's
-        // threshold, turning it from a non-creature into a body?
-        if let Some(threshold) = feature.highest_threshold {
-            if current < threshold && current + added >= threshold {
-                let activation = ctx.config.policy_penalties.devotion_god_activation;
-                return PolicyVerdict::score(
-                    activation + pip_scalar * f64::from(added),
-                    PolicyReason::new("devotion_god_activation")
-                        .with_fact("devotion", current as i64)
-                        .with_fact("threshold", threshold as i64),
-                );
-            }
+        // CR 700.5 + each god's own `DevotionGE` gate: count every DISTINCT
+        // threshold this cast newly crosses. Each Theros god turns on
+        // independently, so a cast can activate more than one at once — and a
+        // cast that crosses a lower gate matters even when a higher gate it
+        // does not reach also exists.
+        let crossed = feature
+            .thresholds
+            .iter()
+            .filter(|&&t| current < t && current + added >= t)
+            .count() as u32;
+        if crossed > 0 {
+            let activation = ctx.config.policy_penalties.devotion_god_activation;
+            return PolicyVerdict::score(
+                activation * f64::from(crossed) + pip_scalar * f64::from(added),
+                PolicyReason::new("devotion_god_activation")
+                    .with_fact("devotion", current as i64)
+                    .with_fact("gods_activated", crossed as i64),
+            );
         }
 
         // Otherwise a smooth preference proportional to the pips added.
@@ -117,20 +128,4 @@ impl TacticalPolicy for DevotionPolicy {
                 .with_fact("added", added as i64),
         )
     }
-}
-
-/// CR 205.2a: a permanent can enter the battlefield and thus contribute
-/// devotion; an instant or sorcery never does.
-fn is_permanent(core_types: &[CoreType]) -> bool {
-    core_types.iter().any(|t| {
-        matches!(
-            t,
-            CoreType::Creature
-                | CoreType::Artifact
-                | CoreType::Enchantment
-                | CoreType::Planeswalker
-                | CoreType::Land
-                | CoreType::Battle
-        )
-    })
 }

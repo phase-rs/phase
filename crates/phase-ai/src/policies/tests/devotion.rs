@@ -43,14 +43,14 @@ fn state() -> GameState {
 fn context_with(
     config: &AiConfig,
     primary_color: Option<ManaColor>,
-    highest_threshold: Option<u32>,
+    thresholds: Vec<u32>,
 ) -> AiContext {
     let features = DeckFeatures {
         devotion: DevotionFeature {
             payoff_count: 8,
             primary_color,
             pip_count: 30,
-            highest_threshold,
+            thresholds,
             commitment: 0.9,
             payoff_names: Vec::new(),
         },
@@ -175,7 +175,7 @@ fn activation_opts_in_above_floor() {
 #[test]
 fn verdict_scores_pips_added_when_no_threshold() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), None);
+    let context = context_with(&config, Some(ManaColor::Black), Vec::new());
     let mut state = state();
     let oid = hand_card(&mut state, 1, CoreType::Creature, &[B, B]);
     let decision = priority_decision();
@@ -190,7 +190,7 @@ fn verdict_scores_pips_added_when_no_threshold() {
 #[test]
 fn verdict_god_activation_when_cast_crosses_threshold() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), Some(5));
+    let context = context_with(&config, Some(ManaColor::Black), vec![5]);
     let mut state = state();
     // Four black pips already on board → devotion 4, one below the threshold.
     battlefield_permanent(&mut state, 1, &[B, B]);
@@ -211,7 +211,7 @@ fn verdict_god_activation_when_cast_crosses_threshold() {
 #[test]
 fn verdict_below_threshold_without_crossing_is_pip_progress() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), Some(5));
+    let context = context_with(&config, Some(ManaColor::Black), vec![5]);
     let mut state = state();
     // Devotion 1; casting one more pip reaches 2, still short of 5.
     battlefield_permanent(&mut state, 1, &[B]);
@@ -226,7 +226,7 @@ fn verdict_below_threshold_without_crossing_is_pip_progress() {
 #[test]
 fn verdict_off_color_cast_is_neutral() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), None);
+    let context = context_with(&config, Some(ManaColor::Black), Vec::new());
     let mut state = state();
     let oid = hand_card(&mut state, 1, CoreType::Creature, &[R, R]);
     let decision = priority_decision();
@@ -241,7 +241,7 @@ fn verdict_off_color_cast_is_neutral() {
 #[test]
 fn verdict_instant_is_neutral() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), None);
+    let context = context_with(&config, Some(ManaColor::Black), Vec::new());
     let mut state = state();
     let oid = hand_card(&mut state, 1, CoreType::Instant, &[B, B]);
     let decision = priority_decision();
@@ -250,4 +250,54 @@ fn verdict_instant_is_neutral() {
         score_of(DevotionPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)));
     assert_eq!(reason.kind, "devotion_na");
     assert_eq!(delta, 0.0);
+}
+
+/// [MED] The bug the review caught: with gods at 3 and 5 and devotion at 2, a
+/// cast that reaches 3 turns on the smaller god. The old max-only logic scored
+/// this as mere pip progress; it must now be a god activation.
+#[test]
+fn verdict_crossing_lower_threshold_activates_that_god() {
+    let config = config();
+    let context = context_with(&config, Some(ManaColor::Black), vec![3, 5]);
+    let mut state = state();
+    // Devotion 2 (one below the lower gate).
+    battlefield_permanent(&mut state, 1, &[B, B]);
+    let oid = hand_card(&mut state, 1, CoreType::Enchantment, &[B]);
+    let decision = priority_decision();
+    let candidate = cast_candidate(oid);
+    let (_, reason) =
+        score_of(DevotionPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "devotion_god_activation");
+    assert!(
+        reason
+            .facts
+            .iter()
+            .any(|(k, v)| *k == "gods_activated" && *v == 1),
+        "exactly one god crossed, got {:?}",
+        reason.facts
+    );
+}
+
+/// One cast can flip two gods at once when it clears both gates.
+#[test]
+fn verdict_crossing_two_thresholds_activates_both() {
+    let config = config();
+    let context = context_with(&config, Some(ManaColor::Black), vec![3, 5]);
+    let mut state = state();
+    // Devotion 2; a {B}{B}{B} cast reaches 5, clearing both the 3 and the 5 gate.
+    battlefield_permanent(&mut state, 1, &[B, B]);
+    let oid = hand_card(&mut state, 1, CoreType::Enchantment, &[B, B, B]);
+    let decision = priority_decision();
+    let candidate = cast_candidate(oid);
+    let (_, reason) =
+        score_of(DevotionPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "devotion_god_activation");
+    assert!(
+        reason
+            .facts
+            .iter()
+            .any(|(k, v)| *k == "gods_activated" && *v == 2),
+        "both gods crossed, got {:?}",
+        reason.facts
+    );
 }

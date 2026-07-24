@@ -64,11 +64,12 @@ pub struct DevotionFeature {
     /// Raw colored-pip count in `primary_color` across the deck's permanent
     /// faces (CR 700.5 counts permanents only).
     pub pip_count: u32,
-    /// The highest `DevotionGE` threshold any god/gate reads in `primary_color`,
-    /// or `None` when no threshold payoff reads it. Drives the policy's
-    /// "this cast turns the god on" spike. Absence is modelled distinctly from a
-    /// fabricated ceiling, mirroring `graveyard_types`.
-    pub highest_threshold: Option<u32>,
+    /// Every DISTINCT `DevotionGE` threshold read in `primary_color`, sorted
+    /// ascending; empty when no threshold payoff reads it. Each entry is one
+    /// god that turns on independently, so the policy rewards a cast that
+    /// crosses ANY of them — not just the maximum. Absence is an empty vec, so a
+    /// scaling-only deck is never handed a fabricated ceiling.
+    pub thresholds: Vec<u32>,
     /// `0.0..=1.0` — how central devotion is. Consumed by
     /// `DevotionPolicy::activation` as the single scaling knob.
     pub commitment: f32,
@@ -108,8 +109,13 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
             total_nonland = total_nonland.saturating_add(entry.count);
         }
 
-        // CR 700.5: only permanents contribute devotion pips.
-        if is_permanent_face(&face.card_type.core_types) {
+        // CR 700.5 + CR 110.4: only permanents contribute devotion pips.
+        if face
+            .card_type
+            .core_types
+            .iter()
+            .any(|t| t.is_permanent_type())
+        {
             for color in ManaColor::ALL {
                 let pips = face.mana_cost.count_colored_pips(Some(color)).max(0) as u32;
                 pip_totals.add(color, pips.saturating_mul(entry.count));
@@ -120,7 +126,7 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
         let scales = reads_devotion(face);
         if let Some((colors, threshold)) = &gate {
             for color in colors {
-                thresholds.raise(*color, *threshold);
+                thresholds.insert(*color, *threshold);
                 demanded.fixed.push(*color);
             }
         }
@@ -146,9 +152,9 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
         .filter(|color| demanded.any_chosen || demanded.fixed.contains(color))
         .max_by_key(|color| pip_totals.get(*color));
 
-    let (pip_count, highest_threshold) = match primary_color {
+    let (pip_count, thresholds) = match primary_color {
         Some(color) => (pip_totals.get(color), thresholds.get(color)),
-        None => (0, None),
+        None => (0, Vec::new()),
     };
 
     let commitment = compute_commitment(payoff_count, pip_count, total_nonland);
@@ -157,7 +163,7 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
         payoff_count,
         primary_color,
         pip_count,
-        highest_threshold,
+        thresholds,
         commitment,
         payoff_names,
     }
@@ -175,22 +181,6 @@ fn compute_commitment(payoff_count: u32, pip_count: u32, total_nonland: u32) -> 
     // ~30 pips per 60 nonland is a fully-committed mono-color devotion deck.
     let pip_density = (commitment::density_per_60(pip_count, total_nonland) / 30.0).min(1.0);
     commitment::geometric_mean(&[payoff_density, pip_density])
-}
-
-/// CR 205.2a: a face that can enter the battlefield contributes devotion.
-/// Instants and sorceries never do (their pips are not "permanents you control").
-fn is_permanent_face(core_types: &[CoreType]) -> bool {
-    core_types.iter().any(|t| {
-        matches!(
-            t,
-            CoreType::Creature
-                | CoreType::Artifact
-                | CoreType::Enchantment
-                | CoreType::Planeswalker
-                | CoreType::Land
-                | CoreType::Battle
-        )
-    })
 }
 
 /// The highest `DevotionGE` gate on the face (the god threshold), with the
@@ -342,44 +332,50 @@ impl ColorTotals {
     }
 }
 
-/// Per-color god-threshold maxima. `None` slots distinguish "no gate in this
-/// color" from a real threshold, so a scaling-only deck is never handed a
-/// fabricated ceiling.
+/// Per-color set of DISTINCT god thresholds. Each Theros god turns on
+/// independently at its own `DevotionGE` threshold, so a cast crossing a lower
+/// gate (activating a smaller god) matters even when a higher gate exists —
+/// keeping only the maximum would miss that. An empty slot distinguishes "no
+/// gate in this color" from a real threshold, so a scaling-only deck is never
+/// handed a fabricated ceiling.
 #[derive(Default)]
 struct ColorThresholds {
-    totals: ColorTotals,
-    seen: ColorSeen,
-}
-
-#[derive(Default)]
-struct ColorSeen {
-    white: bool,
-    blue: bool,
-    black: bool,
-    red: bool,
-    green: bool,
+    white: Vec<u32>,
+    blue: Vec<u32>,
+    black: Vec<u32>,
+    red: Vec<u32>,
+    green: Vec<u32>,
 }
 
 impl ColorThresholds {
-    fn raise(&mut self, color: ManaColor, threshold: u32) {
-        let current = self.totals.get(color);
-        *self.totals.slot(color) = current.max(threshold);
-        match color {
-            ManaColor::White => self.seen.white = true,
-            ManaColor::Blue => self.seen.blue = true,
-            ManaColor::Black => self.seen.black = true,
-            ManaColor::Red => self.seen.red = true,
-            ManaColor::Green => self.seen.green = true,
+    fn insert(&mut self, color: ManaColor, threshold: u32) {
+        let slot = self.slot(color);
+        if !slot.contains(&threshold) {
+            slot.push(threshold);
         }
     }
-    fn get(&self, color: ManaColor) -> Option<u32> {
-        let seen = match color {
-            ManaColor::White => self.seen.white,
-            ManaColor::Blue => self.seen.blue,
-            ManaColor::Black => self.seen.black,
-            ManaColor::Red => self.seen.red,
-            ManaColor::Green => self.seen.green,
-        };
-        seen.then(|| self.totals.get(color))
+    /// The distinct thresholds in this color, sorted ascending.
+    fn get(&self, color: ManaColor) -> Vec<u32> {
+        let mut out = self.slot_ref(color).clone();
+        out.sort_unstable();
+        out
+    }
+    fn slot(&mut self, color: ManaColor) -> &mut Vec<u32> {
+        match color {
+            ManaColor::White => &mut self.white,
+            ManaColor::Blue => &mut self.blue,
+            ManaColor::Black => &mut self.black,
+            ManaColor::Red => &mut self.red,
+            ManaColor::Green => &mut self.green,
+        }
+    }
+    fn slot_ref(&self, color: ManaColor) -> &Vec<u32> {
+        match color {
+            ManaColor::White => &self.white,
+            ManaColor::Blue => &self.blue,
+            ManaColor::Black => &self.black,
+            ManaColor::Red => &self.red,
+            ManaColor::Green => &self.green,
+        }
     }
 }

@@ -122,7 +122,7 @@ fn detects_god_gate_and_threshold() {
     )]);
     assert_eq!(f.payoff_count, 1);
     assert_eq!(f.primary_color, Some(ManaColor::Black));
-    assert_eq!(f.highest_threshold, Some(5));
+    assert_eq!(f.thresholds, vec![5]);
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn detects_scaling_drain_payoff() {
     assert_eq!(f.payoff_count, 4);
     assert_eq!(f.primary_color, Some(ManaColor::Black));
     // A drain has no god threshold.
-    assert_eq!(f.highest_threshold, None);
+    assert!(f.thresholds.is_empty());
 }
 
 #[test]
@@ -260,4 +260,25 @@ fn chosen_color_payoff_uses_deck_densest_color() {
     ];
     let f = detect(&deck);
     assert_eq!(f.primary_color, Some(ManaColor::Green));
+}
+
+/// Two gods at DIFFERENT thresholds in the same color must both be retained —
+/// keeping only the maximum would hide the lower god from the policy.
+#[test]
+fn distinct_thresholds_are_all_retained() {
+    let deck = vec![
+        entry(
+            god("Small God", ManaColor::Black, 3, ManaCostShard::Black),
+            1,
+        ),
+        entry(god("Big God", ManaColor::Black, 5, ManaCostShard::Black), 1),
+        entry(pip_body("Black Body", BB), 8),
+    ];
+    let f = detect(&deck);
+    assert_eq!(f.primary_color, Some(ManaColor::Black));
+    assert_eq!(
+        f.thresholds,
+        vec![3, 5],
+        "both distinct thresholds retained"
+    );
 }
