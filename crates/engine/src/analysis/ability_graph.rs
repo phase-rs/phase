@@ -884,6 +884,9 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): as-enters copy choice — no repeatable
+        // modeled axis at the candidate stage.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::DoublePT { .. }

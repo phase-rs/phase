@@ -805,6 +805,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::ExileTop
         | EffectKind::TargetOnly
         | EffectKind::Choose
+        | EffectKind::ChoosePermanent
         | EffectKind::OpponentGuess
         | EffectKind::ChooseDamageSource
         | EffectKind::Suspect

@@ -15,6 +15,24 @@
     "enter": "Włącz pełny ekran",
     "exit": "Wyłącz pełny ekran"
   },
+  "nativeEngineProgress": {
+    "title": "Aktualizowanie silnika natywnego",
+    "resolving": "Wyszukiwanie właściwego lokalnego serwera…",
+    "downloadingBinary": "Pobieranie zaktualizowanego serwera…",
+    "verifying": "Weryfikowanie serwera…",
+    "downloadingData": "Pobieranie danych gry…",
+    "spawning": "Uruchamianie lokalnego serwera…",
+    "ready": "Silnik natywny jest gotowy",
+    "failed": "Nie można przygotować silnika natywnego"
+  },
+  "engineBadge": {
+    "native": "Silnik natywny",
+    "nativeTooltip": "Ta gra korzysta z natywnego silnika aplikacji desktopowej.",
+    "inBrowser": "Silnik przeglądarki",
+    "inBrowserTooltip": "Silnik natywny niedostępny — ta gra działa w przeglądarce.",
+    "versionMismatchTooltip": "Niezgodna wersja silnika natywnego — ta gra działa w przeglądarce.",
+    "notAttemptedTooltip": "Ta gra działa w przeglądarce — silnik natywny nie został użyty."
+  },
   "buildBadge": {
     "downloading": "pobieranie… {{progress}}%",
     "checking": "sprawdzanie…",
@@ -247,7 +265,13 @@
     "youPlayFirst": "Zaczynasz",
     "playerPlaysFirst": "{{name}} zaczyna",
     "heads": "Orzeł",
-    "tails": "Reszka"
+    "tails": "Reszka",
+    "coinFlip": "Rzut monetą",
+    "wonCoinFlip": "{{name}} wygrywa rzut monetą",
+    "lostCoinFlip": "{{name}} przegrywa rzut monetą",
+    "turnOrder": "Kolejność tur",
+    "turnOrderItem": "Tura {{turn}}: {{name}}",
+    "youTakeTurn": "Rozgrywasz turę {{turn}}"
   },
   "chrome": {
     "back": "Wstecz",

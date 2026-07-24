@@ -537,8 +537,22 @@ pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinitio
         })
 }
 
+/// CR 614.1a + CR 400.7 + CR 707.2: True for a runtime replacement bound to the
+/// lifetime of the OBJECT hosting it — the "if it would leave the battlefield,
+/// exile it instead" rider installed by Unearth (CR 702.84a) and the
+/// parser-driven reanimation cards (Gruesome Encore, Whip of Erebos, …). It is
+/// stamped `RestrictionExpiry::UntilHostLeavesPlay`. Like the die-exile rider it
+/// is persisted in base only to survive CR 613.1 layer reseeds; it is NOT a
+/// copiable value (a copy of the host must not inherit the exile redirect,
+/// CR 707.2) and must lapse when the host leaves the battlefield (CR 400.7).
+pub(crate) fn is_runtime_host_lifetime_replacement(def: &ReplacementDefinition) -> bool {
+    matches!(def.expiry, Some(RestrictionExpiry::UntilHostLeavesPlay))
+}
+
 pub(crate) fn is_runtime_non_copiable_replacement(def: &ReplacementDefinition) -> bool {
-    is_runtime_control_gated_replacement(def) || is_runtime_target_die_exile_replacement(def)
+    is_runtime_control_gated_replacement(def)
+        || is_runtime_target_die_exile_replacement(def)
+        || is_runtime_host_lifetime_replacement(def)
 }
 
 /// CR 707.2 + CR 712.4b: Build the copiable values for a melded permanent
@@ -849,6 +863,9 @@ fn walk_continuous_mod(modification: &ContinuousModification, out: &mut Vec<Stri
         // from the provider objects at layer collection time, not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
+        // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
+        // nested ability/effect carrier to walk (the copy grant is the runtime TCE).
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -1184,6 +1201,9 @@ fn walk_effect(effect: &Effect, out: &mut Vec<String>) {
         | Effect::HideawayConceal { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): filter-only copy choice; no nested
+        // ability carrier to walk — a leaf for printed-card collection.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounter { .. }
@@ -1950,6 +1970,88 @@ mod tests {
             TriggerDefinition::new(TriggerMode::Attacks),
         ]);
         intrinsic_copiable_values(&source)
+    }
+
+    /// A bare "Moved SelfRef -> Exile" redirect with NO expiry stamp — the
+    /// Personal Decoy printed-static shape (CMB1 playtest card). This is the
+    /// fixture that kills shape-widening: the runtime detectors must key on the
+    /// `UntilHostLeavesPlay` expiry stamp, NOT on the redirect shape, so a
+    /// printed-static exile redirect is never misclassified as a runtime rider.
+    fn bare_moved_selfref_exile_rider() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+
+    /// R10 (issue #5976): a redirect that lacks the `UntilHostLeavesPlay` stamp
+    /// must be classified as NEITHER a host-lifetime rider NOR non-copiable — the
+    /// detectors key on the expiry stamp, not the Moved->Exile shape, so a
+    /// printed-static exile redirect (Personal Decoy) is never widened into a
+    /// runtime rider.
+    #[test]
+    fn r10_bare_exile_redirect_without_expiry_is_not_runtime_rider() {
+        let def = bare_moved_selfref_exile_rider();
+        assert!(
+            !is_runtime_host_lifetime_replacement(&def),
+            "a redirect with no UntilHostLeavesPlay stamp is NOT a host-lifetime rider"
+        );
+        assert!(
+            !is_runtime_non_copiable_replacement(&def),
+            "a printed-static exile redirect must stay copiable (shape must not widen)"
+        );
+    }
+
+    /// R6 (issue #5976): the same redirect, now stamped `UntilHostLeavesPlay`, IS
+    /// a runtime rider (CR 702.84a) and must be excluded from the host's copiable
+    /// values so a copy does not inherit the exile redirect (CR 707.2). This is
+    /// the production seam the runtime token-copy path
+    /// (`compute_current_copiable_values` -> `copiable_replacement_definitions`)
+    /// consumes.
+    #[test]
+    fn host_lifetime_rider_is_non_copiable_and_excluded_from_copiable_values() {
+        let rider = bare_moved_selfref_exile_rider()
+            .expiry(crate::types::ability::RestrictionExpiry::UntilHostLeavesPlay);
+        assert!(is_runtime_host_lifetime_replacement(&rider));
+        assert!(is_runtime_non_copiable_replacement(&rider));
+
+        let mut obj = GameObject::new(
+            ObjectId(7),
+            CardId(7),
+            PlayerId(0),
+            "Unearthed".to_string(),
+            Zone::Battlefield,
+        );
+        obj.base_replacement_definitions = Arc::new(vec![rider]);
+
+        let copiable = intrinsic_copiable_values(&obj);
+        assert!(
+            copiable
+                .replacement_definitions
+                .iter()
+                .all(|r| !is_runtime_host_lifetime_replacement(r)),
+            "CR 707.2: a copy must not inherit the host-lifetime exile rider"
+        );
+        assert!(
+            copiable.replacement_definitions.is_empty(),
+            "the only rider was the non-copiable host-lifetime one, so copiable defs are empty"
+        );
     }
 
     fn copy_recipient(id: u64) -> GameObject {

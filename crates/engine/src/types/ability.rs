@@ -1334,6 +1334,16 @@ pub enum ChosenAttribute {
     /// Replace-on-rechoose: the {Left,Right} hijack in `choose.rs` removes any
     /// prior `Direction` before pushing, so only the "last chosen" survives.
     Direction(SeatDirection),
+    /// CR 707.2c + CR 614.12a + CR 400.7: The copiable-values snapshot chosen as
+    /// an `Effect::ChoosePermanent` Aura entered (Metamorphic Alteration:
+    /// "choose a creature"). Like `Card` and `TributeOutcome`, this is
+    /// ENGINE-SET (written directly at the `CopyTargetChoice` answer, not
+    /// produced through `ChoiceType`/`from_choice`) — it records the frozen
+    /// snapshot the companion copy effect was installed from, and, being stored
+    /// in `chosen_attributes`, is cleared automatically when the Aura changes
+    /// zones (CR 400.7), which is exactly the copy's lifetime. Boxed to keep
+    /// the enum small (mirrors the copy-value box idiom).
+    CopiableSnapshot(Box<LatchedCopiableSnapshot>),
 }
 
 impl ChosenAttribute {
@@ -1395,6 +1405,13 @@ impl ChosenAttribute {
             // option set to persist a typed `Direction` rather than a `Label`.
             Self::Direction(_) => ChoiceType::Labeled {
                 options: vec!["Left".into(), "Right".into()],
+            },
+            // Engine-set, never player-prompted (written directly at the
+            // `CopyTargetChoice` answer, not via `from_choice`). Mirrors the
+            // `Card` placeholder: an empty `Labeled` template rather than
+            // inventing a spurious copy-snapshot choice category.
+            Self::CopiableSnapshot(_) => ChoiceType::Labeled {
+                options: Vec::new(),
             },
         }
     }
@@ -2602,6 +2619,19 @@ pub enum RestrictionExpiry {
     UntilEndOfNextTurnOf {
         player: PlayerId,
     },
+    /// CR 614.1a + CR 400.7: a runtime-installed replacement bound to the
+    /// lifetime of the OBJECT hosting it (the "if it would leave the
+    /// battlefield, exile it instead" rider of Unearth / Gruesome Encore /
+    /// Whip of Erebos, CR 702.84a). It is ONLY meaningful on an object-hosted
+    /// `ReplacementDefinition::expiry`; it is meaningless for the state-hosted
+    /// `GameRestriction` / `pending_damage_replacements` that share this enum,
+    /// and it is NEVER pruned by turn machinery (no untap/cleanup step ends it).
+    /// It lapses solely via the battlefield-exit prune
+    /// (`zones.rs` -> `layers.rs::prune_controller_controls_source_on_leave`).
+    /// Three operational consequences follow: it is base-installed so it
+    /// survives CR 613.1 layer reseeds; it is non-copiable (CR 707.2); and its
+    /// base+live copies are pruned together when the host leaves play.
+    UntilHostLeavesPlay,
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.
@@ -10847,6 +10877,22 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
+    /// CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." The
+    /// controller chooses a permanent matching `filter` as the Aura enters
+    /// (CR 614.12a: the choice is made before the permanent enters). Unlike
+    /// `BecomeCopy` — where the *entering* object becomes the copy — this effect
+    /// latches the chosen permanent's copiable values and applies them to a
+    /// *separate* recipient: the Aura's enchanted host (Metamorphic Alteration).
+    /// Runtime discrimination is `CopyTargetPurpose::PersistChosenAttribute`;
+    /// emission is gated on `LinkedChoiceKind::CopyChosenHost` (companion
+    /// `ContinuousModification::CopyChosen` is a parse-time marker only). The
+    /// copy is materialized once, at the choice answer, as a Layer-1
+    /// `CopyValues` transient continuous effect whose values are fixed per
+    /// CR 707.2c (determined when the copy effect first starts to apply).
+    ChoosePermanent {
+        #[serde(default = "default_target_filter_any")]
+        filter: TargetFilter,
+    },
     /// CR 113.1a + CR 113.10 + CR 611.2 + CR 611.2c + CR 613.1f: Grant the
     /// recipient(s) all activated abilities of a chosen target object, for a
     /// duration. Unlike the static-side `ContinuousModification::GrantAllActivatedAbilitiesOf`
@@ -14384,6 +14430,10 @@ impl Effect {
             // target) picked at resolution time via
             // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
             | Effect::ReturnAsAura { .. }
+            // CR 614.12a + CR 707.2c: Metamorphic Alteration's "As this Aura
+            // enters, choose a creature" is an as-enters replacement CHOICE picked
+            // via `WaitingFor::CopyTargetChoice`, never a stack-declared target.
+            | Effect::ChoosePermanent { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseAndSacrificeRest { .. }
@@ -14689,6 +14739,8 @@ impl Effect {
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::BecomeCopy { .. }
+            // CR 707.2c: the copy-source choice carries no magnitude.
+            | Effect::ChoosePermanent { .. }
             | Effect::GainActivatedAbilitiesOfTarget { .. }
             | Effect::ChooseCard { .. }
             | Effect::MultiplyCounter { .. }
@@ -14942,6 +14994,8 @@ impl Effect {
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::BecomeCopy { .. }
+            // CR 707.2c: the copy-source choice carries no magnitude.
+            | Effect::ChoosePermanent { .. }
             | Effect::GainActivatedAbilitiesOfTarget { .. }
             | Effect::ChooseCard { .. }
             | Effect::MultiplyCounter { .. }
@@ -15152,6 +15206,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::HideawayConceal { .. } => "HideawayConceal",
         Effect::CopyTokenBlockingAttacker { .. } => "CopyTokenBlockingAttacker",
         Effect::BecomeCopy { .. } => "BecomeCopy",
+        Effect::ChoosePermanent { .. } => "ChoosePermanent",
         Effect::GainActivatedAbilitiesOfTarget { .. } => "GainActivatedAbilitiesOfTarget",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
@@ -15371,6 +15426,7 @@ pub enum EffectKind {
     Tribute,
     TimeTravel,
     BecomeMonarch,
+    ChoosePermanent,
     NoOp,
     Proliferate,
     ProliferateTarget,
@@ -15653,6 +15709,7 @@ impl From<&Effect> for EffectKind {
             // is bookkeeping layered on top of the same token-copy creation.
             Effect::CopyTokenBlockingAttacker { .. } => EffectKind::CopyTokenOf,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
+            Effect::ChoosePermanent { .. } => EffectKind::ChoosePermanent,
             Effect::GainActivatedAbilitiesOfTarget { .. } => {
                 EffectKind::GainActivatedAbilitiesOfTarget
             }
@@ -20511,6 +20568,47 @@ pub struct CopiableValues {
     pub static_definitions: Arc<Vec<StaticDefinition>>,
 }
 
+/// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an
+/// `Effect::ChoosePermanent` choice is answered (`CopyTargetPurpose::PersistChosenAttribute`).
+/// Per CR 707.2c the copiable values a static copy effect grants are determined
+/// only when the effect first starts to apply, and per CR 707.2b later changes
+/// to the chosen object never propagate — so the values are frozen here rather
+/// than re-read live. The display trio (`display_source` / `printed_ref` /
+/// `token_image_ref`) is art routing only (NOT a CR 707.2 copiable value),
+/// carried so the enchanted host renders the chosen creature's art; it mirrors
+/// the identical trio on `ContinuousModification::CopyValues`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedCopiableSnapshot {
+    pub values: CopiableValues,
+    #[serde(default)]
+    pub display_source: DisplaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
+}
+
+/// CR 707.2 + CR 707.2c: Why a `WaitingFor::CopyTargetChoice` was raised, which
+/// determines how the answer is consumed in `handle_copy_target_choice`.
+/// `BecomeCopy` (default for serde back-compat with pre-existing serialized
+/// enter-as-a-copy waits) resolves the entering object into a copy of the
+/// chosen permanent. `PersistChosenAttribute` (Metamorphic Alteration) latches
+/// the chosen permanent's copiable values onto the source Aura and installs a
+/// copy effect on the Aura's enchanted host instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum CopyTargetPurpose {
+    /// CR 707.2: the entering object (the clone) becomes a copy of the chosen
+    /// permanent, acquiring its copiable values. Every classic enter-as-a-copy
+    /// card (Clone, Phantasmal Image, Vesuva, meld/embalm copy tokens).
+    #[default]
+    BecomeCopy,
+    /// CR 707.2c + CR 614.12a: the chosen permanent's copiable values are
+    /// latched and applied to a *separate* recipient (the source Aura's host)
+    /// rather than to the entering object. Metamorphic Alteration.
+    PersistChosenAttribute,
+}
+
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
 /// granted cost-bearing keyword's cost is DERIVED from each recipient. Extensible
 /// axis (build-for-the-class): today only the reduced-mana-cost form is printed;
@@ -20569,6 +20667,18 @@ pub enum ContinuousModification {
         #[serde(default)]
         token_image_ref: Option<TokenImageRef>,
     },
+    /// CR 707.2c + CR 613.1a: Parse-time MARKER for the static ability
+    /// "enchanted creature is a copy of the chosen creature" (Metamorphic
+    /// Alteration). It exists so the card's static parse claims copy support at
+    /// Layer 1, but it carries NO layered behavior: the actual copy is
+    /// materialized once — at the `Effect::ChoosePermanent` answer — as a
+    /// `CopyValues` transient continuous effect whose values are latched per
+    /// CR 707.2c (fixed when the copy effect first starts to apply). Applying it
+    /// in the layer pipeline would double-install the copy, so its
+    /// `apply_continuous_effect` arm is an explicit no-op. Layered at
+    /// `Layer::Copy` purely for correct copy-layer ordering/dependency
+    /// bookkeeping alongside the real `CopyValues` TCE.
+    CopyChosen,
     /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
     /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's
     /// Mind Swap). Applied in Layer 1 so the override is part of the copy's

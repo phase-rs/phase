@@ -112,7 +112,7 @@ export function OpponentSeatPane({
             </span>
           )}
         </div>
-        <div className="pointer-events-none -translate-y-[52%]">
+        <div className="pointer-events-none">
           <OpponentHand playerId={playerId} showCards={showCards} layout="split" />
         </div>
       </div>

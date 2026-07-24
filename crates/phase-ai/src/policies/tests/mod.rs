@@ -10,5 +10,6 @@ pub mod equipment_payoff;
 pub mod lifegain_payoff;
 pub mod mill_payoff;
 pub mod mulligan_input_lint;
+pub mod poison;
 pub mod reanimator_payoff;
 pub mod score_contract_lint;

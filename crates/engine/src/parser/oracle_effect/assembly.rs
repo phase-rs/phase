@@ -9,11 +9,20 @@
 //! The clause-lowering helpers this traversal calls still live in `lower.rs`
 //! (widened to `pub(super)` for this move); relocating them is a later increment.
 
+use nom::branch::alt;
+use nom::bytes::complete::tag;
+use nom::character::complete::multispace0;
+use nom::combinator::value;
+use nom::sequence::preceded;
+use nom::Parser;
+
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::effect_chain::{
     AbsorbKind, ClauseDisposition, ClauseId, EffectChainIr, OtherwiseKind, PlayerScopeRewrite,
     PriorModifier, ReplaceMeaningKind, ReplicateKind,
 };
+use crate::parser::oracle_nom::bridge::nom_on_lower;
+use crate::parser::oracle_nom::error::OracleError;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CastFromZoneDriver,
     CastingPermission, ControllerRef, Effect, PlayerFilter, QuantityExpr, StaticCondition,
@@ -69,6 +78,55 @@ use super::{
     rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
     wire_optional_cast_decline_fallback,
 };
+
+/// CR 601.2c: True when the assembled head chose one or more players at
+/// announcement, including Oracle's type-less `target opponents` lowering.
+fn is_multi_target_player_subject_definition(def: &AbilityDefinition) -> bool {
+    def.multi_target.is_some()
+        && def
+            .effect
+            .target_filter()
+            .is_some_and(|target| match target {
+                TargetFilter::Player | TargetFilter::Opponent => true,
+                TargetFilter::Typed(typed) => {
+                    typed.type_filters.is_empty()
+                        && typed.properties.is_empty()
+                        && matches!(typed.controller, Some(ControllerRef::Opponent))
+                }
+                _ => false,
+            })
+}
+
+/// CR 608.2c: A bare verb after a multi-target player subject continues that
+/// subject. A printed player subject (especially `you`) starts an independent
+/// actor-relative instruction instead.
+fn has_implicit_player_subject_continuation(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    nom_on_lower(source, &lower, |input| {
+        value(
+            (),
+            preceded(
+                multispace0,
+                alt((
+                    tag::<_, _, OracleError<'_>>("you "),
+                    tag("target "),
+                    tag("each "),
+                    tag("that "),
+                    tag("those "),
+                    tag("the "),
+                    tag("a player "),
+                    tag("an opponent "),
+                    tag("players "),
+                    tag("opponents "),
+                    tag("it "),
+                    tag("they "),
+                )),
+            ),
+        )
+        .parse(input)
+    })
+    .is_none()
+}
 
 // ===========================================================================
 // AssemblyEnv (Plan 01 §6, U6-B1) — emit-time provenance + role registries
@@ -2015,6 +2073,32 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 def = def.multi_target(spec.clone());
             }
         }
+        // CR 601.2c + CR 608.2c: A conjugated continuation after an "any
+        // number of target players/opponents each" head shares the targets
+        // selected for that head. At this assembly seam, the previous definition
+        // has its finalized `multi_target` shape and this clause still has its
+        // source text, so bind a bare draw ("then draw seven cards") to
+        // `ParentTarget`. An explicit imperative ("then you draw a card")
+        // remains controller-relative.
+        if def.sub_link == SubAbilityLink::ContinuationStep
+            && defs
+                .last()
+                .is_some_and(is_multi_target_player_subject_definition)
+            && has_implicit_player_subject_continuation(
+                clause_ir.source.fragment().unwrap_or_default(),
+            )
+        {
+            if let Effect::Draw { target, .. } = def.effect.as_mut() {
+                if matches!(
+                    target,
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                ) {
+                    *target = TargetFilter::ParentTarget;
+                }
+            }
+        }
         if parse_controlled_by_different_players_target_constraint(
             clause_ir.source.fragment().unwrap_or_default(),
         ) {
@@ -2302,6 +2386,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
     // is a simple "reveal the top N" with no player selection — it must resolve synchronously
     // (via RevealTop) so that sub_ability chains like RevealedHasCardType evaluate inline.
+    //
+    // CR 107.3 + CR 701.20a: Dynamic counts (Portent of Calamity's "top X cards") cannot
+    // round-trip through `RevealTop { count: u32 }` without collapsing to 1. Keep those
+    // Digs as reveal-only peeks (`keep_count: 0`) so X resolves at runtime; a later
+    // ForEachCategory / LastRevealed rest-move consumes the revealed pool.
     for def in &mut defs {
         if let Effect::Dig {
             count,
@@ -2317,14 +2406,27 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             if destination == &Some(Zone::Library) && rest_destination == &Some(Zone::Library) {
                 continue;
             }
-            let count_val = match count {
-                QuantityExpr::Fixed { value } => *value as u32,
-                _ => 1,
-            };
-            *def.effect = Effect::RevealTop {
-                player: player.clone(),
-                count: count_val,
-            };
+            match count {
+                QuantityExpr::Fixed { value } => {
+                    *def.effect = Effect::RevealTop {
+                        player: player.clone(),
+                        count: *value as u32,
+                    };
+                }
+                _ => {
+                    if let Effect::Dig {
+                        keep_count,
+                        destination,
+                        rest_destination,
+                        ..
+                    } = &mut *def.effect
+                    {
+                        *keep_count = Some(0);
+                        *destination = None;
+                        *rest_destination = None;
+                    }
+                }
+            }
         }
     }
 

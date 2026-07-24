@@ -262,6 +262,14 @@ pub fn resolve(
                     // reset: a damaged creature can gain/lose characteristics
                     // or enter combat before it dies. Cleanup prunes this
                     // narrowly scoped base copy at end of turn.
+                    // A host-lifetime rider (CR 702.84a "if it would leave the
+                    // battlefield, exile it instead", stamped
+                    // `UntilHostLeavesPlay`) is the same class: it must survive
+                    // every CR 613.1 reseed so the redirect still fires after the
+                    // returned permanent gains/loses characteristics, and its
+                    // base+live copies are pruned together the instant the host
+                    // leaves the battlefield (`prune_controller_controls_source_on_leave`,
+                    // CR 400.7) so it never revives on a same-ObjectId re-entry.
                     //
                     // Acknowledged out-of-scope edges (NOT fixed here): (1) Cleave
                     // re-baselining only touches spells on the stack (casting.rs)
@@ -275,7 +283,12 @@ pub fn resolve(
                         crate::game::printed_cards::is_runtime_target_die_exile_replacement(
                             &replacement,
                         );
+                    let host_lifetime =
+                        crate::game::printed_cards::is_runtime_host_lifetime_replacement(
+                            &replacement,
+                        );
                     let install_to_base = durable_die_exile
+                        || host_lifetime
                         || matches!(
                             replacement.condition,
                             Some(ReplacementCondition::ControllerControlsSource { .. })

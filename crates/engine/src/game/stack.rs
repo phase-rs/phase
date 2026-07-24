@@ -9,8 +9,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, ExileLink, ExileLinkKind, GameState,
-    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, StackEntry,
-    StackEntryKind, StackPaidSnapshot, WaitingFor,
+    MayTriggerAutoChoiceKey, MayTriggerOrigin, PendingCounterPostAction, PendingSpellResolution,
+    StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -239,6 +239,58 @@ fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
     }
 }
 
+/// CR 608.3 + CR 400.7d: Snapshot cast-link / target facts for a permanent spell
+/// paused mid-resolution (delivery-tail `NeedsChoice`, replacement-choice
+/// `NeedsChoice`, or CallerEpilogue `CopyTargetChoice`). Single authority so a
+/// new cast-metadata field cannot be threaded into only two of three stash sites.
+fn pending_spell_resolution_snapshot(
+    state: &GameState,
+    entry: &StackEntry,
+    ability: Option<&ResolvedAbility>,
+    casting_variant: CastingVariant,
+    actual_mana_spent: u32,
+    spell_targets: &[TargetRef],
+) -> PendingSpellResolution {
+    let obj = state.objects.get(&entry.id);
+    let cast_from_zone = ability
+        .and_then(|a| a.context.cast_from_zone)
+        .or_else(|| obj.and_then(|o| o.cast_from_zone));
+    let cast_timing_permission =
+        obj.and_then(|o| o.cast_timing_permission.map(|(permission, _)| permission));
+    let kickers_paid = ability
+        .map(|a| a.context.kickers_paid.clone())
+        .unwrap_or_else(|| obj.map(|o| o.kickers_paid.clone()).unwrap_or_default());
+    let additional_cost_payment_count = ability
+        .map(|a| a.context.additional_cost_payment_count)
+        .unwrap_or_else(|| {
+            obj.map(|o| o.additional_cost_payment_count)
+                .unwrap_or_default()
+        });
+    let additional_cost_payments = ability
+        .map(|a| a.context.additional_cost_payments.clone())
+        .unwrap_or_else(|| {
+            obj.map(|o| o.additional_cost_payments.clone())
+                .unwrap_or_default()
+        });
+    let convoked_creatures = obj
+        .map(|o| o.convoked_creatures.clone())
+        .unwrap_or_default();
+    PendingSpellResolution {
+        object_id: entry.id,
+        controller: entry.controller,
+        casting_variant,
+        cast_from_zone,
+        cast_controller: Some(entry.controller),
+        cast_timing_permission,
+        spell_targets: spell_targets.to_vec(),
+        actual_mana_spent,
+        kickers_paid,
+        additional_cost_payment_count,
+        additional_cost_payments,
+        convoked_creatures,
+    }
+}
+
 /// CR 608.2: Resolve the top object on the stack.
 pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
@@ -440,10 +492,19 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
-    // Capture targets for Aura attachment after resolution
+    // Capture targets for Aura attachment after resolution. Prefer the full
+    // chain flatten so Enchant targets assigned onto an Aura placeholder are
+    // not missed when only a nested sink holds them.
     let spell_targets = ability
         .as_ref()
-        .map(|a| a.targets.clone())
+        .map(|a| {
+            let flat = flatten_targets_in_chain(a);
+            if flat.is_empty() {
+                a.targets.clone()
+            } else {
+                flat
+            }
+        })
         .unwrap_or_default();
 
     // CR 702.103e: As a bestowed Aura spell begins resolving, if its target is
@@ -970,11 +1031,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
-            let convoked_creatures = state
-                .objects
-                .get(&entry.id)
-                .map(|obj| obj.convoked_creatures.clone())
-                .unwrap_or_default();
             // CR 702.33d + CR 400.7d + CR 603.4: Normalize the authoritative
             // cast-link provenance onto the stack object BEFORE `replace_event`,
             // so the pipeline's `CastLinkSnapshot` (captured inside
@@ -1005,11 +1061,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         ability.context.cast_controller.or(Some(entry.controller));
                 }
             }
-            let cast_timing_permission = state
-                .objects
-                .get(&entry.id)
-                .and_then(|obj| obj.cast_timing_permission.map(|(permission, _)| permission));
-
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -1066,12 +1117,26 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 events,
                             ) {
                                 zone_pipeline::ZoneDeliveryResult::Done => {}
-                                // CR 614.1c / CR 616.1: the delivery tail parked a
-                                // counter-replacement pause and stashed the
-                                // remaining tail; surface it without running the
-                                // caller epilogue (the parked tail carries
-                                // `CallerEpilogue` and the resume path owns it).
+                                // CR 614.1c / CR 616.1 / CR 614.12a: the delivery
+                                // tail parked a mid-entry choice (CopyTargetChoice,
+                                // NamedChoice, counter branch, …) and stashed the
+                                // remaining tail. Surface it without running the
+                                // caller epilogue — including CR 608.3c Aura attach,
+                                // which has not run yet.
+                                //
+                                // CR 608.3c + CR 400.7d: stash PendingSpellResolution
+                                // so the choice-answer resume can complete Aura
+                                // attachment / cast-link stamps — mirrors the
+                                // ReplacementResult::NeedsChoice arm below.
                                 zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
+                                    state.push_spell_resolution(pending_spell_resolution_snapshot(
+                                        state,
+                                        &entry,
+                                        ability.as_ref(),
+                                        casting_variant,
+                                        actual_mana_spent,
+                                        &spell_targets,
+                                    ));
                                     events.push(GameEvent::StackResolved {
                                         object_id: entry.id,
                                     });
@@ -1162,22 +1227,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             events,
                         );
                     }
-                    // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
-                    // Siege protector / Tribute opponent-choice prompt that was stashed
-                    // by `apply_single_replacement` while resolving this ZoneChange).
-                    // Sets `state.waiting_for` to the resulting prompt, if any — the
-                    // caller's post-stack resolution checks waiting_for before returning
-                    // priority. Without this drain the choice would be silently dropped.
-                    if state.has_post_replacement_drain() {
-                        state.clear_post_replacement_source();
-                        let _ = super::engine_replacement::apply_pending_post_replacement_effect(
-                            state,
-                            Some(entry.id),
-                            None,
-                            Some(crate::types::replacements::ReplacementEvent::Moved),
-                            events,
-                        );
-                    }
+                    // CR 614.12a post-replacement drain runs AFTER CR 608.3c Aura
+                    // attach below — PersistChosenAttribute needs `attached_to`
+                    // before the choice is answered (mirrors dig/CR 303.4f).
                 }
                 super::replacement::ReplacementResult::Prevented => {
                     // CR 608.3e: Permanent spell's ETB was fully prevented —
@@ -1217,60 +1269,20 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     // A replacement needs player choice (e.g., Clone "enter as a copy").
                     // Store context so handle_replacement_choice can complete post-resolution.
-                    let cast_from_zone = ability
-                        .as_ref()
-                        .and_then(|a| a.context.cast_from_zone)
-                        .or_else(|| state.objects.get(&entry.id).and_then(|o| o.cast_from_zone));
                     // CR 702.33d + CR 400.7d: Use the authoritative kicker payments
                     // (resolving spell's `SpellContext` when present, else the stack
                     // object's stamped value) so placeholder permanent spells with
                     // `ability == None` are not silently de-kicked when a replacement
                     // needs a player choice. `engine_replacement` restores this onto
                     // the permanent unconditionally after the choice resolves.
-                    let kickers_paid = ability
-                        .as_ref()
-                        .map(|a| a.context.kickers_paid.clone())
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.kickers_paid.clone())
-                                .unwrap_or_default()
-                        });
-                    let additional_cost_payment_count = ability
-                        .as_ref()
-                        .map(|a| a.context.additional_cost_payment_count)
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.additional_cost_payment_count)
-                                .unwrap_or_default()
-                        });
-                    let additional_cost_payments = ability
-                        .as_ref()
-                        .map(|a| a.context.additional_cost_payments.clone())
-                        .unwrap_or_else(|| {
-                            state
-                                .objects
-                                .get(&entry.id)
-                                .map(|o| o.additional_cost_payments.clone())
-                                .unwrap_or_default()
-                        });
-                    state.push_spell_resolution(crate::types::game_state::PendingSpellResolution {
-                        object_id: entry.id,
-                        controller: entry.controller,
+                    state.push_spell_resolution(pending_spell_resolution_snapshot(
+                        state,
+                        &entry,
+                        ability.as_ref(),
                         casting_variant,
-                        cast_from_zone,
-                        cast_controller: Some(entry.controller),
-                        cast_timing_permission,
-                        spell_targets: spell_targets.clone(),
                         actual_mana_spent,
-                        kickers_paid,
-                        additional_cost_payment_count,
-                        additional_cost_payments,
-                        convoked_creatures,
-                    });
+                        &spell_targets,
+                    ));
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);
                     // Emit StackResolved now — the spell has left the stack even though
@@ -1435,6 +1447,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Dead) legally accepts a graveyard host. A now-illegal target
                     // leaves the Aura unattached and SBA (CR 704.5m) cleans it up
                     // at the next checkpoint.
+                    //
+                    // CR 608.3c / CR 303.4a: the host is the spell's chosen
+                    // target — never re-consult the Enchant filter (CR 303.4f
+                    // non-spell entry) when that target is missing.
                     Some(crate::types::ability::TargetRef::Object(target_id))
                         if crate::game::sba::is_valid_attachment_target(
                             state, entry.id, *target_id,
@@ -1457,6 +1473,53 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
+                    }
+                }
+            }
+
+            // CR 614.12a: Drain mandatory replacement post-effects (Siege /
+            // Tribute opponent-choice, Metamorphic ChoosePermanent
+            // CopyTargetChoice, …) stashed while resolving this permanent's
+            // ZoneChange. `CallerEpilogue` skipped the DeliveryTail drain, so
+            // this site owns the prompt — AFTER CR 608.3c Aura attach above so
+            // the Aura is hosted before SBAs / the copy-choice answer, while
+            // `PendingSpellResolution.spell_targets` still carries the cast
+            // target for the PersistChosenAttribute resume (CR 608.3c /
+            // CR 303.4a). Do not push SpellResolution on top of an
+            // AbilityContinuation (Tribute/Siege resume is top-only).
+            if state.has_post_replacement_drain() {
+                state.clear_post_replacement_source();
+                if let Some(wf) = super::engine_replacement::apply_pending_post_replacement_effect(
+                    state,
+                    Some(entry.id),
+                    None,
+                    Some(crate::types::replacements::ReplacementEvent::Moved),
+                    events,
+                ) {
+                    match wf {
+                        // CR 608.3c + CR 614.12a: stash the Aura spell's chosen
+                        // host for the copy-choice answer path, then surface the
+                        // prompt. Continue the cast-variant epilogue (same as
+                        // Tribute NamedChoice) so resolve_top settles normally;
+                        // the answer path still prefers spell_targets.
+                        WaitingFor::CopyTargetChoice { .. } => {
+                            state.push_spell_resolution(pending_spell_resolution_snapshot(
+                                state,
+                                &entry,
+                                ability.as_ref(),
+                                casting_variant,
+                                actual_mana_spent,
+                                &spell_targets,
+                            ));
+                            state.waiting_for = wf;
+                        }
+                        WaitingFor::Priority { .. } => {}
+                        other => {
+                            // Tribute / Siege NamedChoice — surface the prompt
+                            // and continue the caller epilogue. Do not push
+                            // SpellResolution on top of an AbilityContinuation.
+                            state.waiting_for = other;
+                        }
                     }
                 }
             }

@@ -12,7 +12,7 @@ use nom::Parser;
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::{
     parse_effect_chain, parse_effect_chain_with_context, parse_effect_clause,
-    try_parse_named_choice, try_parse_named_choice_conjunction,
+    parse_named_choice_object, try_parse_named_choice, try_parse_named_choice_conjunction,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
@@ -26,7 +26,7 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::parse_type_filter_word;
 use super::oracle_quantity::capitalize_first;
-use super::oracle_target::parse_type_phrase;
+use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::{
     normalize_card_name_refs, parse_count_expr, parse_number, parse_ordinal, strip_after,
     strip_reminder_text, TextPair,
@@ -2120,11 +2120,22 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
         return None;
     }
 
-    // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
-    let (prefix_lower, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+    // Extract the "choose a ..." clause — `scan_preceded` yields the suffix
+    // AFTER `choose ` so named-choice parsing receives the object table with
+    // "choose " already stripped.
+    let (prefix_lower, _, choose_suffix) = nom_primitives::scan_preceded(norm_lower, |i| {
         tag::<_, _, OracleError<'_>>("choose ").parse(i)
     })?;
-    let choice_type = try_parse_named_choice(choose_text)?;
+    // Structural trailing-period cleanup before the named-choice object table
+    // (not parsing dispatch). `parse_named_choice_object` expects the phrase
+    // with "choose " already stripped.
+    let choose_object = choose_suffix.trim_end().trim_end_matches('.').trim();
+    // Named-attribute choices only. Object choices ("choose a creature") are
+    // deliberately NOT claimed here — see `LinkedChoiceKind::CopyChosenHost`.
+    // Claiming them as Moved+unsupported would reshape every as-enters
+    // permanent-choose card (Dauntless Bodyguard, Scheming Fence, …) even when
+    // no CopyChosen consumer exists.
+    let choice_type = parse_named_choice_object(choose_object)?;
 
     let choose = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -2271,6 +2282,39 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
             .destination_zone(Zone::Battlefield)
             .description(original_text.to_string()),
     )
+}
+
+/// Parse the object-filter of an as-enters permanent choice. Accepts either the
+/// suffix after `choose ` (`"a creature."`) or a full `"choose a creature."`
+/// clause. Requires full consumption and a concrete `Typed` filter.
+///
+/// Used by `LinkedChoiceKind::CopyChosenHost` to identify Unimplemented ability
+/// gaps that pair with a CopyChosen static and to derive the injected
+/// `ChoosePermanent` filter — never by line-local
+/// replacement classification (that would claim Moved for every
+/// permanent-choose card).
+pub(crate) fn as_enters_choose_permanent_filter(choose_text: &str) -> Option<TargetFilter> {
+    // Structural optional-prefix + trailing-period cleanup (not dispatch):
+    // callers may pass the match-at-start slice or the post-`choose ` suffix.
+    let object_phrase = choose_text.trim_start();
+    let object_phrase = object_phrase
+        .strip_prefix("choose ") // allow-noncombinator: optional prefix tolerance
+        .unwrap_or(object_phrase);
+    let trimmed_end = object_phrase.trim_end();
+    let object_phrase = trimmed_end
+        .strip_suffix('.') // allow-noncombinator: structural trailing-period cleanup
+        .unwrap_or(trimmed_end)
+        .trim();
+    if object_phrase.is_empty() {
+        return None;
+    }
+    let (filter, remainder) = parse_target(object_phrase);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    // CR 707.2c: the copy source is a permanent — only a concrete object filter
+    // (never a player/zone/`Any` descriptor) is a valid copy-source pool.
+    matches!(filter, TargetFilter::Typed(_)).then_some(filter)
 }
 
 /// Parse "As ~ becomes attached [to a creature/permanent], choose …" into an
@@ -14629,6 +14673,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// CR 614.12a + CR 707.2c: object as-enters choice alone is NOT a
+    /// replacement line — line-local parse must leave it alone so non-CopyChosen
+    /// cards keep their unsupported ability shape. `CopyChosenHost` injects
+    /// ChoosePermanent only when the companion static is present.
+    #[test]
+    fn as_enters_choose_a_creature_is_not_a_line_local_replacement() {
+        assert!(
+            parse_replacement_line(
+                "As this Aura enters, choose a creature.",
+                "Metamorphic Alteration",
+            )
+            .is_none(),
+            "bare object as-enters choose must not claim Moved without CopyChosen"
+        );
     }
 
     #[test]

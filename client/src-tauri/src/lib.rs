@@ -32,6 +32,7 @@ pub fn run() {
             migration::confirm_legacy_import,
             migration::mark_remote_load_ok,
             native_engine::ensure_native_engine,
+            native_engine::native_engine_progress,
             native_engine::stop_native_engine,
             native_bridge::connect_native_engine,
             native_bridge::native_engine_bridge_send,

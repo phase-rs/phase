@@ -2710,6 +2710,9 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
             legacy_quantity_expr(value)
         }
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
+        // frozen event-context tag.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -3159,6 +3162,9 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::CastFromZone {
             target, duration, ..
         } => legacy_target_filter(target) || odur(duration),
+        // CR 707.2c (Metamorphic Alteration): the copy-source choice pool is a
+        // target filter; walk it for legacy event-refs like every other filter.
+        Effect::ChoosePermanent { filter } => legacy_target_filter(filter),
         Effect::GenericEffect {
             duration,
             target,
@@ -5482,6 +5488,11 @@ fn rw_effect(
         // and may add counters from a live property read. Fail closed until the
         // copy/counter sub-steps have a precise profile.
         | Effect::EachPlayerCopyChosen { .. }
+        // CR 707.2c (Metamorphic Alteration): raised only from the Aura-ETB
+        // replacement path; on answer it installs a Layer-1 copy on the Aura's
+        // host. Never resolves through the intra-ability chain — fail-closed
+        // conservative keeps the exhaustive match honest.
+        | Effect::ChoosePermanent { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
