@@ -17,7 +17,7 @@ use engine::game::game_object::BackFaceData;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::stack;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
+use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, EffectKind};
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType, Supertype};
@@ -324,6 +324,21 @@ fn flipping_an_already_flipped_permanent_is_a_no_op() {
 
     let second = resolve_trigger_body(&mut runner, bushi, "Bushi Tenderfoot", &execute);
 
+    // Reach guard: the second flip effect actually resolved (got past dispatch
+    // into `flip_permanent::resolve`), so the absence of a second `Flipped`
+    // event below is the CR 710.4 one-way no-op — not an upstream short-circuit
+    // that skipped the effect entirely.
+    assert!(
+        second.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::FlipPermanent,
+                ..
+            }
+        )),
+        "the repeat FlipPermanent effect must reach the resolver even when it no-ops"
+    );
+
     let state = runner.state();
     assert!(state.objects[&bushi].flipped);
     assert_eq!(
@@ -390,7 +405,21 @@ fn a_flip_card_off_the_battlefield_cannot_flip() {
     engine::game::zones::move_to_zone(runner.state_mut(), bushi, Zone::Graveyard, &mut events);
 
     let execute = captured_trigger_body(&runner, bushi, "Bushi Tenderfoot");
-    let _ = resolve_trigger_body(&mut runner, bushi, "Bushi Tenderfoot", &execute);
+    let events = resolve_trigger_body(&mut runner, bushi, "Bushi Tenderfoot", &execute);
+
+    // Reach guard: the flip effect actually resolved (got past dispatch into
+    // `flip_permanent::resolve`), so the unchanged object below reflects the CR
+    // 710.2 off-battlefield no-op, not an upstream short-circuit that never ran.
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::FlipPermanent,
+                ..
+            }
+        )),
+        "the FlipPermanent effect must reach the resolver even when it no-ops"
+    );
 
     let object = &runner.state().objects[&bushi];
     assert!(!object.flipped);

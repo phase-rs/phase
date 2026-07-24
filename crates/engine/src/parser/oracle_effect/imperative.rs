@@ -5091,8 +5091,9 @@ fn parse_flip_permanent_subject(input: &str) -> OracleResult<'_, FlipSubjectAnap
             alt((tag("itself"), tag("it"))),
         ),
         value(FlipSubjectAnaphor::SelfDeictic, tag("~")),
-        // CR 201.5: "this" / "this <permanent type>" self-deictics, nested on
-        // the shared "this" prefix.
+        // CR 700.7: "this" / "this <permanent type>" self-deictics ("this
+        // [something]" refers to that particular object), nested on the shared
+        // "this" prefix.
         value(
             FlipSubjectAnaphor::SelfDeictic,
             preceded(
@@ -5323,8 +5324,10 @@ pub(super) fn parse_utility_imperative_ast(
     if let Some(anaphor) = nom_parse_lower(lower, parse_flip_permanent_subject) {
         return Some(UtilityImperativeAst::FlipPermanent {
             target: match anaphor {
-                // CR 201.5: a self-deictic always names the object the ability
-                // is on.
+                // CR 700.7 + CR 201.5: a self-deictic always names the object
+                // the ability is on — CR 700.7 governs the "this <type>" form
+                // ("this [something]" refers to that particular object), CR
+                // 201.5 the "~" name form (text referring to the object by name).
                 FlipSubjectAnaphor::SelfDeictic => TargetFilter::SelfRef,
                 // CR 608.2k: the bare object pronoun binds through the same
                 // anaphor dispatch as "transform it" — a typed trigger subject
