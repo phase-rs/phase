@@ -4,9 +4,10 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CardTypeSetSource, Comparator, ContinuousModification,
-    ControllerRef, CountScope, Effect, QuantityExpr, QuantityRef, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter, ZoneRef,
+    AbilityCondition, AbilityDefinition, AbilityKind, CardTypeSetSource, Comparator,
+    ContinuousModification, ControllerRef, CountScope, DigSource, Effect, QuantityExpr,
+    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypedFilter, ZoneRef,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -102,6 +103,85 @@ fn self_mill_enabler(name: &str) -> CardFace {
             destination: Zone::Graveyard,
         },
     )];
+    face
+}
+
+/// Stitcher's Supplier shape: `abilities: []`, the mill rides a TRIGGER body.
+/// The archetypal delirium enabler — and the shape that made the whole axis
+/// inert when only `abilities` was scanned.
+fn trigger_mill_enabler(name: &str) -> CardFace {
+    let mut face = creature(name);
+    face.triggers =
+        vec![
+            TriggerDefinition::new(TriggerMode::ChangesZone).execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Mill {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Controller,
+                    destination: Zone::Graveyard,
+                },
+            )),
+        ];
+    face
+}
+
+/// CR 701.20e: "look at N, keep one, rest into your graveyard" — the densest
+/// type-spread filler there is. `in_trigger` picks the Satyr Wayfinder shape
+/// (trigger-borne) vs the Grisly Salvage shape (ability-borne).
+fn dig_to_graveyard_enabler(name: &str, in_trigger: bool) -> CardFace {
+    let dig = Effect::Dig {
+        player: TargetFilter::Controller,
+        count: QuantityExpr::Fixed { value: 4 },
+        destination: None,
+        keep_count: Some(1),
+        keep_count_expr: None,
+        up_to: false,
+        filter: TargetFilter::Any,
+        rest_destination: Some(Zone::Graveyard),
+        reveal: true,
+        enter_tapped: false,
+        source: DigSource::Library,
+    };
+    let mut face = creature(name);
+    if in_trigger {
+        face.triggers = vec![TriggerDefinition::new(TriggerMode::ChangesZone)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, dig))];
+    } else {
+        face.abilities = vec![AbilityDefinition::new(AbilityKind::Spell, dig)];
+    }
+    face
+}
+
+/// Traverse the Ulvenwald shape: the delirium gate is NOT at
+/// `abilities[0].condition` but at `abilities[0].sub_ability.condition`, wrapped
+/// in `ConditionInstead` — "Delirium — ... instead search ...". The third
+/// condition carrier, and only reachable by walking the sub_ability chain.
+fn ability_chain_threshold_payoff(name: &str, threshold: i32) -> CardFace {
+    let mut sub = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    sub.condition = Some(AbilityCondition::ConditionInstead {
+        inner: Box::new(AbilityCondition::QuantityCheck {
+            lhs: own_graveyard_types(),
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: threshold },
+        }),
+    });
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+        },
+    );
+    root.sub_ability = Some(Box::new(sub));
+
+    let mut face = creature(name);
+    face.abilities = vec![root];
     face
 }
 
@@ -503,4 +583,101 @@ fn control_deck_below_floor() {
         detect(&[entry(creature("Counterspell"), 37)]).commitment,
         0.0
     );
+}
+
+// ─── the three condition/effect carriers (regression guards) ────────────────
+
+/// Blocker regression: Stitcher's Supplier is `abilities: []` with mill
+/// TRIGGERS. Reading only `abilities` left `enabler_count == 0`, which drives
+/// `compute_commitment`'s geometric mean to 0.0 and switches the whole axis off.
+#[test]
+fn trigger_borne_mill_is_an_enabler() {
+    let feature = detect(&[entry(trigger_mill_enabler("Stitcher's Supplier"), 4)]);
+    assert_eq!(feature.enabler_count, 4);
+}
+
+/// The mirror of the above through the real commitment path: a delirium shell
+/// whose enablers are ALL trigger-borne must still clear the policy floor.
+#[test]
+fn trigger_only_enablers_still_clear_the_floor() {
+    let deck = vec![
+        entry(
+            threshold_payoff("Backwoods Survivalists", 4, own_graveyard_types()),
+            8,
+        ),
+        entry(trigger_mill_enabler("Stitcher's Supplier"), 8),
+        entry(creature("Filler"), 21),
+    ];
+    let feature = detect(&deck);
+    assert_eq!(feature.enabler_count, 8);
+    assert!(
+        feature.commitment >= GRAVEYARD_TYPES_FLOOR,
+        "trigger-borne enablers must not zero the geometric mean, got {}",
+        feature.commitment
+    );
+}
+
+/// CR 701.20e: a rest-to-graveyard dig is an enabler from either carrier.
+#[test]
+fn dig_to_graveyard_is_an_enabler_from_either_carrier() {
+    for in_trigger in [true, false] {
+        let feature = detect(&[entry(
+            dig_to_graveyard_enabler("Satyr Wayfinder", in_trigger),
+            4,
+        )]);
+        assert_eq!(
+            feature.enabler_count, 4,
+            "dig-to-graveyard must count (in_trigger={in_trigger})"
+        );
+    }
+}
+
+/// A dig whose remainder goes to the bottom of the library deposits nothing.
+#[test]
+fn dig_without_graveyard_rest_is_not_an_enabler() {
+    let mut face = dig_to_graveyard_enabler("Impulse", false);
+    face.abilities = vec![AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Dig {
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 4 },
+            destination: None,
+            keep_count: Some(1),
+            keep_count_expr: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+            enter_tapped: false,
+            source: DigSource::Library,
+        },
+    )];
+    assert_eq!(detect(&[entry(face, 4)]).enabler_count, 0);
+}
+
+/// Blocker regression: the third condition carrier. Traverse the Ulvenwald's
+/// gate sits on `abilities[0].sub_ability.condition`, so a top-level-only read
+/// (or one that skipped `abilities` entirely) returned `None`.
+#[test]
+fn threshold_in_the_ability_chain_is_detected() {
+    let feature = detect(&[entry(
+        ability_chain_threshold_payoff("Traverse the Ulvenwald", 4),
+        4,
+    )]);
+    assert_eq!(feature.threshold_payoff_count, 4);
+    assert_eq!(feature.highest_threshold, Some(4));
+}
+
+/// The ability-chain carrier feeds the same `.max()` as the other two, so a
+/// descend-8 gate there still raises the deck's highest threshold.
+#[test]
+fn ability_chain_threshold_participates_in_highest_threshold() {
+    let deck = vec![
+        entry(
+            threshold_payoff("Delirium Four", 4, own_graveyard_types()),
+            2,
+        ),
+        entry(ability_chain_threshold_payoff("Descend Eight", 8), 2),
+    ];
+    assert_eq!(detect(&deck).highest_threshold, Some(8));
 }

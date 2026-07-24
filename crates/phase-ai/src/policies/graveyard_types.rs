@@ -16,7 +16,7 @@
 //! A *threshold* payoff (delirium, descend N) goes live at its threshold; once
 //! the graveyard reaches it, more diversity buys nothing and the branch scores
 //! zero — otherwise the AI would durdle with self-mill after delirium is on. A
-//! *scaling* payoff (Consuming Blob, Tarmogoyf) has no threshold and keeps
+//! *scaling* payoff (Consuming Blob) has no threshold and keeps
 //! wanting a bigger, more diverse graveyard, so it is rewarded continuously
 //! with a diminishing signal. A deck's threshold is modelled as `Option<u32>`
 //! precisely so a scaling-only deck is never handed a fabricated four-type
@@ -28,8 +28,9 @@
 //! The card-local AST check (`fills_own_graveyard_parts`, over the action's
 //! authoritative effect chain) runs FIRST and rejects the overwhelming majority
 //! of candidates; only a confirmed graveyard-filler pays for the graveyard
-//! scan, which walks one zone's objects and never touches the battlefield, mana
-//! affordability, or `find_legal_targets`.
+//! scan. `GameState` carries no zone index, so that scan filters
+//! `state.objects` (house practice) — but it never touches mana affordability
+//! or `find_legal_targets`.
 
 use std::collections::HashSet;
 
@@ -39,7 +40,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use crate::features::graveyard_types::{fills_own_graveyard_parts, GRAVEYARD_TYPES_FLOOR};
+use crate::features::graveyard_types::{abilities_fill_own_graveyard, GRAVEYARD_TYPES_FLOOR};
 use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
@@ -110,12 +111,11 @@ impl TacticalPolicy for GraveyardTypesPolicy {
         // so a tuned-up `scalar` auto-bands instead of tripping a band assert.
         if let Some(threshold) = threshold {
             if current < threshold {
+                // `scalar / deficit` already peaks at `scalar` when the
+                // deficit is 1 — the last missing type is what turns the
+                // payoffs on, and no separate branch is needed to say so.
                 let deficit = threshold - current;
-                let delta = if deficit == 1 {
-                    scalar
-                } else {
-                    scalar / f64::from(deficit)
-                };
+                let delta = scalar / f64::from(deficit);
                 return PolicyVerdict::score(
                     delta,
                     PolicyReason::new("graveyard_types_progress")
@@ -127,8 +127,8 @@ impl TacticalPolicy for GraveyardTypesPolicy {
 
         // At/over the threshold, or no threshold at all: only a SCALING payoff
         // still wants a bigger, more diverse graveyard. Diminishing (the nth
-        // type matters less than the first) but never zero, so a Tarmogoyf /
-        // Consuming Blob deck keeps being rewarded past four types.
+        // type matters less than the first) but never zero, so a Consuming
+        // Blob deck keeps being rewarded past four types.
         if has_scaling {
             return PolicyVerdict::score(
                 scalar / f64::from(current + 1),
@@ -150,20 +150,28 @@ impl TacticalPolicy for GraveyardTypesPolicy {
 ///
 /// The lookup respects the action's authoritative ability semantics:
 /// * `CastSpell` → the spell's own resolution chain (`CastFacts::primary_effects`,
-///   which is the `AbilityKind::Spell` abilities only). Casting a permanent that
-///   merely *has* an activated self-mill ability does not qualify — the cast
-///   itself fills no graveyard (CR 601.2).
+///   the `AbilityKind::Spell` abilities) **plus its immediate ETB triggers**
+///   (`CastFacts::immediate_etb_triggers`). CR 601.2 excludes *activated*
+///   abilities — casting a permanent that merely has an activated self-mill does
+///   not qualify — but an ETB trigger fires as a consequence of the cast, which
+///   is exactly why `CastFacts` carries it as its own field. Excluding it made
+///   the archetypal delirium play (casting Stitcher's Supplier or Satyr
+///   Wayfinder) score `graveyard_types_na`.
 /// * `ActivateAbility` → the ability at the engine's runtime-enumerated index
 ///   (`effective_activated_ability`), which is the correct index space for
 ///   runtime-granted abilities where `GameObject::abilities` is not (CR 602.2).
 fn candidate_fills_own_graveyard(ctx: &PolicyContext<'_>) -> bool {
     match &ctx.candidate.action {
-        GameAction::CastSpell { .. } => ctx
-            .cast_facts()
-            .is_some_and(|facts| fills_own_graveyard_parts(facts.primary_effects.iter().copied())),
+        GameAction::CastSpell { .. } => ctx.cast_facts().is_some_and(|facts| {
+            let etb_bodies = facts
+                .immediate_etb_triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref());
+            abilities_fill_own_graveyard(facts.primary_effects.iter().copied().chain(etb_bodies))
+        }),
         GameAction::ActivateAbility { .. } => ctx
             .effective_activated_ability()
-            .is_some_and(|ability| fills_own_graveyard_parts(std::iter::once(&ability))),
+            .is_some_and(|ability| abilities_fill_own_graveyard(std::iter::once(&ability))),
         _ => false,
     }
 }

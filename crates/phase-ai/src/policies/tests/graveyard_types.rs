@@ -10,12 +10,15 @@ use std::sync::Arc;
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::config::AiConfig;
@@ -488,6 +491,95 @@ fn verdict_ignores_a_non_filling_spell() {
         *Arc::make_mut(&mut object.abilities) =
             vec![AbilityDefinition::new(AbilityKind::Spell, draw_effect())];
     }
+    let decision = priority_decision();
+
+    let (delta, reason) = score_of(GraveyardTypesPolicy.verdict(&ctx(
+        &state,
+        &cast_candidate(oid),
+        &decision,
+        &context,
+        &config,
+    )));
+    assert_eq!(reason.kind, "graveyard_types_na");
+    assert_eq!(delta, 0.0);
+}
+
+// ─── ETB-trigger casts (the delirium play the gate used to drop) ─────────────
+
+/// Stitcher's Supplier shape: a creature whose self-mill rides an ETB TRIGGER,
+/// not a spell ability. `CastFacts` carries it as `immediate_etb_triggers`
+/// precisely because it fires as a consequence of the cast.
+fn etb_mill_creature(state: &mut GameState, idx: u64) -> ObjectId {
+    let oid = create_object(
+        state,
+        CardId(idx),
+        AI,
+        format!("Stitcher {idx}"),
+        Zone::Hand,
+    );
+    let object = state.objects.get_mut(&oid).unwrap();
+    object.card_id = CardId(oid.0);
+    object.card_types = CardType {
+        supertypes: Vec::new(),
+        core_types: vec![CoreType::Creature],
+        subtypes: Vec::new(),
+    };
+    *Arc::make_mut(&mut object.abilities) = Vec::new();
+    object.trigger_definitions.push(
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                self_mill_effect(),
+            )),
+    );
+    oid
+}
+
+/// Casting the archetypal delirium enabler must score. Excluding ETB triggers
+/// from the cast gate made this exact play return `graveyard_types_na`.
+#[test]
+fn verdict_credits_a_cast_whose_etb_trigger_mills() {
+    let config = config();
+    let context = context_with(&config, Some(4), 0);
+    let mut state = state();
+    seed_graveyard_types(&mut state, 3);
+    let stitcher = etb_mill_creature(&mut state, 1);
+    let decision = priority_decision();
+
+    let (delta, reason) = score_of(GraveyardTypesPolicy.verdict(&ctx(
+        &state,
+        &cast_candidate(stitcher),
+        &decision,
+        &context,
+        &config,
+    )));
+    assert_eq!(reason.kind, "graveyard_types_progress");
+    assert!(delta > 0.0);
+}
+
+/// Control: an ETB trigger that does NOT fill the graveyard stays neutral, so
+/// the branch discriminates on the trigger body rather than on "has any ETB".
+#[test]
+fn verdict_ignores_a_cast_whose_etb_trigger_does_not_fill() {
+    let config = config();
+    let context = context_with(&config, Some(4), 0);
+    let mut state = state();
+    seed_graveyard_types(&mut state, 3);
+    let oid = etb_mill_creature(&mut state, 1);
+    state.objects.get_mut(&oid).unwrap().trigger_definitions = Default::default();
+    state
+        .objects
+        .get_mut(&oid)
+        .unwrap()
+        .trigger_definitions
+        .push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .valid_card(TargetFilter::SelfRef)
+                .destination(Zone::Battlefield)
+                .execute(AbilityDefinition::new(AbilityKind::Spell, draw_effect())),
+        );
     let decision = priority_decision();
 
     let (delta, reason) = score_of(GraveyardTypesPolicy.verdict(&ctx(

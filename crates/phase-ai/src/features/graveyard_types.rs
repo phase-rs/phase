@@ -10,9 +10,10 @@
 //!   rhs }` whose `lhs` is that quantity (Backwoods Survivalists, Autumnal Gloom).
 //! - Scaling payoffs read the same quantity as a dynamic magnitude with no
 //!   threshold at all (Consuming Blob's `SetDynamicPower`).
-//! - Enablers: `Effect::Mill { target, destination }` (`ability.rs:10102`),
-//!   `Effect::DiscardCard { target }` (`:10096`), `Effect::Discard { target }`
-//!   (`:11134`), `Effect::Surveil { target }` (`:10377`).
+//! - Enablers: `Effect::Mill`, `Effect::Discard`, `Effect::DiscardCard`,
+//!   `Effect::Surveil`, and `Effect::Dig { rest_destination: Graveyard }` —
+//!   classified by the shared `reanimator::effect_fills_own_graveyard`
+//!   authority, and read from BOTH `abilities` and `triggers[*].execute`.
 //!
 //! No parser remediation required.
 //!
@@ -34,8 +35,8 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, CardTypeSetSource, Comparator, ControllerRef, CountScope, Effect,
-    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, ZoneRef,
+    AbilityCondition, AbilityDefinition, CardTypeSetSource, Comparator, CountScope, QuantityExpr,
+    QuantityRef, StaticCondition, TriggerCondition, TriggerDefinition, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 
@@ -56,15 +57,16 @@ pub struct GraveyardTypesFeature {
     /// your graveyard") — delirium, descend N, threshold.
     pub threshold_payoff_count: u32,
     /// Payoffs that scale continuously with the count and have no threshold
-    /// (Consuming Blob, Tarmogoyf-likes).
+    /// (Consuming Blob-likes).
     pub scaling_payoff_count: u32,
     /// Cards that put cards into the controller's own graveyard — self-mill,
-    /// self-discard, surveil (CR 701.17 / CR 701.25).
+    /// self-discard, surveil, or a rest-to-graveyard dig (CR 701.17 / CR 701.25
+    /// / CR 701.20e). Counted from ability chains AND trigger bodies.
     pub enabler_count: u32,
     /// The highest threshold any *threshold* payoff in the deck asks for, or
     /// `None` when the deck has no threshold payoff at all. A descend 8 deck
     /// must not think it is finished at four card types; a scaling-only deck
-    /// (Consuming Blob, Tarmogoyf) has no threshold to "finish" and must keep
+    /// (Consuming Blob) has no threshold to "finish" and must keep
     /// being rewarded for diversity — so absence is modelled distinctly from a
     /// concrete four, never invented.
     pub highest_threshold: Option<u32>,
@@ -95,9 +97,14 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
             total_nonland = total_nonland.saturating_add(entry.count);
         }
 
-        // `StaticDefinition.condition` and `TriggerDefinition.condition` are
-        // DISTINCT enums that happen to share the `QuantityComparison` shape,
-        // so each gets its own extractor rather than a forced conversion.
+        // A graveyard-type gate can ride any of THREE carriers, and they are
+        // DISTINCT enums that merely share the same comparison shape, so each
+        // gets its own extractor rather than a forced conversion:
+        //   * `StaticDefinition.condition`  (Backwoods Survivalists)
+        //   * `TriggerDefinition.condition` (Autumnal Gloom)
+        //   * `AbilityDefinition.condition` (Traverse the Ulvenwald) — walked
+        //     down the sub_ability/else_ability chain, where the gate usually
+        //     sits rather than at the ability root.
         let threshold = face
             .static_abilities
             .iter()
@@ -108,6 +115,11 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
                     .iter()
                     .filter_map(|t| t.condition.as_ref())
                     .filter_map(trigger_graveyard_type_threshold),
+            )
+            .chain(
+                face.abilities
+                    .iter()
+                    .filter_map(ability_chain_graveyard_type_threshold),
             )
             .max();
 
@@ -128,7 +140,7 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
             payoff_names.push(face.name.clone());
         }
 
-        if fills_own_graveyard_parts(&face.abilities) {
+        if fills_own_graveyard_parts(&face.abilities, &face.triggers) {
             enabler_count = enabler_count.saturating_add(entry.count);
         }
     }
@@ -153,8 +165,8 @@ pub fn detect(deck: &[DeckEntry]) -> GraveyardTypesFeature {
 
 /// Calibration: a Modern delirium shell (8 threshold payoffs + 2 scaling
 /// payoffs + 8 enablers over 37 nonland) → commitment ≈ 0.90.
-/// Anti-calibration: a deck running one incidental Tarmogoyf and no enablers →
-/// well below `GRAVEYARD_TYPES_FLOOR`; UW control → 0.0.
+/// Anti-calibration: a deck running one incidental scaling body and no
+/// enablers → well below `GRAVEYARD_TYPES_FLOOR`; UW control → 0.0.
 ///
 /// Geometric mean over (payoff, enabler): unlike poison, BOTH pillars are
 /// mandatory here. Payoffs with no enablers never turn on reliably, and
@@ -237,6 +249,58 @@ fn trigger_graveyard_type_threshold(condition: &TriggerCondition) -> Option<u32>
         TriggerCondition::Not { .. } => None,
         _ => None,
     }
+}
+
+/// CR 205.2a: the `AbilityCondition` twin of [`static_graveyard_type_threshold`]
+/// — the THIRD condition carrier, `AbilityDefinition.condition`.
+///
+/// Traverse the Ulvenwald is the shape that forces this: its delirium gate is
+/// not on `abilities[0].condition` but on `abilities[0].sub_ability.condition`,
+/// because *"Delirium — If there are four or more card types among cards in your
+/// graveyard, **instead** search…"* replaces the second clause and so lowers
+/// onto the sub-ability, wrapped in `ConditionInstead`. Walking only the top
+/// level would still miss it — see [`ability_chain_graveyard_type_threshold`].
+fn ability_graveyard_type_threshold(condition: &AbilityCondition) -> Option<u32> {
+    match condition {
+        AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } => positive_graveyard_threshold(lhs, *comparator, rhs),
+        // CR 608.2c: "instead" wraps the gate without changing its polarity.
+        AbilityCondition::ConditionInstead { inner } => ability_graveyard_type_threshold(inner),
+        AbilityCondition::And { conditions } => conditions
+            .iter()
+            .filter_map(ability_graveyard_type_threshold)
+            .max(),
+        AbilityCondition::Or { conditions } => {
+            all_graveyard_thresholds_min(conditions.iter().map(ability_graveyard_type_threshold))
+        }
+        AbilityCondition::Not { .. } => None,
+        _ => None,
+    }
+}
+
+/// Walk an ability and its `sub_ability` / `else_ability` chain, returning the
+/// highest graveyard-type threshold gating any link.
+///
+/// The chain walk is the load-bearing part: the gate frequently sits on a
+/// sub-ability rather than the ability root (Traverse the Ulvenwald), so a
+/// top-level-only read returns `None` for the very cards this axis exists for.
+fn ability_chain_graveyard_type_threshold(ability: &AbilityDefinition) -> Option<u32> {
+    let here = ability
+        .condition
+        .as_ref()
+        .and_then(ability_graveyard_type_threshold);
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .and_then(ability_chain_graveyard_type_threshold);
+    let alt = ability
+        .else_ability
+        .as_deref()
+        .and_then(ability_chain_graveyard_type_threshold);
+    here.into_iter().chain(sub).chain(alt).max()
 }
 
 /// The `Or`-combinator rule shared by both extractors: yield a threshold only
@@ -375,43 +439,51 @@ pub(crate) fn modification_quantity(
     }
 }
 
-/// CR 701.17 + CR 701.25 + CR 404.1: an ability chain that puts cards into the
-/// CONTROLLER's own graveyard — self-mill, self-discard, or surveil.
+/// CR 701.17 + CR 701.25 + CR 701.20e + CR 404.1: true when any ability chain
+/// OR trigger body puts cards into the CONTROLLER's own graveyard — self-mill,
+/// self-discard, surveil, or a rest-to-graveyard dig.
 ///
-/// An opponent-scoped mill is deliberately excluded: filling an opponent's
-/// graveyard does nothing for this deck's threshold (and actively helps a
-/// Goyf-style symmetric count, which this axis does not chase).
-pub(crate) fn fills_own_graveyard_parts<'a>(
+/// Both carriers matter and missing either zeroes the axis: the archetypal
+/// enabler (Stitcher's Supplier) is `abilities: []` with mill *triggers*, and
+/// `compute_commitment`'s geometric mean collapses to `0.0` when
+/// `enabler_count == 0`, which drops the deck below `GRAVEYARD_TYPES_FLOOR` and
+/// switches the policy off entirely. Mirrors `tokens_wide::is_token_generator_parts`.
+///
+/// The per-effect question delegates to
+/// [`crate::features::reanimator::effect_fills_own_graveyard`] — the single
+/// authority both graveyard axes share, so they cannot drift on which effects
+/// and scopes count. An opponent-scoped mill is excluded there: filling an
+/// opponent's graveyard does nothing for this deck's threshold.
+pub(crate) fn fills_own_graveyard_parts(
+    abilities: &[AbilityDefinition],
+    triggers: &[TriggerDefinition],
+) -> bool {
+    let chain_fills = |ability: &AbilityDefinition| {
+        collect_chain_effects(ability)
+            .iter()
+            .copied()
+            .any(crate::features::reanimator::effect_fills_own_graveyard)
+    };
+    if abilities.iter().any(&chain_fills) {
+        return true;
+    }
+    // CR 603.6a: "when this enters, mill three" lives on the trigger body.
+    triggers
+        .iter()
+        .any(|trigger| trigger.execute.as_deref().is_some_and(&chain_fills))
+}
+
+/// The live-policy companion to [`fills_own_graveyard_parts`]: the same
+/// single-authority question asked over an already-resolved effect chain (a
+/// cast's spell abilities plus its immediate ETB triggers, or one activated
+/// ability), where the carrier split has already been made by the caller.
+pub(crate) fn abilities_fill_own_graveyard<'a>(
     abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
 ) -> bool {
     abilities.into_iter().any(|ability| {
         collect_chain_effects(ability)
             .iter()
-            .any(|effect| match effect {
-                Effect::Mill {
-                    target,
-                    destination,
-                    ..
-                } => {
-                    *destination == engine::types::zones::Zone::Graveyard
-                        && filter_is_controller_scoped(target)
-                }
-                Effect::DiscardCard { target, .. } => filter_is_controller_scoped(target),
-                Effect::Discard { target, .. } => filter_is_controller_scoped(target),
-                Effect::Surveil { target, .. } => filter_is_controller_scoped(target),
-                _ => false,
-            })
+            .copied()
+            .any(crate::features::reanimator::effect_fills_own_graveyard)
     })
-}
-
-/// True when a `TargetFilter` resolves to the ability's own controller.
-fn filter_is_controller_scoped(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Controller | TargetFilter::SelfRef => true,
-        TargetFilter::Typed(typed) => matches!(typed.controller, Some(ControllerRef::You)),
-        TargetFilter::Or { filters } => filters.iter().any(filter_is_controller_scoped),
-        // CR 109.3: every constraint of a conjunction must hold.
-        TargetFilter::And { filters } => filters.iter().all(filter_is_controller_scoped),
-        _ => false,
-    }
 }
