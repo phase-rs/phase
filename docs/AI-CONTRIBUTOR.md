@@ -33,6 +33,8 @@ Skill references in this section use the `$skill` / `/skill` convention defined 
 
 If you cannot determine your model, abort — do not guess and do not proceed on the assumption that you qualify. Tier cannot satisfy the artifact gate or authorize architecture scope.
 
+**Applies to PRs opened on or after 2026-07-24.** Pull requests opened before that date are judged on their code, not their declared tier — the Standard tier was accepted policy when they were written, and a contributor who reported a Sonnet or Composer run accurately was following the rules as published. Do not close an older PR for a declaration that was correct when it was made. This grandfathering covers the declaration only: every other gate in this document applies to open PRs regardless of age.
+
 **Agentic harnesses (Cursor, and similar).** Using an agentic harness is allowed, but a `Co-authored-by: Cursor <cursoragent@cursor.com>` trailer (or equivalent) on your commits **raises the review bar rather than lowering it**, and the underlying model must still be Frontier tier. The pattern that earns an immediate close is pushing changes you have not verified and using repo CI and maintainer review as your correction loop — reverting a fix to push a diagnostic commit so CI prints a value for you, or deleting an assertion to turn a job green, are both treated as that pattern. Run the gates locally, understand the change, then push.
 
 ### 0.1.2. Pre-PR gates
@@ -74,7 +76,7 @@ Every PR body must include a single canonical line on its own line:
 Tier: Frontier
 ```
 
-`Frontier` is the only accepted value — see §0.1.1. `/pr-contribution-handler` reads this line, and it is never evidence of quality or authority on its own. A missing, malformed, or non-`Frontier` line means the PR is closed as out-of-policy without an implementation review. Do not editorialize.
+`Frontier` is the only accepted value — see §0.1.1. `/pr-contribution-handler` reads this line, and it is never evidence of quality or authority on its own. A missing, malformed, or non-`Frontier` line means the PR is closed as out-of-policy without an implementation review, subject to the 2026-07-24 cutoff in §0.1.1. Do not editorialize.
 
 ---
 
