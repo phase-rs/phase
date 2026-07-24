@@ -51,6 +51,16 @@ const p2pMocks = vi.hoisted(() => ({
   dispose: vi.fn(),
 }));
 
+const brokerMocks = vi.hoisted(() => ({
+  registerHost: vi.fn(async () => ({
+    gameCode: "PRIV1",
+    playerToken: "broker-token",
+  })),
+  updateMetadata: vi.fn(),
+  unregister: vi.fn(async () => undefined),
+  close: vi.fn(),
+}));
+
 const socketMocks = vi.hoisted(() => ({
   send: vi.fn(),
   close: vi.fn(),
@@ -111,6 +121,19 @@ vi.mock("../../services/openPhaseSocket", () => ({
   })),
   withReconnect: vi.fn(),
 }));
+
+vi.mock("../../services/brokerClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../services/brokerClient")>();
+  return {
+    ...actual,
+    openBrokerClient: vi.fn(async () => ({
+      registerHost: brokerMocks.registerHost,
+      updateMetadata: brokerMocks.updateMetadata,
+      unregister: brokerMocks.unregister,
+      close: brokerMocks.close,
+    })),
+  };
+});
 
 function hostingSettings(
   overrides: Partial<HostingSettings> = {},
@@ -419,6 +442,24 @@ describe("multiplayerStore", () => {
         },
       },
     });
+  });
+
+  it("registers a private LobbyOnly host without advertising it in the public list (#6556)", async () => {
+    const ok = await useMultiplayerStore.getState().startP2PHostingSession(
+      hostingSettings({ public: false }),
+      {
+        main_deck: ["Forest"],
+        sideboard: [],
+        commander: ["Goreclaw, Terror of Qal Sisma"],
+      },
+      { useBroker: true, roomName: "Private table" },
+    );
+
+    expect(ok).toBe(true);
+    expect(useMultiplayerStore.getState().hostIsPublic).toBe(false);
+    expect(brokerMocks.registerHost).toHaveBeenCalledWith(
+      expect.objectContaining({ public: false }),
+    );
   });
 
   it("does not apply setup-time AI seats when starting a team-based P2P host session", async () => {

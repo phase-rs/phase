@@ -867,7 +867,8 @@ export function GameProvider({
                 hostPeerId: host.peer.id,
                 deck: deckList.player,
                 displayName: store.displayName || "Host",
-                public: true,
+                // Honor HostSetup's "List in lobby" toggle (issue #6556).
+                public: store.hostIsPublic,
                 password: null,
                 timerSeconds: null,
                 playerCount: effectivePlayerCount,

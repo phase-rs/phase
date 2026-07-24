@@ -1009,7 +1009,10 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         };
 
         set({
-          hostIsPublic: opts.useBroker,
+          // LobbyOnly hosts still register with the broker so friends can
+          // join by code; `settings.public` controls whether that entry is
+          // advertised in the public lobby list (issue #6556).
+          hostIsPublic: opts.useBroker && settings.public,
           hostingStatus: "connecting",
           hostGameCode: null,
           hostSession: {
@@ -1094,7 +1097,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               hostPeerId: host.peer.id,
               deck: asDeckPayload(deck),
               displayName: get().displayName || "Host",
-              public: true,
+              public: settings.public,
               password: settings.password || null,
               timerSeconds: null,
               playerCount: settings.formatConfig.max_players,
@@ -1177,7 +1180,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           destroyHostedRoom = null;
 
           set({
-            hostIsPublic: opts.useBroker,
+            hostIsPublic: opts.useBroker && settings.public,
             hostingStatus: "waiting",
             hostGameCode: host.roomCode,
             hostSession: {
