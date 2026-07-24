@@ -6733,29 +6733,31 @@ fn try_parse_for_each_target_copy_token(
     peek(tag::<_, _, OracleError<'_>>("target "))
         .parse(after_count)
         .ok()?;
-    // Split the target clause from the body at the distributor comma.
-    let (body_lower, _target_lower) =
-        terminated(take_until::<_, _, OracleError<'_>>(", "), tag(", "))
-            .parse(after_count)
-            .ok()?;
-    // Map the lowercase slices back onto the original-case `text` (ASCII Oracle
+    // Let the target parser itself consume the filter and hand back the
+    // distributor comma + body — the parser IS the detector, so a compound
+    // filter with internal commas ("target artifact, creature, or land
+    // permanent") that a naive ", " split would truncate is handled correctly.
+    // Map the lowercase offset back onto the original-case `text` (ASCII Oracle
     // text keeps byte offsets aligned).
     let target_start = lower.len() - after_count.len();
-    let target_end = text.len() - body_lower.len() - ", ".len();
-    let target_text = &text[target_start..target_end];
-    let body = text[text.len() - body_lower.len()..].trim();
-
-    // The targeted set must resolve to a concrete typed filter with no residue.
     let mut target_ctx = ctx.clone();
-    let (target, target_rem) = parse_target_with_ctx(target_text, &mut target_ctx);
-    if !target_rem.trim().is_empty() || !matches!(target, TargetFilter::Typed(_)) {
+    let (target, target_rem) = parse_target_with_ctx(&text[target_start..], &mut target_ctx);
+    if !matches!(target, TargetFilter::Typed(_)) {
         return None;
     }
+    // The distributor comma separates the target set from the body; tolerate
+    // its optional consumption by the target parser.
+    let body = target_rem.trim_start();
+    let body = body.strip_prefix(',').unwrap_or(body).trim();
+    if body.is_empty() {
+        return None;
+    }
+    let body_lower = body.to_lowercase();
 
     // The body must be a bare "create <M> tokens that are copies of that <noun>"
     // whose copy source is an anaphor (no independent target of its own).
     let mut body_ctx = ctx.clone();
-    let effect = token::try_parse_token(body_lower, body, &mut body_ctx)?;
+    let effect = token::try_parse_token(&body_lower, body, &mut body_ctx)?;
     let Effect::CopyTokenOf {
         target: TargetFilter::ParentTarget | TargetFilter::SelfRef | TargetFilter::TriggeringSource,
         owner,
