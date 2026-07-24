@@ -459,6 +459,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 109.4 + CR 115.10a/b (issue #6505): "Target opponent exiles a creature
+    // they control and their graveyard" (Strategic Betrayal). The spell targets
+    // ONLY the opponent (CR 115.1a); that opponent then CHOOSES a creature they
+    // control and exiles their graveyard — so a `ScopedPlayer`-scoped move-object
+    // filter must resolve its acting/choosing player against the resolved single
+    // player target, not the caster. Sibling of the DamageDealt/AttackersDeclared
+    // scoped-player stamp above: bind `scoped_player` from the ability's lone
+    // `TargetRef::Player` before the change_zone choosers run at resolution.
+    if let Some(ability) = ability.as_mut() {
+        if ability.scoped_player.is_none() {
+            let single_player_target = ability
+                .targets
+                .iter()
+                .filter(|target| matches!(target, TargetRef::Player(_)))
+                .count()
+                == 1;
+            if single_player_target
+                && crate::game::effects::ability_uses_relative_controller_scoped(ability)
+            {
+                let actor = ability.target_player();
+                ability.set_scoped_player_recursive(actor);
+            }
+        }
+    }
+
     // CR 608.2c: Re-stamp ParentTarget anaphora from the stack entry's trigger
     // event at resolution time (Stationed/VehicleCrewed/Saddled/attack batches).
     // Push-time seeding in `push_pending_trigger_to_stack_with_event_batch` can

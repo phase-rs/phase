@@ -8377,7 +8377,12 @@ pub(super) fn parse_exile_ast(
     } else {
         parsed_target
     };
-    let origin = super::infer_origin_zone(rest_lower);
+    // CR 400.7 (issue #6505): infer the origin zone excluding ONLY a trailing
+    // compound conjunct ("and their graveyard", Strategic Betrayal) so its
+    // sibling graveyard leg cannot leak Zone::Graveyard onto the battlefield
+    // creature leg — while a non-"and" qualifier ("instead of putting it into
+    // its owner's graveyard") still defines this leg's origin.
+    let origin = super::infer_origin_zone(&super::compound_exile_origin_scan(rest_text, rem));
     Some(ZoneCounterImperativeAst::Exile {
         origin,
         target,

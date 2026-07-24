@@ -5925,6 +5925,44 @@ fn filter_uses_relative_controller_scoped(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 109.4 + CR 115.10a (issue #6505): True when this ability's effect — or any
+/// effect in its sub-ability / else-ability chain — carries a `ScopedPlayer`-
+/// scoped move-object filter ("a creature they control" / "their graveyard").
+/// Used by `stack::resolve_top` to bind the resolution-time scoped player to the
+/// ability's single player target, so a "target opponent exiles a creature they
+/// control" chooser is the target opponent, not the caster.
+pub(crate) fn ability_uses_relative_controller_scoped(ability: &ResolvedAbility) -> bool {
+    fn effect_moves_scoped_filter(effect: &Effect) -> bool {
+        if effect
+            .target_filter()
+            .is_some_and(filter_uses_relative_controller_scoped)
+        {
+            return true;
+        }
+        // `Effect::target_filter()` does not surface `ChangeZoneAll`'s mass
+        // filter, so check it explicitly (the "their graveyard" leg).
+        matches!(
+            effect,
+            Effect::ChangeZoneAll { target, .. } if filter_uses_relative_controller_scoped(target)
+        )
+    }
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        if effect_moves_scoped_filter(&current.effect) {
+            return true;
+        }
+        if current
+            .else_ability
+            .as_deref()
+            .is_some_and(ability_uses_relative_controller_scoped)
+        {
+            return true;
+        }
+        node = current.sub_ability.as_deref();
+    }
+    false
+}
+
 pub(crate) fn controller_for_relative_filter(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,

@@ -1611,7 +1611,10 @@ fn filter_mentions_exiled_by_source(filter: &TargetFilter) -> bool {
 
 /// CR 115.1: True when a `ChangeZone` clause selects from the battlefield
 /// (explicitly or by permanent-type default) rather than a private/off-BF zone.
-fn change_zone_selects_battlefield_permanent(origin: Option<Zone>, target: &TargetFilter) -> bool {
+pub(super) fn change_zone_selects_battlefield_permanent(
+    origin: Option<Zone>,
+    target: &TargetFilter,
+) -> bool {
     if target.is_context_ref() {
         return false;
     }

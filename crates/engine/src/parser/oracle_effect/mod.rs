@@ -15097,8 +15097,10 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
 
-    // Exile: infer origin zone from the full post-verb text (NOT the remainder,
-    // since parse_zone_suffix inside parse_type_phrase consumes zone phrases).
+    // Exile: infer origin zone from the primary target clause the target parser
+    // consumed (see the `infer_origin_zone` call below) — NOT the bare remainder
+    // (parse_zone_suffix inside parse_type_phrase strips zone phrases off it) and
+    // NOT the full post-verb text (a trailing compound conjunct would leak).
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| {
         value((), alt((tag("exile all "), tag("exile each ")))).parse(i)
     }) {
@@ -15140,7 +15142,11 @@ fn try_parse_verb_and_target<'a>(
         } else {
             parsed_target
         };
-        let origin = infer_origin_zone(rest_lower);
+        // CR 400.7 (issue #6505): infer the origin excluding ONLY a trailing
+        // compound conjunct ("and their graveyard") so its sibling zone cannot
+        // leak onto the primary battlefield leg — a non-"and" qualifier still
+        // scopes the primary leg's origin.
+        let origin = infer_origin_zone(&compound_exile_origin_scan(rest, rem));
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
                 origin,
@@ -15162,7 +15168,12 @@ fn try_parse_verb_and_target<'a>(
         } else {
             parsed_target
         };
-        let origin = infer_origin_zone(rest_lower);
+        // CR 400.7 (issue #6505): infer the origin excluding ONLY a trailing
+        // compound conjunct ("and their graveyard") so it cannot leak
+        // Zone::Graveyard onto the battlefield leg — a non-"and" qualifier
+        // ("instead of putting it into its owner's graveyard", No More Lies)
+        // still defines this leg's origin.
+        let origin = infer_origin_zone(&compound_exile_origin_scan(rest, rem));
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
                 origin,
@@ -18904,7 +18915,37 @@ fn lower_subject_predicate_ast(
                     enters_under: None,
                 });
             }
+            // CR 115.10a + CR 109.4 (issue #6505): lower the predicate with the
+            // relative player scope pinned to `ScopedPlayer` so an anaphoric
+            // "they control" on a moved-object leg ("target opponent exiles a
+            // creature they control …", Strategic Betrayal) resolves to the
+            // acting scoped player (oracle_target::parse_controller_suffix reads
+            // `relative_player_scope.unwrap_or(You)`), unifying with the already
+            // scope-agnostic "their graveyard" leg (`Owned{ScopedPlayer}`). The
+            // save/restore is tight around ONLY this lowering call — the scope is
+            // restored before any predicate-shape handling below runs, so it
+            // cannot leak into unrelated re-parsing. The runtime binds this
+            // scoped filter to the real target player at resolution (see the
+            // single-Player-target `scoped_player` stamp in `stack::resolve_top`).
+            //
+            // Guarded tightly to this arm: pin the scope ONLY when (a) no outer
+            // relative scope is already established — a trigger/vote/antecedent
+            // context sets its own ("that player", damage-all, chosen-player),
+            // and clobbering it mis-binds those — AND (b) the subject is an
+            // explicit player target (the same precondition as the moved-object
+            // wrapper below). Without these guards ScopedPlayer leaks into every
+            // subject-predicate imperative-fallback clause.
+            let pin_scoped_player = ctx.relative_player_scope.is_none()
+                && subject
+                    .target
+                    .as_ref()
+                    .is_some_and(target_filter_can_target_player);
+            let saved_relative_scope = ctx.relative_player_scope.clone();
+            if pin_scoped_player {
+                ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+            }
             let mut clause = lower_imperative_clause(&text, ctx);
+            ctx.relative_player_scope = saved_relative_scope;
             // CR 608.2c + CR 109.4 + CR 115.1: "target <filter>'s controller/owner
             // <verb>s it" (Arcum Dagsson, Mercy Killing). `parse_subject_application`
             // records this possessive shift as `affected = ParentTargetController/
@@ -19019,6 +19060,23 @@ fn lower_subject_predicate_ast(
                     clause.effect,
                     Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. }
                 ) {
+                    // CR 115.1a + CR 702.21a (issue #6505): distinguish a
+                    // battlefield-wide, NON-targeted resolution pick ("target
+                    // opponent exiles a creature they control", Strategic
+                    // Betrayal) from an off-battlefield or explicitly-targeted
+                    // moved-object leg. Mirror `target_choice_timing_for_clause`
+                    // in lower.rs: a battlefield-selecting ChangeZone with no
+                    // "target " token has its object CHOSEN at resolution, so it
+                    // never becomes a target and Ward on the opponent's own
+                    // creature never fires.
+                    let creature_leg_is_resolution_pick = match &clause.effect {
+                        Effect::ChangeZone { origin, target, .. }
+                        | Effect::ChangeZoneAll { origin, target, .. } => {
+                            lower::change_zone_selects_battlefield_permanent(*origin, target)
+                                && !scan_contains_phrase(&pred_lower, "target ")
+                        }
+                        _ => false,
+                    };
                     // CR 109.4 (issue #1077): "target player exiles a card
                     // from their graveyard" (Relic of Progenitus, Scrabbling
                     // Claws, Merrow Bonegnawer, Graveyard Shovel, Grave
@@ -19026,18 +19084,23 @@ fn lower_subject_predicate_ast(
                     // [zone]" (Memory's Journey, above). The moved-object
                     // filter's possessive "their" parses as
                     // `Owned { controller: ScopedPlayer }` because the
-                    // zone-suffix parser is scope-agnostic — but this branch
-                    // only runs for an explicit "target player" (not an
-                    // anaphoric "that player"), so the filter must be rebound
-                    // to the real declared target before it's cloned into the
-                    // sub-ability, or it stays scoped to the acting player
-                    // (the activator) instead of the player just targeted.
-                    match &mut clause.effect {
-                        Effect::ChangeZone { target, .. }
-                        | Effect::ChangeZoneAll { target, .. } => {
-                            rebind_owned_scope(target, ControllerRef::TargetPlayer);
+                    // zone-suffix parser is scope-agnostic. An off-battlefield
+                    // or targeted leg selects its object on the STACK — before
+                    // the resolution-time `scoped_player` stamp lands — so the
+                    // filter must be rebound to the real declared target now, or
+                    // it stays scoped to the activator instead of the targeted
+                    // player. A battlefield resolution pick (issue #6505) keeps
+                    // `ScopedPlayer` and is bound at resolution instead, so its
+                    // acting/choosing player is the target opponent, not the
+                    // caster (CR 115.10a — being affected is not choosing).
+                    if !creature_leg_is_resolution_pick {
+                        match &mut clause.effect {
+                            Effect::ChangeZone { target, .. }
+                            | Effect::ChangeZoneAll { target, .. } => {
+                                rebind_owned_scope(target, ControllerRef::TargetPlayer);
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                     let mut sub_ability =
                         AbilityDefinition::new(AbilityKind::Spell, clause.effect.clone());
@@ -19049,6 +19112,16 @@ fn lower_subject_predicate_ast(
                     // wrapper. Carry it onto the sub-ability so the cast
                     // surfaces N card slots.
                     sub_ability.multi_target = clause.multi_target;
+                    // CR 115.1a + CR 702.21a (issue #6505): a battlefield
+                    // resolution pick is chosen at resolution and never becomes a
+                    // target — stamp Resolution timing (the default is Stack) so
+                    // no BecomesTarget event fires and Ward on the chosen creature
+                    // stays silent. Off-battlefield/targeted legs keep the Stack
+                    // default so their stack-time selection is unchanged.
+                    if creature_leg_is_resolution_pick {
+                        sub_ability.target_choice_timing =
+                            crate::types::ability::TargetChoiceTiming::Resolution;
+                    }
                     return ParsedEffectClause {
                         effect: Effect::TargetOnly {
                             target: player_target.clone(),
@@ -31679,6 +31752,25 @@ fn parse_put_rest_library_position(lower: &str) -> Option<LibraryPosition> {
         Some(LibraryPosition::Top)
     } else {
         None
+    }
+}
+
+/// CR 400.7 (issue #6505): produce the lowercase text `infer_origin_zone` should
+/// scan for a (possibly compound) exile. Exclude ONLY a trailing COMPOUND
+/// conjunct (`" and <second leg>"`) — e.g. "exile a creature they control AND
+/// their graveyard", whose sibling graveyard leg must not leak `Zone::Graveyard`
+/// onto the primary battlefield leg. A non-"and" remainder legitimately QUALIFIES
+/// the primary leg ("exile it … instead of putting it into its owner's graveyard",
+/// No More Lies) and stays in scope. `rem` is a suffix of `base` (a
+/// `parse_target` remainder), so `base.len() - rem.len()` lands on a valid UTF-8
+/// boundary; scan the ORIGINAL-CASE base then lowercase.
+pub(super) fn compound_exile_origin_scan(base: &str, rem: &str) -> String {
+    let rem_head = rem.trim_start();
+    let trailing_and_conjunct = tag::<_, _, OracleError<'_>>("and ").parse(rem_head).is_ok();
+    if trailing_and_conjunct {
+        base[..base.len() - rem.len()].to_ascii_lowercase()
+    } else {
+        base.to_ascii_lowercase()
     }
 }
 
