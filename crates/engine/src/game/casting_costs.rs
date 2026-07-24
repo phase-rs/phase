@@ -346,16 +346,8 @@ fn make_optional_cost_choice(
     }
 }
 
-/// Printed cards carry at most one Gift keyword. The additional-cost queue is
-/// per-ordinal for uniformity with other origins, but `SpellContext.gift_recipient`
-/// is a single latch — take the last `Keyword::Gift` if multiples ever appear.
 fn gift_kind_for_object(state: &GameState, object_id: ObjectId) -> Option<GiftKind> {
-    state.objects.get(&object_id).and_then(|obj| {
-        obj.keywords.iter().rev().find_map(|k| match k {
-            Keyword::Gift(kind) => Some(kind.clone()),
-            _ => None,
-        })
-    })
+    super::keywords::effective_gift_kind(state, object_id)
 }
 
 /// CR 702.174a + CR 601.2c: Propagate shared SpellContext facts (additional_cost_paid /
