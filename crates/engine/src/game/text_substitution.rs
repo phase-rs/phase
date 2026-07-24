@@ -2501,6 +2501,12 @@ fn walk_continuous_modification(
         ContinuousModification::GrantStaticAbility { definition } => {
             walk_static_definition(definition, category, cursor)
         }
+        // CR 613.1f + CR 612.1: a granted replacement effect carries the same
+        // word-bearing condition / event / replaced-effect filters as any other
+        // replacement definition (e.g. a subtype-scoped check-land condition).
+        ContinuousModification::GrantReplacement { replacement } => {
+            walk_replacement_definition(replacement, category, cursor)
+        }
         // CR 613.1f + CR 612.1: a granted rule-modification static `mode` carries
         // the same word-bearing evasion / protection / cost-filter / color params as
         // any static's mode (e.g. a granted "can't be blocked by Goblins").
