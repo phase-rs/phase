@@ -5178,7 +5178,7 @@ fn extract_if_condition_with_card_name(
     // grammar production, not a card-text table entry. The scanner applies the
     // nom production at word boundaries so a leading intervening-if is retained
     // while later sentence-local conditionals remain outside this function.
-    if let Some((prefix, rest)) = scan_preceded(&lower, |i| {
+    if let Some((prefix, _, rest)) = scan_preceded(&lower, |i| {
         tag::<_, _, OracleError<'_>>("if ~ attacked this combat").parse(i)
     }) {
         let clause_len = lower.len() - prefix.len() - rest.len();

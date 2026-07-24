@@ -1329,7 +1329,7 @@ fn creature_has_must_block_requirement(
 /// while incompatible requirements must be maximized together rather than
 /// greedily enforced one at a time.
 #[derive(Clone)]
-enum BlockRequirement {
+enum BlockDeclarationRequirement {
     Generic {
         blocker: ObjectId,
     },
@@ -1360,7 +1360,7 @@ struct BlockDeclarationConstraints {
     /// exploring every raw pair subset and rejecting almost all of them at a
     /// leaf.
     choices: Vec<Vec<Vec<(ObjectId, ObjectId)>>>,
-    requirements: Vec<BlockRequirement>,
+    requirements: Vec<BlockDeclarationRequirement>,
     /// Memoized feasibility frontier: for every remaining blocker-choice index
     /// and requirement, whether any later local choice can satisfy it. This
     /// avoids rescanning the Cartesian product at every search node.
@@ -1397,7 +1397,7 @@ impl BlockDeclarationConstraints {
                 &blocker_allowed,
                 shadow,
             ) {
-                requirements.push(BlockRequirement::Generic { blocker });
+                requirements.push(BlockDeclarationRequirement::Generic { blocker });
             }
             let Some(object) = state.objects.get(&blocker) else {
                 continue;
@@ -1417,7 +1417,7 @@ impl BlockDeclarationConstraints {
                     })
                 });
                 if live && pairs.contains(&(blocker, attacker.object_id)) {
-                    requirements.push(BlockRequirement::Exact {
+                    requirements.push(BlockDeclarationRequirement::Exact {
                         blocker,
                         attacker: attacker.object_id,
                     });
@@ -1447,7 +1447,7 @@ impl BlockDeclarationConstraints {
                                 )
                             })
                     }) {
-                        requirements.push(BlockRequirement::Attacker {
+                        requirements.push(BlockDeclarationRequirement::Attacker {
                             attacker,
                             by: by.cloned(),
                             source,
@@ -1471,7 +1471,8 @@ impl BlockDeclarationConstraints {
                                 )
                             })
                         {
-                            requirements.push(BlockRequirement::Every { blocker, attacker });
+                            requirements
+                                .push(BlockDeclarationRequirement::Every { blocker, attacker });
                         }
                     }
                 }
@@ -1529,7 +1530,7 @@ impl BlockDeclarationConstraints {
     fn requirement_is_satisfied(
         &self,
         state: &GameState,
-        requirement: &BlockRequirement,
+        requirement: &BlockDeclarationRequirement,
         assignments: &[(ObjectId, ObjectId)],
     ) -> bool {
         requirement_is_satisfied(state, requirement, assignments)
@@ -1633,16 +1634,18 @@ impl BlockDeclarationConstraints {
 /// memoized remaining-choice feasibility frontier.
 fn requirement_is_satisfied(
     state: &GameState,
-    requirement: &BlockRequirement,
+    requirement: &BlockDeclarationRequirement,
     assignments: &[(ObjectId, ObjectId)],
 ) -> bool {
     match requirement {
-        BlockRequirement::Generic { blocker } => assignments.iter().any(|(b, _)| b == blocker),
-        BlockRequirement::Exact { blocker, attacker }
-        | BlockRequirement::Every { blocker, attacker } => {
+        BlockDeclarationRequirement::Generic { blocker } => {
+            assignments.iter().any(|(b, _)| b == blocker)
+        }
+        BlockDeclarationRequirement::Exact { blocker, attacker }
+        | BlockDeclarationRequirement::Every { blocker, attacker } => {
             assignments.contains(&(*blocker, *attacker))
         }
-        BlockRequirement::Attacker {
+        BlockDeclarationRequirement::Attacker {
             attacker,
             by,
             source,

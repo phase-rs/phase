@@ -11843,10 +11843,15 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
 /// axis. This is intentionally a small nom production rather than a text
 /// substring check: the referent and duration survive lowering independently.
 fn parse_force_block_ast(input: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
-    let (rest, _) = alt((tag("block "), tag("blocks "))).parse(input).ok()?;
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("block "), tag("blocks ")))
+        .parse(input)
+        .ok()?;
     let parse_duration = |tail| {
         all_consuming(alt((
-            value(Duration::UntilEndOfTurn, tag("this turn if able")),
+            value(
+                Duration::UntilEndOfTurn,
+                tag::<_, _, OracleError<'_>>("this turn if able"),
+            ),
             value(Duration::UntilEndOfCombat, tag("this combat if able")),
         )))
         .parse(tail)
@@ -11860,13 +11865,15 @@ fn parse_force_block_ast(input: &str, ctx: &ParseContext) -> Option<ImperativeFa
             duration,
         });
     }
-    if let Ok((tail, _)) = alt((tag("~ "), tag("this creature "))).parse(rest) {
+    if let Ok((tail, _)) =
+        alt((tag::<_, _, OracleError<'_>>("~ "), tag("this creature "))).parse(rest)
+    {
         return parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
             attacker: Some(ForceBlockAttackerRef::Source),
             duration,
         });
     }
-    if let Ok((tail, _)) = tag("it ").parse(rest) {
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("it ").parse(rest) {
         if !ctx.in_trigger || !matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
             return None;
         }

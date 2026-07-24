@@ -10,7 +10,7 @@ use super::ability::{
     QuantityRef, TargetFilter,
 };
 use super::events::ActivatedAbilityKind;
-use super::identifiers::{ObjectId, ObjectIncarnationRef};
+use super::identifiers::ObjectIncarnationRef;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
 use super::phase::Phase;

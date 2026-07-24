@@ -2268,6 +2268,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        force_block_attacker: _,
         controller: _,
         original_controller,
         scoped_player,
