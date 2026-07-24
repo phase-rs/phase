@@ -9,7 +9,7 @@ import type { ObjectId } from "../../adapter/types.ts";
  * engine-provided `block_requirements` (CR 702.111b Menace / CR 509.1b) and the
  * player's in-progress assignments:
  * - `pending`    — not yet blocked (legal: "or not at all").
- * - `incomplete` — blocked by 1+ but fewer than required (illegal to confirm).
+ * - `incomplete` — blocked by 1+ but fewer than required.
  * - `satisfied`  — blocked by at least the required count.
  */
 export type BlockRequirementStatus = "pending" | "incomplete" | "satisfied";
@@ -25,11 +25,9 @@ export interface BlockRequirement {
 
 export interface BlockRequirements {
   byAttacker: Map<ObjectId, BlockRequirement>;
-  /** Any attacker started but not finished — confirmation must be blocked. */
-  hasIncomplete: boolean;
 }
 
-const EMPTY: BlockRequirements = { byAttacker: new Map(), hasIncomplete: false };
+const EMPTY: BlockRequirements = { byAttacker: new Map() };
 
 /**
  * Compares the engine-declared per-attacker minimum-blocker requirements against
@@ -48,22 +46,22 @@ export function useBlockRequirements(): BlockRequirements {
       return EMPTY;
     }
 
-    // blockerAssignments maps blockerId -> attackerId; invert to count blockers
-    // assigned to each attacker.
+    // Count the UI's selected pairs for presentation only. The engine remains
+    // the authority on whether a declaration is legal or requirement-maximal.
     const assignedPerAttacker = new Map<ObjectId, number>();
-    for (const attackerId of blockerAssignments.values()) {
-      assignedPerAttacker.set(attackerId, (assignedPerAttacker.get(attackerId) ?? 0) + 1);
+    for (const attackerIds of blockerAssignments.values()) {
+      for (const attackerId of attackerIds) {
+        assignedPerAttacker.set(attackerId, (assignedPerAttacker.get(attackerId) ?? 0) + 1);
+      }
     }
 
     const byAttacker = new Map<ObjectId, BlockRequirement>();
-    let hasIncomplete = false;
     for (const [attackerKey, requirement] of Object.entries(blockRequirements)) {
       const attackerId = Number(attackerKey);
       const required = requirement.count;
       const assigned = assignedPerAttacker.get(attackerId) ?? 0;
       const status: BlockRequirementStatus =
         assigned === 0 ? "pending" : assigned < required ? "incomplete" : "satisfied";
-      if (status === "incomplete") hasIncomplete = true;
       byAttacker.set(attackerId, {
         attackerId,
         required,
@@ -73,6 +71,6 @@ export function useBlockRequirements(): BlockRequirements {
       });
     }
 
-    return { byAttacker, hasIncomplete };
+    return { byAttacker };
   }, [blockRequirements, blockerAssignments]);
 }

@@ -17885,7 +17885,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         // parent-bound PhaseIn ("untap target permanent, then phase it in")
         // is not silently skipped.
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
         {
@@ -20061,7 +20061,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::Suspect { target, .. }
         | Effect::Unsuspect { target, .. }
@@ -24275,7 +24275,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         // CR 702.26c: PhaseIn mirrors PhaseOut; expose its target to tracked-set
         // rewrites for symmetry so a parent-bound PhaseIn is not skipped.
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
@@ -24537,7 +24537,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         // its target filter too so generic anaphor/scope rewrites and the
         // self-disjunctive delayed-trigger rebind (CR 603.7c) reach it.
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
         | Effect::Discard { target, .. }

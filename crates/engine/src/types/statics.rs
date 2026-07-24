@@ -10,7 +10,7 @@ use super::ability::{
     QuantityRef, TargetFilter,
 };
 use super::events::ActivatedAbilityKind;
-use super::identifiers::ObjectId;
+use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
 use super::phase::Phase;
@@ -1158,9 +1158,10 @@ pub enum StaticMode {
     /// of the attacker that must be blocked. Data-carrying variant — not
     /// registry-registered (see `coverage::is_data_carrying_static`); enforced by
     /// direct pattern-match in `combat.rs` declare-blockers validation. The
-    /// `ObjectId` is stable for the end-of-turn lifetime of the granting effect.
+    /// incarnation reference prevents an attacker that left and re-entered from
+    /// inheriting the old combat requirement (CR 400.7).
     MustBlockAttacker {
-        attacker: ObjectId,
+        attacker: ObjectIncarnationRef,
     },
     CantDraw {
         who: ProhibitionScope,

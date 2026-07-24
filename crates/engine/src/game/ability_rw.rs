@@ -1813,6 +1813,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastSpellThisTurn { .. }
         | TriggerCondition::SpellCastWithVariantThisTurn { .. }
         | TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
@@ -2830,7 +2831,7 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Unsuspect { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
         | Effect::BecomeSaddled { target }
@@ -3670,6 +3671,7 @@ fn walk_ability(
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
+        force_block_attacker: _, // exact force-block referent, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -6088,6 +6090,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         }
         TriggerCondition::DuringPlayersTurn { player } => rw_player_filter(player),
         TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed

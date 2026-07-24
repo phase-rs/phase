@@ -19890,7 +19890,8 @@ fn force_block_targeted() {
         matches!(
             e,
             Effect::ForceBlock {
-                target: TargetFilter::Typed(_)
+                target: TargetFilter::Typed(_),
+                ..
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
@@ -20860,7 +20861,10 @@ fn force_block_with_self_ref() {
         matches!(
             e,
             Effect::ForceBlock {
-                target: TargetFilter::Typed(_)
+                target: TargetFilter::Typed(_),
+                attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+                duration: Duration::UntilEndOfTurn,
+                ..
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
@@ -20888,15 +20892,48 @@ fn force_attack_you_this_combat_targets_creature() {
 #[test]
 fn force_block_blocks_it_this_combat() {
     // "target creature blocks it this combat if able" (e.g., Avalanche Tusker)
-    let e = parse_effect("Target creature blocks it this combat if able");
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..ParseContext::default()
+    };
+    let e = parse_effect_clause("Target creature blocks it this combat if able", &mut ctx).effect;
     assert!(
         matches!(
             e,
             Effect::ForceBlock {
-                target: TargetFilter::Typed(_)
+                target: TargetFilter::Typed(_),
+                attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+                duration: Duration::UntilEndOfCombat,
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
+        e
+    );
+}
+
+#[test]
+fn force_block_that_triggered_creature_this_combat_preserves_event_referent() {
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..ParseContext::default()
+    };
+    let e = parse_effect_clause(
+        "Target creature an opponent controls blocks that Wolf this combat if able",
+        &mut ctx,
+    )
+    .effect;
+    assert!(
+        matches!(
+            e,
+            Effect::ForceBlock {
+                target: TargetFilter::Typed(_),
+                attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+                duration: Duration::UntilEndOfCombat,
+            }
+        ),
+        "Expected an event-bound combat force block, got {:?}",
         e
     );
 }

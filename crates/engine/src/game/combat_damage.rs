@@ -1444,6 +1444,7 @@ mod tests {
                 timestamp: ts,
                 duration: Duration::UntilEndOfTurn,
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![
                     ContinuousModification::AddPower { value: 1 },
                     ContinuousModification::AddToughness { value: 1 },

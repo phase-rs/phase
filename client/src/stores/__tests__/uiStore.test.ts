@@ -1,7 +1,7 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { useUiStore } from "../uiStore";
+import { blockerAssignmentPairs, useUiStore } from "../uiStore";
 
 describe("uiStore", () => {
   beforeEach(() => {
@@ -15,6 +15,7 @@ describe("uiStore", () => {
         selectedCardIds: [],
         fullControl: false,
         autoPass: false,
+        blockerAssignments: new Map(),
       });
     });
   });
@@ -123,6 +124,22 @@ describe("uiStore", () => {
     expect(useUiStore.getState().autoPass).toBe(false);
     act(() => useUiStore.getState().toggleAutoPass());
     expect(useUiStore.getState().autoPass).toBe(true);
+  });
+
+  it("retains multiple attackers for one blocker and removes only the chosen pair", () => {
+    act(() => {
+      useUiStore.getState().assignBlocker(10, 100);
+      useUiStore.getState().assignBlocker(10, 101);
+      useUiStore.getState().assignBlocker(10, 100);
+    });
+
+    expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments)).toEqual([
+      [10, 100],
+      [10, 101],
+    ]);
+
+    act(() => useUiStore.getState().removeBlockerAssignment(10, 100));
+    expect(blockerAssignmentPairs(useUiStore.getState().blockerAssignments)).toEqual([[10, 101]]);
   });
 
   it("toggleDebugClickModeButtonVisible flips the pinned click-mode control", () => {

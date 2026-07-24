@@ -322,7 +322,7 @@ export interface MeldSelection {
 // display-only badges + Confirm gating. `#[serde(tag = "kind")]` in the engine.
 export type CombatRequirement =
   | { kind: "MustAttack"; players: PlayerId[]; sources?: ObjectId[] }
-  | { kind: "MustBlock"; sources?: ObjectId[] }
+  | { kind: "MustBlock"; sources?: ObjectId[]; attackers?: ObjectId[] }
   | { kind: "CantAttack"; sources?: ObjectId[] }
   | { kind: "CantBlock"; sources?: ObjectId[] };
 

@@ -549,6 +549,28 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
 }
 
 #[test]
+fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
+    let trigger = parse_trigger_line(
+        "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, \
+         target creature an opponent controls blocks that Wolf this combat if able.",
+        "Tolsimir, Midnight's Light",
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::SourceAttackedThisCombat),
+        "the intervening-if is combat-scoped and source-incarnation-bound"
+    );
+    assert!(matches!(
+        trigger.execute.as_deref().map(|ability| &*ability.effect),
+        Some(Effect::ForceBlock {
+            attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+            duration: Duration::UntilEndOfCombat,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn intervening_if_source_attacked_or_blocked_this_turn_populates_condition() {
     // CR 508.1 + CR 509.1 + CR 603.4: the "attacked or blocked" sibling of the
     // attacked-only intervening-if. Gates on the source creature having attacked

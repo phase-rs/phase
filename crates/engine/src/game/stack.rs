@@ -25,6 +25,10 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+    let source_ref = state
+        .objects
+        .get(&entry.source_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
     // CR 701.27f: an activated or triggered ability of a permanent may
     // transform that permanent only if it has not transformed/converted since
     // the ability was put onto the stack. Spells and keyword actions do not
@@ -51,6 +55,12 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
                 }
             }
         }
+    }
+    // CR 400.7 + CR 509.1c: source-referential force-block instructions bind
+    // their exact source at the common stack boundary, covering activated and
+    // other nontriggered stack abilities as well as normal triggered paths.
+    if let Some(ability) = entry.ability_mut() {
+        ability.bind_force_block_source_recursive(source_ref);
     }
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
@@ -2459,6 +2469,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: _,
         controller: _,
         original_controller: _,
         scoped_player,
@@ -2645,6 +2656,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: _,
         controller: _,
         original_controller: _,
         scoped_player,
@@ -3256,6 +3268,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: a_force_block_attacker,
         controller: a_controller,
         original_controller: _,
         scoped_player: a_scoped_player,
@@ -3308,6 +3321,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: b_force_block_attacker,
         controller: b_controller,
         original_controller: _,
         scoped_player: b_scoped_player,
@@ -3356,6 +3370,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 
     a_effect == b_effect
         && a_targets == b_targets
+        && a_force_block_attacker == b_force_block_attacker
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind

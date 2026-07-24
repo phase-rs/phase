@@ -89,6 +89,7 @@ mod tests {
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            force_block_attacker: None,
             targets: vec![],
             kind: AbilityKind::Spell,
             sub_ability: None,

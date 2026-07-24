@@ -2787,7 +2787,11 @@ pub(crate) fn deterministic_choice(
                 &config.profile,
                 Some(valid_block_targets),
             );
-            return Some(GameAction::DeclareBlockers { assignments });
+            return Some(engine::game::combat::complete_blocker_proposal(
+                state,
+                ai_player,
+                &assignments,
+            ));
         }
         return Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),
@@ -2844,7 +2848,11 @@ fn deterministic_combat_choice(
                 profile,
                 Some(valid_block_targets),
             );
-            return Some(GameAction::DeclareBlockers { assignments });
+            return Some(engine::game::combat::complete_blocker_proposal(
+                state,
+                ai_player,
+                &assignments,
+            ));
         }
         return Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),

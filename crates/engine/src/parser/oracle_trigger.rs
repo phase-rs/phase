@@ -5174,6 +5174,20 @@ fn extract_if_condition_with_card_name(
         );
     }
 
+    // CR 400.7 + CR 508.1 + CR 603.4: source-combat history is a distinct
+    // grammar production, not a card-text table entry. The scanner applies the
+    // nom production at word boundaries so a leading intervening-if is retained
+    // while later sentence-local conditionals remain outside this function.
+    if let Some((prefix, rest)) = scan_preceded(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if ~ attacked this combat").parse(i)
+    }) {
+        let clause_len = lower.len() - prefix.len() - rest.len();
+        return (
+            strip_condition_clause(text, prefix.len(), clause_len),
+            Some(TriggerCondition::SourceAttackedThisCombat),
+        );
+    }
+
     // Simple pattern→condition extractions (no dynamic parsing or guards needed).
     if let Some(result) = try_extract_simple_condition(
         &tp,

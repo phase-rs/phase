@@ -283,9 +283,7 @@ describe("ActionButton", () => {
     });
   });
 
-  it("gates Block with None on an unassigned must-block creature, independent of menace", () => {
-    // No block_requirements (menace) present, so incompleteBlockCount is 0 — the
-    // gate here is purely the engine-provided must-block constraint.
+  it("does not client-gate Block with None on an unassigned must-block creature", () => {
     const wf: WaitingFor = {
       type: "DeclareBlockers",
       data: {
@@ -299,24 +297,33 @@ describe("ActionButton", () => {
     useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
 
     render(<ActionButton />);
-    expect(screen.getByRole("button", { name: "Block with None" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Block with None" })).toBeEnabled();
   });
 
-  it("enables Confirm Blockers once the must-block creature is assigned", () => {
+  it("submits every selected blocker pair without client-side requirement gating", () => {
     const wf: WaitingFor = {
       type: "DeclareBlockers",
       data: {
         player: 0,
         valid_blocker_ids: [100],
-        valid_block_targets: { "100": [200] },
+        valid_block_targets: { "100": [200, 201] },
         blocker_constraints: { "100": { kind: "MustBlock" } },
       },
     };
     useGameStore.setState({ gameState: createGameState(wf), waitingFor: wf, legalActions: [] });
-    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map([[100, 200]]) });
+    useUiStore.setState({
+      selectedAttackers: [],
+      blockerAssignments: new Map([[100, new Set([200, 201])]]),
+    });
 
     render(<ActionButton />);
-    expect(screen.getByRole("button", { name: "Confirm Blockers (1)" })).toBeEnabled();
+    const confirm = screen.getByRole("button", { name: "Confirm Blockers (2)" });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    expect(vi.mocked(dispatchAction)).toHaveBeenCalledWith({
+      type: "DeclareBlockers",
+      data: { assignments: [[100, 200], [100, 201]] },
+    });
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {

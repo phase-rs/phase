@@ -6263,8 +6263,11 @@ pub enum CombatTaxPending {
         /// band for blocking (CR 702.22h).
         bands: Vec<Vec<crate::types::identifiers::ObjectIncarnationRef>>,
     },
+    /// CR 400.7 + CR 509.1d: Both sides of each proposed block pair are
+    /// snapshotted. A blocker or attacker that leaves and re-enters during the
+    /// payment pause is a different object and cannot receive the locked quote.
     Block {
-        assignments: Vec<(ObjectId, ObjectId)>,
+        assignments: Vec<(ObjectIncarnationRef, ObjectIncarnationRef)>,
     },
 }
 
@@ -12915,6 +12918,11 @@ pub struct TransientContinuousEffect {
     pub timestamp: u64,
     pub duration: Duration,
     pub affected: TargetFilter,
+    /// CR 400.7: A one-shot effect that resolved on a specific target must not
+    /// apply to a later incarnation that reuses the same storage id. `None`
+    /// preserves the dynamic affected-set semantics required by general TCEs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_recipient: Option<ObjectIncarnationRef>,
     pub modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<StaticCondition>,
@@ -16608,6 +16616,7 @@ impl GameState {
                 timestamp,
                 duration,
                 affected,
+                affected_recipient: None,
                 modifications,
                 condition,
                 duration_subject: None,
@@ -16615,6 +16624,19 @@ impl GameState {
             });
         self.layers_dirty.mark_full();
         id
+    }
+
+    /// Bind a transient effect to the exact recipient resolved by a one-shot
+    /// instruction. Dynamic effects intentionally leave this unset.
+    pub fn set_transient_affected_recipient(&mut self, id: u64, recipient: ObjectIncarnationRef) {
+        if let Some(tce) = self
+            .transient_continuous_effects
+            .iter_mut()
+            .find(|tce| tce.id == id)
+        {
+            tce.affected_recipient = Some(recipient);
+            self.layers_dirty.mark_full();
+        }
     }
 
     /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a

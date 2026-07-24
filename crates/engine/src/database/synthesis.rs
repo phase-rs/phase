@@ -5039,6 +5039,7 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
         execute.sub_ability.as_deref().map(|a| &*a.effect),
         Some(Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
+            ..
         })
     )
 }
@@ -5167,6 +5168,8 @@ fn build_provoke_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
+            attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+            duration: Duration::UntilEndOfTurn,
         },
     )
     .description("CR 509.1c: that creature blocks this creature this turn if able".to_string());
@@ -13575,6 +13578,7 @@ mod provoke_synthesis_tests {
                 &*sub.effect,
                 Effect::ForceBlock {
                     target: TargetFilter::ParentTarget,
+                    ..
                 }
             ),
             "sub-ability must force-block the parent (untapped) target via ParentTarget, got {:?}",
@@ -13892,7 +13896,7 @@ mod provoke_runtime_tests {
                     m,
                     ContinuousModification::AddStaticMode {
                         mode: StaticMode::MustBlockAttacker { attacker },
-                    } if *attacker == provoker
+                    } if attacker.object_id == provoker
                 )
             })
         });

@@ -2353,7 +2353,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
         // CR 710.4: the flipping permanent is the effect's single reported target.
@@ -13817,7 +13817,7 @@ mod tests {
         let mut face = make_face();
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::MustBlockAttacker {
-                attacker: ObjectId(42),
+                attacker: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(42), 0),
             })
             .description("Target creature blocks this creature this turn if able.".to_string()),
         );

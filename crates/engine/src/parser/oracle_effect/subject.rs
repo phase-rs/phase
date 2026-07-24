@@ -6803,7 +6803,7 @@ mod tests {
             "mass force-block must not request a target, got {:?}",
             def.target_prompt
         );
-        let Effect::ForceBlock { target } = &*def.effect else {
+        let Effect::ForceBlock { target, .. } = &*def.effect else {
             panic!("expected ForceBlock, got {:?}", def.effect);
         };
         let TargetFilter::Typed(filter) = target else {

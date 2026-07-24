@@ -8,10 +8,9 @@ import type { CombatRequirement, ObjectId } from "../../adapter/types.ts";
  * Per-creature blocker-constraint status, derived from the engine-provided
  * `blocker_constraints` (CR 509.1c must-block / CR 509.1b can't-block) and the
  * player's in-progress blocker assignments:
- * - `pending`   — a MustBlock creature not yet assigned to any attacker (illegal
- *                 to confirm). The engine already excludes must-block creatures
- *                 with zero legal targets, so no target check is needed here.
- * - `satisfied` — a MustBlock creature currently assigned.
+ * - `pending`   — a MustBlock creature lacks a matching selected assignment.
+ * - `satisfied` — generic MustBlock has any assignment; exact MustBlock has
+ *                 every engine-provided required attacker selected.
  * - `info`      — a CantBlock creature (informational; can never be assigned).
  */
 export type BlockerConstraintStatus = "pending" | "satisfied" | "info";
@@ -22,15 +21,15 @@ export interface BlockerConstraint {
   status: BlockerConstraintStatus;
   /** Engine-provided objects imposing this constraint (CR 509.1b/c). */
   sources: ObjectId[];
+  /** Engine-provided exact attackers this creature is asked to block. */
+  attackers: ObjectId[];
 }
 
 export interface BlockerConstraints {
   byObject: Map<ObjectId, BlockerConstraint>;
-  /** MustBlock creatures not yet assigned — confirmation must be blocked. */
-  unsatisfiedMustBlockCount: number;
 }
 
-const EMPTY: BlockerConstraints = { byObject: new Map(), unsatisfiedMustBlockCount: 0 };
+const EMPTY: BlockerConstraints = { byObject: new Map() };
 
 /**
  * Compares the engine-declared per-creature blocker constraints against the
@@ -49,23 +48,26 @@ export function useBlockerConstraints(): BlockerConstraints {
       return EMPTY;
     }
 
-    // blockerAssignments maps blockerId -> attackerId; a must-block creature is
-    // satisfied once it appears as a key (assigned to some attacker).
+    // This only annotates the player's selection. The engine decides whether it
+    // satisfies every requirement and whether it can be declared.
     const byObject = new Map<ObjectId, BlockerConstraint>();
-    let unsatisfiedMustBlockCount = 0;
 
     for (const [key, requirement] of Object.entries(blockerConstraints)) {
       const objectId = Number(key);
       if (requirement.kind === "MustBlock") {
-        const status: BlockerConstraintStatus = blockerAssignments.has(objectId)
+        const requiredAttackers = requirement.attackers ?? [];
+        const selectedAttackers = blockerAssignments.get(objectId);
+        const status: BlockerConstraintStatus = selectedAttackers != null
+          && (requiredAttackers.length === 0
+            || requiredAttackers.every((attackerId) => selectedAttackers.has(attackerId)))
           ? "satisfied"
           : "pending";
-        if (status === "pending") unsatisfiedMustBlockCount += 1;
         byObject.set(objectId, {
           objectId,
           kind: requirement.kind,
           status,
           sources: requirement.sources ?? [],
+          attackers: requiredAttackers,
         });
       } else if (requirement.kind === "CantBlock") {
         byObject.set(objectId, {
@@ -73,10 +75,11 @@ export function useBlockerConstraints(): BlockerConstraints {
           kind: requirement.kind,
           status: "info",
           sources: requirement.sources ?? [],
+          attackers: [],
         });
       }
     }
 
-    return { byObject, unsatisfiedMustBlockCount };
+    return { byObject };
   }, [blockerConstraints, blockerAssignments]);
 }

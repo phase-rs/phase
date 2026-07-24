@@ -25,6 +25,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
+use crate::parser::oracle_nom::target as nom_target;
 use crate::parser::oracle_static::parse_activated_ability_cost_head;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
@@ -34,11 +35,11 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
     CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControlWindow,
     ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp, Duration,
-    Effect, EffectScope, FaceDownProfile, FilterProp, GrantedAbilityScope, LibraryPosition,
-    MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat,
-    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
-    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter, ZoneOwner,
+    Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
+    LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount,
+    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode,
+    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
+    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -10343,18 +10344,9 @@ pub(super) fn parse_imperative_family_ast(
 
         // ── Combat-related ──
 
-        // CR 509.1g: "block [object] this turn/combat if able"
-        // Handles: "block this turn if able", "blocks ~ this turn if able",
-        // "blocks it this combat if able", "blocks this creature this turn if able"
-        "block" | "blocks" => {
-            if nom_primitives::scan_contains(lower, "this turn if able")
-                || nom_primitives::scan_contains(lower, "this combat if able")
-            {
-                Some(ImperativeFamilyAst::ForceBlock)
-            } else {
-                None
-            }
-        }
+        // CR 509.1c: the named attacker is a semantic referent, not a source-id
+        // inference. "that Wolf" means the narrowed attacking event subject.
+        "block" | "blocks" => parse_force_block_ast(lower, ctx),
         // CR 509.1c: "must be blocked [this turn] [if able]"
         "must" => {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("must be blocked").parse(lower) {
@@ -11847,6 +11839,55 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
     }
 }
 
+/// CR 509.1c: Parse the force-block grammar after preserving the named attacker
+/// axis. This is intentionally a small nom production rather than a text
+/// substring check: the referent and duration survive lowering independently.
+fn parse_force_block_ast(input: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = alt((tag("block "), tag("blocks "))).parse(input).ok()?;
+    let parse_duration = |tail| {
+        all_consuming(alt((
+            value(Duration::UntilEndOfTurn, tag("this turn if able")),
+            value(Duration::UntilEndOfCombat, tag("this combat if able")),
+        )))
+        .parse(tail)
+        .ok()
+        .map(|(_, duration)| duration)
+    };
+
+    if let Some(duration) = parse_duration(rest) {
+        return Some(ImperativeFamilyAst::ForceBlock {
+            attacker: None,
+            duration,
+        });
+    }
+    if let Ok((tail, _)) = alt((tag("~ "), tag("this creature "))).parse(rest) {
+        return parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
+            attacker: Some(ForceBlockAttackerRef::Source),
+            duration,
+        });
+    }
+    if let Ok((tail, _)) = tag("it ").parse(rest) {
+        if !ctx.in_trigger || !matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
+            return None;
+        }
+        return parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
+            attacker: Some(ForceBlockAttackerRef::EventSource),
+            duration,
+        });
+    }
+    // CR 603.2 + CR 506.3: an event-referential demonstrative needs a typed
+    // attacking-creature antecedent from a trigger. The shared nom production
+    // rejects arbitrary text and non-attacker nouns before this effect is built.
+    if !ctx.in_trigger || !matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
+        return None;
+    }
+    let (tail, _referent) = nom_target::parse_demonstrative_attacker_referent(rest).ok()?;
+    parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
+        attacker: Some(ForceBlockAttackerRef::EventSource),
+        duration,
+    })
+}
+
 fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
     match ast {
         ImperativeFamilyAst::Structured(ast) => lower_imperative_ast(ast),
@@ -11857,8 +11898,10 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
         },
-        ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
+        ImperativeFamilyAst::ForceBlock { attacker, duration } => Effect::ForceBlock {
             target: TargetFilter::Any,
+            attacker,
+            duration,
         },
         ImperativeFamilyAst::ForceAttack {
             duration,
