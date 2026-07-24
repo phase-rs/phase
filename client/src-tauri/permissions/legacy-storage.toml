@@ -29,6 +29,11 @@ description = "Allows first-party remote content to prepare a signed native engi
 commands.allow = ["ensure_native_engine"]
 
 [[permission]]
+identifier = "allow-native-engine-progress"
+description = "Allows first-party remote content to read the latest native-engine provisioning progress."
+commands.allow = ["native_engine_progress"]
+
+[[permission]]
 identifier = "allow-stop-native-engine"
 description = "Allows first-party remote content to stop the shell-owned native engine."
 commands.allow = ["stop_native_engine"]

@@ -2302,6 +2302,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
     // is a simple "reveal the top N" with no player selection — it must resolve synchronously
     // (via RevealTop) so that sub_ability chains like RevealedHasCardType evaluate inline.
+    //
+    // CR 107.3 + CR 701.20a: Dynamic counts (Portent of Calamity's "top X cards") cannot
+    // round-trip through `RevealTop { count: u32 }` without collapsing to 1. Keep those
+    // Digs as reveal-only peeks (`keep_count: 0`) so X resolves at runtime; a later
+    // ForEachCategory / LastRevealed rest-move consumes the revealed pool.
     for def in &mut defs {
         if let Effect::Dig {
             count,
@@ -2317,14 +2322,27 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             if destination == &Some(Zone::Library) && rest_destination == &Some(Zone::Library) {
                 continue;
             }
-            let count_val = match count {
-                QuantityExpr::Fixed { value } => *value as u32,
-                _ => 1,
-            };
-            *def.effect = Effect::RevealTop {
-                player: player.clone(),
-                count: count_val,
-            };
+            match count {
+                QuantityExpr::Fixed { value } => {
+                    *def.effect = Effect::RevealTop {
+                        player: player.clone(),
+                        count: *value as u32,
+                    };
+                }
+                _ => {
+                    if let Effect::Dig {
+                        keep_count,
+                        destination,
+                        rest_destination,
+                        ..
+                    } = &mut *def.effect
+                    {
+                        *keep_count = Some(0);
+                        *destination = None;
+                        *rest_destination = None;
+                    }
+                }
+            }
         }
     }
 

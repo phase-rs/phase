@@ -2384,20 +2384,28 @@ fn settle_sacrifice_for_cost_events(
     if !deferred_cost_events.is_empty() {
         crate::game::triggers::collect_triggers_into_deferred(state, &deferred_cost_events);
     }
-    state.consumed_before_priority_trigger_events.extend(
-        events[current_start..current_end]
-            .iter()
-            .enumerate()
-            .map(|(offset, event)| {
-                let index = current_start + offset;
-                crate::game::triggers::ConsumedTriggerEventOccurrence {
-                    event: event.clone(),
-                    occurrence: events[..index]
-                        .iter()
-                        .filter(|prior| *prior == event)
-                        .count(),
-                }
-            }),
+    let occurrences = events[current_start..current_end]
+        .iter()
+        .enumerate()
+        .map(|(offset, event)| {
+            let index = current_start + offset;
+            crate::game::triggers::ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: events[..index]
+                    .iter()
+                    .filter(|prior| *prior == event)
+                    .count(),
+            }
+        })
+        .collect();
+    crate::game::triggers::resolve_and_apply_trigger_collection(
+        state,
+        crate::types::resolved_commands::ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences,
+        },
+    )
+    .expect(
+        "sacrifice-cost settlement consumed-before-priority trigger journal cause must be live",
     );
 }
 

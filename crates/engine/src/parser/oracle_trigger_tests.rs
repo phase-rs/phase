@@ -14636,6 +14636,101 @@ fn phase_trigger_each_players_upkeep_no_constraint() {
     assert_eq!(def.constraint, None);
 }
 
+/// CR 102.2 / CR 102.3 + CR 402.1 + CR 603.2b + CR 608.2c: Fevered
+/// Visions keeps the phase trigger unconditional, draws for the scoped
+/// phase-player first, then gates the damage instruction on BOTH that player's
+/// opponent relation and post-draw hand size.
+#[test]
+fn fevered_visions_scoped_player_damage_gate_is_fully_typed() {
+    const ORACLE: &str = "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, this enchantment deals 2 damage to that player.";
+
+    fn count_unimplemented(ability: &AbilityDefinition) -> usize {
+        usize::from(matches!(
+            ability.effect.as_ref(),
+            Effect::Unimplemented { .. }
+        )) + ability
+            .sub_ability
+            .as_deref()
+            .map(count_unimplemented)
+            .unwrap_or(0)
+            + ability
+                .else_ability
+                .as_deref()
+                .map(count_unimplemented)
+                .unwrap_or(0)
+    }
+
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Fevered Visions",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{:?}", parsed.triggers);
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Phase);
+    assert_eq!(trigger.phase, Some(Phase::End));
+    assert_eq!(
+        trigger.condition, None,
+        "the damage rider is a resolution-time instruction condition, not an intervening-if"
+    );
+
+    let draw = trigger.execute.as_deref().expect("trigger execute");
+    assert_eq!(
+        draw.effect.as_ref(),
+        &Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::ScopedPlayer,
+        }
+    );
+    let damage = draw
+        .sub_ability
+        .as_deref()
+        .expect("conditional damage child");
+    assert_eq!(
+        damage.effect.as_ref(),
+        &Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::ScopedPlayer,
+            damage_source: None,
+            excess: None,
+        }
+    );
+    assert_eq!(
+        damage.condition,
+        Some(AbilityCondition::And {
+            conditions: vec![
+                AbilityCondition::ScopedPlayerMatches {
+                    filter: PlayerFilter::Opponent,
+                },
+                AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::ScopedPlayer,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 4 },
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        count_unimplemented(draw),
+        0,
+        "Fevered Visions must contain no Unimplemented effects: {draw:?}"
+    );
+    assert!(
+        parsed.parse_warnings.iter().all(|warning| !matches!(
+            warning,
+            OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+        )),
+        "Fevered Visions must not emit Condition_If: {:?}",
+        parsed.parse_warnings
+    );
+}
+
 /// CR 603.2b + CR 608.2c: Roiling Vortex — "At the beginning of each player's
 /// upkeep, this enchantment deals 1 damage to them." The bare player anaphor
 /// "them" is the player whose upkeep it is — the same referent "that player"

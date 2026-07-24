@@ -839,11 +839,20 @@ pub fn spell_modal_unavailable_modes(
 pub fn modal_spell_mode_abilities(
     obj: &crate::game::game_object::GameObject,
 ) -> Vec<AbilityDefinition> {
+    modal_spell_mode_ability_refs(obj).cloned().collect()
+}
+
+/// Borrowing view of [`modal_spell_mode_abilities`] — the same predicate
+/// without the per-call clone, for read-only consumers that only inspect the
+/// modes (AI classification, coverage reporting). Both share this one
+/// definition of "which abilities on this object are its printed modes" so the
+/// owned and borrowed forms can never disagree.
+pub fn modal_spell_mode_ability_refs(
+    obj: &crate::game::game_object::GameObject,
+) -> impl Iterator<Item = &AbilityDefinition> {
     obj.abilities
         .iter()
         .filter(|a| a.kind == AbilityKind::Spell)
-        .cloned()
-        .collect()
 }
 
 /// CR 700.2a-b + CR 700.2f: Extends `unavailable_modes` with mode indices

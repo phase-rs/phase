@@ -722,6 +722,7 @@ export function GameProvider({
       audioManager.setContext("battlefield");
       return () => {
         audioManager.setContext("menu");
+        clearPromptOverlayState();
       };
     }
 
@@ -1036,6 +1037,7 @@ export function GameProvider({
         // sessions, clears timers, and disposes the WASM engine.
         if (p2pAdapter) p2pAdapter.dispose();
         audioManager.setContext("menu");
+        clearPromptOverlayState();
         reset();
       };
     }
@@ -1246,6 +1248,7 @@ export function GameProvider({
         useMultiplayerStore.getState().setIsSpectator(false);
         useMultiplayerStore.getState().setSpectators([]);
         audioManager.setContext("menu");
+        clearPromptOverlayState();
         reset();
       };
     }
@@ -1481,6 +1484,11 @@ export function GameProvider({
 
     if (shouldUseNativeAi && nativeEngineKey) {
       const setupNativeAi = async () => {
+        // A native socket that dies before the session is live is not a lost
+        // connection the player can act on — the `catch` below silently falls
+        // back to WASM, so surfacing GamePage's terminal connection-lost banner
+        // would paint it over a healthy local game that plays on underneath.
+        let nativeSessionLive = false;
         try {
           // Native sessions deliberately do not resume a local snapshot. A
           // pre-existing state belongs to the established WASM path instead.
@@ -1560,7 +1568,9 @@ export function GameProvider({
               }
               // GamePage's existing reconnect-failed/error surface is terminal
               // and provides the Return-to-Menu action for this native session.
-              onWsEventRef.current?.(event);
+              // Setup failures instead reject the pending `initGame`, which the
+              // `catch` turns into a WASM fallback with no banner.
+              if (nativeSessionLive) onWsEventRef.current?.(event);
             }
           });
 
@@ -1581,14 +1591,26 @@ export function GameProvider({
           setGameMode("native-ai");
           controller = createGameLoopController({ mode: "online" });
           controller.start();
+          nativeSessionLive = true;
           audioManager.setContext("battlefield");
         } catch (error) {
           nativeAdapter?.dispose({ concede: true });
           nativeAdapter = null;
           if (cancelled) return;
 
+          const fallbackReason = nativeFallbackReason(error);
           setGameMode("ai");
-          setEngineMode("wasm", nativeFallbackReason(error));
+          setEngineMode("wasm", fallbackReason);
+          // Losing the native engine is otherwise invisible — the game simply
+          // plays slower. EngineModeBadge carries the standing signal; this is
+          // the one-shot that says it happened just now.
+          useMultiplayerStore.getState().showToast(
+            tRef.current(
+              fallbackReason === "server_version_mismatch"
+                ? "common:engineBadge.versionMismatchTooltip"
+                : "common:engineBadge.inBrowserTooltip",
+            ),
+          );
           saveWasmAiResumePointer(gameId, difficulty, playerCount, formatConfig);
           await setupLocal();
         }
