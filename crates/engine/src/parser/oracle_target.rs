@@ -2534,29 +2534,60 @@ pub fn parse_type_phrase_with_ctx<'a>(
                     };
                     (Some(tf), Some(sub_name))
                 } else if let TypeFilter::Subtype(second) = tf {
-                    if matches!(&card_type, Some(TypeFilter::Subtype(s)) if s.ends_with("'s")) {
-                        // "Urza's" (the ONLY possessive-suffixed entry in the
-                        // whole subtype vocabulary — LAND_SUBTYPES,
-                        // card_type.rs) is a name FRAGMENT meant to attach to
-                        // a following noun ("Urza's Mine"/"Tower"/
-                        // "Power-Plant"), not an independently AND-combinable
-                        // subtype like "Elder"/"Elf"/"Human" below. Chaining
-                        // it here would fully consume "an urza's mine" into
-                        // one `Typed{Subtype("Urza's"), Subtype("Mine")}`
-                        // filter with an empty remainder, which changes which
-                        // downstream condition-builder claims the clause and
-                        // regresses the dedicated Urza-lands
-                        // `ControllerControlsMatching` parser (issue #6321 /
-                        // PR #6533 review — urzas_lands_share_delta_shape /
-                        // legacy_misparses_are_now_honest_gaps). Decline; the
-                        // specialized handler still gets the untouched text.
+                    // CR 205.3b + CR 205.3m: on a PRINTED type line, subtypes
+                    // of every card type except creature (and plane) are
+                    // always single words — each dash-separated word is its
+                    // own subtype. Creature subtypes are the one category the
+                    // rules let run one OR two words (the sole two-word
+                    // creature type is "Time Lord"; every other type in the
+                    // 205.3m list — "Elder"/"Dragon"/"Elf"/"Warrior"/"Human"/
+                    // "Wizard" included — is one word). So when ORACLE TEXT
+                    // names two consecutive creature-subtype words, that is
+                    // ambiguous ONLY for creatures — the same word-boundary
+                    // question ("one two-word type, or two one-word types
+                    // stacked?") never arises for other categories, where
+                    // CR 205.3b already guarantees each word is separate.
+                    // This generic phrase-chaining rule exists to resolve
+                    // exactly that creature-only ambiguity, so it is scoped
+                    // to fire ONLY when NEITHER matched word is a registered
+                    // NONCREATURE subtype (`fixed_noncreature_subtypes` —
+                    // land/artifact/enchantment/spell/battle/planeswalker).
+                    // "Urza's" (a real land type per CR 205.3i, LAND_SUBTYPES
+                    // in card_type.rs) is noncreature — land subtypes CAN
+                    // co-occur on one permanent (Urza's Mine genuinely has
+                    // BOTH the "Urza's" and "Mine" land subtypes), but the
+                    // dedicated Urza-lands condition parser already owns that
+                    // Oracle-text pattern and deliberately extracts only the
+                    // discriminating second word ("Mine"/"Power-Plant"/
+                    // "Tower" — "Urza's" is common to all three lands in the
+                    // cycle, so checking for it adds no discriminating
+                    // power). Chaining here instead fully consumed "an urza's
+                    // mine" into one filter with an empty remainder, which
+                    // changed which downstream condition-builder claimed the
+                    // clause and regressed that specialized parser (issue
+                    // #6321 / PR #6533 review —
+                    // urzas_lands_share_delta_shape /
+                    // legacy_misparses_are_now_honest_gaps). Staying out of
+                    // every noncreature category's way, not just this one
+                    // land cycle, is why the check is by vocabulary
+                    // membership rather than an Urza's-specific special case.
+                    let first_name = match &card_type {
+                        Some(TypeFilter::Subtype(s)) => s.as_str(),
+                        _ => unreachable!(),
+                    };
+                    let is_noncreature_subtype = |name: &str| {
+                        crate::types::card_type::fixed_noncreature_subtypes()
+                            .any(|s| s.eq_ignore_ascii_case(name))
+                    };
+                    if is_noncreature_subtype(first_name) || is_noncreature_subtype(&second) {
+                        // Decline — this generic creature-stack rule doesn't
+                        // own noncreature subtype pairs. Whichever specialized
+                        // handler owns this category still gets the untouched
+                        // trailing text.
                         (card_type, subtype)
                     } else {
-                        // CR 205.3a: two consecutive subtype words ("Elder
-                        // Dragon", "Elf Warrior", "Human Wizard") are BOTH
-                        // real subtypes stacked on the same permanent, not
-                        // one compound word — chain the second as an
-                        // additional AND-combined type filter instead of
+                        // Both words are creature-only: chain the second as
+                        // an additional AND-combined type filter instead of
                         // silently dropping it. Reuses the existing `subtype`
                         // slot (already flows into `base_type_filters`
                         // below), so `card_type` keeps the first subtype and
@@ -15388,17 +15419,19 @@ mod tests {
         assert_eq!(tf.controller, Some(ControllerRef::You));
     }
 
-    /// CR 205.3a: two consecutive subtype words ("Elder Dragon", "Elf
-    /// Warrior", "Human Wizard") are BOTH real, independently-registered
-    /// subtypes stacked on the same permanent (`oracle-subtypes.json` lists
-    /// "Elder" and "Dragon" as separate entries) — not one compound word, and
-    /// not a `[Subtype] [CoreType]` promotion (CR 205.3a's existing arm only
-    /// fires when the SECOND word is a concrete core type like "creature").
-    /// Before this fix the second subtype word was silently dropped (Fate
-    /// Reforged chapter II — "a copy of any Elder Dragon from the Legends
-    /// expansion" — collapsed to bare `Subtype("Elder")`, an over-broad
-    /// filter matching any "Elder"-subtype creature, not just Elder Dragons;
-    /// issue #6321 / PR #6533 review).
+    /// CR 205.3b + CR 205.3m: creature subtypes are the one category the
+    /// rules let run one OR two words on a type line (the sole two-word
+    /// creature type is "Time Lord"; every other listed creature type —
+    /// "Elder"/"Dragon"/"Elf"/"Warrior"/"Human"/"Wizard" included — is one
+    /// word), so two of them printed back to back are two SEPARATE stacked
+    /// subtypes, not a compound word (`oracle-subtypes.json` lists "Elder"
+    /// and "Dragon" as separate entries). Not a `[Subtype] [CoreType]`
+    /// promotion either (that existing arm only fires when the SECOND word is
+    /// a concrete core type like "creature"). Before this fix the second
+    /// subtype word was silently dropped (Fate Reforged chapter II — "a copy
+    /// of any Elder Dragon from the Legends expansion" — collapsed to bare
+    /// `Subtype("Elder")`, an over-broad filter matching any "Elder"-subtype
+    /// creature, not just Elder Dragons; issue #6321 / PR #6533 review).
     #[test]
     fn parse_type_phrase_two_word_subtype_chain() {
         for (text, first, second) in [
@@ -15427,19 +15460,23 @@ mod tests {
         }
     }
 
-    /// CR 205.3i: "Urza's" (LAND_SUBTYPES, `card_type.rs`) is the ONE
-    /// possessive-suffixed entry in the whole subtype vocabulary — a name
-    /// FRAGMENT meant to attach to a following noun ("Urza's Mine"/"Tower"/
-    /// "Power-Plant"), not an independently AND-combinable subtype like
-    /// "Elder"/"Elf"/"Human" above. The two-word subtype chain must NOT fire
-    /// for it: chaining would fully consume "urza's mine" into one
+    /// CR 205.3b + CR 205.3i: "Urza's" is a real land type (LAND_SUBTYPES,
+    /// `card_type.rs`), and land subtypes CAN co-occur on one permanent —
+    /// Urza's Mine genuinely has both the "Urza's" and "Mine" land subtypes.
+    /// But the two-consecutive-subtype-word chain above is scoped to resolve
+    /// a CREATURE-only word-boundary ambiguity (CR 205.3b/205.3m) and must
+    /// stay out of every noncreature category's way — including this one.
+    /// Chaining here would fully consume "urza's mine" into one
     /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
     /// remainder, which changes which downstream condition-builder claims the
     /// clause and regresses the dedicated Urza-lands
     /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
     /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
-    /// oracle_condition.rs — issue #6321 / PR #6533 review). "mine" must stay
-    /// unconsumed in the remainder so the specialized handler still sees it.
+    /// oracle_condition.rs — issue #6321 / PR #6533 review), which
+    /// deliberately extracts only the discriminating second word ("Mine" —
+    /// "Urza's" is common to all three cycle members and adds no
+    /// discriminating power). "mine" must stay unconsumed in the remainder so
+    /// that specialized handler still sees it.
     #[test]
     fn parse_type_phrase_urzas_possessive_prefix_does_not_chain() {
         let (filter, rest) = parse_type_phrase("urza's mine");
