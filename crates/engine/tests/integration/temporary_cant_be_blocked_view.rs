@@ -12,6 +12,7 @@ use engine::game::phasing::phase_out_object;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::types::ability::{ContinuousModification, Duration, TargetFilter};
+use engine::types::actions::GameAction;
 use engine::types::attribution::EffectRef;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -290,8 +291,49 @@ fn rogues_passage_activation_projects_only_its_target_until_cleanup() {
         "a creature not selected during activation must not receive the badge"
     );
 
-    runner.advance_to_end_step();
-    runner.advance_to_phase(Phase::Upkeep);
+    // Cross CR 514.2 through the production action pipeline. The phase helpers
+    // may stop at an intermediate priority window; legal_actions also advances
+    // through the empty combat declarations, and the turn counter proves cleanup
+    // has actually completed.
+    let start_turn = runner.state().turn_number;
+    let mut crossed_turn = false;
+    for _ in 0..400 {
+        if runner.state().turn_number > start_turn {
+            crossed_turn = true;
+            break;
+        }
+        let actions = engine::ai_support::legal_actions(runner.state());
+        let progress = actions
+            .iter()
+            .find(|action| matches!(action, GameAction::PassPriority))
+            .or_else(|| {
+                actions.iter().find(|action| {
+                    matches!(
+                        action,
+                        GameAction::DeclareAttackers { .. }
+                            | GameAction::DeclareBlockers { .. }
+                            | GameAction::SelectCards { .. }
+                            | GameAction::ChooseTarget { .. }
+                    )
+                })
+            })
+            .cloned();
+        match progress {
+            Some(action) => {
+                if runner.act(action).is_err() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    assert!(
+        crossed_turn,
+        "the game must advance past the turn containing the Rogues Passage activation; parked at turn {} phase {:?} waiting {:?}",
+        runner.state().turn_number,
+        runner.state().phase,
+        runner.state().waiting_for,
+    );
     evaluate_layers(runner.state_mut());
     assert!(
         !derive_views(runner.state(), None)
