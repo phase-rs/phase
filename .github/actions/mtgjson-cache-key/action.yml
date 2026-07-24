@@ -72,19 +72,26 @@ runs:
       # roll this key. Widen it here if draft-pool-gen ever reads more.
       run: |
         set -euo pipefail
+        paths=(
+          crates/draft-core
+          crates/engine/src/database/set_catalog.rs
+          crates/engine/src/database/set_gating.rs
+        )
+        # Validate each path INDEPENDENTLY. A combined emptiness check only
+        # catches total loss: `crates/draft-core` alone matches 13 tracked
+        # files, so renaming either single-file engine path would leave the
+        # combined output non-empty, pass the guard, and silently drop that
+        # file from the hash — the key would then stop rolling on its content
+        # for good, which is the exact staleness this guard exists to prevent.
+        for p in "${paths[@]}"; do
+          if [ -z "$(git ls-files -s "$p")" ]; then
+            echo "::error::draft-pool source path '$p' matched no tracked files — update .github/actions/mtgjson-cache-key"
+            exit 1
+          fi
+        done
         # `git ls-files -s` yields the tracked blob SHAs of the checked-out
         # tree — a content hash with no file reads.
-        srcs="$(git ls-files -s \
-          crates/draft-core \
-          crates/engine/src/database/set_catalog.rs \
-          crates/engine/src/database/set_gating.rs)"
-        # Empty means the paths were moved or renamed. Fail loudly: a constant
-        # hash silently pins every consumer to the first pool ever cached.
-        if [ -z "$srcs" ]; then
-          echo "::error::draft-pool source paths matched no tracked files — update .github/actions/mtgjson-cache-key"
-          exit 1
-        fi
-        src_hash="$(printf '%s' "$srcs" | sha256sum | cut -c1-16)"
+        src_hash="$(git ls-files -s "${paths[@]}" | sha256sum | cut -c1-16)"
         # Release gating is generation-time input, and gated sets auto-unlock
         # once their release date passes as of GATED_SETS_AS_OF (default UTC
         # today — see engine::database::set_gating). So while gating is active

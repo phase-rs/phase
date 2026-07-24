@@ -95,15 +95,36 @@ jobs:
           echo "inventory: $(wc -l < caches.tsv) entries, $(awk -F'\t' '{s+=$3} END {printf "%.2f", s/1073741824}' caches.tsv) GB"
 
           # Live merge-queue refs, so an in-flight queue entry is never swept.
-          gh api "/repos/$REPO/git/matching-refs/heads/gh-readonly-queue" \
-            --jq '.[].ref | sub("^refs/heads/"; "")' | sort > live_queue.txt || : > live_queue.txt
-          echo "live merge-queue refs: $(wc -l < live_queue.txt)"
+          # A FAILED lookup is missing evidence, not an empty live set: an API
+          # blip would otherwise leave this file empty, mark every queue ref
+          # orphaned, and delete the caches of entries currently in flight.
+          # matching-refs returns 200 with `[]` when nothing matches, so a
+          # genuinely empty live set still succeeds here and sweeps correctly.
+          # Only needed when the queue scope is in play — a PR-close run must
+          # not fail on an API blip for a scope it isn't going to touch.
+          : > live_queue.txt
+          if [ -z "$CLOSED_PR" ]; then
+            if ! gh api "/repos/$REPO/git/matching-refs/heads/gh-readonly-queue" \
+                 --jq '.[].ref | sub("^refs/heads/"; "")' > live_queue.raw; then
+              echo "::error::could not enumerate live merge-queue refs — refusing to sweep on missing evidence"
+              exit 1
+            fi
+            sort live_queue.raw > live_queue.txt
+            echo "live merge-queue refs: $(wc -l < live_queue.txt)"
+          fi
 
           # Cache-holding PR numbers -> state, resolved once each. A PR that
           # 404s (deleted fork, bad ref) is treated as OPEN: this janitor must
-          # never delete on missing evidence.
+          # never delete on missing evidence. On a PR-close run only the PR
+          # that closed is in scope, so resolve just that one rather than
+          # every PR holding a cache.
+          if [ -n "$CLOSED_PR" ]; then
+            prs="$CLOSED_PR"
+          else
+            prs="$(cut -f2 caches.tsv | sed -n 's#^refs/pull/\([0-9][0-9]*\)/.*#\1#p' | sort -un)"
+          fi
           : > pr_state.txt
-          for pr in $(cut -f2 caches.tsv | sed -n 's#^refs/pull/\([0-9][0-9]*\)/.*#\1#p' | sort -un); do
+          for pr in $prs; do
             state="$(gh api "/repos/$REPO/pulls/$pr" --jq '.state' 2>/dev/null || echo open)"
             printf '%s\t%s\n' "$pr" "$state" >> pr_state.txt
           done
@@ -118,11 +139,14 @@ jobs:
           while IFS=$'\t' read -r id ref size created key; do
             reason=""
 
+            # A PR-close run is scoped to that one PR — the queue and tag
+            # scopes belong to the nightly sweep, which has the live-ref
+            # evidence a PR-close run deliberately skips fetching.
             case "$ref" in
               refs/heads/gh-readonly-queue/*)
                 # The queue branch is gone -> no run can ever check it out, so
                 # no run can ever restore this entry.
-                if ! grep -qxF "${ref#refs/heads/}" live_queue.txt; then
+                if [ -z "$CLOSED_PR" ] && ! grep -qxF "${ref#refs/heads/}" live_queue.txt; then
                   reason="merge-queue ref no longer exists"
                 fi
                 ;;
@@ -137,7 +161,7 @@ jobs:
               *refs/tags/*)
                 # Tag refs are single-use: the next release is a different ref
                 # and cannot read these. Keep briefly for same-tag re-runs.
-                if [ "$(date -u -d "$created" +%s)" -lt "$cutoff" ]; then
+                if [ -z "$CLOSED_PR" ] && [ "$(date -u -d "$created" +%s)" -lt "$cutoff" ]; then
                   reason="tag cache older than ${TAG_CACHE_MAX_AGE_DAYS}d"
                 fi
                 ;;
@@ -151,15 +175,29 @@ jobs:
             printf '%s  %6sMB  %s  (%s)\n' \
               "$verb" "$((size / 1048576))" "$key" "$reason"
             if [ "$DRY_RUN" != "true" ]; then
-              gh api -X DELETE "/repos/$REPO/actions/caches/$id" >/dev/null 2>&1 \
-                || { echo "  (already gone)"; continue; }
+              # Only a 404 means the entry is genuinely gone. Swallowing every
+              # failure would report a 403 (no `actions: write`) or a secondary
+              # rate-limit as a clean sweep, and the job would exit green
+              # having reclaimed nothing. `</dev/null` keeps gh off the loop's
+              # stdin; `2>&1 >/dev/null` captures stderr and drops stdout.
+              if ! err="$(gh api -X DELETE "/repos/$REPO/actions/caches/$id" </dev/null 2>&1 >/dev/null)"; then
+                case "$err" in
+                  *"HTTP 404"*) echo "  (already gone)" ;;
+                  *) echo "::warning::delete failed for cache $id: $err" ;;
+                esac
+                continue
+              fi
             fi
             deleted=$((deleted + 1))
             freed=$((freed + size))
           done < caches.tsv
 
+          # `${DRY_RUN:+...}` would expand on every run — DRY_RUN is the string
+          # "false" on scheduled and PR-close runs, not empty.
+          would=""
+          [ "$DRY_RUN" = "true" ] && would="would have "
           echo
-          echo "kept $kept, ${DRY_RUN:+would have }deleted $deleted entries, freeing $(awk -v b="$freed" 'BEGIN {printf "%.2f", b/1073741824}') GB"
+          echo "kept $kept, ${would}deleted $deleted entries, freeing $(awk -v b="$freed" 'BEGIN {printf "%.2f", b/1073741824}') GB"
 
       - name: Report remaining usage
         if: ${{ always() }}
