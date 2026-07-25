@@ -11230,9 +11230,27 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
+    /// CR 701.27a: Transform — turn a double-faced permanent to its other face.
+    ///
+    /// `scope` mirrors `Effect::SetTapState`'s single-vs-mass parameterization
+    /// (CR 701.26a/b) instead of proliferating a `TransformAll` sibling:
+    ///   - `Single` (default) == the legacy targeted/anaphoric transform
+    ///     ("transform target creature" / "transform it" / self-ref "transform
+    ///     ~"). `target` is a selectable target filter; `target_filter()`
+    ///     exposes it so a target slot is built (CR 115.1).
+    ///   - `All` == a non-targeting mass transform ("Transform all Humans" —
+    ///     Moonmist). Per CR 115.10/115.10a "all X" is NOT a target; `target`
+    ///     is a population filter enumerated over the battlefield at resolution
+    ///     and `target_filter()` returns `None` (no prompt).
+    ///
+    /// Keeps Transform's legacy `SelfRef` serde default (NOT SetTapState's
+    /// `Any`) so old serialized single Transforms stay byte-compatible, and the
+    /// `Single` scope serde default so they deserialize as targeted.
     Transform {
         #[serde(default = "default_target_filter_self_ref")]
         target: TargetFilter,
+        #[serde(default = "default_effect_scope_single")]
+        scope: EffectScope,
     },
     /// CR 710.4: Flip a Kamigawa flip permanent — a one-way status change
     /// (CR 110.5) after which the card's alternative name, text box, type line,
@@ -14187,9 +14205,8 @@ impl Effect {
             | Effect::Animate { target, .. }
             | Effect::Discard { target, .. }
             | Effect::Shuffle { target, .. }
-            | Effect::Transform { target, .. }
             // CR 710.4: the flipping permanent is named by the effect's target
-            // slot exactly like `Transform`'s.
+            // slot exactly like `Transform`'s single scope (below).
             | Effect::FlipPermanent { target, .. }
             | Effect::RevealHand { target, .. }
             | Effect::Reveal { target, .. }
@@ -14389,6 +14406,23 @@ impl Effect {
                 ..
             } => Some(target),
             Effect::SetTapState {
+                scope: EffectScope::All,
+                ..
+            } => None,
+
+            // CR 701.27a + CR 115.1 / CR 115.10a: `Transform` exposes its target
+            // only for the single-permanent scope (legacy "transform target
+            // creature" / "transform it" / self-ref "transform ~"). The `All`
+            // scope ("Transform all Humans" — Moonmist) is a non-targeting
+            // population filter enumerated at resolution, so — like `SetTapState`
+            // above and `DestroyAll` — its `target_filter()` is `None` and no
+            // target slot / prompt is built.
+            Effect::Transform {
+                scope: EffectScope::Single,
+                target,
+                ..
+            } => Some(target),
+            Effect::Transform {
                 scope: EffectScope::All,
                 ..
             } => None,

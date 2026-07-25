@@ -1044,7 +1044,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::Transform { target } => {
+        Effect::Transform { target, .. } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
@@ -5182,6 +5182,16 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // (missed offer, never a false certificate).
         | Effect::Suspect { scope: EffectScope::All, .. }
         | Effect::Unsuspect { scope: EffectScope::All, .. }
+        // CR 701.27a + CR 115.10a: mass Transform ("Transform all Humans", scope:All)
+        // is a non-targeting battlefield-population read (`target_filter()`==None;
+        // `transform_effect::resolve_all` enumerates `state.battlefield`, like
+        // DestroyAll) ⇒ census — its read SCALES with the growing class. Unlike the
+        // state-convergent SetTapState exception below, Transform WRITES ObjectPt and
+        // swaps the object's abilities, so a grown token is NOT inert and the read can
+        // escalate: `LiveBoardCensus`, never the Snapshot exception. scope:Single is a
+        // single announced/anaphoric target (a2), relaxed in the single-object group
+        // below. Exhaustive over EffectScope = {Single, All}.
+        | Effect::Transform { scope: EffectScope::All, .. }
         // ── F1-CLASS DUAL-MODE MASS-BATTLEFIELD RESOLVERS (P3-B round-2): each has a
         // resolver mode that, when the ability carries NO explicit object target,
         // enumerates the battlefield (or all phased-in/-out permanents) and applies the
@@ -5321,8 +5331,11 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Mana { .. }
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
-        // CR 710.4: same single-target read context as `Transform`.
+        // CR 701.27a: only the scope:Single Transform relaxes — a single announced or
+        // anaphoric target (a2). scope:All is the mass battlefield read, census-tagged
+        // above with the DestroyAll/Suspect{All} group.
+        | Effect::Transform { scope: EffectScope::Single, .. }
+        // CR 710.4: same single-target read context as `Transform` (always self-ref).
         | Effect::FlipPermanent { .. }
         | Effect::SearchLibrary { .. }
         | Effect::SearchOutsideGame { .. }
@@ -5523,7 +5536,7 @@ enum CensusRole {
 #[cfg(test)]
 fn effect_census_role(e: &Effect) -> CensusRole {
     match e {
-        // -- CENSUS (29): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
+        // -- CENSUS (30): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
         // arm - mass battlefield population reads that scale with growth.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -5575,7 +5588,16 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         // token copy per matching attacker over an UNCONDITIONAL battlefield scan (grows
         // the board); unsound across CR 508.1 multi-combat loops. Mirror of the new
         // effect_target_ctx census member.
-        | Effect::CopyTokenBlockingAttacker { .. } => CensusRole::Census,
+        | Effect::CopyTokenBlockingAttacker { .. }
+        // CR 701.27a + CR 115.10a: mass Transform (scope:All) enumerates
+        // `state.battlefield` (`transform_effect::resolve_all`) — a census read that
+        // GROWS with the class. It WRITES ObjectPt + swaps abilities (NOT state-
+        // convergent like SetTapState), so it is a true `Census`, never the SetTapState
+        // relax exception. Parity with the effect_target_ctx LiveBoardCensus member.
+        | Effect::Transform {
+            scope: EffectScope::All,
+            ..
+        } => CensusRole::Census,
 
         // -- SetTapState (scope-DESTRUCTURED, exhaustive over EffectScope): scope:All is
         // the census-ROLE proven exception (TapAll/UntapAll - state-convergent/idempotent,
@@ -5707,9 +5729,14 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Mana { .. }
         | Effect::Discard { .. }
         | Effect::Shuffle { .. }
-        | Effect::Transform { .. }
+        // CR 701.27a: scope:Single Transform reads only its single announced/anaphoric
+        // target — not a board census. scope:All is census-tagged above.
+        | Effect::Transform {
+            scope: EffectScope::Single,
+            ..
+        }
         // CR 710.4: a flip reads only its own self-referential target — not a
-        // board census, mirroring `Transform`.
+        // board census, mirroring `Transform`'s single scope.
         | Effect::FlipPermanent { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
@@ -6931,7 +6958,7 @@ mod tests {
     }
 
     /// guard#3 (mitigation #3): the `LiveBoardCensus` tag set of `effect_target_ctx`
-    /// == EXACTLY the enumeration-derived MASS-POPULATION set (29). Source-scanned, not
+    /// == EXACTLY the enumeration-derived MASS-POPULATION set (30). Source-scanned, not
     /// hand-counted (the hand-count is what produced the earlier "relax=4" miss). Under
     /// B's SnapshotOrEvent default this is the primary false-certificate gate: only a
     /// census tag vetoes a mass read that ESCALATES over inert token growth (which
@@ -6987,6 +7014,11 @@ mod tests {
             // `EffectScope::All`; the scope:Single arms live in the relax group below and
             // are NOT scanned here (they sit past the census terminator).
             "Suspect",
+            // CR 701.27a + CR 115.10a: mass Transform (scope:All) enumerates
+            // `state.battlefield` (`transform_effect::resolve_all`). Scope-gated on
+            // `EffectScope::All` in the census `|`-chain; the scope:Single arm sits past
+            // the census terminator in the relax group and is NOT scanned here.
+            "Transform",
             "UnattachAll",
             "Unsuspect",
             // P3-B round-2: F1-class dual-mode mass-battlefield resolvers (a resolver
@@ -7007,7 +7039,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 29, "exactly 29 mass-population census tags");
+        assert_eq!(got.len(), 30, "exactly 30 mass-population census tags");
     }
 
     /// A7' (mitigation #4, replaces the void census-default A7): with SnapshotOrEvent the
@@ -7118,7 +7150,7 @@ mod tests {
     /// with `effect_target_ctx` on the Census/Relax boundary, closing the F1 gap where a
     /// census-ROLE slot silently in the generic relax `|`-chain (exactly R1's Suspect{All})
     /// is invisible to the census-arm-only guards. Structural: both functions' `Census`
-    /// name-sets are source-scanned and asserted IDENTICAL (== the 29). Behavioral: the
+    /// name-sets are source-scanned and asserted IDENTICAL (== the 30). Behavioral: the
     /// two oracles agree on every discriminator, incl. BOTH Suspect/Unsuspect scopes.
     ///
     /// REVERT-PROBE (discrimination proof): moving `Suspect{All}` out of the census arm of
@@ -7133,7 +7165,7 @@ mod tests {
         use crate::types::ability::{EffectScope, TapStateChange};
         use ScanMode::LoopFirewall;
 
-        // -- Structural: the two census name-sets are byte-identical (and == 29).
+        // -- Structural: the two census name-sets are byte-identical (and == 30).
         fn census_names(fnsrc: &str, terminator: &str) -> Vec<String> {
             let end = fnsrc.find(terminator).expect("census terminator");
             let block = &fnsrc[..end];
@@ -7162,7 +7194,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 29, "exactly 29 census members");
+        assert_eq!(ecr_census.len(), 30, "exactly 30 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -7217,6 +7249,31 @@ mod tests {
         census(&settap, false);
         census(&Effect::HeistExile, false);
         census(&Effect::NoOp, false);
+        // CR 701.27a + CR 115.10a: mass Transform is a battlefield census in BOTH oracles
+        // (scope:All), and a bounded single-target read (scope:Single) that relaxes. It is
+        // a true Census, NOT the SetTapState relax exception (ObjectPt/ability write).
+        census(
+            &Effect::Transform {
+                target: f(),
+                scope: EffectScope::All,
+            },
+            true,
+        );
+        census(
+            &Effect::Transform {
+                target: f(),
+                scope: EffectScope::Single,
+            },
+            false,
+        );
+        assert_eq!(
+            effect_census_role(&Effect::Transform {
+                target: f(),
+                scope: EffectScope::All,
+            }),
+            CensusRole::Census,
+            "mass Transform must be a true Census, not the SetTapState relax exception"
+        );
 
         // -- Reason sub-tags reachable and correct (documentation-grade, unenforced by the
         // Census/Relax boundary but proving each `RelaxReason` arm is live).

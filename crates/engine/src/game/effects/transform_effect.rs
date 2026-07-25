@@ -1,15 +1,33 @@
-use crate::game::transform::transform_permanent;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::game::transform::{is_double_faced_permanent, transform_permanent};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// CR 701.27a: Transform — turn a double-faced card to its other face.
+///
+/// `scope` is load-bearing and genuinely divergent (mirrors
+/// `tap_untap::resolve_set_tap_state`):
+/// - `EffectScope::Single` (legacy targeted/anaphoric transform) acts on the
+///   single chosen or source permanent (`resolve_single`).
+/// - `EffectScope::All` ("Transform all Humans" — Moonmist) is a non-targeting
+///   mass transform that enumerates the population filter over the battlefield
+///   (`resolve_all`).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     match &ability.effect {
+        Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        } => {
+            let target = target.clone();
+            return resolve_all(state, ability, &target, events);
+        }
         Effect::Transform { .. } => {}
         _ => {
             return Err(EffectError::InvalidParam(
@@ -57,11 +75,62 @@ pub fn resolve(
     Ok(())
 }
 
+/// CR 701.27a + CR 115.10 / CR 115.10a: Mass transform of every permanent
+/// matching the (non-targeting) population filter — "Transform all Humans"
+/// (Moonmist). Unlike the single scope this never declares a target: it
+/// enumerates the resolved population filter over the battlefield and turns each
+/// matching permanent over, mirroring `tap_untap::resolve_all`.
+///
+/// CR 701.27a + CR 701.27c: "all X" matches mostly SINGLE-FACED permanents, but
+/// only permanents represented by double-faced tokens/cards can transform, and a
+/// permanent that can't transform does nothing. The matched population is
+/// therefore PRE-FILTERED to double-faced permanents (the authoritative
+/// `is_double_faced_permanent`) before `transform_permanent`, and any residual
+/// per-object error is caught as a no-op rather than propagated — a single
+/// non-DFC in the population must never abort the whole mass transform.
+fn resolve_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target: &crate::types::ability::TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let effective_filter = crate::game::effects::resolved_object_filter(ability, target);
+
+    // CR 107.3a + CR 601.2b: ability-context filter evaluation.
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    let matching: Vec<_> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter(state, *id, &effective_filter, &ctx)
+        })
+        // CR 701.27a + CR 701.27c: only double-faced permanents can transform;
+        // every other match does nothing (never an error).
+        .filter(|id| state.objects.get(id).is_some_and(is_double_faced_permanent))
+        .collect();
+
+    for obj_id in matching {
+        // CR 701.27c: never `?`-propagate — a permanent that can't transform
+        // (CantTransform static, meld, or a filtered-in edge) is a per-object
+        // no-op, so a single failure must not abort the remaining population.
+        let _ = transform_permanent(state, obj_id, events);
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::Transform,
+        source_id: ability.source_id,
+        subject: None,
+    });
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{AbilityDefinition, AbilityKind, TargetFilter};
+    use crate::types::ability::{AbilityDefinition, AbilityKind, EffectScope, TargetFilter};
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
@@ -94,6 +163,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::Transform {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
             },
         )]);
         obj.base_abilities = Arc::clone(&obj.abilities);
@@ -123,7 +193,10 @@ mod tests {
             strive_cost: None,
             casting_restrictions: vec![],
             casting_options: vec![],
-            layout_kind: None,
+            // CR 712.16: a transform DFC records the Transform layout on its back
+            // face so `is_double_faced_permanent` recognizes it (the mass-transform
+            // resolver pre-filters on that authority).
+            layout_kind: Some(crate::types::card::LayoutKind::Transform),
         });
         id
     }
@@ -135,6 +208,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Transform {
                 target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
             },
             vec![],
             source_id,
@@ -170,6 +244,7 @@ mod tests {
         let ability = ResolvedAbility::new(
             Effect::Transform {
                 target: TargetFilter::Any,
+                scope: EffectScope::Single,
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -351,6 +426,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Transform {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
                     },
                 )),
                 uses_tracked_set: false,
@@ -418,6 +494,7 @@ mod tests {
                     AbilityKind::Spell,
                     Effect::Transform {
                         target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
                     },
                 )),
                 uses_tracked_set: false,
@@ -465,5 +542,186 @@ mod tests {
             "CR 400.7: the delayed self-transform must not affect the re-entered source"
         );
         assert_eq!(state.objects[&source_id].transformation_count, 0);
+    }
+
+    /// A single-faced (non-DFC) creature with an arbitrary subtype, on the
+    /// battlefield. `back_face` is `None`, so `transform_permanent` would return
+    /// the "Card has no back face" error if it were ever called on it.
+    fn make_single_faced(state: &mut GameState, name: &str, subtype: &str) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(7),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types = CardType {
+            supertypes: vec![],
+            core_types: vec![CoreType::Creature],
+            subtypes: vec![subtype.to_string()],
+        };
+        obj.base_card_types = obj.card_types.clone();
+        id
+    }
+
+    fn human_all_filter() -> TargetFilter {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).subtype("Human".to_string()))
+    }
+
+    /// B1 (issue #6403, the bug-fix linchpin, CR 115.10a): the mass (`All`) scope
+    /// exposes NO target slot — so the cast/trigger pipeline builds no
+    /// one-target prompt — while the `Single` scope still surfaces its target.
+    /// Reverting the `Effect::target_filter()` scope-split (leaving Transform in
+    /// the unconditional `Some(target)` group) makes the `All` arm return `Some`
+    /// ⇒ a prompt ⇒ the first assertion flips red.
+    #[test]
+    fn mass_transform_exposes_no_target_slot() {
+        let mass = Effect::Transform {
+            target: human_all_filter(),
+            scope: EffectScope::All,
+        };
+        assert!(
+            mass.target_filter().is_none(),
+            "mass Transform must expose no target slot (CR 115.10a)"
+        );
+        let single = Effect::Transform {
+            target: human_all_filter(),
+            scope: EffectScope::Single,
+        };
+        assert!(
+            single.target_filter().is_some(),
+            "single Transform must surface its target (CR 115.1)"
+        );
+    }
+
+    /// PRIMARY revert-guard (issue #6403, production path): Moonmist's verbatim
+    /// Oracle text parses to a mass Transform and resolves over a battlefield of
+    /// two transformable Humans (DFC) plus a Goblin and a Werewolf — BOTH Humans
+    /// transform, the non-Humans are untouched, and NO prompt is installed.
+    /// Reverting the parser mass branch (parses `scope: Single`) or `resolve_all`
+    /// flips this red.
+    #[test]
+    fn moonmist_transforms_all_humans_without_a_prompt() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Transform all Humans. Prevent all combat damage that would be dealt this turn by creatures other than Werewolves and Wolves.",
+            "Moonmist",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let def = parsed
+            .abilities
+            .first()
+            .expect("Moonmist parses a spell ability");
+        // Production-path parser shape: the head is a mass Transform.
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Transform {
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "Moonmist must parse to a mass Transform, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.effect.target_filter().is_none(),
+            "mass Transform must build no target slot (CR 115.10a)"
+        );
+        // Sibling intact: the prevent-combat-damage clause is preserved as the
+        // sub-ability (the mass branch must not swallow the rest of the card).
+        let sibling = def
+            .sub_ability
+            .as_deref()
+            .expect("Moonmist's prevent-combat-damage sibling must be preserved");
+        assert!(
+            matches!(*sibling.effect, Effect::PreventDamage { .. }),
+            "the second sentence must parse to PreventDamage, got {:?}",
+            sibling.effect
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let human_a = setup_dfc(&mut state);
+        let human_b = setup_dfc(&mut state);
+        let goblin = make_single_faced(&mut state, "Goblin Raider", "Goblin");
+        let werewolf = make_single_faced(&mut state, "Lone Wolf", "Werewolf");
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Moonmist".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new((*def.effect).clone(), vec![], source, PlayerId(0));
+
+        let waiting_before = std::mem::discriminant(&state.waiting_for);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("mass transform resolves");
+
+        assert!(
+            state.objects[&human_a].transformed,
+            "first Human transforms"
+        );
+        assert!(
+            state.objects[&human_b].transformed,
+            "second Human transforms"
+        );
+        assert!(
+            !state.objects[&goblin].transformed,
+            "the Goblin is not a Human — untouched"
+        );
+        assert!(
+            !state.objects[&werewolf].transformed,
+            "the Werewolf is not a Human — untouched"
+        );
+        assert_eq!(
+            std::mem::discriminant(&state.waiting_for),
+            waiting_before,
+            "mass transform must not install any WaitingFor prompt"
+        );
+    }
+
+    /// B2 (issue #6403, CR 701.27c): "all X" matches mostly SINGLE-FACED
+    /// permanents. A single-faced Human in the population must NOT abort
+    /// resolution — the DFC transforms, the non-DFC does nothing. Reverting the
+    /// `resolve_all` DFC pre-filter (letting `transform_permanent`'s "no back
+    /// face" error `?`-propagate) makes `resolve` return `Err` ⇒ this fails.
+    #[test]
+    fn mass_transform_skips_single_faced_human_without_error() {
+        let mut state = GameState::new_two_player(42);
+        let dfc_human = setup_dfc(&mut state);
+        let single_human = make_single_faced(&mut state, "Village Ironsmith", "Human");
+        let source = create_object(
+            &mut state,
+            CardId(9),
+            PlayerId(0),
+            "Src".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Transform {
+                target: human_all_filter(),
+                scope: EffectScope::All,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events)
+            .expect("a non-DFC Human in the population must not error (CR 701.27c)");
+
+        assert!(
+            state.objects[&dfc_human].transformed,
+            "the Human-faced DFC transforms"
+        );
+        assert!(
+            !state.objects[&single_human].transformed,
+            "the single-faced Human is untouched (CR 701.27c)"
+        );
     }
 }

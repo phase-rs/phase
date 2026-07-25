@@ -2824,7 +2824,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::ExileHaunting { target }
         | Effect::HideawayConceal { target }
         | Effect::ChooseCard { target, .. }
-        | Effect::Transform { target }
+        // CR 701.27a: both scopes write ObjectPt on the target/population filter.
+        | Effect::Transform { target, .. }
         // CR 710.4: same single-target-slot shape as `Transform`.
         | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
@@ -4923,7 +4924,7 @@ fn rw_effect(
             factor: _,
         } => obj(StateKind::ObjectPt, target),
         Effect::SwitchPT { target } => obj(StateKind::ObjectPt, target),
-        Effect::Transform { target } => obj(StateKind::ObjectPt, target),
+        Effect::Transform { target, .. } => obj(StateKind::ObjectPt, target),
         // CR 710.1b: flipping replaces the permanent's power and toughness
         // (along with its name, type line, and text box) — the same
         // `ObjectPt` write axis `Transform` records.
@@ -7073,6 +7074,7 @@ mod tests {
         let docent = cond(
             ra(token(&["Creature", "Wizard"], qfix(1))).sub_ability(ra(Effect::Transform {
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })),
             qcheck(obj_count(sub("Wizard")), 1),
         );

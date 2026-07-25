@@ -6448,8 +6448,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::Fight { target, .. }
         | Effect::Attach { target, .. }
         | Effect::UnattachAll { target, .. }
-        | Effect::Transform { target, .. }
-        // CR 710.4: same single-target-slot shape as `Transform`.
+        // CR 710.4: same single-target-slot shape as `Transform`'s single scope.
         | Effect::FlipPermanent { target, .. }
         | Effect::CopySpell { target, .. }
         | Effect::CastCopyOfCard { target, .. }
@@ -6504,6 +6503,15 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // auto-resolved here (matching the legacy `TapAll`/`UntapAll`, which had
         // no event-context target at all).
         Effect::SetTapState {
+            scope: EffectScope::Single,
+            target,
+            ..
+        } => target,
+        // CR 701.27a + CR 603.7c: only the single-scope Transform exposes an
+        // event-context target (e.g. an anaphoric trigger subject). The mass
+        // (`All`) scope's `target` is a population filter, not a per-event ref —
+        // it falls through to `None`, mirroring the SetTapState split above.
+        Effect::Transform {
             scope: EffectScope::Single,
             target,
             ..

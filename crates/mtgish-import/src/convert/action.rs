@@ -3818,6 +3818,8 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         // ordering) at resolution time.
         Action::TransformPermanent(p) => Effect::Transform {
             target: convert_permanent(p)?,
+            // CR 701.27a: mtgish `TransformPermanent` is a single targeted transform.
+            scope: EffectScope::Single,
         },
 
         // CR 400.7 + CR 611.2c: "Return a [filter] to its owner's hand" — single-

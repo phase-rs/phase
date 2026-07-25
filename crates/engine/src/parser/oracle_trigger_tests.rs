@@ -5388,7 +5388,7 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             transform_sub.condition,
         );
     match &*transform_sub.effect {
-        Effect::Transform { target } => {
+        Effect::Transform { target, .. } => {
             // The parser today emits `ParentTarget` here — "transform it"
             // refers back to the Untap target (the trigger source).
             assert_eq!(
