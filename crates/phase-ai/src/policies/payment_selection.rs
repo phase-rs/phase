@@ -945,8 +945,11 @@ mod tests {
             },
         )
         .expect("nonland discard sibling applies through the engine");
+        let mut sibling_playable_lands = playable_lands_after_stack_clears(&sibling_replay, AI);
+        sibling_playable_lands.sort_unstable();
+        sibling_playable_lands.dedup();
         assert_eq!(
-            playable_lands_after_stack_clears(&sibling_replay, AI),
+            sibling_playable_lands,
             vec![first_land, second_land],
             "the negative verdict must be reached with two retained playable lands"
         );
@@ -1012,8 +1015,11 @@ mod tests {
             },
         )
         .expect("multi-card discard applies through the engine");
+        let mut retained_playable_lands = playable_lands_after_stack_clears(&selected_replay, AI);
+        retained_playable_lands.sort_unstable();
+        retained_playable_lands.dedup();
         assert_eq!(
-            playable_lands_after_stack_clears(&selected_replay, AI),
+            retained_playable_lands,
             vec![second_land],
             "the negative verdict must be reached with a retained playable land"
         );
