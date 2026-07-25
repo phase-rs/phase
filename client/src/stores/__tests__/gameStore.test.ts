@@ -1,7 +1,7 @@
 import { act } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameEvent, GameState } from "../../adapter/types";
+import type { EngineAdapter, GameEvent, GameState } from "../../adapter/types";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
   buildGameState,
@@ -42,6 +42,21 @@ describe("gameStore", () => {
     expect(store.gameState).toEqual(state);
     expect(store.waitingFor).toEqual(state.waiting_for);
     expect(adapter.initialize).toHaveBeenCalled();
+  });
+
+  it("binds the adapter before initializeGame can publish an initial remote snapshot", async () => {
+    const state = buildGameState();
+    let adapterDuringInitialization: EngineAdapter | null = null;
+    const adapter = buildEngineAdapterMock(state, {
+      initializeGame: vi.fn(async () => {
+        adapterDuringInitialization = useGameStore.getState().adapter;
+        return { events: [] };
+      }),
+    });
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+
+    expect(adapterDuringInitialization).toBe(adapter);
   });
 
   it("dispatch calls adapter.submitAction and updates state", async () => {
