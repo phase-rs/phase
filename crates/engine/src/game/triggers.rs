@@ -6589,6 +6589,9 @@ fn dispatch_pending_trigger_context(
     };
 
     if target_slots.is_empty() {
+        if trigger.distribute.is_some() {
+            trigger.ability.distribution = Some(Vec::new());
+        }
         // CR 605.1b: Triggered mana abilities don't use the stack — they resolve
         // immediately at the moment the trigger event occurs. Classify via the
         // single-authority `is_triggered_mana_ability` (ResolvedAbility form),
@@ -6660,36 +6663,40 @@ fn dispatch_pending_trigger_context(
                     // in the emit above and are not part of the division.
                     let assigned_targets =
                         super::ability_utils::distribution_targets(&trigger.ability);
-                    if assigned_targets.len() == 1 {
-                        trigger.ability.distribution =
-                            Some(vec![(assigned_targets[0].clone(), total)]);
-                    } else {
-                        // CR 601.2d + CR 603.3d: Distribute-among with targets
-                        // already chosen but division still pending. Push the
-                        // entry to the stack FIRST (ability has `targets`
-                        // populated, `distribution` still empty), then prompt
-                        // for division. `engine_stack::finalize_trigger_target_selection`
-                        // mutates the on-stack entry's `ability.distribution`
-                        // when the division choice completes.
-                        let player = trigger.controller;
-                        let pending_for_state = trigger.clone();
-                        let entry_id = push_pending_trigger_to_stack_with_event_batch(
-                            state,
-                            trigger,
-                            trigger_events.clone(),
-                            events_out,
-                        );
-                        state.pending_trigger_event_batch = trigger_events;
-                        state.pending_trigger = Some(pending_for_state);
-                        state.pending_trigger_entry = Some(entry_id);
-                        state.waiting_for = crate::types::game_state::WaitingFor::DistributeAmong {
-                            player,
-                            total,
-                            targets: assigned_targets,
-                            unit,
-                        };
-                        restore_trigger_event_context(state, context_snapshot);
-                        return TriggerDispatchDisposition::Paused;
+                    match assigned_targets.as_slice() {
+                        [] => trigger.ability.distribution = Some(Vec::new()),
+                        [target] => {
+                            trigger.ability.distribution = Some(vec![(target.clone(), total)]);
+                        }
+                        _ => {
+                            // CR 601.2d + CR 603.3d: Distribute-among with targets
+                            // already chosen but division still pending. Push the
+                            // entry to the stack FIRST (ability has `targets`
+                            // populated, `distribution` still empty), then prompt
+                            // for division. `engine_stack::finalize_trigger_target_selection`
+                            // mutates the on-stack entry's `ability.distribution`
+                            // when the division choice completes.
+                            let player = trigger.controller;
+                            let pending_for_state = trigger.clone();
+                            let entry_id = push_pending_trigger_to_stack_with_event_batch(
+                                state,
+                                trigger,
+                                trigger_events.clone(),
+                                events_out,
+                            );
+                            state.pending_trigger_event_batch = trigger_events;
+                            state.pending_trigger = Some(pending_for_state);
+                            state.pending_trigger_entry = Some(entry_id);
+                            state.waiting_for =
+                                crate::types::game_state::WaitingFor::DistributeAmong {
+                                    player,
+                                    total,
+                                    targets: assigned_targets,
+                                    unit,
+                                };
+                            restore_trigger_event_context(state, context_snapshot);
+                            return TriggerDispatchDisposition::Paused;
+                        }
                     }
                 }
             }
@@ -11347,6 +11354,35 @@ pub mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         id
+    }
+
+    fn make_divided_damage_etb_source(
+        state: &mut GameState,
+        min_targets: usize,
+        target: TargetFilter,
+    ) -> ObjectId {
+        let source = make_creature(state, PlayerId(0), "Divided Damage Source", 3, 3);
+        let mut execute = AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                target,
+                damage_source: None,
+                excess: None,
+            },
+        );
+        execute.multi_target = Some(MultiTargetSpec::unlimited(min_targets));
+        execute.distribute = Some(DistributionUnit::Damage);
+
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.entered_battlefield_turn = Some(1);
+        obj.trigger_definitions.push(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .execute(execute)
+                .valid_card(TargetFilter::SelfRef)
+                .destination(Zone::Battlefield),
+        );
+        source
     }
 
     /// CR 109.5 + CR 603.2: the `EventSourceControlledBy { Opponent }` trigger
@@ -16559,6 +16595,132 @@ pub mod tests {
         let pending = state.pending_trigger.as_ref().unwrap();
         assert_eq!(pending.source_id, trigger_creature);
         assert_eq!(pending.controller, PlayerId(0));
+    }
+
+    #[test]
+    fn divided_trigger_with_no_legal_targets_uses_empty_distribution() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            0,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+
+        assert!(state.pending_trigger.is_none());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected triggered ability");
+        };
+        assert_eq!(ability.distribution, Some(Vec::new()));
+
+        let mut safety_bound = 4;
+        while !state.stack.is_empty() && safety_bound > 0 {
+            let actor = state.priority_player;
+            crate::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("targetless divided trigger should resolve");
+            safety_bound -= 1;
+        }
+        assert!(state.stack.is_empty(), "targetless trigger must not hang");
+    }
+
+    #[test]
+    fn divided_trigger_auto_selects_one_target_and_assigns_full_amount() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let target = make_creature(&mut state, PlayerId(1), "Only Target", 2, 2);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            1,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent)),
+        );
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+
+        assert!(state.pending_trigger.is_none());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected triggered ability");
+        };
+        assert_eq!(ability.targets, vec![TargetRef::Object(target)]);
+        assert_eq!(
+            ability.distribution,
+            Some(vec![(TargetRef::Object(target), 4)])
+        );
+    }
+
+    #[test]
+    fn divided_trigger_all_decline_finalizes_with_empty_distribution() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let source = make_divided_damage_etb_source(
+            &mut state,
+            0,
+            TargetFilter::Typed(TypedFilter::creature()),
+        );
+        let _other_target = make_creature(&mut state, PlayerId(1), "Other Target", 2, 2);
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                source,
+                Zone::Hand,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                Vec::new(),
+            )],
+        );
+        let waiting_for = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+            .expect("begin target selection")
+            .expect("any-number trigger must prompt when targets exist");
+        state.waiting_for = waiting_for;
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::SelectTargets {
+                targets: Vec::new(),
+            },
+        )
+        .expect("declining every target should finalize the trigger");
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.pending_trigger.is_none());
+        assert!(state.pending_trigger_entry.is_none());
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack[0].kind else {
+            panic!("expected triggered ability");
+        };
+        assert_eq!(ability.distribution, Some(Vec::new()));
+
+        let mut safety_bound = 4;
+        while !state.stack.is_empty() && safety_bound > 0 {
+            let actor = state.priority_player;
+            crate::game::engine::apply(&mut state, actor, GameAction::PassPriority)
+                .expect("all-declined divided trigger should resolve");
+            safety_bound -= 1;
+        }
+        assert!(state.stack.is_empty(), "all-declined trigger must not hang");
     }
 
     /// CR 601.2d + CR 603.3d: A triggered ability with a divided effect
