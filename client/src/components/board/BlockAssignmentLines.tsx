@@ -9,14 +9,11 @@ import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
-import type { ObjectId, PlayerId } from "../../adapter/types.ts";
-import {
-  filterVisibleBlockerPairs,
-  type BlockerAssignmentPair,
-} from "./blockAssignmentVisibility.ts";
+import type { BlockerAssignmentPair, ObjectId, PlayerId } from "../../adapter/types.ts";
 
 const BLOCK_COLOR = "rgba(56,189,248,0.95)";
 const BLOCK_COLOR_HEAD = "rgba(56,189,248,0.9)";
+const EMPTY_BLOCKER_ASSIGNMENT_PAIRS: readonly BlockerAssignmentPair[] = [];
 
 export function BlockAssignmentLines() {
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
@@ -40,17 +37,13 @@ export function BlockAssignmentLines() {
     [focusedOpponent, gameState, localPlayerId, multiplayerBoardLayout],
   );
 
-  const pairs = useMergedPairs(blockerAssignments, combat?.blocker_to_attacker ?? null);
-  const visibleBlockerPairs = useMemo(
-    () => filterVisibleBlockerPairs(pairs, objects ?? null, visiblePlayerIds),
-    [objects, pairs, visiblePlayerIds],
+  const pairs = useMergedPairs(
+    blockerAssignments,
+    gameState?.derived?.blocker_assignment_pairs ?? EMPTY_BLOCKER_ASSIGNMENT_PAIRS,
   );
+  const positions = useRafPositions(pairs);
 
-  const positions = useRafPositions(visibleBlockerPairs);
-
-  const isVisible =
-    combatMode === "blockers" ||
-    (combat !== null && Object.keys(combat.blocker_to_attacker).length > 0);
+  const isVisible = combatMode === "blockers" || pairs.length > 0;
 
   // Compute HUD→attacker indicator arrows for off-screen blocking opponents
   const hudIndicators = useHudBlockIndicators(
@@ -223,20 +216,15 @@ function useHudBlockIndicators(
 
 function useMergedPairs(
   uiAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
-  engineAssignments: Record<string, ObjectId[]> | null,
+  engineAssignments: readonly BlockerAssignmentPair[],
 ): BlockerAssignmentPair[] {
   return useMemo(() => {
     const merged = new Map<string, BlockerAssignmentPair>();
     for (const pair of blockerAssignmentPairs(uiAssignments)) {
       merged.set(pair.join(":"), pair);
     }
-    if (engineAssignments) {
-      for (const [blockerId, attackerIds] of Object.entries(engineAssignments)) {
-        for (const attackerId of attackerIds) {
-          const pair: BlockerAssignmentPair = [Number(blockerId), attackerId];
-          merged.set(pair.join(":"), pair);
-        }
-      }
+    for (const pair of engineAssignments) {
+      merged.set(pair.join(":"), pair);
     }
     return Array.from(merged.values());
   }, [uiAssignments, engineAssignments]);
