@@ -1103,6 +1103,23 @@ pub enum DieRollModifier {
     Subtract { value: QuantityExpr },
 }
 
+impl DieRollModifier {
+    /// Visits every `QuantityExpr` carried by this modifier. Composed into
+    /// `Effect::for_each_quantity_expr` (the exhaustive authority over every
+    /// quantity an effect resolves in the current chain): the modifier's
+    /// quantity is resolved live during `Effect::RollDie` resolution
+    /// (`game/effects/roll_die.rs`), so it must be visible to callers such as
+    /// the tracked-set consumer classifier.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified here.
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        match self {
+            DieRollModifier::Add { value } | DieRollModifier::Subtract { value } => f(value),
+        }
+    }
+}
+
 impl std::str::FromStr for Parity {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
@@ -2019,6 +2036,45 @@ pub enum ManaProduction {
     /// `state.current_trigger_event` at resolution time; emits no mana if the
     /// current trigger event is absent or not a `ManaAdded` event (CR 106.5).
     TriggerEventManaType,
+}
+
+impl ManaProduction {
+    /// Visits every `QuantityExpr` carried by this production descriptor.
+    /// Composed into `Effect::for_each_quantity_expr` (the exhaustive
+    /// authority over every quantity an effect resolves in the current
+    /// chain): each dynamic-count variant's `count` is resolved live during
+    /// `Effect::Mana` resolution (`resolve_count` in `game/effects/mana.rs`),
+    /// so those slots must be visible to callers such as the tracked-set
+    /// consumer classifier — "add {C} for each card discarded this way"
+    /// makes the mana effect a consumer of the preceding producer's set.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified here rather than silently reporting no
+    /// quantities.
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        match self {
+            // --- Dynamic-count productions: `count` resolves at effect
+            // --- resolution time.
+            ManaProduction::Colorless { count }
+            | ManaProduction::AnyOneColor { count, .. }
+            | ManaProduction::AnyCombination { count, .. }
+            | ManaProduction::ChosenColor { count, .. }
+            | ManaProduction::OpponentLandColors { count }
+            | ManaProduction::AnyCombinationOfObjectColors { count, .. }
+            | ManaProduction::AnyTypeProduceableBy { count, .. }
+            | ManaProduction::AnyInCommandersColorIdentity { count, .. }
+            | ManaProduction::AnyOneColorAmongPermanents { count, .. } => f(count),
+            // --- Quantity-free productions: fixed color lists, fixed `u32`
+            // --- counts (`Mixed::colorless_count`), or amounts derived
+            // --- entirely from board/trigger state with no `QuantityExpr`.
+            ManaProduction::Fixed { .. }
+            | ManaProduction::Mixed { .. }
+            | ManaProduction::ChoiceAmongExiledColors { .. }
+            | ManaProduction::ChoiceAmongCombinations { .. }
+            | ManaProduction::DistinctColorsAmongPermanents { .. }
+            | ManaProduction::TriggerEventManaType => {}
+        }
+    }
 }
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Which exile-link relation a mana ability reads
@@ -8428,6 +8484,70 @@ pub enum CostCategory {
 }
 
 impl AbilityCost {
+    /// Visits every `QuantityExpr` carried by this cost, recursing through
+    /// the compositional forms (`Composite`, `OneOf`, `PerCounter`) and into
+    /// the embedded effect of `EffectCost` (whose body resolves on the source
+    /// as part of paying the cost, so its quantities are live in the current
+    /// chain). Composed into `Effect::for_each_quantity_expr` (the exhaustive
+    /// authority over every quantity an effect resolves in the current
+    /// chain): a resolution-time `Effect::PayCost` resolves each of these
+    /// dynamic values when the cost is paid
+    /// (`costs::pay_ability_cost_for_resolution`), so they must be visible to
+    /// callers such as the tracked-set consumer classifier — "pay 1 life for
+    /// each card discarded this way" makes the payment a consumer of the
+    /// preceding producer's set.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified here rather than silently reporting no
+    /// quantities.
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        match self {
+            // --- Direct `QuantityExpr` carriers ---
+            AbilityCost::ManaDynamic { quantity } => f(quantity),
+            AbilityCost::PayLife { amount }
+            | AbilityCost::PayEnergy { amount }
+            | AbilityCost::PaySpeed { amount } => f(amount),
+            AbilityCost::Discard { count, .. } => f(count),
+            // --- Recursive forms: every nested cost's quantities are part of
+            // --- paying THIS cost, so recurse.
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                for cost in costs {
+                    cost.for_each_quantity_expr(f);
+                }
+            }
+            AbilityCost::PerCounter { base, .. } => base.for_each_quantity_expr(f),
+            // CR 118.3: the cost's effect body resolves on the source before
+            // the ability's own effect — its quantity slots are live.
+            AbilityCost::EffectCost { effect } => effect.for_each_quantity_expr(f),
+            // --- Quantity-free costs: static mana pips, fixed `u32`/`i32`
+            // --- counts and aggregate thresholds, or purely structural
+            // --- payments with no `QuantityExpr` field.
+            AbilityCost::Mana { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::Unimplemented { .. } => {}
+        }
+    }
+
     /// CR 605.3a + CR 106.12 + CR 107.6: True iff every component of this cost is
     /// conclusively decided by the non-simulating mana-ability cheap gate
     /// (`mana_ability_ready_without_simulation`) — i.e. the cost is built solely
@@ -14555,7 +14675,7 @@ impl Effect {
         }
     }
 
-    /// Visits every `QuantityExpr` directly carried by this effect —
+    /// Visits every `QuantityExpr` carried by this effect —
     /// including the secondary quantity slots that `count_expr()` (the
     /// PRIMARY count/amount accessor) intentionally does not expose, such as
     /// `Token::enter_with_counters` entry-counter quantities,
@@ -14565,9 +14685,27 @@ impl Effect {
     /// embed another `Effect`/`ResolvedAbility` (`CreateDrawReplacement`,
     /// `CreatePlaneswalkReplacement`, `EpicCopy`).
     ///
+    /// Nested domain types that carry their own quantities are walked
+    /// through composed exhaustive sub-visitors (each a no-wildcard match on
+    /// its own type): `ManaProduction::for_each_quantity_expr` for
+    /// `Effect::Mana`'s dynamic production counts,
+    /// `AbilityCost::for_each_quantity_expr` for `Effect::PayCost`'s dynamic
+    /// cost values (recursing through `Composite`/`OneOf`/`PerCounter` and
+    /// into `EffectCost`'s embedded effect), and
+    /// `DieRollModifier::for_each_quantity_expr` for `Effect::RollDie`'s
+    /// roll modifier. Smaller nested carriers are walked inline with the
+    /// same no-wildcard discipline: `LibraryPosition`'s dynamic slots
+    /// (`ChangeZoneAll`/`PutAtLibraryPosition`/`Conjure`/`Counter`'s
+    /// countered-spell destination), `UntilCondition::CumulativeThreshold`
+    /// (`ExileFromTopUntil`), `GuessSubject::Proposition` (`OpponentGuess`),
+    /// `KeeperConstraint::ExactCount` (`ChooseAndSacrificeRest`), and each
+    /// `ConjureCard::count`.
+    ///
     /// Deliberately NOT walked: quantities inside deferred definition
-    /// payloads (`AbilityDefinition`, `ContinuousModification`,
-    /// `DamageModification`, `CastingPermission`, …). Those are evaluated in
+    /// payloads (`AbilityDefinition` — including `RollDie::results` branch
+    /// bodies, which resolve through their own `resolve_ability_chain`
+    /// entry — `ContinuousModification`, `DamageModification`,
+    /// `CastingPermission`, …). Those are evaluated in
     /// their own later resolution context, not the currently resolving
     /// chain's; where such a payload consumes the CURRENT chain's tracked
     /// set, that is signalled by an explicit flag instead
@@ -14581,6 +14719,21 @@ impl Effect {
             match value {
                 PtValue::Fixed(_) | PtValue::Variable(_) => {}
                 PtValue::Quantity(expr) => f(expr),
+            }
+        }
+        // CR 401.7: dynamic library slots (`BeneathTop::depth`,
+        // `RandomWithinTop::n`) are resolved at effect-resolution time by the
+        // library-insertion authority; the fixed slots carry no quantity.
+        fn visit_library_position<'a>(
+            position: &'a LibraryPosition,
+            f: &mut dyn FnMut(&'a QuantityExpr),
+        ) {
+            match position {
+                LibraryPosition::Top
+                | LibraryPosition::Bottom
+                | LibraryPosition::NthFromTop { .. } => {}
+                LibraryPosition::BeneathTop { depth } => f(depth),
+                LibraryPosition::RandomWithinTop { n } => f(n),
             }
         }
         fn visit_resolved_ability<'a>(
@@ -14675,10 +14828,14 @@ impl Effect {
             }
             Effect::ChangeZoneAll {
                 enter_with_counters,
+                library_position,
                 ..
             } => {
                 for (_, q) in enter_with_counters {
                     f(q);
+                }
+                if let Some(position) = library_position {
+                    visit_library_position(position, f);
                 }
             }
             Effect::Dig {
@@ -14769,7 +14926,12 @@ impl Effect {
             Effect::AddPendingETBCounters { count, .. } => {
                 f(count);
             }
-            Effect::PayCost { scale, .. } => {
+            Effect::PayCost { cost, scale, .. } => {
+                // The cost's own dynamic values (ManaDynamic, PayLife,
+                // Discard, PayEnergy/PaySpeed, and the recursive
+                // Composite/OneOf/EffectCost/PerCounter forms) resolve when
+                // the cost is paid during THIS effect's resolution.
+                cost.for_each_quantity_expr(f);
                 if let Some(q) = scale {
                     f(q);
                 }
@@ -14789,11 +14951,73 @@ impl Effect {
             } => {
                 replacement_effect.for_each_quantity_expr(f);
             }
-            Effect::RollDie { count, .. } => {
+            Effect::RollDie {
+                count, modifier, ..
+            } => {
                 f(count);
+                // CR 706.2: the (optional) Add/Subtract modifier quantity is
+                // resolved against each natural roll during THIS effect's
+                // resolution (`game/effects/roll_die.rs`).
+                if let Some(m) = modifier {
+                    m.for_each_quantity_expr(f);
+                }
             }
             Effect::FlipCoins { count, .. } => {
                 f(count);
+            }
+            Effect::Mana { produced, .. } => {
+                // The production descriptor's dynamic `count` slots (Colorless,
+                // AnyOneColor, AnyOneColorAmongPermanents, …) resolve during
+                // THIS effect's resolution (`resolve_count` in
+                // `game/effects/mana.rs`).
+                produced.for_each_quantity_expr(f);
+            }
+            // CR 401.7: the countered spell's replacement destination may be a
+            // dynamic library slot, resolved when the counter moves the spell
+            // (`game/effects/counter.rs`).
+            Effect::Counter {
+                countered_spell_zone,
+                ..
+            } => match countered_spell_zone {
+                Some(SpellStackToGraveyardReplacement::Library { position }) => {
+                    visit_library_position(position, f);
+                }
+                Some(
+                    SpellStackToGraveyardReplacement::Exile
+                    | SpellStackToGraveyardReplacement::Hand,
+                )
+                | None => {}
+            },
+            // CR 202.3 + CR 107.3e: the cumulative-threshold quantity is
+            // resolved up-front when the until-loop starts
+            // (`game/effects/exile_from_top_until.rs`).
+            Effect::ExileFromTopUntil { until, .. } => match until {
+                UntilCondition::NextMatches { .. } => {}
+                UntilCondition::CumulativeThreshold { threshold, .. } => f(threshold),
+            },
+            // A proposition guess resolves both comparison sides live
+            // (`game/effects/opponent_guess.rs`).
+            Effect::OpponentGuess { subject, .. } => match &**subject {
+                GuessSubject::CommittedChoice { .. } => {}
+                GuessSubject::Proposition { lhs, rhs, .. } => {
+                    f(lhs);
+                    f(rhs);
+                }
+            },
+            // Each conjured card's count — and the optional dynamic library
+            // slot — resolve during conjure resolution
+            // (`game/effects/conjure.rs`).
+            Effect::Conjure {
+                cards,
+                library_position,
+                ..
+            } => {
+                for card in cards {
+                    f(&card.count);
+                }
+                if let Some(position) = library_position {
+                    visit_library_position(position, f);
+                }
             }
             Effect::ArrangePlanarDeckTop {
                 count, keep_on_top, ..
@@ -14815,10 +15039,19 @@ impl Effect {
                 }
             }
             Effect::ChooseAndSacrificeRest {
-                total_power_cap, ..
+                total_power_cap,
+                keeper_constraint,
+                ..
             } => {
                 if let Some(q) = total_power_cap {
                     f(q);
+                }
+                // CR 101.4 + CR 701.21a: the keeper cardinality is resolved
+                // live when the chooser prompt is built.
+                if let Some(constraint) = keeper_constraint {
+                    match constraint {
+                        KeeperConstraint::ExactCount { count } => f(count),
+                    }
                 }
             }
             Effect::GainEnergy { amount, .. } => {
@@ -14835,8 +15068,11 @@ impl Effect {
             } => {
                 f(mana_value_limit);
             }
-            Effect::PutAtLibraryPosition { count, .. } => {
+            Effect::PutAtLibraryPosition {
+                count, position, ..
+            } => {
                 f(count);
+                visit_library_position(position, f);
             }
             Effect::ChooseDrawnThisTurnPayOrTopdeck {
                 count,
@@ -14909,7 +15145,6 @@ impl Effect {
             | Effect::Destroy { .. }
             | Effect::Regenerate { .. }
             | Effect::RemoveAllDamage { .. }
-            | Effect::Counter { .. }
             | Effect::CounterAll { .. }
             | Effect::SetTapState { .. }
             | Effect::DiscardCard { .. }
@@ -14958,7 +15193,6 @@ impl Effect {
             | Effect::RegisterBending { .. }
             | Effect::GenericEffect { .. }
             | Effect::Cleanup { .. }
-            | Effect::Mana { .. }
             | Effect::Shuffle { .. }
             | Effect::Transform { .. }
             | Effect::RevealFromHand { .. }
@@ -14966,7 +15200,6 @@ impl Effect {
             | Effect::RevealTop { .. }
             | Effect::TargetOnly { .. }
             | Effect::Choose { .. }
-            | Effect::OpponentGuess { .. }
             | Effect::SwapChosenLabels { .. }
             | Effect::ChooseDamageSource { .. }
             | Effect::Suspect { .. }
@@ -15019,7 +15252,6 @@ impl Effect {
             | Effect::EachPlayerCopyChosen { .. }
             | Effect::Exploit { .. }
             | Effect::LoseAllPlayerCounters { .. }
-            | Effect::ExileFromTopUntil { .. }
             | Effect::Heist { .. }
             | Effect::HeistExile
             | Effect::Cascade
@@ -15052,7 +15284,6 @@ impl Effect {
             | Effect::GiveControl { .. }
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
-            | Effect::Conjure { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
