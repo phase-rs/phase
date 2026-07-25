@@ -81,6 +81,13 @@ pub(super) fn has_spell_face(object: &engine::game::game_object::GameObject) -> 
             .is_some_and(|face| !face.card_types.core_types.contains(&CoreType::Land))
 }
 
+/// Whether this hand card is a land without a spell face. Upper-bound land
+/// heuristics use this rather than [`is_land_source`] so a flexible MDFC is not
+/// treated as flood merely because it can also be played as a land.
+pub(super) fn is_land_only_source(object: &engine::game::game_object::GameObject) -> bool {
+    is_land_source(object) && !has_spell_face(object)
+}
+
 /// Whether the player under consideration is on the play or on the draw this
 /// game. Derived from `GameState::current_starting_player` at call time —
 /// `OnPlay` when the mulliganing player started the game, otherwise `OnDraw`.

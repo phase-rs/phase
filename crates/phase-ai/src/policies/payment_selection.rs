@@ -123,6 +123,9 @@ fn discard_spends_last_playable_land(
     if *player != ctx.ai_player || cards != selected || !matches!(kind, PayCostKind::Discard) {
         return false;
     }
+    if !selected.iter().copied().any(|id| is_land(ctx.state, id)) {
+        return false;
+    }
 
     let legal_actions = legal_actions_full(ctx.state).0;
     if !legal_actions
@@ -139,29 +142,45 @@ fn discard_spends_last_playable_land(
         return false;
     }
 
+    // Simulate each sibling once, then reuse the projected land plays for all
+    // land cards in this selected payment. This keeps a multi-card discard
+    // from multiplying full-state forecasts by its number of lands.
+    let sibling_land_plays: Vec<(Vec<ObjectId>, Vec<ObjectId>)> = legal_actions
+        .iter()
+        .filter_map(|action| {
+            let GameAction::SelectCards { cards: sibling } = action else {
+                return None;
+            };
+            if sibling == selected {
+                return None;
+            }
+
+            let mut post_discard = ctx.state.clone();
+            if apply_as_current_for_simulation(&mut post_discard, action.clone()).is_err() {
+                return Some((sibling.clone(), Vec::new()));
+            }
+            Some((
+                sibling.clone(),
+                playable_lands_after_stack_clears(&post_discard, ctx.ai_player),
+            ))
+        })
+        .collect();
+
     selected
         .iter()
         .copied()
         .filter(|&land| is_land(ctx.state, land))
         .any(|land| {
-            let mut sibling_outcomes = legal_actions.iter().filter_map(|action| {
-                let GameAction::SelectCards { cards: sibling } = action else {
-                    return None;
-                };
-                if sibling == selected || sibling.contains(&land) {
-                    return None;
-                }
-
-                let mut post_discard = ctx.state.clone();
-                if apply_as_current_for_simulation(&mut post_discard, action.clone()).is_err() {
-                    return Some(false);
-                }
-                let mut remaining_lands =
-                    playable_lands_after_stack_clears(&post_discard, ctx.ai_player).into_iter();
-                Some(remaining_lands.next() == Some(land) && remaining_lands.next().is_none())
-            });
-            sibling_outcomes.next().is_some_and(|first| first)
-                && sibling_outcomes.all(|only_land| only_land)
+            sibling_land_plays
+                .iter()
+                .filter(|(sibling, _)| !sibling.contains(&land))
+                .next()
+                .is_some_and(|_| {
+                    sibling_land_plays
+                        .iter()
+                        .filter(|(sibling, _)| !sibling.contains(&land))
+                        .all(|(_, lands)| lands.as_slice() == [land])
+                })
         })
 }
 
@@ -175,7 +194,12 @@ fn discard_spends_last_playable_land(
 /// is a bounded tactical forecast, not an action application.
 fn playable_lands_after_stack_clears(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     let mut next_priority = state.clone();
-    if next_priority.stack.len() > 1 {
+    if next_priority.stack.len() > 1
+        || next_priority
+            .stack
+            .first()
+            .is_some_and(|entry| entry.controller != player)
+    {
         return Vec::new();
     }
     next_priority.stack.clear();
@@ -897,6 +921,8 @@ mod tests {
     #[test]
     fn production_discard_probe_does_not_treat_one_of_two_retained_lands_as_final() {
         let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
         let first_land = make_land(&mut state, "Forest", Zone::Hand);
         let second_land = make_land(&mut state, "Island", Zone::Hand);
         let nonland = create_object(
@@ -910,6 +936,21 @@ mod tests {
             .hand
             .extend([first_land, second_land, nonland]);
         install_discard_payment(&mut state, vec![first_land, second_land, nonland]);
+
+        let mut sibling_replay = state.clone();
+        engine::game::engine::apply(
+            &mut sibling_replay,
+            AI,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("nonland discard sibling applies through the engine");
+        assert_eq!(
+            playable_lands_after_stack_clears(&sibling_replay, AI),
+            vec![first_land, second_land],
+            "the negative verdict must be reached with two retained playable lands"
+        );
 
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
@@ -947,6 +988,8 @@ mod tests {
     #[test]
     fn multi_card_discard_does_not_penalize_a_land_when_another_land_survives_the_candidate() {
         let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
         let first_land = make_land(&mut state, "Forest", Zone::Hand);
         let second_land = make_land(&mut state, "Island", Zone::Hand);
         let spell = create_object(
@@ -960,6 +1003,21 @@ mod tests {
             .hand
             .extend([first_land, second_land, spell]);
         install_discard_payment_with_count(&mut state, vec![first_land, second_land, spell], 2);
+
+        let mut selected_replay = state.clone();
+        engine::game::engine::apply(
+            &mut selected_replay,
+            AI,
+            GameAction::SelectCards {
+                cards: vec![first_land, spell],
+            },
+        )
+        .expect("multi-card discard applies through the engine");
+        assert_eq!(
+            playable_lands_after_stack_clears(&selected_replay, AI),
+            vec![second_land],
+            "the negative verdict must be reached with a retained playable land"
+        );
 
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);

@@ -143,11 +143,14 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use crate::context::AiContext;
-    use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
+    use engine::ai_support::{
+        build_decision_context, ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass,
+    };
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityDefinition, AbilityKind, BounceSelection, TargetFilter, TriggerDefinition,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, BounceSelection, ChosenAttribute, GameRestriction,
+        ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter,
+        TriggerDefinition, TypedFilter,
     };
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
@@ -322,14 +325,46 @@ mod tests {
     #[test]
     fn unavailable_non_bounce_land_in_hand_is_not_an_alternative() {
         let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        state.phase = engine::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player: AI };
         let bounce = bounce_land(&mut state);
         let restricted = plain_land(&mut state, "Restricted Forest");
         state.players[0].hand = [bounce, restricted].into_iter().collect();
 
-        // The engine omitted `restricted` from this decision's legal actions,
-        // as it does for a land unavailable under a current play restriction.
+        let restriction_source = create_object(
+            &mut state,
+            CardId(3),
+            AI,
+            "Conjurer's Ban".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&restriction_source)
+            .expect("restriction source")
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Restricted Forest".to_string()));
+        state.restrictions.push(GameRestriction::ProhibitActivity {
+            source: restriction_source,
+            affected_players: RestrictionPlayerScope::AllPlayers,
+            expiry: RestrictionExpiry::EndOfTurn,
+            activity: ProhibitedActivity::PlayLands {
+                land_filter: Some(TargetFilter::HasChosenName),
+            },
+        });
+
+        let decision = build_decision_context(&state);
+        assert!(decision.candidates.iter().any(|candidate| {
+            matches!(candidate.action, GameAction::PlayLand { object_id, .. } if object_id == bounce)
+        }));
+        assert!(!decision.candidates.iter().any(|candidate| {
+            matches!(candidate.action, GameAction::PlayLand { object_id, .. } if object_id == restricted)
+        }));
+
+        // The production candidate generator excludes the restricted hand land.
         assert_score(
-            play_verdict(&state, bounce, vec![play_candidate(bounce)]),
+            play_verdict(&state, bounce, decision.candidates),
             "land_sequencing_no_alternative",
             0.0,
         );

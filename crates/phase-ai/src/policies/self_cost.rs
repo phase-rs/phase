@@ -109,15 +109,7 @@ pub(crate) fn self_counter_cost_preview(
     source_id: ObjectId,
     ability: &AbilityDefinition,
 ) -> Option<SelfCounterCostPreview> {
-    let AbilityCost::RemoveCounter {
-        count,
-        counter_type: CounterMatch::OfType(counter_type),
-        target: None,
-        ..
-    } = ability.cost.as_ref()?
-    else {
-        return None;
-    };
+    let (count, counter_type) = self_counter_removal_cost(ability.cost.as_ref()?)?;
     let Effect::PutCounter {
         counter_type: replenished_type,
         count: QuantityExpr::Fixed { value },
@@ -129,7 +121,7 @@ pub(crate) fn self_counter_cost_preview(
     if ability.sub_ability.is_some()
         || ability.else_ability.is_some()
         || counter_type != replenished_type
-        || *value != i32::try_from(*count).ok()?
+        || *value != i32::try_from(count).ok()?
     {
         return None;
     }
@@ -143,7 +135,7 @@ pub(crate) fn self_counter_cost_preview(
         actor,
         ObjectIncarnationRef::from_object(source),
         counter_type.clone(),
-        *count,
+        count,
     )? {
         CounterAdditionPreview::Applied { .. } => Some(SelfCounterCostPreview::Applied),
         CounterAdditionPreview::Prevented => Some(SelfCounterCostPreview::Prevented),
@@ -152,6 +144,25 @@ pub(crate) fn self_counter_cost_preview(
         }
         CounterAdditionPreview::Transformed { .. } => Some(SelfCounterCostPreview::Transformed),
         CounterAdditionPreview::Unsupported => Some(SelfCounterCostPreview::Unsupported),
+    }
+}
+
+/// Extract the narrow self-counter payment this preview understands. Parser
+/// output may wrap one cost in `Composite`; multi-cost composites are outside
+/// this exact replenishment check because the preview does not value their
+/// additional payment components.
+fn self_counter_removal_cost(cost: &AbilityCost) -> Option<(u32, &CounterType)> {
+    match cost {
+        AbilityCost::RemoveCounter {
+            count,
+            counter_type: CounterMatch::OfType(counter_type),
+            target: None,
+            ..
+        } => Some((*count, counter_type)),
+        AbilityCost::Composite { costs } if costs.len() == 1 => {
+            self_counter_removal_cost(&costs[0])
+        }
+        _ => None,
     }
 }
 

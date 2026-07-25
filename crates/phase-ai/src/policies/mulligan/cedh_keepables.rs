@@ -22,7 +22,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_only_source, is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Minimum kept-hand size for a cEDH AI. A 3-card hand essentially can't win
 /// at a cEDH table, so we never take a mulligan that would leave fewer cards
@@ -85,6 +85,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
         }
 
         let land_count = count_lands_in_hand(hand, state);
+        let land_only_count = count_land_only_cards_in_hand(hand, state);
 
         // < 2 lands: can't cast spells or accelerate. CR 103.5 — even cEDH
         // hands must be able to develop a mana base.
@@ -97,10 +98,10 @@ impl MulliganPolicy for CedhKeepablesMulligan {
 
         // > 4 lands: too land-heavy for a 37-land cEDH list; threat/combo
         // density too diluted to win at a speed-focused table.
-        if land_count > 4 {
+        if land_only_count > 4 {
             return MulliganScore::ForceMulligan {
                 reason: PolicyReason::new("cedh_keepables_too_many_lands")
-                    .with_fact("lands", land_count as i64),
+                    .with_fact("lands", land_only_count as i64),
             };
         }
 
@@ -143,6 +144,12 @@ impl MulliganPolicy for CedhKeepablesMulligan {
 fn count_lands_in_hand(hand: &[ObjectId], state: &GameState) -> u32 {
     hand.iter()
         .filter(|&&id| state.objects.get(&id).is_some_and(is_land_source))
+        .count() as u32
+}
+
+fn count_land_only_cards_in_hand(hand: &[ObjectId], state: &GameState) -> u32 {
+    hand.iter()
+        .filter(|&&id| state.objects.get(&id).is_some_and(is_land_only_source))
         .count() as u32
 }
 
@@ -202,10 +209,12 @@ fn type_filter_references_land(filter: &TypeFilter) -> bool {
 mod tests {
     use std::sync::Arc;
 
+    use engine::game::printed_cards::snapshot_object_face;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, ManaContribution, ManaProduction, QuantityExpr, TypedFilter,
     };
+    use engine::types::card::LayoutKind;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
@@ -257,6 +266,19 @@ mod tests {
 
     fn push_ability(state: &mut GameState, oid: ObjectId, ability: AbilityDefinition) {
         Arc::make_mut(&mut state.objects.get_mut(&oid).unwrap().abilities).push(ability);
+    }
+
+    fn add_modal_spell_face(state: &mut GameState, object_id: ObjectId) {
+        let object = state.objects.get_mut(&object_id).expect("hand card");
+        let mut back_face = snapshot_object_face(object);
+        back_face.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Instant],
+            subtypes: Vec::new(),
+        };
+        back_face.mana_cost = ManaCost::generic(2);
+        back_face.layout_kind = Some(LayoutKind::Modal);
+        object.back_face = Some(back_face);
     }
 
     fn tap_for_mana_ability() -> AbilityDefinition {
@@ -559,6 +581,41 @@ mod tests {
             }
             _ => panic!("expected ForceMulligan(cedh_keepables_too_many_lands), got {score:?}"),
         }
+    }
+
+    #[test]
+    fn flexible_modal_lands_do_not_trigger_cedh_too_many_lands_mulligan() {
+        let policy = CedhKeepablesMulligan::new();
+        let mut state = GameState::new_two_player(42);
+        state.players[0].hand.clear();
+
+        let mut hand = Vec::new();
+        for i in 0..5 {
+            let land = add_hand_card(
+                &mut state,
+                i,
+                &format!("Modal land {i}"),
+                vec![CoreType::Land],
+            );
+            add_modal_spell_face(&mut state, land);
+            hand.push(land);
+        }
+        let counter = add_hand_card(&mut state, 20, "Counter Shape", vec![CoreType::Instant]);
+        push_ability(&mut state, counter, counterspell_ability());
+        hand.push(counter);
+
+        let score = policy.evaluate(
+            &hand,
+            &state,
+            &features_cedh(true),
+            &PlanSnapshot::default(),
+            TurnOrder::OnPlay,
+            0,
+        );
+        assert!(matches!(
+            score,
+            MulliganScore::Score { reason, .. } if reason.kind == "cedh_keepables_baseline_keep"
+        ));
     }
 
     /// Combo-in-hand path: hand contains both Thassa's Oracle and Demonic

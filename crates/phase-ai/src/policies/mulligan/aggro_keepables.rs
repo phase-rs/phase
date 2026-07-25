@@ -19,7 +19,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_only_source, is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 pub struct AggroKeepablesMulligan;
 
@@ -47,6 +47,7 @@ impl MulliganPolicy for AggroKeepablesMulligan {
         }
 
         let mut lands: i64 = 0;
+        let mut land_only: i64 = 0;
         let mut early_drops: i64 = 0;
         let mut evasion_or_burn: i64 = 0;
 
@@ -57,6 +58,9 @@ impl MulliganPolicy for AggroKeepablesMulligan {
             let core_types = &obj.card_types.core_types;
             if is_land_source(obj) {
                 lands += 1;
+            }
+            if is_land_only_source(obj) {
+                land_only += 1;
             }
             if core_types.contains(&CoreType::Land) {
                 continue;
@@ -90,10 +94,10 @@ impl MulliganPolicy for AggroKeepablesMulligan {
         }
 
         // Flooded: too many lands kills aggro's threat density.
-        if lands >= 5 {
+        if land_only >= 5 {
             return MulliganScore::Score {
                 delta: -0.8,
-                reason: PolicyReason::new("aggro_opener_flooded").with_fact("lands", lands),
+                reason: PolicyReason::new("aggro_opener_flooded").with_fact("lands", land_only),
             };
         }
 
@@ -138,10 +142,12 @@ mod tests {
     use crate::features::aggro_pressure::AggroPressureFeature;
     use crate::features::DeckFeatures;
     use crate::plan::PlanSnapshot;
+    use engine::game::printed_cards::snapshot_object_face;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter,
     };
+    use engine::types::card::LayoutKind;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::GameState;
     use engine::types::identifiers::{CardId, ObjectId};
@@ -263,6 +269,19 @@ mod tests {
         (state, hand)
     }
 
+    fn add_modal_spell_face(state: &mut GameState, object_id: ObjectId) {
+        let object = state.objects.get_mut(&object_id).expect("hand card");
+        let mut back_face = snapshot_object_face(object);
+        back_face.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: Vec::new(),
+        };
+        back_face.mana_cost = ManaCost::generic(2);
+        back_face.layout_kind = Some(LayoutKind::Modal);
+        object.back_face = Some(back_face);
+    }
+
     // ── Tests ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -382,6 +401,36 @@ mod tests {
             }
             _ => panic!("expected Score"),
         }
+    }
+
+    #[test]
+    fn flexible_modal_lands_do_not_trigger_aggro_flood_penalty() {
+        let features = features_with_commitment(0.8);
+        let (mut state, hand) = make_hand(vec![
+            Card::Land,
+            Card::Land,
+            Card::Land,
+            Card::Land,
+            Card::Land,
+            Card::EarlyDrop,
+            Card::EarlyDrop,
+        ]);
+        for &modal in hand.iter().take(5) {
+            add_modal_spell_face(&mut state, modal);
+        }
+
+        let score = AggroKeepablesMulligan.evaluate(
+            &hand,
+            &state,
+            &features,
+            &plan(),
+            TurnOrder::OnPlay,
+            0,
+        );
+        assert!(matches!(
+            score,
+            MulliganScore::Score { reason, .. } if reason.kind == "aggro_opener_workable"
+        ));
     }
 
     #[test]
