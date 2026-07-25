@@ -4291,7 +4291,7 @@ mod tests {
     ) -> GameState {
         let mut state = make_state();
         let spell_id = add_spell_to_hand(&mut state, PlayerId(0), "Targeting Spell", 0);
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::DealDamage {
                 amount: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Any,
@@ -4302,6 +4302,7 @@ mod tests {
             spell_id,
             PlayerId(0),
         );
+        ability.optional_targeting = optional;
         let pending_cast = engine::types::game_state::PendingCast::new(
             spell_id,
             CardId(spell_id.0),

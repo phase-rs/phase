@@ -47123,22 +47123,21 @@ fn exile_pile_shuffle_cloak_remains_with_context_only() {
 }
 
 #[test]
-fn triumph_of_saint_katherine_lowers_to_atomic_face_down_pile() {
-    let parsed = parse_oracle_text(
-        "Praesidium Protectiva — When Triumph of Saint Katherine dies, exile it and the top six cards of your library in a face-down pile. If you do, shuffle that pile and put it back on top of your library.",
-        "Triumph of Saint Katherine",
-        &[],
-        &["Creature".to_string()],
-        &["Human".to_string(), "Warrior".to_string()],
-    );
-    let effect = parsed.triggers[0]
-        .execute
-        .as_ref()
-        .expect("dies trigger must have an execute ability")
-        .effect
-        .as_ref();
+fn triumph_of_saint_katherine_trigger_body_lowers_to_atomic_face_down_pile() {
+    // The trigger parser owns the "When ... dies" shell; this contextual body
+    // lowering is where the face-down-pile recognizer is selected.
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        ..Default::default()
+    };
+    let effect = parse_effect_chain_with_context(
+        "exile it and the top six cards of your library in a face-down pile. If you do, shuffle that pile and put it back on top of your library.",
+        AbilityKind::Spell,
+        &mut ctx,
+    )
+    .effect;
     assert!(matches!(
-        effect,
+        &*effect,
         Effect::ExileFaceDownPile {
             object: TargetFilter::TriggeringSource,
             player: TargetFilter::Controller,
