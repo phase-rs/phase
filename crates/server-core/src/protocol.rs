@@ -327,7 +327,6 @@ pub enum ServerMessage {
         derived: engine::game::derived_views::DerivedViews,
         /// Viewer-scoped interactive opportunities derived from the same
         /// authoritative state as this filtered snapshot.
-        #[serde(default)]
         viewer_interaction: engine::types::interaction::ViewerInteraction,
         /// Included for joiners so they can persist the token for reconnection.
         /// Omitted (None) for hosts (who get it via GameCreated) and reconnects.
@@ -374,7 +373,6 @@ pub enum ServerMessage {
         derived: engine::game::derived_views::DerivedViews,
         /// Viewer-scoped interactive opportunities derived from the same
         /// authoritative state as this filtered snapshot.
-        #[serde(default)]
         viewer_interaction: engine::types::interaction::ViewerInteraction,
     },
     ActionRejected {
