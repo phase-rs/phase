@@ -113,7 +113,7 @@ const viewerInteraction = {
 } as LegalActionsResult["viewerInteraction"];
 
 const objectActions: Record<string, ObjectAction[]> = {
-  "42": [{ type: "PassPriority", interactionActionId: "pass-priority" }],
+  "42": [{ type: "PassPriority" }],
 };
 
 describe("ServerDraftAdapter", () => {
