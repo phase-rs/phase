@@ -534,6 +534,14 @@ export class P2PHostAdapter implements EngineAdapter {
   private nativeBridge: NativeP2PBridge | null = null;
   private nativeInitialSetupPending = false;
   private listeners: P2PAdapterEventListener[] = [];
+  /**
+   * Mirrors WasmAdapter's initialization contract: setup runs exactly once,
+   * and concurrent callers share its in-flight promise. The lobby initializes
+   * the host before advertising it; the game-page handoff later calls
+   * initialize again while seeding gameStore.
+   */
+  private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   private guestSessions = new Map<PlayerId, PeerSession>();
   private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
@@ -1094,6 +1102,17 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   async initialize(): Promise<void> {
+    if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
+    const pending = this.initializeInner();
+    this.initPromise = pending;
+    pending.catch(() => {
+      if (this.initPromise === pending) this.initPromise = null;
+    });
+    return pending;
+  }
+
+  private async initializeInner(): Promise<void> {
     traceAdapter("Host", "initialize-start", { isResume: this.isResume });
     // Subscribe SYNCHRONOUSLY before any `await`. `hostRoom()` buffers
     // inbound guest connections that arrived between peer-open and the
@@ -1158,6 +1177,7 @@ export class P2PHostAdapter implements EngineAdapter {
       });
     }
     traceAdapter("Host", "initialize-complete", {});
+    this.initialized = true;
   }
 
   private handleNewConnection(conn: DataConnection): void {

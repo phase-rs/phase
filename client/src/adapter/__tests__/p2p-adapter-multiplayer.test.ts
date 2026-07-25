@@ -407,6 +407,16 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSetMultiplayerMode).toHaveBeenCalledWith(true);
   });
 
+  it("does not reinitialize the host during the lobby-to-game handoff", async () => {
+    const { adapter } = makeHost(2);
+
+    await Promise.all([adapter.initialize(), adapter.initialize()]);
+    await adapter.initialize();
+
+    expect(mockInitialize).toHaveBeenCalledTimes(1);
+    expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a non-Oathbreaker guest signature spell before game setup", async () => {
     mockCheckDeckCompatibility.mockResolvedValueOnce({
       selected_format_compatible: false,
