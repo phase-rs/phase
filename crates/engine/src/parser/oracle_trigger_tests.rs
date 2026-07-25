@@ -5388,7 +5388,11 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             transform_sub.condition,
         );
     match &*transform_sub.effect {
-        Effect::Transform { target, .. } => {
+        Effect::Transform {
+            target,
+            scope: EffectScope::Single,
+            ..
+        } => {
             // The parser today emits `ParentTarget` here — "transform it"
             // refers back to the Untap target (the trigger source).
             assert_eq!(
@@ -5397,7 +5401,7 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
                 "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
             );
         }
-        other => panic!("nested sub_ability effect must be Transform, got {other:?}"),
+        other => panic!("nested sub_ability effect must be a single Transform, got {other:?}"),
     }
     // The Transform clause is the inner-most sub_ability and inherits the
     // default `ContinuationStep` link — the chain shape is
