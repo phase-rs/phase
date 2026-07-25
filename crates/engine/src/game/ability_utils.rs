@@ -157,6 +157,13 @@ pub fn build_resolved_from_def_with_targets(
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
+    // CR 702.1c ("the same is true") + CR 608.2c (written order): Carry the
+    // replication marker through so `resolve_chain_body` evaluates a
+    // `ReplicatedOrBranch` per-item OR-branch (Mutable Pupa, Kathril)
+    // independently of a preceding sibling's failed gate. Without this copy the
+    // parser-stamped `SiblingCondition` never reaches the resolved sub and the
+    // keyword list collapses after the first false gate.
+    resolved.sibling_condition = def.sibling_condition;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
     // through so try_begin_reflexive_target_selection can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
@@ -432,17 +439,25 @@ pub fn additional_cost_instead_spell_has_legal_targets(
     if !has_kicker_cost && !has_queue_cost {
         return false;
     }
-    let Some(sub) = ability_def.sub_ability.as_deref() else {
-        return false;
-    };
-    if !matches!(
-        sub.condition,
-        Some(AbilityCondition::AdditionalCostPaidInstead)
-    ) {
+    // Walk past GiftDelivery wrappers to find AdditionalCostPaidInstead.
+    let mut instead_node = ability_def.sub_ability.as_deref();
+    let mut found_instead = false;
+    while let Some(sub) = instead_node {
+        if matches!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        ) {
+            found_instead = true;
+            break;
+        }
+        instead_node = sub.sub_ability.as_deref();
+    }
+    if !found_instead {
         return false;
     }
     let mut resolved = build_resolved_from_def(ability_def, object_id, player);
     resolved.context.additional_cost_paid = true;
+    resolved.set_context_recursive(resolved.context.clone());
     // CR 601.2c: a queue-synthesized "instead" cost only broadens castability when the
     // override re-selects a REAL (non-context-ref) target — mirror the cast-time gate
     // (requires_additional_cost_declaration_before_targets). A context-ref override
@@ -3157,7 +3172,7 @@ fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
     !filter.is_context_ref()
         && !matches!(
             filter,
-            TargetFilter::LastCreated | TargetFilter::LastRevealed
+            TargetFilter::LastCreated | TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
         )
 }
 
@@ -4848,7 +4863,7 @@ fn concretize_granting_object_in_effect(effect: &mut Effect, granter: ObjectId) 
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }

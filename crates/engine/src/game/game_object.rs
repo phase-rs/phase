@@ -678,6 +678,13 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 702.174a: Opponent chosen when this object's Gift cost was paid.
+    /// Mirrors `SpellContext.gift_recipient`; stamped at cast finalize
+    /// (kickers_paid pattern). Cleared by `reset_for_battlefield_exit` /
+    /// `reset_for_battlefield_entry` (CR 400.7); restored across Stack→Battlefield
+    /// only via `CastLinkSnapshot` (CR 400.7d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gift_recipient: Option<PlayerId>,
     /// CR 601.2b/f/h + CR 702.157a: Count of non-kicker repeatable
     /// additional costs paid while casting the spell that produced this
     /// permanent. Kept separate from `kickers_paid` so Squad does not inherit
@@ -1203,6 +1210,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cost_x_paid: _,
         fused_split_spell: _,
         kickers_paid: _,
+        gift_recipient: _,
         additional_cost_payment_count: _,
         additional_cost_payments: _,
         convoked_creatures: _,
@@ -2063,6 +2071,7 @@ impl GameObject {
             cost_x_paid: None,
             fused_split_spell: false,
             kickers_paid: Vec::new(),
+            gift_recipient: None,
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -2273,6 +2282,11 @@ impl GameObject {
         // event as `cast_from_zone`; clear it on zone change for the same reason.
         self.cast_spell_keywords.clear();
         self.kickers_paid.clear();
+        // CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance (who was
+        // promised the gift when this permanent was cast). A re-entering object
+        // has no memory of a prior Gift promise — clear before CastLinkSnapshot
+        // restores it for Stack→Battlefield cast resolution only.
+        self.gift_recipient = None;
         self.additional_cost_payment_count = 0;
         self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
@@ -2365,6 +2379,10 @@ impl GameObject {
         // runs (zones.rs: exit seam → snapshot → reset), so latched trigger
         // contexts keep the payment record of the departing incarnation.
         self.clear_cast_payment_stamps();
+        // CR 400.7 + CR 702.174a: Gift recipient is the same cast-link class as
+        // kickers_paid / payment stamps — a blinked or reanimated permanent must
+        // not deliver (or condition on) a prior incarnation's Gift promise.
+        self.gift_recipient = None;
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on the same zone-change boundary.
         self.cast_spell_keywords.clear();
@@ -2783,6 +2801,49 @@ mod tests {
         assert!(
             obj.cast_from_zone.is_none(),
             "cast_from_zone exit-clear pin (CR 400.7 + CR 603.4)"
+        );
+    }
+
+    /// CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance and must
+    /// clear on battlefield exit — a blinked/reanimated permanent cannot keep a
+    /// prior incarnation's Gift promise.
+    #[test]
+    fn reset_for_battlefield_exit_clears_gift_recipient() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Scrapshooter".to_string(),
+            Zone::Battlefield,
+        );
+        obj.gift_recipient = Some(PlayerId(1));
+
+        obj.reset_for_battlefield_exit();
+
+        assert!(
+            obj.gift_recipient.is_none(),
+            "gift_recipient must clear on battlefield exit (CR 400.7)"
+        );
+    }
+
+    /// CR 400.7d: Entry reset also clears Gift recipient so effect-driven puts
+    /// (Reanimate) cannot resurrect a stamp that somehow survived exile/GY.
+    #[test]
+    fn reset_for_battlefield_entry_clears_gift_recipient() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Scrapshooter".to_string(),
+            Zone::Graveyard,
+        );
+        obj.gift_recipient = Some(PlayerId(1));
+
+        obj.reset_for_battlefield_entry(1, 1);
+
+        assert!(
+            obj.gift_recipient.is_none(),
+            "gift_recipient must clear on battlefield entry (CR 400.7d)"
         );
     }
 

@@ -1415,6 +1415,17 @@ pub(crate) fn bargain_additional_cost() -> AdditionalCost {
     }
 }
 
+/// CR 702.174a: Zero-cost optional Gift promise. Matches `synthesize_gift` so
+/// `obj_additional_matches_instance` dedups the legacy face cost against the queue.
+pub(crate) fn gift_additional_cost() -> AdditionalCost {
+    AdditionalCost::Optional {
+        cost: AbilityCost::Mana {
+            cost: ManaCost::zero(),
+        },
+        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+    }
+}
+
 /// Synthesize Gift optional cost and delivery effect.
 /// Gift is a promise (zero-cost optional additional cost) that sets `additional_cost_paid`
 /// when the player promises the gift. Conditional branches ("if the gift was promised" /
@@ -1440,12 +1451,7 @@ pub fn synthesize_gift(face: &mut CardFace) {
     };
 
     // Gift uses a zero-cost optional additional cost — the "cost" is just a decision.
-    face.additional_cost = Some(AdditionalCost::Optional {
-        cost: AbilityCost::Mana {
-            cost: ManaCost::zero(),
-        },
-        repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
-    });
+    face.additional_cost = Some(gift_additional_cost());
 
     // Inject GiftDelivery as a wrapper around the first spell ability.
     // The delivery effect is a no-op when the gift wasn't promised, so the
@@ -5033,6 +5039,7 @@ fn is_provoke_attack_trigger(t: &TriggerDefinition) -> bool {
         execute.sub_ability.as_deref().map(|a| &*a.effect),
         Some(Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
+            ..
         })
     )
 }
@@ -5161,9 +5168,14 @@ fn build_provoke_trigger() -> TriggerDefinition {
         AbilityKind::Spell,
         Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
+            attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+            duration: Duration::UntilEndOfCombat,
         },
     )
-    .description("CR 509.1c: that creature blocks this creature this turn if able".to_string());
+    .description(
+        "CR 702.39a + CR 509.1c: that creature blocks this creature this combat if able"
+            .to_string(),
+    );
 
     // CR 702.39a + CR 701.26b: "you may have target creature ... untap" — the
     // optional parent body untaps the chosen defender, then force-blocks it.
@@ -5178,7 +5190,7 @@ fn build_provoke_trigger() -> TriggerDefinition {
     .optional()
     .sub_ability(force_block)
     .description(
-        "Provoke — untap target creature defending player controls; it blocks this turn if able"
+        "Provoke — untap target creature defending player controls; it blocks this combat if able"
             .to_string(),
     );
 
@@ -13569,6 +13581,8 @@ mod provoke_synthesis_tests {
                 &*sub.effect,
                 Effect::ForceBlock {
                     target: TargetFilter::ParentTarget,
+                    attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+                    duration: Duration::UntilEndOfCombat,
                 }
             ),
             "sub-ability must force-block the parent (untapped) target via ParentTarget, got {:?}",
@@ -13817,7 +13831,7 @@ mod provoke_runtime_tests {
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
 
@@ -13868,6 +13882,11 @@ mod provoke_runtime_tests {
             vec![TargetRef::Object(defender)],
         );
         resolved.optional = false;
+        // Match the shared stack boundary: source-referential force-blocks
+        // bind the exact attacking incarnation before their continuation runs.
+        resolved.bind_force_block_source_recursive(Some(ObjectIncarnationRef::from_object(
+            &state.objects[&provoker],
+        )));
 
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
@@ -13886,7 +13905,7 @@ mod provoke_runtime_tests {
                     m,
                     ContinuousModification::AddStaticMode {
                         mode: StaticMode::MustBlockAttacker { attacker },
-                    } if *attacker == provoker
+                    } if attacker.object_id == provoker
                 )
             })
         });
@@ -13894,6 +13913,13 @@ mod provoke_runtime_tests {
             forced,
             "Provoke must apply MustBlockAttacker bound to the provoking attacker, \
              reusing the existing source-referential ForceBlock resolver"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.duration == Duration::UntilEndOfCombat),
+            "CR 702.39a's forced block lasts only for this combat"
         );
 
         assert!(events.iter().any(|e| matches!(

@@ -330,6 +330,12 @@ gh pr create --title "<title>" --body "<body>"   # no --label arg; upstream auto
 
 **PR body template:**
 
+Start with the repository's .github/PULL_REQUEST_TEMPLATE.md. The GitHub UI
+prepopulates it; when using gh pr create --body, copy that file's completed
+contents into the body. Fill every section rather than writing an ad-hoc body
+or omitting a placeholder. The repository template is the source of truth for
+fields measured by the review loop, artifact audit, and triage workflow.
+
 ```markdown
 ## Summary
 Adds engine support for **<Card Name>**.
@@ -350,6 +356,7 @@ Method: /engine-implementer
 
 ## LLM
 Model: <claude-opus-4-8 | gpt-5-5 | codex-5-5 | …>   # Frontier tier only — see §0.1.1
+Tier: Frontier
 Thinking: <high | max>
 
 ## Verification
@@ -373,16 +380,20 @@ Gate A PASS head=<40-hex-sha> base=<40-hex-sha>
 Final review-impl PASS head=<40-hex-sha>
 
 ## Claimed parse impact
-- <Exact Card Name>
-<!-- Optional manual quality evidence; not an admission artifact. Write `None.` when parse-diff has no changed cards. -->
+None.
+<!-- List exact card names only when the parse-diff changes cards. -->
+
+## Scope Expansion
+None.
+<!-- Describe any change that crosses the issue/card's stated scope. -->
 
 ## Validation Failures
 None.
-<!-- If Step 5 could not be made to pass after retries, replace `None.` above with the failure details. -->
+<!-- Replace with the unresolved validation failure and its evidence. -->
 
 ## CI Failures
 None.
-<!-- If Step 6 surfaced a failure the LLM could not resolve, replace `None.` above with the failure details. -->
+<!-- Replace with the unresolved CI failure and its evidence. -->
 ```
 
 **Labels classify behavior; they do not grant authority.** The upstream workflows and maintainer apply type labels (`bug`, `enhancement`, `feature`, `test`, or `refactor`), `needs-maintainer` for operational attention, and the existing `quality` label only after manual evidence review. Fork PRs must not pass `--label` to `gh pr create`. No label waives artifact or architecture scope gates.
@@ -420,6 +431,8 @@ and follow the Developer track end-to-end to implement or fix the card
 ladder: misparse fix → open issue → coverage gap}. Use high thinking. Do not stop for
 my input. Apply the §0.1 tier routing — BOTH §0.1.2
 gates must pass before opening the PR (all tiers). Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section; do not write an ad-hoc body.
 If the work requires protected architecture scope without a prior maintainer
 appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 ```
@@ -434,6 +447,8 @@ ladder: misparse fix → open issue → coverage gap}. Skip local verification �
 PR. Use high thinking. Do not stop for my input. Apply the §0.1 tier routing
 — BOTH §0.1.2 gates must pass before opening the PR (all tiers).
 Open a PR when done.
+Use the repository's .github/PULL_REQUEST_TEMPLATE.md for the PR body and fill
+every section; do not write an ad-hoc body.
 If the work requires protected architecture scope without a prior maintainer
 appointment or a linked issue labeled `accepted`, stop instead of opening a PR.
 ```
@@ -448,8 +463,9 @@ Requirements: Frontier-tier model REQUIRED — Claude Opus 4.7+, GPT-5.5+, or
 Codex 5.5+ at high+ thinking. If your runtime is below that (Sonnet, Haiku,
 Composer, or any older model), STOP and tell me rather than opening a PR; it
 will be closed as out-of-policy. Report your actual model on a single canonical
-"Model:" line in the PR body (e.g. "Model: claude-opus-4-8"). Do NOT
-editorialize that line and do NOT overstate it. Hard requirements: you can
+"Model:" line and the exact "Tier: Frontier" line in the PR body (e.g.
+"Model: claude-opus-4-8"). Do NOT editorialize either line or overstate the
+model. Hard requirements: you can
 invoke skills, run shell commands, and you will not pause for input.
 
 Steps:
@@ -488,7 +504,8 @@ Steps:
    "Fix <Card Name>" for a misparse fix (§3.1) or an issue (§3.2), and
    add "Closes #<number>" to the body for an issue; "Partial: <Card Name>"
    only if validation or CI failures were unresolved).
-   Body must follow the template in docs/AI-CONTRIBUTOR.md. Do NOT pass
+   Body must use the repository's .github/PULL_REQUEST_TEMPLATE.md exactly;
+   fill every section rather than writing an ad-hoc body. Do NOT pass
    --label flags — the upstream auto-labeler may apply needs-maintainer
    automatically based on the branch name and body content.
 8. Print the PR URL and exit.

@@ -1723,6 +1723,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseAnnouncingOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
         }
+        GameAction::ChooseGiftRecipient { .. } => {
+            AvailableActionConversion::Unsupported("local.gift-recipient-unsupported")
+        }
         GameAction::ChoosePileOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
         }

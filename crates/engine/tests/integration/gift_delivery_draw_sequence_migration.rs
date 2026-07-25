@@ -56,6 +56,12 @@ fn cast_promised_coiling(
                     .act(GameAction::DecideOptionalCost { pay: true })
                     .expect("promise Gift a card");
             }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let opponent = candidates[0];
+                runner
+                    .act(GameAction::ChooseGiftRecipient { opponent })
+                    .expect("choose gift recipient");
+            }
             WaitingFor::TargetSelection { .. } => {
                 runner
                     .act(GameAction::ChooseTarget {

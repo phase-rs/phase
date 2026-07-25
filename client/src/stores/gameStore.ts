@@ -411,7 +411,26 @@ export const useGameStore = create<GameStore>()(
       // pacing (rematch started within the throughput window).
       resetStackThroughput();
       await adapter.initialize();
-      const initResult = await adapter.initializeGame(deckData, formatConfig, playerCount, matchConfig, firstPlayer);
+      // Network-backed adapters can publish the initial authoritative snapshot
+      // from inside `initializeGame`. Bind the transport before that happens so
+      // the shared remote-update path never commits a visible game state whose
+      // action dispatcher has no adapter yet.
+      set({ adapter });
+      let initResult;
+      try {
+        initResult = await adapter.initializeGame(
+          deckData,
+          formatConfig,
+          playerCount,
+          matchConfig,
+          firstPlayer,
+        );
+      } catch (error) {
+        // A failed initialization must not leave a transport that never
+        // produced a playable game attached to the store.
+        if (get().adapter === adapter) set({ adapter: null });
+        throw error;
+      }
       // Fetched AFTER the engine is initialized, so this snapshot is
       // newest-by-construction under the global counter — it always passes the
       // gate, and it drops any leftover in-flight commit from a prior match.

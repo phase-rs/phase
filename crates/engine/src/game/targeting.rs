@@ -599,6 +599,11 @@ pub fn resolve_event_context_target(
             .first()
             .copied()
             .map(TargetRef::Object),
+        TargetFilter::LastZoneChanged => state
+            .last_zone_changed_ids
+            .first()
+            .copied()
+            .map(TargetRef::Object),
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
@@ -643,6 +648,13 @@ pub fn resolve_event_context_targets(
         TargetFilter::LastRevealed => {
             return state
                 .last_revealed_ids
+                .iter()
+                .map(|id| TargetRef::Object(*id))
+                .collect();
+        }
+        TargetFilter::LastZoneChanged => {
+            return state
+                .last_zone_changed_ids
                 .iter()
                 .map(|id| TargetRef::Object(*id))
                 .collect();
@@ -768,6 +780,14 @@ pub fn resolved_targets(
     if matches!(target_filter, TargetFilter::LastRevealed) {
         return state
             .last_revealed_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+    }
+    if matches!(target_filter, TargetFilter::LastZoneChanged) {
+        return state
+            .last_zone_changed_ids
             .iter()
             .copied()
             .map(TargetRef::Object)
@@ -987,6 +1007,7 @@ pub(crate) fn resolved_object_ids_for_filter(
             .collect(),
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
         TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))

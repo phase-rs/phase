@@ -91,6 +91,12 @@ type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
 const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
+#[cfg(windows)]
+// Windows gives the process' primary thread a comparatively small stack. A
+// persisted game is a deeply nested rules snapshot, so restore it on a
+// purpose-sized thread rather than letting one saved session prevent the
+// server from reaching its health endpoint on the next launch.
+const PERSISTED_SESSION_RESTORE_STACK_BYTES: usize = 16 * 1024 * 1024;
 type SharedDraftPools = Arc<draft_pools::DraftPools>;
 /// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
 type SharedDraftSpectators = Arc<
@@ -106,6 +112,30 @@ type SharedDraftSpectators = Arc<
 >;
 /// Spectator senders keyed by game code (live games only).
 type SharedGameSpectators = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<ServerMessage>>>>>;
+
+#[cfg(windows)]
+fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
+    let json = json.to_owned();
+    let restore = std::thread::Builder::new()
+        .name("phase-session-restore".to_owned())
+        .stack_size(PERSISTED_SESSION_RESTORE_STACK_BYTES)
+        .spawn(move || {
+            let persisted = serde_json::from_str::<server_core::PersistedSession>(&json)
+                .map_err(|error| error.to_string())?;
+            Ok(GameSession::from_persisted(persisted, db.as_ref()))
+        })
+        .map_err(|error| format!("could not start restore thread: {error}"))?;
+    restore
+        .join()
+        .map_err(|_| "persisted session restore thread panicked".to_owned())?
+}
+
+#[cfg(not(windows))]
+fn restore_persisted_session(json: &str, db: SharedDb) -> Result<GameSession, String> {
+    let persisted = serde_json::from_str::<server_core::PersistedSession>(json)
+        .map_err(|error| error.to_string())?;
+    Ok(GameSession::from_persisted(persisted, db.as_ref()))
+}
 
 async fn reserve_lobby_subscriber_slot(
     lobby_subscribers: &SharedLobbySubscribers,
@@ -442,7 +472,10 @@ const MAX_GAMES: usize = 100;
 // `lobby_broker::broker` — the broker enforces it inside `handle`.
 const RATE_LIMIT_MESSAGES: u32 = 30;
 const RATE_LIMIT_WINDOW_SECS: u64 = 1;
-const MAX_WS_MESSAGE_BYTES: usize = 8 * 1024; // 8 KB
+// A native Play-vs-AI setup carries the host deck and every AI deck in one
+// CreateGameWithSettings frame. Keep a bounded transport limit while allowing
+// a full multiplayer table's ordinary deck lists to reach the input guards.
+const MAX_WS_MESSAGE_BYTES: usize = 64 * 1024; // 64 KB
 
 /// Native [`BrokerEnv`] implementation: wall clock via `SystemTime`, tokens /
 /// codes via the `server_core` generators (which stay in `server-core` — they
@@ -1003,12 +1036,11 @@ async fn main() {
                 let mut restored = 0u32;
 
                 for (game_code, json) in &persisted_games {
-                    match serde_json::from_str::<server_core::PersistedSession>(json) {
-                        Ok(ps) => {
-                            let lobby_meta = ps.lobby_meta.clone();
-                            let is_started = ps.game_started;
-                            let session =
-                                server_core::session::GameSession::from_persisted(ps, db.as_ref());
+                    info!(game = %game_code, bytes = json.len(), "restoring persisted session");
+                    match restore_persisted_session(json, db.clone()) {
+                        Ok(session) => {
+                            let lobby_meta = session.lobby_meta.clone();
+                            let is_started = session.game_started;
 
                             // Register all non-AI human players as disconnected
                             // to start the 120s grace period from now
@@ -6896,13 +6928,23 @@ mod full_create_guard_tests {
 mod issue_4548_full_create_tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
-    use server_core::protocol::{ClientMessage, DeckData, ServerErrorCode, ServerMessage};
+    use phase_ai::config::AiDifficulty;
+    use server_core::protocol::{
+        AiSeatRequest, ClientMessage, DeckChoice, DeckData, ServerErrorCode, ServerMessage,
+    };
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::WebSocketStream;
 
     fn empty_deck() -> DeckData {
         DeckData::default()
+    }
+
+    fn deck_with_main_entries(entries: usize) -> DeckData {
+        DeckData {
+            main_deck: vec!["Forest".to_string(); entries],
+            ..Default::default()
+        }
     }
 
     async fn spawn_full_mode_server() -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
@@ -7095,6 +7137,85 @@ mod issue_4548_full_create_tests {
         assert!(
             result.is_ok(),
             "full-mode create did not reject the invalid format deck"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_mode_accepts_native_multi_ai_setup_larger_than_eight_kib() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: deck_with_main_entries(300),
+                display_name: "Alice".to_string(),
+                public: false,
+                password: None,
+                timer_seconds: None,
+                player_count: 3,
+                match_config: Default::default(),
+                ai_seats: vec![
+                    AiSeatRequest {
+                        seat_index: 1,
+                        difficulty: AiDifficulty::Medium,
+                        deck_name: None,
+                        deck: Some(DeckChoice::DeckList(Box::new(deck_with_main_entries(300)))),
+                    },
+                    AiSeatRequest {
+                        seat_index: 2,
+                        difficulty: AiDifficulty::Medium,
+                        deck_name: None,
+                        deck: Some(DeckChoice::DeckList(Box::new(deck_with_main_entries(300)))),
+                    },
+                ],
+                format_config: None,
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+            };
+            let create_json = serde_json::to_string(&create).expect("create json");
+            assert!(create_json.len() > 8 * 1024);
+            assert!(create_json.len() <= MAX_WS_MESSAGE_BYTES);
+            socket
+                .send(WsMessage::Text(create_json.into()))
+                .await
+                .expect("send create");
+
+            // The empty test card database rejects the deck, which proves the
+            // complete multi-AI frame passed WebSocket framing and reached the
+            // normal create-game validation path.
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::Error { .. }
+            ));
+        })
+        .await;
+        server.abort();
+
+        assert!(
+            result.is_ok(),
+            "native multi-AI setup frame did not reach server validation"
         );
     }
 }

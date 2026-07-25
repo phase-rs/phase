@@ -46,6 +46,13 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -140,6 +147,13 @@ jobs:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
 
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -166,6 +180,13 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-shared-key: rust-debug
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Enable sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Set cache keys
         id: cache-keys

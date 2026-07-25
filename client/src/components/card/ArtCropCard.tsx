@@ -5,6 +5,7 @@ import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -25,19 +26,10 @@ const PT_COLORS: Record<PTColor, string> = {
   white: "text-[#111]",
 };
 
-// Stable empty ref so the unbounded-counter selector returns the same value when
-// absent, avoiding a spurious re-render every state tick (mirrors PermanentCard).
-const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
-
 export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
-  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
-  // counter-growth loop) for this object. Same channel PermanentCard's full-card pill
-  // reads — both battlefield display modes must agree, or the ∞ silently drops in one.
-  const unboundedCounterTypes = useGameStore(
-    (s) => s.gameState?.derived?.unbounded_counters?.[String(objectId)] ?? EMPTY_UNBOUNDED_COUNTERS,
-  );
+  const unboundedCounterTypes = useUnboundedCounterTypes(objectId);
   const isMobile = useIsMobile();
   const inspectObject = useUiStore((s) => s.inspectObject);
   const isCompactHeight = useIsCompactHeight();

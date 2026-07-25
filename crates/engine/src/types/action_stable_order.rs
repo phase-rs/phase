@@ -189,6 +189,12 @@ fn cmp_payload(a: &GameAction, b: &GameAction) -> Ordering {
             };
             cmp_val(a0, b0)
         }
+        GameAction::ChooseGiftRecipient { opponent: a0 } => {
+            let GameAction::ChooseGiftRecipient { opponent: b0 } = b else {
+                unreachable!("cmp_payload: same-variant invariant");
+            };
+            cmp_val(a0, b0)
+        }
         GameAction::ChooseAssistPlayer { player: a0 } => {
             let GameAction::ChooseAssistPlayer { player: b0 } = b else {
                 unreachable!("cmp_payload: same-variant invariant");
@@ -1653,6 +1659,14 @@ mod tests {
                 opponent: PlayerId(0),
             },
             GameAction::ChooseAnnouncingOpponent {
+                opponent: PlayerId(1),
+            },
+        );
+        assert_distinct_order(
+            GameAction::ChooseGiftRecipient {
+                opponent: PlayerId(0),
+            },
+            GameAction::ChooseGiftRecipient {
                 opponent: PlayerId(1),
             },
         );

@@ -65,18 +65,18 @@ use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
-    attach_repeat_process_keywords, attach_same_is_true_keywords,
+    attach_perpetual_keyword_grants, attach_repeat_process_keywords, attach_same_is_true_keywords,
     bind_anaphoric_damage_subject_keep_recipient, collapse_ephemeral_color_choice_mana,
     contains_explicit_tracked_set_pronoun, contains_implicit_tracked_set_pronoun,
     def_is_damage_dealer, def_is_dig_look, def_is_dig_or_mill, def_is_generic_effect_head,
-    def_is_keyword_counter_placement, demote_unbindable_batch_aggregate, draw_object_count_filter,
-    fold_cast_copy_of_card_defs, has_explicit_player_target, inject_chosen_color_choice_grant,
-    mark_uses_tracked_set, parse_spell_graveyard_replacement_rider,
-    publishes_aggregate_set_from_resolution, publishes_tracked_set_from_resolution,
-    rebind_tracked_aggregate_to_chain_set, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode,
-    rewrite_that_type_mana_instead, stamp_delayed_returns, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback,
+    def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
+    demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
+    has_explicit_player_target, inject_chosen_color_choice_grant, mark_uses_tracked_set,
+    parse_spell_graveyard_replacement_rider, publishes_aggregate_set_from_resolution,
+    publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
+    retarget_counter_additional_cost_to_target, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_rounding_mode, rewrite_that_type_mana_instead,
+    stamp_delayed_returns, try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -696,6 +696,15 @@ pub(super) enum AntecedentRole {
     /// the sibling template a "Repeat this process for <keywords>" continuation
     /// clones (Kathril, Aspect Warper).
     KeywordCounterPlacement,
+    /// CR 702.1c + CR 608.2c: A perpetual keyword grant
+    /// (`ApplyPerpetual { GrantKeywords }`) — the sibling
+    /// template a "The same is true for <keywords>" continuation clones when the
+    /// antecedent is a PERPETUAL grant rather than Odric's static `GenericEffect`
+    /// grant (Mutable Pupa). Membership is the EFFECT VARIANT ALONE, mirroring
+    /// `def_is_perpetual_keyword_grant`; the gating condition is the mutator's
+    /// business, not the role's filter. "Perpetually" is a digital-only extension
+    /// outside the Comprehensive Rules.
+    PerpetualKeywordGrantHead,
     /// A `DealDamage` — the antecedent an "excess damage" rider redirects from
     /// (CR 120.4a). The rider need not be adjacent to the damage clause, which is
     /// why this is a role and not `LastEmitted`.
@@ -767,6 +776,11 @@ fn live_role_predicate(role: AntecedentRole) -> Option<fn(&AbilityDefinition) ->
     match role {
         AntecedentRole::GenericEffectHead => Some(def_is_generic_effect_head),
         AntecedentRole::KeywordCounterPlacement => Some(def_is_keyword_counter_placement),
+        // LIVE — mirrors `KeywordCounterPlacement`. The mutator
+        // (`attach_perpetual_keyword_grants`) appends siblings (length-changing),
+        // but staying live keeps it consistent with its sibling role and immune to
+        // any future in-place effect rewrite.
+        AntecedentRole::PerpetualKeywordGrantHead => Some(def_is_perpetual_keyword_grant),
         // LIVE, not cached. The scan this role replaces (`sequence.rs`, the
         // `DigFromAmong` fallthrough) re-derived its antecedent from `defs` on every
         // call, so it saw the CURRENT effect of every def. A cached registry is
@@ -1109,7 +1123,8 @@ impl AssemblyEnv {
                 | AntecedentRole::DigOrMill
                 | AntecedentRole::DigLook
                 | AntecedentRole::DamageDealer
-                | AntecedentRole::CopySpellBearer => Vec::new(),
+                | AntecedentRole::CopySpellBearer
+                | AntecedentRole::PerpetualKeywordGrantHead => Vec::new(),
             },
         };
         members
@@ -1370,6 +1385,19 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         );
                         if let Some(bound_index) = bound {
                             attach_repeat_process_keywords(&mut defs, bound_index, keywords);
+                        }
+                    }
+                    ReplicateKind::PerpetualKeywordGrant => {
+                        let bound = env.resolve(
+                            &defs,
+                            AntecedentSelector::LastWithRole(
+                                AntecedentRole::PerpetualKeywordGrantHead,
+                            ),
+                            None,
+                            OnMiss::Ignore,
+                        );
+                        if let Some(bound_index) = bound {
+                            attach_perpetual_keyword_grants(&mut defs, bound_index, keywords);
                         }
                     }
                 }

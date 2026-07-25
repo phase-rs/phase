@@ -146,7 +146,6 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
       const validBlockerIds = new Set(waitingFor.data.valid_blocker_ids);
       const eligibleIds = group.ids.filter((id) =>
         validBlockerIds.has(id)
-        && !blockerAssignments.has(id)
         && (waitingFor.data.valid_block_targets[id]?.length ?? 0) > 0,
       );
       return eligibleIds.length > 0 ? { mode: "blockers", eligibleIds } : null;

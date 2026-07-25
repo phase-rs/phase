@@ -1,8 +1,8 @@
 use crate::types::ability::{
     AbilityKind, ContinuousModification, CopyCountStatus, Duration, Effect, EffectKind, FilterProp,
     KeywordAction, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode,
-    TriggerCondition,
+    SiblingCondition, SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef,
+    TargetSelectionMode, TriggerCondition,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -25,6 +25,10 @@ use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 405.1: Add an object to the stack.
 pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut Vec<GameEvent>) {
+    let source_ref = state
+        .objects
+        .get(&entry.source_id)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
     // CR 701.27f: an activated or triggered ability of a permanent may
     // transform that permanent only if it has not transformed/converted since
     // the ability was put onto the stack. Spells and keyword actions do not
@@ -51,6 +55,12 @@ pub fn push_to_stack(state: &mut GameState, mut entry: StackEntry, events: &mut 
                 }
             }
         }
+    }
+    // CR 400.7 + CR 509.1c: source-referential force-block instructions bind
+    // their exact source at the common stack boundary, covering activated and
+    // other nontriggered stack abilities as well as normal triggered paths.
+    if let Some(ability) = entry.ability_mut() {
+        ability.bind_force_block_source_recursive(source_ref);
     }
     events.push(GameEvent::StackPushed {
         object_id: entry.id,
@@ -1069,6 +1079,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if let Some(ability) = ability.as_ref() {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.kickers_paid = ability.context.kickers_paid.clone();
+                    obj.gift_recipient = ability.context.gift_recipient;
                     obj.additional_cost_payment_count =
                         ability.context.additional_cost_payment_count;
                     obj.additional_cost_payments = ability.context.additional_cost_payments.clone();
@@ -2282,6 +2293,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_incarnation,
         trigger_source,
         trigger_definition_ref,
+        force_block_attacker: _,
         controller: _,
         original_controller,
         scoped_player,
@@ -2322,6 +2334,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         repeat_until,
         replacement_applied: _,
         sub_link,
+        sibling_condition,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -2387,6 +2400,11 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
+        // covers — its independent OR-branch gate must be evaluated per entry.
+        && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -2477,6 +2495,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: _,
         controller: _,
         original_controller: _,
         scoped_player,
@@ -2517,6 +2536,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         repeat_until,
         replacement_applied: _,
         sub_link,
+        sibling_condition,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -2565,6 +2585,11 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
+        // covers — its independent OR-branch gate must be evaluated per entry.
+        && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -2657,6 +2682,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: _,
         controller: _,
         original_controller: _,
         scoped_player,
@@ -2697,6 +2723,7 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         repeat_until,
         replacement_applied: _,
         sub_link,
+        sibling_condition,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -2745,6 +2772,11 @@ fn fixed_opponent_lose_life_ability_is_batch_candidate(ability: &ResolvedAbility
         && chosen_players.is_empty()
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
+        // CR 702.1c ("the same is true") + CR 608.2c (written order): a
+        // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
+        // Kathril) is not the vanilla batchable shape this proof
+        // covers — its independent OR-branch gate must be evaluated per entry.
+        && *sibling_condition == SiblingCondition::Dependent
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -3262,6 +3294,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: a_force_block_attacker,
         controller: a_controller,
         original_controller: _,
         scoped_player: a_scoped_player,
@@ -3302,6 +3335,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         repeat_until: a_repeat_until,
         replacement_applied: a_replacement_applied,
         sub_link: a_sub_link,
+        sibling_condition: a_sibling_condition,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
@@ -3313,6 +3347,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
+        force_block_attacker: b_force_block_attacker,
         controller: b_controller,
         original_controller: _,
         scoped_player: b_scoped_player,
@@ -3353,6 +3388,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         repeat_until: b_repeat_until,
         replacement_applied: b_replacement_applied,
         sub_link: b_sub_link,
+        sibling_condition: b_sibling_condition,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
@@ -3360,6 +3396,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
 
     a_effect == b_effect
         && a_targets == b_targets
+        && a_force_block_attacker == b_force_block_attacker
         && a_controller == b_controller
         && a_scoped_player == b_scoped_player
         && a_kind == b_kind
@@ -3408,6 +3445,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_repeat_until == b_repeat_until
         && a_replacement_applied == b_replacement_applied
         && a_sub_link == b_sub_link
+        && a_sibling_condition == b_sibling_condition
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities
         && a_parent_target_missing_reason == b_parent_target_missing_reason

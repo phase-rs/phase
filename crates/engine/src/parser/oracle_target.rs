@@ -2075,21 +2075,47 @@ pub fn parse_type_phrase_with_ctx<'a>(
     let offset = lower.len() - lower_trimmed.len();
     pos += offset;
 
-    // Strip leading article ("a "/"an ") when followed by a recognized type word
-    // or the "commander" class. Guard: "an opponent" → "opponent" fails type word
-    // check → no stripping. CR 903.3: "commander" is recognized by the commander
-    // atom below (it pushes `IsCommander`), not by `starts_with_type_phrase_lead`,
-    // so the article guard must also accept it — otherwise "a commander you own"
-    // (Hellkite Courser, #5256) keeps its article and never reaches the atom,
-    // collapsing to a match-anything filter. "commander you own" / "target
-    // commander" already work; this makes the indefinite article compose too.
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("a ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) || starts_with_commander_word(rest) {
-            pos += "a ".len();
-        }
-    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("an ").parse(&lower[pos..]) {
-        if starts_with_type_phrase_lead(rest) || starts_with_commander_word(rest) {
-            pos += "an ".len();
+    // Strip a leading indefinite quantifier ("a "/"an "/"any ") when followed by
+    // a recognized type word or the "commander" class. Guard: "an opponent" →
+    // "opponent" fails the type-word check → no stripping. CR 903.3: "commander"
+    // is recognized by the commander atom below (it pushes `IsCommander`), not by
+    // `starts_with_type_phrase_lead`, so the guard must also accept it —
+    // otherwise "a commander you own" (Hellkite Courser, #5256) keeps its article
+    // and never reaches the atom, collapsing to a match-anything filter.
+    // "commander you own" / "target commander" already work; this makes the
+    // indefinite article/quantifier compose too.
+    //
+    // CR 115.10a (+ CR 115.1d for the triggered-ability case): an object/player
+    // is a target ONLY if the text uses the literal word "target" — "any
+    // creature you control" (no "target") is an untargeted controller choice,
+    // distinct from "any target" (a fixed keyword phrase matched earlier in
+    // `parse_target_with_syntax`, which requires "target" as the very next word
+    // and so never reaches here). "any " strips exactly like "a "/"an " above: a
+    // plain quantifier over the following type word, adding no extra
+    // `FilterProp` (unlike "other"/"another" below). Without this the type word
+    // is never reached and the phrase falls through every arm to the
+    // `TargetFilter::Any` fallback at the bottom of this function's caller
+    // (Kathril, Aspect Warper's "put a flying counter on any creature you
+    // control", issue #6321).
+    //
+    // Composed through "other"/"another" — mirroring the "all"/"each"/"every"
+    // block's own `after_other` composition just below — so "any other
+    // creature you control" (gain-control / sacrifice effects) also reaches
+    // the type word instead of leaking "other" into the subtype string. Only
+    // the quantifier is consumed here; the "other"/"another" handler below
+    // still runs on the remainder and adds `FilterProp::Another`.
+    if let Ok((rest, matched)) =
+        alt((tag::<_, _, OracleError<'_>>("a "), tag("an "), tag("any "))).parse(&lower[pos..])
+    {
+        let after_other = alt((tag::<_, _, OracleError<'_>>("other "), tag("another ")))
+            .parse(rest)
+            .map(|(r, _)| r)
+            .ok();
+        if starts_with_type_phrase_lead(rest)
+            || starts_with_commander_word(rest)
+            || after_other.is_some_and(starts_with_type_phrase_lead)
+        {
+            pos += matched.len();
         }
     }
 
@@ -2507,6 +2533,72 @@ pub fn parse_type_phrase_with_ctx<'a>(
                         _ => unreachable!(),
                     };
                     (Some(tf), Some(sub_name))
+                } else if let TypeFilter::Subtype(second) = tf {
+                    // CR 205.3b + CR 205.3m: on a PRINTED type line, subtypes
+                    // of every card type except creature (and plane) are
+                    // always single words — each dash-separated word is its
+                    // own subtype. Creature subtypes are the one category the
+                    // rules let run one OR two words (the sole two-word
+                    // creature type is "Time Lord"; every other type in the
+                    // 205.3m list — "Elder"/"Dragon"/"Elf"/"Warrior"/"Human"/
+                    // "Wizard" included — is one word). So when ORACLE TEXT
+                    // names two consecutive creature-subtype words, that is
+                    // ambiguous ONLY for creatures — the same word-boundary
+                    // question ("one two-word type, or two one-word types
+                    // stacked?") never arises for other categories, where
+                    // CR 205.3b already guarantees each word is separate.
+                    // This generic phrase-chaining rule exists to resolve
+                    // exactly that creature-only ambiguity, so it is scoped
+                    // to fire ONLY when NEITHER matched word is a registered
+                    // NONCREATURE subtype (`fixed_noncreature_subtypes` —
+                    // land/artifact/enchantment/spell/battle/planeswalker).
+                    // "Urza's" (a real land type per CR 205.3i, LAND_SUBTYPES
+                    // in card_type.rs) is noncreature — land subtypes CAN
+                    // co-occur on one permanent (Urza's Mine genuinely has
+                    // BOTH the "Urza's" and "Mine" land subtypes), but the
+                    // dedicated Urza-lands condition parser already owns that
+                    // Oracle-text pattern and deliberately extracts only the
+                    // discriminating second word ("Mine"/"Power-Plant"/
+                    // "Tower" — "Urza's" is common to all three lands in the
+                    // cycle, so checking for it adds no discriminating
+                    // power). Chaining here instead fully consumed "an urza's
+                    // mine" into one filter with an empty remainder, which
+                    // changed which downstream condition-builder claimed the
+                    // clause and regressed that specialized parser (issue
+                    // #6321 / PR #6533 review —
+                    // urzas_lands_share_delta_shape /
+                    // legacy_misparses_are_now_honest_gaps). Staying out of
+                    // every noncreature category's way, not just this one
+                    // land cycle, is why the check is by vocabulary
+                    // membership rather than an Urza's-specific special case.
+                    let first_name = match &card_type {
+                        Some(TypeFilter::Subtype(s)) => s.as_str(),
+                        _ => unreachable!(),
+                    };
+                    let is_noncreature_subtype = |name: &str| {
+                        crate::types::card_type::fixed_noncreature_subtypes()
+                            .any(|s| s.eq_ignore_ascii_case(name))
+                    };
+                    if is_noncreature_subtype(first_name) || is_noncreature_subtype(&second) {
+                        // Decline — this generic creature-stack rule doesn't
+                        // own noncreature subtype pairs. Whichever specialized
+                        // handler owns this category still gets the untouched
+                        // trailing text.
+                        (card_type, subtype)
+                    } else {
+                        // Both words are creature-only: chain the second as
+                        // an additional AND-combined type filter instead of
+                        // silently dropping it. Reuses the existing `subtype`
+                        // slot (already flows into `base_type_filters`
+                        // below), so `card_type` keeps the first subtype and
+                        // this fills the second (Fate Reforged chapter II —
+                        // "a copy of any Elder Dragon…", issue #6321 / PR
+                        // #6533: without this, "any " strips down to
+                        // `Subtype("Elder")` alone, dropping "Dragon").
+                        let ct_len = rest_after.len() - ct_rest.len();
+                        pos += ws + ct_len;
+                        (card_type, Some(second))
+                    }
                 } else {
                     (card_type, subtype)
                 }
@@ -15291,6 +15383,196 @@ mod tests {
             );
             assert_eq!(tf.controller, Some(ControllerRef::You));
         }
+    }
+
+    /// CR 115.10a + CR 608.2d: "any other <type> you control" — the indefinite
+    /// quantifier "any" must compose through "other"/"another" the same way
+    /// "all"/"each"/"every" already do above, or the type word is never
+    /// reached and the phrase collapses to the degenerate `TargetFilter::Any`
+    /// fallback (gain-control / sacrifice effects — "gain control of any
+    /// other creature", "sacrifice any other creature you control").
+    #[test]
+    fn parse_type_phrase_any_other_creature_you_control() {
+        let (filter, rest) = parse_type_phrase("any other creature you control");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            !tf.type_filters
+                .iter()
+                .any(|t| matches!(t, TypeFilter::Subtype(s) if s.contains(' '))),
+            "quantifier/other leaked into subtype: {:?}",
+            tf.type_filters
+        );
+        // "other" excludes the source → Another IS present.
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "expected Another: {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 205.3b + CR 205.3m: creature subtypes are the one category the
+    /// rules let run one OR two words on a type line (the sole two-word
+    /// creature type is "Time Lord"; every other listed creature type —
+    /// "Elder"/"Dragon"/"Elf"/"Warrior"/"Human"/"Wizard" included — is one
+    /// word), so two of them printed back to back are two SEPARATE stacked
+    /// subtypes, not a compound word (`oracle-subtypes.json` lists "Elder"
+    /// and "Dragon" as separate entries). Not a `[Subtype] [CoreType]`
+    /// promotion either (that existing arm only fires when the SECOND word is
+    /// a concrete core type like "creature"). Before this fix the second
+    /// subtype word was silently dropped (Fate Reforged chapter II — "a copy
+    /// of any Elder Dragon from the Legends expansion" — collapsed to bare
+    /// `Subtype("Elder")`, an over-broad filter matching any "Elder"-subtype
+    /// creature, not just Elder Dragons; issue #6321 / PR #6533 review).
+    #[test]
+    fn parse_type_phrase_two_word_subtype_chain() {
+        for (text, first, second) in [
+            ("Elder Dragon", "Elder", "Dragon"),
+            ("Elf Warrior", "Elf", "Warrior"),
+            ("Human Wizard", "Human", "Wizard"),
+        ] {
+            let (filter, rest) = parse_type_phrase(text);
+            assert!(rest.trim().is_empty(), "remainder for '{text}': '{rest}'");
+            let TargetFilter::Typed(tf) = &filter else {
+                panic!("Expected Typed filter for '{text}', got {filter:?}");
+            };
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(first.to_string())),
+                "expected Subtype(\"{first}\") for '{text}', got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype(second.to_string())),
+                "expected Subtype(\"{second}\") for '{text}' — the second subtype word must \
+                 not be silently dropped, got {:?}",
+                tf.type_filters
+            );
+        }
+    }
+
+    /// CR 205.3b + CR 205.3i: "Urza's" is a real land type (LAND_SUBTYPES,
+    /// `card_type.rs`), and land subtypes CAN co-occur on one permanent —
+    /// Urza's Mine genuinely has both the "Urza's" and "Mine" land subtypes.
+    /// But the two-consecutive-subtype-word chain above is scoped to resolve
+    /// a CREATURE-only word-boundary ambiguity (CR 205.3b/205.3m) and must
+    /// stay out of every noncreature category's way — including this one.
+    /// Chaining here would fully consume "urza's mine" into one
+    /// `Typed{Subtype("Urza's"), Subtype("Mine")}` filter with an empty
+    /// remainder, which changes which downstream condition-builder claims the
+    /// clause and regresses the dedicated Urza-lands
+    /// `ControllerControlsMatching` parser (`urzas_lands_share_delta_shape` /
+    /// `legacy_misparses_are_now_honest_gaps` in oracle_tests.rs /
+    /// oracle_condition.rs — issue #6321 / PR #6533 review), which
+    /// deliberately extracts only the discriminating second word ("Mine" —
+    /// "Urza's" is common to all three cycle members and adds no
+    /// discriminating power). "mine" must stay unconsumed in the remainder so
+    /// that specialized handler still sees it.
+    #[test]
+    fn parse_type_phrase_urzas_possessive_prefix_does_not_chain() {
+        let (filter, rest) = parse_type_phrase("urza's mine");
+        assert_eq!(
+            rest.trim(),
+            "mine",
+            "\"mine\" must stay unconsumed, not chained into the type filter"
+        );
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert_eq!(
+            tf.type_filters,
+            vec![TypeFilter::Subtype("Urza's".to_string())],
+            "only the possessive fragment may be consumed here, got {:?}",
+            tf.type_filters
+        );
+    }
+
+    /// CR 201.2 + CR 115.10a: Naming Screen — "Each creature you control that
+    /// doesn't share a name with any other creature you control gets +1/+1."
+    /// `parse_shared_quality_reference` (the reference-population parser for
+    /// "that doesn't share a name with X") explicitly REJECTS a `TargetFilter
+    /// ::Any` result from `parse_target` as a parse failure (it cannot build a
+    /// meaningful name comparison against "anything"). Before the "any"/
+    /// "other" composition fix, "any other creature you control" collapsed to
+    /// `Any`, so this whole relative clause failed to parse and the static
+    /// ability fell through to an unstructured fallback — after the fix it
+    /// builds a real `Typed{Creature, Another, You}` reference and the clause
+    /// parses (issue #6321 / PR #6533 review).
+    #[test]
+    fn parse_shared_quality_clause_naming_screen_reference() {
+        let ctx = ParseContext::default();
+        let (rest, prop) =
+            parse_shared_quality_clause("that doesn't share a name with any other creature you control", &ctx)
+                .expect("the reference population must parse now that \"any other ...\" is a real Typed filter, not Any");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } = prop
+        else {
+            panic!("expected SharesQuality, got {prop:?}");
+        };
+        assert_eq!(quality, SharedQuality::Name);
+        assert_eq!(relation, SharedQualityRelation::DoesNotShare);
+        let reference = reference.expect("reference population must be present");
+        let TargetFilter::Typed(tf) = *reference else {
+            panic!("expected Typed reference filter, got {reference:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature in the reference filter, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties.contains(&FilterProp::Another),
+            "\"other\" must exclude the compared creature itself, got {:?}",
+            tf.properties
+        );
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 707.2 + CR 115.10a: Duplication Device — "target creature becomes a
+    /// copy of any creature on the battlefield". "any creature on the
+    /// battlefield" carries no controller restriction (any player's
+    /// creatures) — before the "any" widening this collapsed to `Any`
+    /// (matching literally anything, including non-creatures/players);
+    /// afterward it correctly reaches the pre-existing, unmodified zone-
+    /// suffix machinery that already handles "creature on the battlefield"
+    /// for non-"any" phrasing (issue #6321 / PR #6533 review).
+    #[test]
+    fn parse_type_phrase_any_creature_on_the_battlefield() {
+        let (filter, rest) = parse_type_phrase("any creature on the battlefield");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Typed(tf) = &filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.type_filters.contains(&TypeFilter::Creature),
+            "expected Creature, got {:?}",
+            tf.type_filters
+        );
+        assert!(
+            tf.properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { zone } if *zone == Zone::Battlefield)),
+            "expected an InZone(Battlefield) property, got {:?}",
+            tf.properties
+        );
+        // "on the battlefield" (not "you control") — no controller restriction.
+        assert_eq!(
+            tf.controller, None,
+            "\"on the battlefield\" must not add a controller restriction"
+        );
     }
 
     /// CR 700.9 + CR 109.4: "modified creatures you control other than ~"

@@ -1357,6 +1357,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -1813,6 +1814,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastSpellThisTurn { .. }
         | TriggerCondition::SpellCastWithVariantThisTurn { .. }
         | TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
@@ -2262,6 +2264,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
@@ -2504,6 +2507,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ScopedPlayer
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -2830,7 +2834,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Unsuspect { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
         | Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
         | Effect::BecomeSaddled { target }
@@ -2860,6 +2863,10 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
+
+        Effect::ForceBlock {
+            target, duration, ..
+        } => legacy_target_filter(target) || legacy_duration(duration),
 
         Effect::GainActivatedAbilitiesOfTarget {
             target,
@@ -3600,9 +3607,10 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
 /// board `ObjectPt` characteristic read.
 fn share_quality_operand_read(f: &TargetFilter) -> RwProfile {
     match f {
-        TargetFilter::LastRevealed | TargetFilter::SelfRef | TargetFilter::SourceOrPaired => {
-            RwProfile::empty()
-        }
+        TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired => RwProfile::empty(),
         // Fail-closed: any other reference is a live board characteristic read.
         _ => reads_board_of(StateKind::ObjectPt),
     }
@@ -3670,6 +3678,7 @@ fn walk_ability(
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
+        force_block_attacker: _, // exact force-block referent, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -3696,6 +3705,7 @@ fn walk_ability(
         target_selection_mode: _,
         chosen_players: _,
         sub_link: _,
+        sibling_condition: _, // replication marker, no read/write effect
         replacement_applied: _,
         parent_target_missing_reason: _,
     } = a;
@@ -3816,6 +3826,7 @@ fn walk_definition(
         target_selection_mode: _,
         sub_link: _,
         iteration_kind_binding: _,
+        sibling_condition: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -5346,6 +5357,14 @@ fn rw_effect(
             p.merge(rw_duration(duration));
             (p, None)
         }
+        Effect::ForceBlock {
+            target, duration, ..
+        } => {
+            let mut p = ext_write(StateKind::Other);
+            flag_legacy_write_target(&mut p, target);
+            p.merge(rw_duration(duration));
+            (p, None)
+        }
         // §L14 (CR 500.8): an additional phase/step is a turn-structure write.
         Effect::AdditionalPhase {
             target: _,
@@ -5498,7 +5517,6 @@ fn rw_effect(
         | Effect::RevealFromHand { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
@@ -6086,6 +6104,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         }
         TriggerCondition::DuringPlayersTurn { player } => rw_player_filter(player),
         TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
@@ -6325,6 +6344,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource

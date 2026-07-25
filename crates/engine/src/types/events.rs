@@ -500,6 +500,7 @@ impl EventObjectSnapshot {
             | TargetFilter::SpecificObject { .. }
             | TargetFilter::LastCreated
             | TargetFilter::LastRevealed
+            | TargetFilter::LastZoneChanged
             | TargetFilter::CostPaidObject
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }

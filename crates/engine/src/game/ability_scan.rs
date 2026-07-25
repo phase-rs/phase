@@ -231,6 +231,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         source_incarnation: _,     // self-transform epoch latch, no dynamic read
         trigger_source: _,         // exact triggered-source authority, no dynamic read
         trigger_definition_ref: _, // exact trigger occurrence, no dynamic read
+        force_block_attacker: _,   // exact force-block referent, no dynamic read
         controller: _,             // player id
         original_controller: _,    // player id
         scoped_player: _,          // player id (iteration binding)
@@ -258,6 +259,7 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
         chosen_players: _,         // concrete chosen player ids
         replacement_applied: _,    // replacement provenance set, no dynamic read
         sub_link: _,               // SubAbilityLink kind tag
+        sibling_condition: _,      // SiblingCondition replication marker, no dynamic read
         parent_target_missing_reason: _, // seam flag
     } = a;
 
@@ -1141,9 +1143,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ForceBlock { target } => {
+        Effect::ForceBlock {
+            target,
+            attacker: _,
+            duration,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_duration(duration, mode));
             acc
         }
         Effect::ForceAttack {
@@ -2897,7 +2904,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         TargetFilter::ScopedPlayer => Axes::NONE,
         TargetFilter::AttachedTo => Axes::NONE,
         TargetFilter::LastCreated => Axes::NONE,
-        TargetFilter::LastRevealed => Axes::NONE,
+        TargetFilter::LastRevealed | TargetFilter::LastZoneChanged => Axes::NONE,
         TargetFilter::CostPaidObject => Axes {
             event: true,
             sibling: false,
@@ -3085,11 +3092,13 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_filter(player, mode));
             acc
         }
-        TriggerCondition::SourceEnteredThisTurn => Axes {
-            event: false,
-            sibling: false,
-            projected: true,
-        },
+        TriggerCondition::SourceEnteredThisTurn | TriggerCondition::SourceAttackedThisCombat => {
+            Axes {
+                event: false,
+                sibling: false,
+                projected: true,
+            }
+        }
         TriggerCondition::EchoDue => Axes::NONE,
         TriggerCondition::MinCoAttackers { filter, minimum: _ } => {
             let mut acc = Axes::NONE;
@@ -4240,6 +4249,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         target_selection_mode: _,
         sub_link: _,
         iteration_kind_binding: _,
+        sibling_condition: _,
     } = def;
 
     let mut acc = scan_effect(effect, mode);
@@ -6429,6 +6439,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         source_incarnation: _, // self-transform epoch latch, no resolution-time choice
         trigger_source: _, // exact triggered-source authority, no choice
         trigger_definition_ref: _, // exact trigger occurrence, no choice
+        force_block_attacker: _, // exact force-block referent, no choice
         controller: _, // player id
         original_controller: _, // player id
         scoped_player: _, // player id (iteration binding)
@@ -6451,6 +6462,7 @@ pub(crate) fn ability_resolution_choice_freedom(a: &ResolvedAbility) -> Resoluti
         chosen_players: _, // concrete chosen player ids (already selected)
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _,  // SubAbilityLink kind tag
+        sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
     } = a;
 

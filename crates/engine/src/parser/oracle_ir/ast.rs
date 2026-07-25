@@ -4,10 +4,11 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
     CastingPermission, ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment,
-    CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter,
+    CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, ForceBlockAttackerRef,
+    LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -531,8 +532,11 @@ pub(crate) enum ImperativeFamilyAst {
     Explore,
     /// CR 702.162a: Connive.
     Connive,
-    /// CR 509.1g: Block this turn if able.
-    ForceBlock,
+    /// CR 509.1c: Block this turn/combat if able.
+    ForceBlock {
+        attacker: Option<ForceBlockAttackerRef>,
+        duration: Duration,
+    },
     /// CR 508.1d: Attack a required player this turn/combat if able. The
     /// `required_player` filter selects whom the forced attacker must attack —
     /// `TargetFilter::Controller` for "attacks you", or

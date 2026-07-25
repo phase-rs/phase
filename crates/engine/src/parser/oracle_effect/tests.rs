@@ -19890,10 +19890,30 @@ fn force_block_targeted() {
         matches!(
             e,
             Effect::ForceBlock {
-                target: TargetFilter::Typed(_)
+                target: TargetFilter::Typed(_),
+                ..
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
+        e
+    );
+}
+
+#[test]
+fn force_block_with_named_target_preserves_generic_requirement() {
+    // Hunt Down — retain the pre-existing generic grammar when the target
+    // creature is named between the block verb and duration.
+    let e = parse_effect("Target creature blocks target creature this turn if able.");
+    assert!(
+        matches!(
+            e,
+            Effect::ForceBlock {
+                target: TargetFilter::Typed(_),
+                attacker: None,
+                duration: Duration::UntilEndOfTurn,
+            }
+        ),
+        "Expected generic ForceBlock with turn duration, got {:?}",
         e
     );
 }
@@ -20855,12 +20875,14 @@ fn static_must_be_blocked_still_routes_to_static_parser() {
 #[test]
 fn force_block_with_self_ref() {
     // "Target creature blocks ~ this turn if able" (e.g., Auriok Siege Sled)
-    let e = parse_effect("Target creature blocks ~ this turn if able");
+    let e = parse_effect("Target creature blocks ~ this turn if able.");
     assert!(
         matches!(
             e,
             Effect::ForceBlock {
-                target: TargetFilter::Typed(_)
+                target: TargetFilter::Typed(_),
+                attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+                duration: Duration::UntilEndOfTurn,
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
@@ -20888,15 +20910,48 @@ fn force_attack_you_this_combat_targets_creature() {
 #[test]
 fn force_block_blocks_it_this_combat() {
     // "target creature blocks it this combat if able" (e.g., Avalanche Tusker)
-    let e = parse_effect("Target creature blocks it this combat if able");
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..ParseContext::default()
+    };
+    let e = parse_effect_clause("Target creature blocks it this combat if able.", &mut ctx).effect;
     assert!(
         matches!(
             e,
             Effect::ForceBlock {
-                target: TargetFilter::Typed(_)
+                target: TargetFilter::Typed(_),
+                attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+                duration: Duration::UntilEndOfCombat,
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
+        e
+    );
+}
+
+#[test]
+fn force_block_that_triggered_creature_this_combat_preserves_event_referent() {
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..ParseContext::default()
+    };
+    let e = parse_effect_clause(
+        "Target creature an opponent controls blocks that Wolf this combat if able",
+        &mut ctx,
+    )
+    .effect;
+    assert!(
+        matches!(
+            e,
+            Effect::ForceBlock {
+                target: TargetFilter::Typed(_),
+                attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+                duration: Duration::UntilEndOfCombat,
+            }
+        ),
+        "Expected an event-bound combat force block, got {:?}",
         e
     );
 }
@@ -44784,6 +44839,89 @@ fn repeat_process_directive_you_may_stays_controller_choice() {
         ))
     ));
 }
+
+/// CR 608.2c + CR 701.17a: Grindstone-class "if two cards that share a color
+/// were milled this way, repeat this process" → unbounded `WhileCondition` over
+/// `ObjectCountBySharedQuality { LastZoneChanged, Color, Max } >= 2`.
+#[test]
+fn repeat_process_directive_milled_shared_color_while_condition() {
+    use crate::types::ability::{AggregateFunction, RepeatContinuation, SharedQuality};
+
+    let mut ctx = ParseContext::default();
+    let outcome = try_parse_repeat_process_directive(
+        "if two cards that share a color were milled this way, repeat this process",
+        &mut ctx,
+    );
+    match outcome {
+        Some(RepeatProcessOutcome::Continuation(RepeatContinuation::WhileCondition {
+            condition,
+            max_iterations,
+        })) => {
+            assert_eq!(max_iterations, None);
+            assert!(
+                matches!(
+                    *condition,
+                    AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCountBySharedQuality {
+                                filter: TargetFilter::LastZoneChanged,
+                                quality: SharedQuality::Color,
+                                aggregate: AggregateFunction::Max,
+                                ..
+                            },
+                            ..
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 2 },
+                        ..
+                    }
+                ),
+                "expected LastZoneChanged shared-color quantity gate, got {condition:?}"
+            );
+        }
+        other => panic!("expected unbounded WhileCondition, got {other:?}"),
+    }
+}
+
+/// Grindstone — full-card parse drops zero `Unimplemented` nodes and the
+/// activated root carries the unbounded shared-color `WhileCondition` repeat.
+#[test]
+fn grindstone_parses_repeat_while_milled_shared_color() {
+    use crate::types::ability::RepeatContinuation;
+
+    let parsed = parse_oracle_text(
+        GRINDSTONE_ORACLE,
+        "Grindstone",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let json = serde_json::to_string(&parsed).unwrap();
+    assert!(
+        // allow-noncombinator: test assertion scans serialized AST JSON, not parsing dispatch
+        !json.contains("\"Unimplemented\""),
+        "Grindstone must parse with zero Unimplemented nodes"
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("Grindstone must expose its activated ability");
+    assert!(
+        matches!(
+            activated.repeat_until,
+            Some(RepeatContinuation::WhileCondition {
+                max_iterations: None,
+                ..
+            })
+        ),
+        "Grindstone repeat is an unbounded WhileCondition, got {:?}",
+        activated.repeat_until
+    );
+}
+
+const GRINDSTONE_ORACLE: &str = "{3}, {T}: Target player mills two cards. If two cards that \
+     share a color were milled this way, repeat this process.";
 
 /// Sin, Spira's Punishment — full-card parse drops zero `Unimplemented` nodes
 /// and the trigger's root carries the unbounded `WhileCondition` repeat.

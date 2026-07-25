@@ -1,8 +1,8 @@
 use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ChoiceValue, ChosenAttribute,
-    ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
+    AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
+    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER,
 };
 use crate::types::counter::{CounterMatch, CounterType};
@@ -3569,10 +3569,24 @@ fn discard_cost_choice(
     source_id: ObjectId,
     cost: &Option<AbilityCost>,
 ) -> Option<(usize, Vec<ObjectId>)> {
-    let (count, filter) = find_non_self_discard_cost(cost.as_ref()?)?;
-    let resolved = super::quantity::resolve_quantity(state, count, player, source_id).max(0);
-    let cards = super::casting::find_eligible_discard_targets(state, player, source_id, filter);
-    Some((resolved as usize, cards))
+    let cost = cost.as_ref()?;
+    // Mana-ability interactive discard applies only to a player-CHOSEN discard leg; a
+    // non-Chosen discard (e.g. random / top-of-hand) is not a mid-activation card selection,
+    // so this interactive surfacing does not handle it. (Pre-existing scope; keeps blast
+    // radius nil.) `find_non_self_discard` is the single detector shared with the
+    // casting/activation path; the `Chosen` gate below is the ONLY mana-specific divergence.
+    let (_count, _filter, selection) = super::casting::find_non_self_discard(cost)?;
+    if selection != CardSelectionMode::Chosen {
+        return None;
+    }
+    // Single authority for the zero-count auto-pay + payability rules (CR 601.2h + CR 701.9a):
+    // delegate to `resolve_non_self_discard_requirement` so the mana path stays aligned with the
+    // activation path in one place. `Ok(Some)` => interactive selection; `Ok(None)` => zero-card
+    // discard paid by doing nothing (skip the leg). `Err` (fewer eligible cards than the nonzero
+    // count) is unreachable here because `cost_payability` already gated activation on hand size,
+    // so `unwrap_or_default()`'s `None` fallback is the correct "no selection to surface" result.
+    super::casting::resolve_non_self_discard_requirement(state, player, source_id, cost)
+        .unwrap_or_default()
 }
 
 /// CR 117.1 + CR 118.3: Match non-self `AbilityCost::Exile` shapes. Returns
@@ -3668,21 +3682,6 @@ fn sacrifice_cost_choice(
     let permanents =
         super::casting::find_eligible_sacrifice_targets(state, player, source_id, filter);
     Some((count as usize, permanents))
-}
-
-fn find_non_self_discard_cost(
-    cost: &AbilityCost,
-) -> Option<(&crate::types::ability::QuantityExpr, Option<&TargetFilter>)> {
-    match cost {
-        AbilityCost::Discard {
-            count,
-            filter,
-            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            selection: crate::types::ability::CardSelectionMode::Chosen,
-        } => Some((count, filter.as_ref())),
-        AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard_cost),
-        _ => None,
-    }
 }
 
 fn tap_selected_creature_for_mana_cost(
@@ -6407,6 +6406,206 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+    }
+
+    /// CR 605.1a + CR 106.1: Build a Lion's-Eye-Diamond-shaped mana ability —
+    /// `Composite[Discard { HandSize }, Sacrifice(SelfRef)]` producing three mana
+    /// of one chosen color. Mirrors the real card's parsed cost
+    /// (`Discard { count: Ref HandSize(Controller), self_scope: FromHand }` +
+    /// `Sacrifice(SelfRef, 1)`), so a name change alone re-targets it to any card
+    /// in the same "discard your hand, sacrifice ~: add three mana" class.
+    fn discard_hand_sacrifice_three_mana_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 3 },
+                    color_options: vec![
+                        ManaColor::White,
+                        ManaColor::Blue,
+                        ManaColor::Black,
+                        ManaColor::Red,
+                        ManaColor::Green,
+                    ],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Discard {
+                    count: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::HandSize {
+                            player: crate::types::ability::PlayerScope::Controller,
+                        },
+                    },
+                    filter: None,
+                    selection: crate::types::ability::CardSelectionMode::Chosen,
+                    self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        })
+    }
+
+    /// Issue #6494 (PRIMARY revert-guard, mana path): Lion's Eye Diamond with an
+    /// EMPTY hand must be activatable — its "Discard your hand" leg with an empty
+    /// hand is a zero-card discard, paid by doing nothing (CR 601.2h + CR 701.9a).
+    ///
+    /// Oracle (Scryfall-verified): "Discard your hand, Sacrifice this artifact:
+    /// Add three mana of any one color. Activate only as an instant."
+    ///
+    /// At base the activation surfaces `WaitingFor::PayCost { Discard, count: 0 }`
+    /// (a dead prompt that re-emits forever), so the `ChooseManaColor` assertion
+    /// fails with `left: PayCost right: ChooseManaColor` — revert-sensitive to the
+    /// zero-count auto-pay guard `discard_cost_choice` now inherits from the shared
+    /// `casting::resolve_non_self_discard_requirement` authority. The 3-mana
+    /// assertion is a positive reach-guard (proves production, not a vacuous halt);
+    /// the sacrifice assertion proves the guard consumes ONLY the discard leg and
+    /// the self-sacrifice still fires.
+    #[test]
+    fn lions_eye_diamond_activates_empty_handed_and_produces_chosen_color() {
+        let mut state = GameState::new_two_player(42);
+        let led = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Lion's Eye Diamond".to_string(),
+            Zone::Battlefield,
+        );
+        // No cards in hand — HandSize(Controller) resolves to 0.
+        assert!(state.players[0].hand.is_empty());
+
+        let ability = discard_hand_sacrifice_three_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&led).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            led,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        // CR 601.2h + CR 701.9a: no dead PayCost { Discard, count: 0 } — the
+        // activation advances straight to the color choice.
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                context,
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(options.len(), 5);
+                *expect_mana_ability_context(context)
+            }
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+
+        // CR 701.9a: nothing was discarded — the hand stays empty.
+        assert!(state.players[0].hand.is_empty());
+        // The self-sacrifice leg still fired — LED left the battlefield for the
+        // graveyard, and it is the ONLY card there (the zero-card discard added
+        // nothing), proving the guard consumed only the discard leg.
+        assert_eq!(state.players[0].graveyard.len(), 1);
+        assert!(state.players[0].graveyard.contains(&led));
+        assert_ne!(
+            state.objects.get(&led).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Red),
+            &mut events,
+        )
+        .unwrap();
+
+        // Positive reach-guard: production actually ran (not a vacuous halt).
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 3);
+    }
+
+    /// Issue #6494 (mana path, class not card): Diamond Lion shares Lion's Eye
+    /// Diamond's "Discard your hand, Sacrifice ~: Add three mana of any one color"
+    /// shape, so the empty-hand fix is class-wide, not keyed to one card. Only the
+    /// object name differs from the LED case above.
+    #[test]
+    fn diamond_lion_activates_empty_handed_and_produces_chosen_color() {
+        let mut state = GameState::new_two_player(7);
+        let lion = create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(0),
+            "Diamond Lion".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(state.players[0].hand.is_empty());
+
+        let ability = discard_hand_sacrifice_three_mana_ability();
+        Arc::make_mut(&mut state.objects.get_mut(&lion).unwrap().abilities).push(ability.clone());
+
+        let mut events = Vec::new();
+        let waiting = activate_mana_ability(
+            &mut state,
+            lion,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        let pending = match waiting {
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { .. },
+                context,
+                ..
+            } => *expect_mana_ability_context(context),
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+        assert_ne!(
+            state.objects.get(&lion).map(|obj| obj.zone),
+            Some(Zone::Battlefield)
+        );
+
+        handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &ManaChoicePrompt::SingleColor {
+                options: vec![
+                    ManaType::White,
+                    ManaType::Blue,
+                    ManaType::Black,
+                    ManaType::Red,
+                    ManaType::Green,
+                ],
+            },
+            ManaChoice::SingleColor(ManaType::Green),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 3);
     }
 
     /// Helper: build a Pit-of-Offerings-style permanent with a `{T}: Add one mana
@@ -10635,5 +10834,84 @@ mod tests {
             !can_activate_mana_ability_now(&state, player, prism, 0, &def),
             "Pentad Prism must not be activatable without charge counters"
         );
+    }
+
+    /// Issue #6494 (shared seam): `casting::find_non_self_discard` is the SOLE
+    /// detector for FromHand discard cost legs and no longer filters by selection
+    /// mode — it returns the `CardSelectionMode` for BOTH `Chosen` and `Random`
+    /// legs (and recurses into `Composite`, e.g. Lion's Eye Diamond's shape). The
+    /// mana path's only divergence from the casting/activation path is the explicit
+    /// `Chosen` gate in `discard_cost_choice`, which routes accepted legs through
+    /// the shared `resolve_non_self_discard_requirement` authority so the zero-count
+    /// auto-pay + payability rules live in one place.
+    ///
+    /// Revert-sensitive: fails if `find_non_self_discard` re-adds a selection filter
+    /// (the `Random` assertions go `None`), or if `discard_cost_choice` drops its
+    /// `Chosen` gate (the `Random` leg would then surface an interactive selection).
+    #[test]
+    fn find_non_self_discard_is_sole_detector_mana_path_gates_on_chosen() {
+        use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        // One card in hand so a `Chosen` discard resolves to an interactive selection.
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+
+        let discard_leg = |selection| AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            filter: None,
+            selection,
+            self_scope: DiscardSelfScope::FromHand,
+        };
+        let chosen_leg = discard_leg(CardSelectionMode::Chosen);
+        let random_leg = discard_leg(CardSelectionMode::Random);
+        // LED-shaped composite: the Chosen discard leg lives beside a self-sacrifice.
+        let chosen_in_composite = AbilityCost::Composite {
+            costs: vec![
+                chosen_leg.clone(),
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        };
+
+        // Sole detector: reports the selection mode for BOTH variants (no selection
+        // filter), including inside a Composite.
+        let detect = crate::game::casting::find_non_self_discard;
+        assert!(matches!(
+            detect(&chosen_leg),
+            Some((_, _, CardSelectionMode::Chosen))
+        ));
+        assert!(matches!(
+            detect(&chosen_in_composite),
+            Some((_, _, CardSelectionMode::Chosen))
+        ));
+        assert!(matches!(
+            detect(&random_leg),
+            Some((_, _, CardSelectionMode::Random))
+        ));
+
+        // Mana selection gate: only a Chosen leg surfaces an interactive discard,
+        // and it does so through the shared resolver (Some((1, [card]))).
+        match discard_cost_choice(&state, PlayerId(0), source, &Some(chosen_in_composite)) {
+            Some((count, cards)) => {
+                assert_eq!(count, 1);
+                assert_eq!(cards, vec![card]);
+            }
+            None => panic!("Chosen FromHand discard with a card in hand must surface a selection"),
+        }
+        // A non-Chosen (Random) FromHand discard is not a mid-activation card
+        // selection: the gate returns None even though the sole detector matched it.
+        assert!(discard_cost_choice(&state, PlayerId(0), source, &Some(random_leg)).is_none());
     }
 }

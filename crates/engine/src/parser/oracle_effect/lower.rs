@@ -1638,9 +1638,22 @@ pub(super) fn target_choice_timing_for_clause(clause_ir: &ClauseIr) -> TargetCho
             .fragment()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !nom_primitives::scan_contains(&lower, "target ")
-            && target.contains_source_attachment_host()
-        {
+        // CR 115.10a: an object is a target only if the text uses the literal
+        // word "target"; CR 608.2d: an untargeted choice is made "while
+        // applying the effect" (at resolution), not at announcement. Was
+        // previously scoped to `contains_source_attachment_host()` alone
+        // (Equipped/Enchanted-host counters, e.g. "put a loyalty counter on
+        // the equipped creature" — deterministic, no player choice). Widened
+        // to every untargeted `PutCounter` recipient that isn't already a
+        // deterministic `is_context_ref()` shape (SelfRef/ParentTarget/None/…,
+        // which resolve automatically regardless of timing) — this is the
+        // same generalization `MultiplyCounter` below already applies. Covers
+        // "put a keyword counter on any creature you control" (Kathril,
+        // Aspect Warper, issue #6321/#6533): each independent instruction in a
+        // replicated keyword-counter chain must offer its own untargeted
+        // choice at ITS OWN resolution (CR 608.2d), not inherit one shared
+        // choice made once when the whole ability went on the stack.
+        if !nom_primitives::scan_contains(&lower, "target ") && !target.is_context_ref() {
             return TargetChoiceTiming::Resolution;
         }
     }

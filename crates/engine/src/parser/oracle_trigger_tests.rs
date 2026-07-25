@@ -12,8 +12,9 @@ use crate::types::ability::{
     CountScope, DamageChannel, DamageModification, DamageSource, DelayedTriggerCondition,
     DiscardSelfScope, Duration, Effect, EffectScope, FilterProp, ManaContribution, ManaProduction,
     ManaSpendPermission, ObjectScope, PerpetualModification, PlayerFilter, PlayerScope, PtStat,
-    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, TapStateChange,
-    TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+    PtValue, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SiblingCondition, SubAbilityLink, TapStateChange, TargetFilter, TriggerCondition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
@@ -545,6 +546,28 @@ fn intervening_if_source_attacked_this_turn_populates_condition() {
     );
     assert_eq!(taigam.condition, expected);
     assert!(taigam.execute.is_some());
+}
+
+#[test]
+fn tolsimir_midnights_light_preserves_combat_source_and_event_attacker_axes() {
+    let trigger = parse_trigger_line(
+        "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, \
+         target creature an opponent controls blocks that Wolf this combat if able.",
+        "Tolsimir, Midnight's Light",
+    );
+    assert_eq!(
+        trigger.condition,
+        Some(TriggerCondition::SourceAttackedThisCombat),
+        "the intervening-if is combat-scoped and source-incarnation-bound"
+    );
+    assert!(matches!(
+        trigger.execute.as_deref().map(|ability| &*ability.effect),
+        Some(Effect::ForceBlock {
+            attacker: Some(crate::types::ability::ForceBlockAttackerRef::EventSource),
+            duration: Duration::UntilEndOfCombat,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -25173,4 +25196,226 @@ fn parse_sigil_of_sleep_bounce_targets_triggering_player_controlled_creature() {
         },
         other => panic!("Sigil of Sleep effect must be Bounce, got {other:?}"),
     }
+}
+
+// -----------------------------------------------------------------------
+// Mutable Pupa — perpetual keyword-mirror ETB trigger (issue #6321).
+// Digital-only Alchemy (no CR entry for "perpetually"); CR 702.1c + CR 608.2c govern the
+// per-branch resolution order the `SiblingCondition::ReplicatedOrBranch` marker
+// restores. Oracle text verified verbatim against data/card-data.json.
+// -----------------------------------------------------------------------
+
+// The antecedent on its own — the SAME production entry point the real pipeline
+// uses (`parse_trigger_line`), but with a SINGLE-sentence body (no "The same is
+// true for …" tail), so no keyword replication runs. This isolates the
+// antecedent build: the trigger body reaches `parse_effect_chain_ir`'s chunk
+// loop with `in_trigger == true`, where `strip_suffix_conditional`'s
+// trigger-gated `ZoneChangeObjectMatchesFilter` branch peels the trailing "if
+// that creature has flying" gate BEFORE `parse_effect_clause` sees the chunk;
+// the short bare-keyword form then lands `try_parse_perpetual_grant_keywords`
+// (`ApplyPerpetual { GrantKeywords[Flying] }`) and the peeled gate is reattached
+// at the chunk level. The root node must carry BOTH — proving the antecedent
+// builds correctly through the real suffix-strip path without depending on the
+// replication machinery.
+#[test]
+fn mutable_pupa_antecedent_clause_grants_and_gates_the_same_keyword() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control enters, this creature perpetually gains flying if that creature has flying.",
+        "Mutable Pupa",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    // Single-sentence antecedent: exactly one node, no replicated siblings.
+    assert!(
+        root.sub_ability.is_none(),
+        "single-sentence antecedent must not build a sibling chain",
+    );
+    match &*root.effect {
+        Effect::ApplyPerpetual {
+            modification: PerpetualModification::GrantKeywords { keywords },
+            ..
+        } => assert_eq!(
+            keywords,
+            &vec![Keyword::Flying],
+            "antecedent must grant exactly Flying"
+        ),
+        other => panic!("expected ApplyPerpetual GrantKeywords, got {other:?}"),
+    }
+    assert_eq!(
+        root.condition,
+        Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: crate::types::zones::Zone::Battlefield,
+            filter: TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::WithKeyword {
+                    value: Keyword::Flying
+                }],
+                ..Default::default()
+            }),
+        }),
+        "antecedent must be gated on the entering object having Flying",
+    );
+}
+
+// The whole two-sentence trigger builds EXACTLY 12 independent keyword-mirror
+// nodes. Each node grants ONLY its own keyword and is gated on THAT SAME keyword
+// (the positional correspondence is the "list collapse" regression guard: a
+// bug that reused keyword[0] for every gate would fail the per-node condition
+// assertion). Nodes 1..11 are `SequentialSibling` + `ReplicatedOrBranch`; the
+// root is the unmarked `ContinuationStep` antecedent.
+#[test]
+fn mutable_pupa_full_trigger_builds_twelve_independent_keyword_mirrors() {
+    let def = parse_trigger_line(
+        "Whenever another creature you control enters, this creature perpetually gains flying if that creature has flying. The same is true for first strike, double strike, deathtouch, haste, hexproof, indestructible, lifelink, menace, reach, trample, and vigilance.",
+        "Mutable Pupa",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    let mut nodes: Vec<&AbilityDefinition> = Vec::new();
+    let mut cur = Some(root);
+    while let Some(n) = cur {
+        nodes.push(n);
+        cur = n.sub_ability.as_deref();
+    }
+    let expected = [
+        Keyword::Flying,
+        Keyword::FirstStrike,
+        Keyword::DoubleStrike,
+        Keyword::Deathtouch,
+        Keyword::Haste,
+        Keyword::Hexproof,
+        Keyword::Indestructible,
+        Keyword::Lifelink,
+        Keyword::Menace,
+        Keyword::Reach,
+        Keyword::Trample,
+        Keyword::Vigilance,
+    ];
+    assert_eq!(
+        nodes.len(),
+        expected.len(),
+        "expected exactly 12 keyword-mirror nodes, got {}",
+        nodes.len()
+    );
+    for (i, (node, kw)) in nodes.iter().zip(expected.iter()).enumerate() {
+        match &*node.effect {
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::GrantKeywords { keywords },
+                ..
+            } => assert_eq!(
+                keywords,
+                &vec![kw.clone()],
+                "node {i} must grant only {kw:?}"
+            ),
+            other => panic!("node {i}: expected ApplyPerpetual GrantKeywords, got {other:?}"),
+        }
+        assert_eq!(
+            node.condition,
+            Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin: None,
+                destination: crate::types::zones::Zone::Battlefield,
+                filter: TargetFilter::Typed(TypedFilter {
+                    properties: vec![FilterProp::WithKeyword { value: kw.clone() }],
+                    ..Default::default()
+                }),
+            }),
+            "node {i} must be gated on {kw:?} (not keyword[0])",
+        );
+        if i == 0 {
+            assert_eq!(
+                node.sub_link,
+                SubAbilityLink::ContinuationStep,
+                "root antecedent is a continuation step",
+            );
+            assert_eq!(
+                node.sibling_condition,
+                SiblingCondition::Dependent,
+                "root antecedent keeps the default sibling condition",
+            );
+        } else {
+            assert_eq!(
+                node.sub_link,
+                SubAbilityLink::SequentialSibling,
+                "node {i} must be a sequential sibling",
+            );
+            assert_eq!(
+                node.sibling_condition,
+                SiblingCondition::ReplicatedOrBranch,
+                "node {i} must be an independent OR-branch",
+            );
+        }
+    }
+}
+
+// Non-regression: Odric's "the same is true for" antecedent is a static
+// keyword grant (`GenericEffect`, replicated in-place into `static_abilities`),
+// NOT a perpetual grant — the new shape-based `ReplicateKind` selection must
+// keep routing it through `StaticGrant`, so no node becomes `ApplyPerpetual` and
+// no `SequentialSibling` sibling chain is built.
+#[test]
+fn odric_same_is_true_stays_generic_effect_not_perpetual_chain() {
+    let def = parse_trigger_line(
+        "At the beginning of each combat, creatures you control gain first strike until end of turn if a creature you control has first strike. The same is true for flying, deathtouch, double strike, haste, hexproof, indestructible, lifelink, menace, reach, skulk, trample, and vigilance.",
+        "Odric, Lunarch Marshal",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    assert!(
+        matches!(&*root.effect, Effect::GenericEffect { .. }),
+        "Odric's antecedent must stay a GenericEffect keyword grant, got {:?}",
+        root.effect,
+    );
+    let mut cur = Some(root);
+    while let Some(n) = cur {
+        assert!(
+            !matches!(&*n.effect, Effect::ApplyPerpetual { .. }),
+            "Odric must never route through the perpetual keyword-grant path",
+        );
+        assert_eq!(
+            n.sibling_condition,
+            SiblingCondition::Dependent,
+            "Odric nodes must not be stamped ReplicatedOrBranch",
+        );
+        cur = n.sub_ability.as_deref();
+    }
+}
+
+// Field-level non-regression: an ordinary DEPENDENT continuation (Thieving
+// Skydiver's "If that artifact is an Equipment, attach it") must keep the
+// default `SiblingCondition::Dependent` — the `ReplicatedOrBranch` marker is
+// stamped ONLY by the two replication helpers, never by sentence-boundary
+// sibling stamping. The `node_count >= 2` reach guard proves the multi-node
+// continuation chain actually built (so the all-`Dependent` assertion is not
+// vacuous on a single node).
+#[test]
+fn thieving_skydiver_dependent_continuation_is_never_replicated_or_branch() {
+    let def = parse_trigger_line(
+        "When this creature enters, if it was kicked, gain control of target artifact with mana value X or less. If that artifact is an Equipment, attach it to this creature.",
+        "Thieving Skydiver",
+    );
+    let root = def
+        .execute
+        .as_deref()
+        .expect("trigger has an ability chain");
+    let mut cur = Some(root);
+    let mut node_count = 0usize;
+    while let Some(n) = cur {
+        node_count += 1;
+        assert_eq!(
+            n.sibling_condition,
+            SiblingCondition::Dependent,
+            "no Thieving Skydiver node may be stamped ReplicatedOrBranch",
+        );
+        cur = n.sub_ability.as_deref();
+    }
+    assert!(
+        node_count >= 2,
+        "reach guard: Thieving Skydiver must build a multi-node chain (GainControl + Attach continuation), got {node_count}",
+    );
 }

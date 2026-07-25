@@ -103,11 +103,11 @@ use crate::types::ability::{
     DelayedTriggerLifetime, DoubleTarget, Duration, Effect, EffectOutcomeSignal, EffectScope,
     FilterProp, GameRestriction, GuessSubject, IntensityScope, IterationKindBinding,
     KeeperConstraint, LibraryPosition, ManaProduction, ManaSpendPermission, MultiTargetSpec,
-    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PlayPermissionInvalidation,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerpetualModification,
+    PlayPermissionInvalidation, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PtValue, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition,
-    RoundingMode, SharedQuality, SharedQualityRelation, SkipScope,
+    RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition, SkipScope,
     SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
     SubAbilityLink, TapStateChange, TargetFilter, TargetSelectionMode, ThisWayCause,
     TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
@@ -8840,7 +8840,14 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // Digital-only Alchemy: "[~/that X] perpetually gains [keyword(s)]" — persistent
-    // keyword grant (Monoist Gravliner station trigger).
+    // keyword grant (Monoist Gravliner station trigger). Mutable Pupa's
+    // keyword-MIRROR antecedent ("… perpetually gains <K0> if that creature has
+    // <K0>") also lands here: the trailing "if that creature has <K0>" gate is
+    // peeled UPSTREAM by `strip_suffix_conditional` (its trigger-gated
+    // `ZoneChangeObjectMatchesFilter` branch) in the effect-chain chunk loop —
+    // the ONLY production path that reaches this dispatch — so the text arriving
+    // here is already the short bare-keyword form and the peeled condition is
+    // reattached at the chunk level.
     if let Some(effect) = try_parse_perpetual_grant_keywords(tp) {
         return parsed_clause(effect);
     }
@@ -17970,7 +17977,7 @@ fn replace_target_with_parent(effect: &mut Effect) {
         // parent-bound PhaseIn ("untap target permanent, then phase it in")
         // is not silently skipped.
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
         {
@@ -20215,7 +20222,7 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::Suspect { target, .. }
         | Effect::Unsuspect { target, .. }
@@ -22368,6 +22375,12 @@ fn attach_repeat_process_keywords(
         }
         // Each replicated counter placement is its own sequential instruction.
         new_def.sub_link = SubAbilityLink::SequentialSibling;
+        // CR 608.2c: each per-keyword sibling is an INDEPENDENT OR-branch gated on
+        // its own keyword, so it must resolve even when a preceding sibling's
+        // condition (K0's graveyard-keyword gate) was false. Without this, K1..Kn
+        // never place their counters once K0's gate fails (the same "list
+        // collapse" bug this marker fixes for Mutable Pupa's perpetual grants).
+        new_def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
         new_def.sub_ability = None;
         defs.push(new_def);
     }
@@ -22383,6 +22396,58 @@ pub(super) fn def_is_keyword_counter_placement(def: &AbilityDefinition) -> bool 
             ..
         }
     )
+}
+
+/// Membership mirror for `AntecedentRole::PerpetualKeywordGrantHead` — the shape
+/// `attach_perpetual_keyword_grants` clones its sibling template from (Mutable
+/// Pupa's "perpetually gains <K0> if that creature has <K0>" antecedent).
+pub(super) fn def_is_perpetual_keyword_grant(def: &AbilityDefinition) -> bool {
+    matches!(
+        &*def.effect,
+        Effect::ApplyPerpetual {
+            modification: PerpetualModification::GrantKeywords { .. },
+            ..
+        }
+    )
+}
+
+/// CR 702.1c + CR 608.2c: Apply a "The same is true for <keyword list>" continuation whose
+/// antecedent is a PERPETUAL keyword grant (Mutable Pupa). The counters-class
+/// `attach_repeat_process_keywords` analogue: walk `defs` back to the most
+/// recent conditional perpetual keyword-grant (`ApplyPerpetual { GrantKeywords }`
+/// gated by a zone-change keyword `condition`) and append one cloned sibling per
+/// listed keyword — swapping both the granted keyword and the gating condition's
+/// keyword. Each clone is an independent sequential sibling
+/// (`SiblingCondition::ReplicatedOrBranch`) so the engine grants every keyword
+/// the entering object actually has during the trigger's one resolution, rather
+/// than collapsing to K0's gate. Digital-only Alchemy (no CR entry for
+/// "perpetually").
+fn attach_perpetual_keyword_grants(
+    defs: &mut Vec<AbilityDefinition>,
+    template_index: usize,
+    keywords: &[Keyword],
+) {
+    let template = defs[template_index].clone();
+    for keyword in keywords {
+        let mut new_def = template.clone();
+        if let Effect::ApplyPerpetual {
+            modification: PerpetualModification::GrantKeywords { keywords: kws },
+            ..
+        } = &mut *new_def.effect
+        {
+            *kws = vec![keyword.clone()];
+        }
+        if let Some(condition) = &mut new_def.condition {
+            rewrite_ability_condition_keyword(condition, keyword);
+        }
+        // Each replicated perpetual grant is its own sequential instruction.
+        new_def.sub_link = SubAbilityLink::SequentialSibling;
+        // CR 702.1c + CR 608.2c: independent OR-branch — resolves regardless of any other
+        // sibling's keyword gate (see `SiblingCondition::ReplicatedOrBranch`).
+        new_def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        new_def.sub_ability = None;
+        defs.push(new_def);
+    }
 }
 
 /// Swap the gating keyword inside an `AbilityCondition` to `new_keyword`. Used
@@ -22405,6 +22470,13 @@ fn rewrite_ability_condition_keyword(condition: &mut AbilityCondition, new_keywo
         AbilityCondition::TargetHasKeywordInstead { keyword }
         | AbilityCondition::SourceLacksKeyword { keyword } => {
             *keyword = new_keyword.clone();
+        }
+        // CR 702.1c + CR 608.2c: Mutable Pupa's per-keyword gate — "if that creature has
+        // <keyword>" — carries the keyword inside a `ZoneChangeObjectMatchesFilter`
+        // typed filter (`FilterProp::WithKeyword`), swapped via the shared
+        // `rewrite_filter_keyword` walker.
+        AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. } => {
+            rewrite_filter_keyword(filter, new_keyword);
         }
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
             for inner in conditions {
@@ -24364,7 +24436,7 @@ fn rewrite_parent_targets_to_tracked_set(effect: &mut Effect) {
         // CR 702.26c: PhaseIn mirrors PhaseOut; expose its target to tracked-set
         // rewrites for symmetry so a parent-bound PhaseIn is not skipped.
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::CastCopyOfCard { target, .. }
         | Effect::CopyTokenOf { target, .. }
@@ -24626,7 +24698,7 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         // its target filter too so generic anaphor/scope rewrites and the
         // self-disjunctive delayed-trigger rebind (CR 603.7c) reach it.
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
+        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
@@ -25745,7 +25817,12 @@ fn try_parse_repeat_process_directive(
             if card_type.is_some() {
                 (card_type, rest)
             } else {
-                strip_leading_general_conditional(text, ctx)
+                let (milled, rest) = strip_milled_shared_quality_conditional(text);
+                if milled.is_some() {
+                    (milled, rest)
+                } else {
+                    strip_leading_general_conditional(text, ctx)
+                }
             }
         }
     };
@@ -27643,15 +27720,40 @@ pub(crate) fn parse_effect_chain_ir(
         // keyword. Requires a prior clause to attach to.
         if !builder.is_empty() {
             if let Some(keywords) = try_parse_same_is_true_continuation(normalized_text) {
+                // CR 702.1c ("the same is true") + CR 608.2c (written order):
+                // select the replication template shape from the antecedent clause's
+                // parsed effect. A PERPETUAL keyword grant
+                // (Mutable Pupa, `ApplyPerpetual { GrantKeywords }`) replicates via
+                // `attach_perpetual_keyword_grants`; every other "same is true for"
+                // antecedent (Odric's `GenericEffect` static grant) keeps the
+                // default `StaticGrant`. Mirrors `def_is_perpetual_keyword_grant`,
+                // applied to the clause's `.effect` (both expose `Effect`).
+                let kind = if builder
+                    .clauses()
+                    .iter()
+                    .rev()
+                    .find(|clause| {
+                        !matches!(clause.disposition, ClauseDisposition::Continue { .. })
+                    })
+                    .is_some_and(|clause| {
+                        matches!(
+                            &clause.parsed.effect,
+                            Effect::ApplyPerpetual {
+                                modification: PerpetualModification::GrantKeywords { .. },
+                                ..
+                            }
+                        )
+                    }) {
+                    ReplicateKind::PerpetualKeywordGrant
+                } else {
+                    ReplicateKind::StaticGrant
+                };
                 builder
                     .clause(
                         normalized_text,
                         placeholder_parsed_clause("same_is_true_for_placeholder"),
                         chunk.boundary_after,
-                        ClauseDisposition::ReplicatePerKeyword {
-                            keywords,
-                            kind: ReplicateKind::StaticGrant,
-                        },
+                        ClauseDisposition::ReplicatePerKeyword { keywords, kind },
                     )
                     .push();
                 continue;

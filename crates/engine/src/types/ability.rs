@@ -2465,6 +2465,20 @@ pub enum Duration {
     Permanent,
 }
 
+/// The attacker named by a force-block instruction.
+///
+/// This intentionally has only exact single-object referents. A filter would
+/// allow resolution to reselect a different attacker after the trigger event;
+/// CR 400.7 requires the event object, not a later object sharing its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ForceBlockAttackerRef {
+    /// "blocks this creature if able" / Provoke's source-referential form.
+    Source,
+    /// "blocks that Wolf if able" from a narrowed attack trigger event.
+    EventSource,
+}
+
 // ---------------------------------------------------------------------------
 // Game restriction system — composable runtime restrictions
 // ---------------------------------------------------------------------------
@@ -4795,6 +4809,11 @@ pub enum TargetFilter {
     /// (Amareth, the Lustrous) and by `AbilityCondition::ObjectsShareQuality`
     /// subject slots.
     LastRevealed,
+    /// CR 608.2c: Resolves to the card(s) most recently moved to a public zone
+    /// by the resolving spell or ability (`state.last_zone_changed_ids`). Used
+    /// by anaphoric "milled this way" / "exiled this way" quantity gates
+    /// (Grindstone) and `ObjectCountBySharedQuality` population filters.
+    LastZoneChanged,
     /// CR 400.7j + CR 608.2k: Resolves to the object paid as a cost for the
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
@@ -8773,6 +8792,10 @@ pub enum AdditionalCostOrigin {
     /// any optional additional cost) and lets Teamwork compose with another
     /// object additional cost in the announcement queue.
     Teamwork,
+    /// CR 702.174a: Gift — optional “choose an opponent” additional cost. A
+    /// dedicated origin distinguishes a promised gift from an unrelated optional
+    /// additional cost and lets the UI present Gift-specific promise copy.
+    Gift,
     #[default]
     Other,
 }
@@ -11497,10 +11520,18 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 509.1g: Target creature must block this turn if able.
+    /// CR 509.1c: Target creature must block this turn/combat if able.
     ForceBlock {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// The exact grammatical attacker referent, if the instruction names
+        /// one. `None` remains the generic "blocks this turn if able" form.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attacker: Option<ForceBlockAttackerRef>,
+        /// `this combat` expires at end of combat; legacy payloads without a
+        /// duration retain the established `this turn` lifetime.
+        #[serde(default = "default_duration_until_end_of_turn")]
+        duration: Duration,
     },
     /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
     ForceAttack {
@@ -16455,6 +16486,12 @@ pub struct AbilityDefinition {
     /// counter type must be rewritten to the current iteration's counter kind
     /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
     pub iteration_kind_binding: Option<IterationKindBinding>,
+    /// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
+    /// `SequentialSibling` continuation with its OWN gating condition must still be
+    /// checked when a PRECEDING sibling's condition was
+    /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
+    /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
+    pub sibling_condition: SiblingCondition,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -16530,6 +16567,8 @@ struct AbilityDefinitionRepr<'a> {
     sub_link: SubAbilityLink,
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_kind_binding: &'a Option<IterationKindBinding>,
+    #[serde(skip_serializing_if = "SiblingCondition::is_default")]
+    sibling_condition: SiblingCondition,
 }
 
 impl Serialize for AbilityDefinition {
@@ -16574,6 +16613,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link,
             iteration_kind_binding,
+            sibling_condition,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -16613,6 +16653,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link: *sub_link,
             iteration_kind_binding,
+            sibling_condition: *sibling_condition,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -16721,6 +16762,8 @@ struct AbilityDefinitionDe {
     sub_link: SubAbilityLink,
     #[serde(default)]
     iteration_kind_binding: Option<IterationKindBinding>,
+    #[serde(default)]
+    sibling_condition: SiblingCondition,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -16770,6 +16813,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             repeat_until: de.repeat_until,
             sub_link: de.sub_link,
             iteration_kind_binding: de.iteration_kind_binding,
+            sibling_condition: de.sibling_condition,
         })
     }
 }
@@ -16800,6 +16844,36 @@ impl SubAbilityLink {
     /// `skip_serializing_if` predicate — the default needs no JSON byte.
     pub fn is_continuation(link: &Self) -> bool {
         matches!(link, Self::ContinuationStep)
+    }
+}
+
+/// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
+/// `SequentialSibling` continuation with its OWN gating condition must still be
+/// checked when a PRECEDING sibling's condition was
+/// false. `Dependent` (default) is today's behavior — the continuation's own
+/// condition/effect may presuppose the preceding sibling's effect actually ran
+/// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
+/// `GainControl` produced a target), so it is skipped alongside a failed
+/// predecessor. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
+/// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
+/// keyword, so it must be evaluated regardless of any other branch's outcome.
+/// Stamped ONLY by the `ReplicatePerKeyword` lowering helpers
+/// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) —
+/// never by ordinary sentence-boundary `SequentialSibling` stamping — so it
+/// cannot leak into a Thieving-Skydiver-shaped dependent continuation that
+/// also happens to carry `SequentialSibling`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SiblingCondition {
+    #[default]
+    Dependent,
+    ReplicatedOrBranch,
+}
+
+impl SiblingCondition {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_default(cond: &Self) -> bool {
+        matches!(cond, Self::Dependent)
     }
 }
 
@@ -16924,6 +16998,7 @@ impl AbilityDefinition {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
+            sibling_condition: SiblingCondition::Dependent,
         }
     }
 
@@ -17764,6 +17839,10 @@ pub struct SpellContext {
     /// `None` until that choice is made (and for the single-opponent default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announcing_opponent: Option<PlayerId>,
+    /// CR 702.174a: Opponent chosen when the Gift additional cost was paid.
+    /// Distinct from `announcing_opponent` (CR 115.1 target-chooser).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gift_recipient: Option<PlayerId>,
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
@@ -18021,6 +18100,9 @@ pub enum TriggerCondition {
     /// CR 400.7 + CR 603.4: True when the source permanent entered the
     /// battlefield this turn.
     SourceEnteredThisTurn,
+    /// CR 400.7 + CR 508.1 + CR 603.4: True only when this exact source
+    /// incarnation attacked during the current combat.
+    SourceAttackedThisCombat,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -21268,6 +21350,12 @@ pub struct ResolvedAbility {
     /// `ability_index` remains presentation/compatibility only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_definition_ref: Option<TriggerDefinitionRef>,
+    /// CR 400.7 + CR 509.1c: Exact attacker selected by a source- or
+    /// event-source-referential force-block instruction. This is bound when the
+    /// triggered ability is put on the stack, before targets are chosen; it is
+    /// deliberately separate from the parsed grammatical selector on `Effect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_block_attacker: Option<ObjectIncarnationRef>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -21468,6 +21556,15 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 702.1c ("the same is true") + CR 608.2c (written order): Copied through
+    /// from the originating `AbilityDefinition`. When `ReplicatedOrBranch`, this
+    /// `SequentialSibling` is an INDEPENDENT
+    /// per-item OR-branch produced by keyword-list replication (Mutable Pupa,
+    /// Kathril) and must be evaluated by `resolve_chain_body` regardless of a
+    /// preceding sibling's failed gate. `Dependent` (default) preserves the
+    /// prior skip-with-failed-predecessor behavior. See [`SiblingCondition`].
+    #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
+    pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
     /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
@@ -21542,9 +21639,11 @@ impl ResolvedAbility {
             repeat_until: None,
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
+            sibling_condition: SiblingCondition::Dependent,
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            force_block_attacker: None,
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -21608,6 +21707,79 @@ impl ResolvedAbility {
         }
     }
 
+    /// Preserve the exact named attacker through target selection and every
+    /// continuation of a triggered force-block instruction. The parser carries
+    /// only its grammatical selector; this stores the one event-time object
+    /// identity that resolution is permitted to use.
+    pub fn bind_force_block_attacker_recursive(
+        &mut self,
+        event_attacker: Option<ObjectIncarnationRef>,
+    ) {
+        if let Effect::ForceBlock {
+            attacker: Some(selector),
+            ..
+        } = &self.effect
+        {
+            self.force_block_attacker = match selector {
+                ForceBlockAttackerRef::Source => self
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ForceBlockAttackerRef::EventSource => event_attacker,
+            };
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_force_block_attacker_recursive(event_attacker);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_force_block_attacker_recursive(event_attacker);
+        }
+    }
+
+    /// Whether any resolution branch names the attacker from its triggering
+    /// attack event. Such an ability must receive one singleton attack event
+    /// per pending trigger; a plural event has no single "that Wolf" referent.
+    pub fn has_event_source_force_block_recursive(&self) -> bool {
+        matches!(
+            &self.effect,
+            Effect::ForceBlock {
+                attacker: Some(ForceBlockAttackerRef::EventSource),
+                ..
+            }
+        ) || self
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.has_event_source_force_block_recursive())
+            || self
+                .else_ability
+                .as_ref()
+                .is_some_and(|else_branch| else_branch.has_event_source_force_block_recursive())
+    }
+
+    /// Bind only source-referential force-block effects at the shared stack
+    /// boundary. Event-source effects are intentionally left untouched because
+    /// their authority is the singleton triggering event, not the stack entry's
+    /// source object.
+    pub fn bind_force_block_source_recursive(&mut self, source: Option<ObjectIncarnationRef>) {
+        if source.is_some()
+            && matches!(
+                &self.effect,
+                Effect::ForceBlock {
+                    attacker: Some(ForceBlockAttackerRef::Source),
+                    ..
+                }
+            )
+        {
+            self.force_block_attacker = source;
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_force_block_source_recursive(source);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_force_block_source_recursive(source);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
@@ -21617,6 +21789,7 @@ impl ResolvedAbility {
         self.source_incarnation = None;
         self.trigger_source = None;
         self.trigger_definition_ref = None;
+        self.force_block_attacker = None;
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.clear_trigger_identity_recursive();
         }
@@ -23564,6 +23737,30 @@ mod tests {
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(effect, deserialized);
+    }
+
+    #[test]
+    fn force_block_serde_preserves_named_attacker_and_legacy_defaults() {
+        let named = Effect::ForceBlock {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            attacker: Some(ForceBlockAttackerRef::EventSource),
+            duration: Duration::UntilEndOfCombat,
+        };
+        let json = serde_json::to_string(&named).expect("serialize named force block");
+        assert_eq!(
+            serde_json::from_str::<Effect>(&json).expect("deserialize named force block"),
+            named
+        );
+
+        let legacy = r#"{"type":"ForceBlock","target":{"type":"Any"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Effect>(legacy).expect("deserialize legacy force block"),
+            Effect::ForceBlock {
+                target: TargetFilter::Any,
+                attacker: None,
+                duration: Duration::UntilEndOfTurn,
+            }
+        );
     }
 
     #[test]
