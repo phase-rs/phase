@@ -5513,7 +5513,6 @@ fn rw_effect(
         | Effect::RevealFromHand { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
