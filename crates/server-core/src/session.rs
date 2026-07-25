@@ -3136,4 +3136,122 @@ mod tests {
         let session = mgr.sessions.get(&code).unwrap();
         assert_eq!(session.state.players[defending_player.0 as usize].life, 20);
     }
+
+    /// CR 508.1a–e: each attacker independently chooses a defender. The
+    /// candidate enumerator only samples that combinatorial space (it lists
+    /// single-target alpha strikes), so a split declaration is legal but absent
+    /// from it — the session must admit it and let `apply()` validate. Guards
+    /// against reintroducing a candidate-membership legality gate at the
+    /// session boundary, while CR 508.1a duplicate rejection stays enforced by
+    /// `validate_attackers`.
+    #[test]
+    fn split_attack_declaration_is_admitted_and_validated_by_the_engine() {
+        use engine::game::combat::AttackTarget;
+        use engine::game::zones::create_object;
+        use engine::types::card_type::CoreType;
+        use engine::types::identifiers::CardId;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game_n_players(
+            make_deck(),
+            "Host".to_string(),
+            None,
+            3,
+            MatchConfig::default(),
+            Some(FormatConfig::standard()),
+        );
+        let _ = mgr.join_game(&code, make_deck()).unwrap();
+        let _ = mgr.join_game(&code, make_deck()).unwrap();
+
+        let attacks = {
+            let session = mgr.sessions.get_mut(&code).unwrap();
+            let first = create_object(
+                &mut session.state,
+                CardId(4000),
+                PlayerId(0),
+                "First attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let second = create_object(
+                &mut session.state,
+                CardId(4001),
+                PlayerId(0),
+                "Second attacker".to_string(),
+                Zone::Battlefield,
+            );
+            for id in [first, second] {
+                session
+                    .state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+            }
+
+            session.state.active_player = PlayerId(0);
+            session.state.priority_player = PlayerId(0);
+            session.state.phase = Phase::DeclareAttackers;
+            session.state.waiting_for = WaitingFor::DeclareAttackers {
+                player: PlayerId(0),
+                valid_attacker_ids: vec![first, second],
+                valid_attack_targets: vec![
+                    AttackTarget::Player(PlayerId(1)),
+                    AttackTarget::Player(PlayerId(2)),
+                ],
+                valid_attack_targets_by_attacker: None,
+                attacker_constraints: Default::default(),
+            };
+
+            vec![
+                (first, AttackTarget::Player(PlayerId(1))),
+                (second, AttackTarget::Player(PlayerId(2))),
+            ]
+        };
+        let action = GameAction::DeclareAttackers {
+            attacks: attacks.clone(),
+            bands: vec![],
+        };
+
+        let enumerated = engine::ai_support::legal_actions(&mgr.sessions[&code].state);
+        assert!(
+            !enumerated.contains(&action),
+            "the finite candidate set intentionally omits this split attack: {enumerated:?}"
+        );
+
+        // The bypass must not weaken validation: a malformed freeform declaration
+        // reaches the engine and is rejected there rather than by candidate lookup.
+        let duplicate = mgr.handle_action(
+            &code,
+            &token0,
+            GameAction::DeclareAttackers {
+                attacks: vec![
+                    attacks[0],
+                    (attacks[0].0, AttackTarget::Player(PlayerId(2))),
+                ],
+                bands: vec![],
+            },
+        );
+        assert!(
+            matches!(duplicate, Err(ref error) if error.starts_with("Engine error:")),
+            "a duplicate attacker must be rejected by the engine, got: {duplicate:?}"
+        );
+
+        let result = mgr.handle_action(&code, &token0, action);
+        assert!(
+            result.is_ok(),
+            "a legal split attack must be validated by apply(), got: {result:?}"
+        );
+        let attackers = &mgr.sessions[&code].state.combat.as_ref().unwrap().attackers;
+        assert_eq!(attackers.len(), 2);
+        assert!(attackers.iter().any(|attacker| {
+            attacker.object_id == attacks[0].0
+                && attacker.attack_target == AttackTarget::Player(PlayerId(1))
+        }));
+        assert!(attackers.iter().any(|attacker| {
+            attacker.object_id == attacks[1].0
+                && attacker.attack_target == AttackTarget::Player(PlayerId(2))
+        }));
+    }
 }

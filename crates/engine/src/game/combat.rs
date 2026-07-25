@@ -567,6 +567,14 @@ pub fn mark_attacker_blocked(state: &mut GameState, oid: ObjectId) -> bool {
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;
 
+    // CR 508.1a: choosing a creature more than once cannot produce two
+    // attackers; reject duplicate declarations before checking their other
+    // individual restrictions.
+    let mut declared = HashSet::with_capacity(attacker_ids.len());
+    if attacker_ids.iter().any(|id| !declared.insert(*id)) {
+        return Err("A creature can't be declared as an attacker more than once".to_string());
+    }
+
     // CR 508.1c: Attack restrictions make the declaration illegal if disobeyed.
     if let Some(max) = max_attackers_each_combat(state) {
         if attacker_ids.len() as u32 > max {
