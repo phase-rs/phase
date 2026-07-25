@@ -155,6 +155,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         source_incarnation: None,
         trigger_source: None,
         trigger_definition_ref: None,
+        force_block_attacker: None,
         targets: vec![],
         kind: AbilityKind::Activated,
         sub_ability: None,

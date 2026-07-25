@@ -11868,31 +11868,53 @@ fn parse_force_block_ast(input: &str, ctx: &ParseContext) -> Option<ImperativeFa
     if let Ok((tail, _)) =
         alt((tag::<_, _, OracleError<'_>>("~ "), tag("this creature "))).parse(rest)
     {
-        return parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
-            attacker: Some(ForceBlockAttackerRef::Source),
-            duration,
-        });
+        if let Some(duration) = parse_duration(tail) {
+            return Some(ImperativeFamilyAst::ForceBlock {
+                attacker: Some(ForceBlockAttackerRef::Source),
+                duration,
+            });
+        }
     }
     if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("it ").parse(rest) {
-        if !ctx.in_trigger || !matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
-            return None;
+        if ctx.in_trigger && matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
+            if let Some(duration) = parse_duration(tail) {
+                return Some(ImperativeFamilyAst::ForceBlock {
+                    attacker: Some(ForceBlockAttackerRef::EventSource),
+                    duration,
+                });
+            }
         }
-        return parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
-            attacker: Some(ForceBlockAttackerRef::EventSource),
-            duration,
-        });
     }
     // CR 603.2 + CR 506.3: an event-referential demonstrative needs a typed
     // attacking-creature antecedent from a trigger. The shared nom production
     // rejects arbitrary text and non-attacker nouns before this effect is built.
-    if !ctx.in_trigger || !matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
-        return None;
+    if ctx.in_trigger && matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
+        if let Ok((tail, _referent)) = nom_target::parse_demonstrative_attacker_referent(rest) {
+            if let Some(duration) = parse_duration(tail) {
+                return Some(ImperativeFamilyAst::ForceBlock {
+                    attacker: Some(ForceBlockAttackerRef::EventSource),
+                    duration,
+                });
+            }
+        }
     }
-    let (tail, _referent) = nom_target::parse_demonstrative_attacker_referent(rest).ok()?;
-    parse_duration(tail).map(|duration| ImperativeFamilyAst::ForceBlock {
-        attacker: Some(ForceBlockAttackerRef::EventSource),
-        duration,
-    })
+
+    // Preserve the existing generic grammar: modifiers between "block(s)" and
+    // the duration still produce an attacker-agnostic requirement. Exact
+    // source/event referents above take precedence when their typed forms match.
+    if nom_primitives::scan_contains(rest, "this turn if able") {
+        Some(ImperativeFamilyAst::ForceBlock {
+            attacker: None,
+            duration: Duration::UntilEndOfTurn,
+        })
+    } else if nom_primitives::scan_contains(rest, "this combat if able") {
+        Some(ImperativeFamilyAst::ForceBlock {
+            attacker: None,
+            duration: Duration::UntilEndOfCombat,
+        })
+    } else {
+        None
+    }
 }
 
 fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {

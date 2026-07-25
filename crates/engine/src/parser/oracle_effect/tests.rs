@@ -19899,6 +19899,25 @@ fn force_block_targeted() {
     );
 }
 
+#[test]
+fn force_block_with_named_target_preserves_generic_requirement() {
+    // Hunt Down — retain the pre-existing generic grammar when the target
+    // creature is named between the block verb and duration.
+    let e = parse_effect("Target creature blocks target creature this turn if able.");
+    assert!(
+        matches!(
+            e,
+            Effect::ForceBlock {
+                target: TargetFilter::Typed(_),
+                attacker: None,
+                duration: Duration::UntilEndOfTurn,
+            }
+        ),
+        "Expected generic ForceBlock with turn duration, got {:?}",
+        e
+    );
+}
+
 // -----------------------------------------------------------------------
 // Item 3b: MustBeBlocked imperative (CR 509.1c)
 // -----------------------------------------------------------------------
