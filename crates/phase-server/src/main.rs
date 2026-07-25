@@ -5122,6 +5122,8 @@ async fn handle_client_message(
                     }
 
                     let derived = derive_transport_views(&raw_state, &filtered_state, Some(joiner));
+                    let viewer_interaction =
+                        derive_viewer_interaction(&raw_state, &filtered_state, joiner);
                     let msg = ServerMessage::StateUpdate {
                         state_revision,
                         state: filtered_state,
@@ -5134,11 +5136,7 @@ async fn handle_client_message(
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
                         derived,
-                        viewer_interaction: derive_viewer_interaction(
-                            &raw_state,
-                            &filtered_state,
-                            joiner,
-                        ),
+                        viewer_interaction,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
