@@ -4566,7 +4566,7 @@ pub(crate) fn keyword_cost_reads_growing_class(kw: &Keyword) -> bool {
         | Keyword::Outlast(_)
         | Keyword::Dash(_)
         | Keyword::Warp(_)
-        | Keyword::Devour(_)
+        | Keyword::Devour { .. }
         | Keyword::Offspring(_)
         | Keyword::Splice { .. }
         | Keyword::Sunburst
@@ -4873,7 +4873,7 @@ fn scan_keyword(kw: &Keyword, mode: ScanMode) -> Axes {
         | Keyword::Bloodthirst(_)
         | Keyword::Amplify(_)
         | Keyword::Graft(_)
-        | Keyword::Devour(_)
+        | Keyword::Devour { .. }
         | Keyword::Toxic(_)
         | Keyword::Saddle(_)
         | Keyword::Teamwork(_)

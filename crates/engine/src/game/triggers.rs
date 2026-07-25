@@ -28658,7 +28658,7 @@ pub mod tests {
             | Keyword::LivingMetal
             | Keyword::Bloodthirst(_)
             | Keyword::Amplify(_)
-            | Keyword::Devour(_)
+            | Keyword::Devour { .. }
             | Keyword::Toxic(_)
             | Keyword::Saddle(_)
             | Keyword::Teamwork(_)
