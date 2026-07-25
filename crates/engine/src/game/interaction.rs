@@ -3600,12 +3600,12 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
         ManaRestriction::OnlyForXCosts => InteractionManaRestriction::OnlyForXCosts,
         ManaRestriction::OnlyForSpellWithKeywordKind(keyword) => {
             InteractionManaRestriction::OnlyForSpellWithKeywordKind {
-                keyword: format!("{keyword:?}"),
+                keyword: keyword.keyword_str().to_string(),
             }
         }
         ManaRestriction::OnlyForSpellWithKeywordKindFromZone(keyword, zone) => {
             InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone {
-                keyword: format!("{keyword:?}"),
+                keyword: keyword.keyword_str().to_string(),
                 zone: zone_code(*zone),
             }
         }

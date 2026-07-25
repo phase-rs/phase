@@ -3334,7 +3334,7 @@ export interface StuckDecisionDiagnostic {
 }
 
 /** Engine-authored object-action identity shared with interaction surfaces. */
-export type ObjectAction = GameAction & { interactionActionId?: InteractionActionId };
+export type ObjectAction = GameAction & { interactionActionId: InteractionActionId };
 
 export interface LegalActionsResult {
   actions: GameAction[];
