@@ -149,14 +149,14 @@
     "mana_payment_shortcut_actions": [],
     "spell_costs": {},
     "viewer_interaction": {
-      "waiting_for_kind": {
+      "waitingForKind": {
         "simultaneous": null,
         "terminal": false,
         "code": "choose"
       },
-      "authorized_submitters": [0],
-      "can_submit": true,
-      "auto_pass_recommended": false,
+      "authorizedSubmitters": [0],
+      "canSubmit": true,
+      "autoPassRecommended": false,
       "opportunities": [],
       "availability": {
         "type": "unsupported",
