@@ -5987,6 +5987,25 @@ pub(crate) fn take_pending_trigger_event_batch(
     }
 }
 
+/// CR 603.3d + CR 509.1c: Extract the one unambiguous attacker named by a
+/// singleton attack trigger. Trigger construction completes before priority, so
+/// this reads the same live incarnation that the stack-push binding observed.
+fn event_attacker_from_trigger_event(
+    state: &GameState,
+    trigger_event: Option<&GameEvent>,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::AttackersDeclared { attacker_ids, .. } = trigger_event? else {
+        return None;
+    };
+    let [attacker_id] = attacker_ids.as_slice() else {
+        return None;
+    };
+    state
+        .objects
+        .get(attacker_id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
 /// CR 603.3 + CR 603.3c + CR 603.3d: Push a pending trigger to the stack with
 /// its event batch keyed by entry id. Returns the new entry's `ObjectId` so
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
@@ -6096,18 +6115,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     // CR 400.7 + CR 509.1c: Bind either grammatical named-attacker form at
     // stack creation. In particular, "that Wolf" is the exact object from the
     // narrowed attack-trigger event, not the triggered ability's source.
-    let event_attacker = match trigger_event.as_ref() {
-        Some(GameEvent::AttackersDeclared { attacker_ids, .. }) => match attacker_ids.as_slice() {
-            [attacker_id] => state
-                .objects
-                .get(attacker_id)
-                .map(ObjectIncarnationRef::from_object),
-            // Event-source force-block effects require an individual attack
-            // event. A batched event has no unambiguous "that Wolf" referent.
-            _ => None,
-        },
-        _ => None,
-    };
+    let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
     ability.bind_force_block_attacker_recursive(event_attacker);
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(&mut ability, trigger_event.as_ref());
@@ -6276,6 +6284,25 @@ fn assign_pending_trigger_entry_ability(
     entry_id: ObjectId,
     source_ability: &ResolvedAbility,
 ) -> bool {
+    let trigger_event = state
+        .stack
+        .iter()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
+            _ => None,
+        });
+    let mut assigned_ability = source_ability.clone();
+    // CR 603.3d: Target/mode construction replaces the provisional stack
+    // ability before any player receives priority. Rebind event-referential
+    // force-blocks here so that replacement cannot discard the stack-time
+    // identity for "that Wolf".
+    assigned_ability.bind_force_block_attacker_recursive(event_attacker_from_trigger_event(
+        state,
+        trigger_event,
+    ));
+
     let Some(entry) = state
         .stack
         .iter_mut()
@@ -6287,7 +6314,7 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
-    *ability = source_ability.clone();
+    *ability = assigned_ability;
     true
 }
 
