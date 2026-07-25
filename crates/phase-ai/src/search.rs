@@ -4310,10 +4310,6 @@ mod tests {
             engine::types::mana::ManaCost::NoCost,
         );
 
-        state.players[PlayerId(0).0 as usize]
-            .hand
-            .retain(|&object_id| object_id != spell_id);
-        state.objects.get_mut(&spell_id).unwrap().zone = Zone::Stack;
         state.stack.push_back(StackEntry {
             id: spell_id,
             source_id: spell_id,

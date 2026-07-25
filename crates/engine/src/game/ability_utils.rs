@@ -5206,64 +5206,25 @@ fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
     )
 }
 
-/// Finds the first stack-targeting instruction after an interactive effect.
-///
-/// Its own resolution-local plumbing (`ChangeZone`, `Shuffle`, and library
-/// placement) stays transparent while it remains a continuation step. A
-/// following printed instruction contributes its targets at stack time only
-/// when it is an unconditional `SequentialSibling`; a child whose target
-/// selection is deferred remains deferred even when it is a sibling.
-fn deferred_effect_stack_target_tail_depth(
-    mut sub_ability: Option<&ResolvedAbility>,
-) -> Option<usize> {
-    let mut depth = 0;
-    while let Some(sub) = sub_ability {
-        if defers_conditional_target_selection(sub) {
-            return None;
-        }
-        if sub.sub_link == SubAbilityLink::SequentialSibling {
-            return Some(depth);
-        }
-        if !skips_stack_targets_after_deferred_effect(&sub.effect) {
-            return None;
-        }
-        sub_ability = sub.sub_ability.as_deref();
-        depth += 1;
-    }
-    None
-}
-
-fn deferred_effect_stack_target_tail(
-    sub_ability: Option<&ResolvedAbility>,
-) -> Option<&ResolvedAbility> {
-    let depth = deferred_effect_stack_target_tail_depth(sub_ability)?;
-    let mut tail = sub_ability?;
-    for _ in 0..depth {
-        tail = tail.sub_ability.as_deref()?;
-    }
-    Some(tail)
-}
-
-fn deferred_effect_stack_target_tail_mut(
-    sub_ability: Option<&mut ResolvedAbility>,
-) -> Option<&mut ResolvedAbility> {
-    let depth = deferred_effect_stack_target_tail_depth(sub_ability.as_deref())?;
-    let mut tail = sub_ability?;
-    for _ in 0..depth {
-        tail = tail.sub_ability.as_deref_mut()?;
-    }
-    Some(tail)
-}
-
 fn collect_target_slots_after_deferred_effect(
     state: &GameState,
     sub_ability: Option<&ResolvedAbility>,
     acc: &mut SlotAccumulator,
 ) -> Result<(), EngineError> {
-    if let Some(sub_ability) = deferred_effect_stack_target_tail(sub_ability) {
-        collect_target_slots(state, sub_ability, acc)?;
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
     }
-    Ok(())
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return collect_target_slots_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref(),
+            acc,
+        );
+    }
+    collect_target_slots(state, sub_ability, acc)
 }
 
 fn collect_target_slot_specs_after_deferred_effect(
@@ -5272,9 +5233,22 @@ fn collect_target_slot_specs_after_deferred_effect(
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
 ) {
-    if let Some(sub_ability) = deferred_effect_stack_target_tail(sub_ability) {
-        collect_target_slot_specs(state, sub_ability, specs, next_instance);
+    let Some(sub_ability) = sub_ability else {
+        return;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return;
     }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        collect_target_slot_specs_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref(),
+            specs,
+            next_instance,
+        );
+        return;
+    }
+    collect_target_slot_specs(state, sub_ability, specs, next_instance);
 }
 
 fn build_target_assignments(
@@ -6472,10 +6446,21 @@ fn assign_targets_after_deferred_effect(
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
-    if let Some(sub_ability) = deferred_effect_stack_target_tail_mut(sub_ability) {
-        assign_targets_recursive(state, sub_ability, targets, next_target)?;
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
     }
-    Ok(())
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return assign_targets_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref_mut(),
+            targets,
+            next_target,
+        );
+    }
+    assign_targets_recursive(state, sub_ability, targets, next_target)
 }
 
 fn assign_selected_slots_after_deferred_effect(
@@ -6484,10 +6469,21 @@ fn assign_selected_slots_after_deferred_effect(
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
-    if let Some(sub_ability) = deferred_effect_stack_target_tail_mut(sub_ability) {
-        assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
     }
-    Ok(())
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return assign_selected_slots_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref_mut(),
+            selected_slots,
+            next_slot,
+        );
+    }
+    assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
@@ -6687,7 +6683,16 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
 }
 
 fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> bool {
-    deferred_effect_stack_target_tail(sub_ability).is_some_and(chain_has_target_sink)
+    let Some(sub_ability) = sub_ability else {
+        return false;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return false;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return chain_has_target_sink_after_deferred_effect(sub_ability.sub_ability.as_deref());
+    }
+    chain_has_target_sink(sub_ability)
 }
 
 fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usize {
@@ -6796,9 +6801,16 @@ fn minimum_targets_after_deferred_effect(
     state: &GameState,
     sub_ability: Option<&ResolvedAbility>,
 ) -> usize {
-    deferred_effect_stack_target_tail(sub_ability)
-        .map(|sub_ability| minimum_targets_in_chain(state, sub_ability))
-        .unwrap_or(0)
+    let Some(sub_ability) = sub_ability else {
+        return 0;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return 0;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return minimum_targets_after_deferred_effect(state, sub_ability.sub_ability.as_deref());
+    }
+    minimum_targets_in_chain(state, sub_ability)
 }
 
 /// CR 700.2a: The controller of a modal spell or activated ability chooses the mode(s)
@@ -8386,7 +8398,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_effect_target_traversal_crosses_only_unconditional_sequential_siblings() {
+    fn deferred_effect_target_traversal_crosses_transparent_links_regardless_of_sub_link() {
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
@@ -8466,88 +8478,115 @@ mod tests {
             .sub_ability(change_zone)
         };
 
-        let continuation = chain(SubAbilityLink::ContinuationStep);
-        assert!(
-            build_target_slots(&state, &continuation)
-                .expect("continuation target traversal should build")
-                .is_empty(),
-            "the deferred effect's own continuation must keep its target selection at resolution"
-        );
-        assert!(target_slot_specs(&state, &continuation).is_empty());
-        assert!(!chain_has_target_sink(&continuation));
-        assert_eq!(minimum_targets_in_chain(&state, &continuation), 0);
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            let ability = chain(link);
+            let slots = build_target_slots(&state, &ability)
+                .expect("transparent deferred-effect links should surface the target");
+            assert_eq!(slots.len(), 1);
+            assert!(slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)));
+            assert_eq!(target_slot_specs(&state, &ability).len(), 1);
+            assert!(chain_has_target_sink(&ability));
+            assert_eq!(minimum_targets_in_chain(&state, &ability), 1);
+            validate_selected_targets_for_ability(
+                &state,
+                &ability,
+                &slots,
+                &[TargetRef::Object(creature)],
+                &[],
+            )
+            .expect("the deferred-effect tail creature target should validate");
 
-        let mut continuation_assigned = continuation.clone();
-        assign_targets_in_chain(&state, &mut continuation_assigned, &[])
-            .expect("a continuation-only chain has no stack target to assign");
-        assign_selected_slots_in_chain(&state, &mut continuation_assigned, &[])
-            .expect("a continuation-only chain has no stack target slot to assign");
+            let mut compact_assigned = ability.clone();
+            assign_targets_in_chain(
+                &state,
+                &mut compact_assigned,
+                &[TargetRef::Object(creature)],
+            )
+            .expect("compact assignment must reach the deferred-effect tail");
+            assert_eq!(
+                compact_assigned
+                    .sub_ability
+                    .as_deref()
+                    .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                    .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(creature)]
+            );
 
-        let mut reflexive_sibling = chain(SubAbilityLink::SequentialSibling);
-        reflexive_sibling
+            let mut selected_assigned = ability;
+            assign_selected_slots_in_chain(
+                &state,
+                &mut selected_assigned,
+                &[Some(TargetRef::Object(creature))],
+            )
+            .expect("selected-slot assignment must reach the deferred-effect tail");
+            assert_eq!(
+                selected_assigned
+                    .sub_ability
+                    .as_deref()
+                    .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                    .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(creature)]
+            );
+        }
+
+        let mut when_you_do = chain(SubAbilityLink::ContinuationStep);
+        when_you_do
             .sub_ability
             .as_deref_mut()
             .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
             .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
             .unwrap()
             .condition = Some(AbilityCondition::WhenYouDo);
-        assert!(
-            build_target_slots(&state, &reflexive_sibling)
-                .expect("reflexive sibling traversal should build")
-                .is_empty(),
-            "a reflexive sequential sibling must keep its target selection deferred"
-        );
-        assert!(target_slot_specs(&state, &reflexive_sibling).is_empty());
-        assert!(!chain_has_target_sink(&reflexive_sibling));
-        assert_eq!(minimum_targets_in_chain(&state, &reflexive_sibling), 0);
+        let mut resolution_timing = chain(SubAbilityLink::SequentialSibling);
+        resolution_timing
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .unwrap()
+            .target_choice_timing = TargetChoiceTiming::Resolution;
 
-        let sibling = chain(SubAbilityLink::SequentialSibling);
-        let slots = build_target_slots(&state, &sibling)
-            .expect("unconditional sequential sibling target should build");
-        assert_eq!(slots.len(), 1);
-        assert_eq!(target_slot_specs(&state, &sibling).len(), 1);
-        assert!(chain_has_target_sink(&sibling));
-        assert_eq!(minimum_targets_in_chain(&state, &sibling), 1);
-        validate_selected_targets_for_ability(
-            &state,
-            &sibling,
-            &slots,
-            &[TargetRef::Object(creature)],
-            &[],
-        )
-        .expect("the sequential sibling's creature target should validate");
+        for ability in [when_you_do, resolution_timing] {
+            assert!(build_target_slots(&state, &ability)
+                .expect("deferred conditional target traversal should build")
+                .is_empty());
+            assert!(target_slot_specs(&state, &ability).is_empty());
+            assert!(!chain_has_target_sink(&ability));
+            assert_eq!(minimum_targets_in_chain(&state, &ability), 0);
 
-        let mut assigned = sibling.clone();
-        assign_targets_in_chain(&state, &mut assigned, &[TargetRef::Object(creature)])
-            .expect("the sequential sibling must receive the selected target");
-        assert_eq!(
-            assigned
+            let mut compact_assigned = ability.clone();
+            assign_targets_in_chain(&state, &mut compact_assigned, &[])
+                .expect("empty compact assignment should leave deferred targets unchosen");
+            assert!(compact_assigned
                 .sub_ability
                 .as_deref()
                 .and_then(|change_zone| change_zone.sub_ability.as_deref())
                 .and_then(|shuffle| shuffle.sub_ability.as_deref())
                 .unwrap()
-                .targets,
-            vec![TargetRef::Object(creature)]
-        );
+                .targets
+                .is_empty());
 
-        let mut assigned_slots = sibling;
-        assign_selected_slots_in_chain(
-            &state,
-            &mut assigned_slots,
-            &[Some(TargetRef::Object(creature))],
-        )
-        .expect("the selected-slot path must match compact target assignment");
-        assert_eq!(
-            assigned_slots
+            let mut selected_assigned = ability;
+            assign_selected_slots_in_chain(&state, &mut selected_assigned, &[])
+                .expect("empty selected-slot assignment should leave deferred targets unchosen");
+            assert!(selected_assigned
                 .sub_ability
                 .as_deref()
                 .and_then(|change_zone| change_zone.sub_ability.as_deref())
                 .and_then(|shuffle| shuffle.sub_ability.as_deref())
                 .unwrap()
-                .targets,
-            vec![TargetRef::Object(creature)]
-        );
+                .targets
+                .is_empty());
+        }
     }
 
     /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's
