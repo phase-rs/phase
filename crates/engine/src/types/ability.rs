@@ -16821,22 +16821,32 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
 /// CR 608.2c: How a `sub_ability` relates to its parent in the resolution chain.
 /// Determines whether the sub is part of the parent's action (skipped when an
 /// optional parent is declined) or an independent following instruction (always
-/// resolves). Derived at parse time from the `ClauseBoundary` separating the
-/// two clauses in the printed Oracle text.
+/// resolves). Seeded at parse time from the `ClauseBoundary` separating the two
+/// clauses in the printed Oracle text.
+///
+/// **The value is semantic, not purely syntactic.** The sentence boundary is the
+/// default reading, but a later parse pass may override it when the printed text
+/// makes a separate sentence part of the previous instruction anyway — see
+/// `parser::oracle_effect::lower::relink_gated_token_referent_consumers`, which
+/// re-tags a separate-sentence clause whose only subject is a token created by a
+/// gated clause before it ("…create a token. Put a +1/+1 counter on that
+/// token."). Do not add a consumer that infers a *sentence boundary* from this
+/// field; infer only the *dependency* the variant docs describe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SubAbilityLink {
-    /// Within-sentence continuation (comma / "then" joined). The sub is a
-    /// resolution step of the parent's instruction — Squadron Hawk
+    /// The sub is a resolution step of the parent's instruction — Squadron Hawk
     /// "...put them into your hand, then shuffle." Skipped when an optional
-    /// parent is declined. This is the default: an unmarked sub is a
-    /// continuation, preserving today's runtime behavior for every existing
+    /// parent is declined. Ordinarily a within-sentence continuation (comma /
+    /// "then" joined), but also a separate sentence that depends on the
+    /// parent's action for its subject. This is the default: an unmarked sub is
+    /// a continuation, preserving today's runtime behavior for every existing
     /// chain.
     #[default]
     ContinuationStep,
-    /// Separate-sentence sibling instruction (sentence boundary). The sub is
-    /// the NEXT printed instruction, independent of the parent — Ponder
-    /// "You may shuffle." "Draw a card." Always resolves, even when an
+    /// The sub is the NEXT printed instruction, independent of the parent —
+    /// Ponder "You may shuffle." "Draw a card." Always resolves, even when an
     /// optional parent is declined (CR 608.2c "in the order written").
+    /// Ordinarily produced by a sentence boundary.
     SequentialSibling,
 }
 
@@ -17165,6 +17175,64 @@ impl AbilityDefinition {
         self.modal = Some(modal);
         self.mode_abilities = mode_abilities;
         self
+    }
+
+    /// CR 603.12: Does this clause carry its own copy of an affirmative
+    /// reflexive gate, in the narrow POSITION-INDEPENDENT form, so that the
+    /// resolver drops it on the gate-false path wherever it sits in the chain?
+    ///
+    /// Lives here rather than in the parser because
+    /// `parser::oracle_effect::lower::clone_would_transplant_gated_referent`
+    /// uses it to decide whether a "Repeat this process for …" clone is honest
+    /// at its landing slot, and the `no_sequential_sibling_reads_last_created`
+    /// regression test must exempt exactly the nodes that predicate accepts.
+    /// `pub` specifically because a test under `crates/engine/tests/` cannot
+    /// call a private `fn` in `lower`, so the alternative was a second copy of
+    /// the predicate inside the test.
+    ///
+    /// It is NOT the engine's single authority for this shape, and does not
+    /// claim to be. `game::effects::resolve_optional_effect_decision` carries a
+    /// structurally identical inlined copy on the RUNTIME twin type — the same
+    /// two fields, the same `AbilityCondition::is_optional_effect_performed`,
+    /// the same conjunction — and it cannot call this method: its receiver is
+    /// `ResolvedAbility`, not `AbilityDefinition`, with no `Deref`/`From`
+    /// bridge between them (measured, not assumed: wiring the call there fails
+    /// to compile with E0599, method not found for `&ResolvedAbility`).
+    /// Unifying the two would take a trait over both types — a resolver-side
+    /// abstraction with its own blast radius, which this change deliberately
+    /// does not introduce.
+    ///
+    /// `parser::oracle_effect::attach_repeat_process_keywords` clones
+    /// `condition` and `else_ability` verbatim, and the resolver's
+    /// condition-false path (`game::effects::resolve_ability_chain`) reads BOTH
+    /// — at two different places, which is why both are tested here:
+    ///
+    /// * a false condition never runs the clause's own effect; `else_ability`
+    ///   decides what runs INSTEAD. With an else present the resolver resolves
+    ///   the else branch and RETURNS, so the clause's `sub_ability` tail never
+    ///   runs at all and the cloned else — a second copy of a printed
+    ///   instruction — executes. "The descent just drops this clause" would then
+    ///   be the wrong description of the outcome.
+    /// * with no else present the resolver walks `sub_ability` for the next
+    ///   `SequentialSibling`, skipping one whose own condition is false and
+    ///   which itself has no else.
+    ///
+    /// Only `EffectOutcome { OptionalEffectPerformed }` qualifies, NOT the whole
+    /// of [`AbilityCondition::is_affirmative_reflexive_gate`]. Its evaluator
+    /// reads `context.optional_effect_performed` and
+    /// `state.cost_payment_failed_flag`, which are chain-scoped and therefore
+    /// position-independent. `WhenYouDo`'s evaluator is
+    /// `!(matches!(ability.effect, PayCost | Discard | DiscardCard) &&
+    /// cost_payment_failed_flag)` — it keys on the effect it RIDES, so on a
+    /// cloned `PutCounter` it is a constant `true` and gates nothing. Measured:
+    /// the same fixture with `If you do` leaves a stale pre-seeded token at `{}`
+    /// and with `When you do` puts a `Keyword(FirstStrike)` counter on it.
+    pub fn is_self_gated_reflexive(&self) -> bool {
+        self.else_ability.is_none()
+            && self
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
     }
 }
 
@@ -17670,6 +17738,99 @@ impl AbilityCondition {
 
     pub fn is_effect_outcome(&self) -> bool {
         matches!(self, AbilityCondition::EffectOutcome { .. })
+    }
+
+    /// CR 603.12 + CR 608.2c: True for the AFFIRMATIVE reflexive-conditional
+    /// gates — exactly the image of
+    /// `parser::oracle_nom::condition::parse_affirmative_reflexive_connector`
+    /// ("when you do", "if you do", "if they do", "if that player does",
+    /// "if the player does", "if a player does").
+    ///
+    /// Such a gate does not introduce an object referent (CR 608.2c: the
+    /// clause's *effect* publishes the referent, its gate does not), and its
+    /// true-branch is exactly "the antecedent action occurred" (CR 603.12). Two
+    /// parse-time sites consume this classification and MUST agree: the referent
+    /// walk (`parser::oracle_effect::chain_prior_referent_is_created_token`) and
+    /// the re-link pass
+    /// (`parser::oracle_effect::lower::relink_gated_token_referent_consumers`).
+    /// Widening one without the other re-opens the stale-`LastCreated` bind.
+    ///
+    /// Classified on the VALUE, not on the phrase that produced it:
+    /// `AbilityCondition::effect_performed()` is also constructed at
+    /// non-connector sites, and the classification is sound for all of them
+    /// because the value itself means "the antecedent optional effect was
+    /// performed" — a token created under it may not exist, whatever text minted
+    /// the gate.
+    ///
+    /// The NEGATED half (`if they don't` → `Not{OptionalEffectPerformed}`) is
+    /// deliberately excluded: its body runs precisely when the antecedent did
+    /// NOT happen, so folding the gate away would invert the guarantee.
+    ///
+    /// Exhaustive, no wildcard: a new `AbilityCondition` variant must be
+    /// classified here deliberately, not silently defaulted (mirrors
+    /// `game::effects::should_resolve_subability_on_optional_decline`).
+    pub fn is_affirmative_reflexive_gate(&self) -> bool {
+        match self {
+            AbilityCondition::WhenYouDo
+            | AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            } => true,
+            AbilityCondition::EffectOutcome {
+                signal:
+                    EffectOutcomeSignal::CurrentScopeSucceeded | EffectOutcomeSignal::Guessed { .. },
+            } => false,
+            AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::PreviousEffectAmount { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::ConditionInstead { .. }
+            | AbilityCondition::And { .. }
+            | AbilityCondition::Or { .. }
+            | AbilityCondition::Not { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::NthResolutionThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
     }
 
     pub fn is_optional_effect_performed(&self) -> bool {

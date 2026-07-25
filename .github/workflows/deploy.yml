@@ -278,8 +278,12 @@ jobs:
             client/public/card-data-*.json
             client/public/card-data.*.json
             !client/public/card-data.json
+            client/public/card-names.json
             client/public/draft-pools.json
             client/public/coverage-data.json
+            client/public/coverage-summary.json
+            client/public/decks.json
+            client/public/set-list.json
           if-no-files-found: error
           retention-days: 1
 

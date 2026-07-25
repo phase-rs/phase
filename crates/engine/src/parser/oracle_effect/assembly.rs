@@ -38,10 +38,11 @@ use super::lower::{
     attach_cast_cost_raise_to_previous_play_from_exile,
     attach_graveyard_redirect_rider_to_prior_cast_from_zone,
     attach_land_enters_tapped_to_previous_play_from_exile, cast_cost_raise_rider,
-    consolidate_die_and_coin_defs, definition_targets_self_source,
-    effect_publishes_revealed_subject, extract_bounded_target_multi_target,
-    extract_exact_target_multi_target, extract_optional_target_multi_target,
-    extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
+    clone_would_transplant_gated_referent, consolidate_die_and_coin_defs,
+    definition_targets_self_source, effect_publishes_revealed_subject,
+    extract_bounded_target_multi_target, extract_exact_target_multi_target,
+    extract_optional_target_multi_target, extract_verb_up_to_multi_target,
+    fold_copy_spell_gains_haste_and_quoted_grant,
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
@@ -53,13 +54,13 @@ use super::lower::{
     parse_controlled_by_different_players_target_constraint,
     parse_same_zone_owner_target_constraint, parse_total_mana_value_target_constraint,
     patch_choose_from_zone_counter_continuation_target, patch_population_head_tap_anaphor,
-    patch_self_ref_head_tap_anaphor, resolve_populated_token_anaphors,
-    resolve_populated_unsuspect_anaphors, resolve_those_tokens_anaphors,
-    rewire_result_anchored_subchain, rewrite_counter_instead_target_from_antecedent,
-    rewrite_else_event_context_to_stable, rewrite_else_parent_target_to_self_ref,
-    rewrite_player_anaphor_targets_in_definition, rewrite_those_tokens_from_antecedent,
-    rewrite_two_target_counter_chain, target_choice_timing_for_clause,
-    thread_chosen_damage_source_into_oneshot_effects,
+    patch_self_ref_head_tap_anaphor, relink_gated_token_referent_consumers,
+    resolve_populated_token_anaphors, resolve_populated_unsuspect_anaphors,
+    resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
+    rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
+    rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
+    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
+    target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
 };
 use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
 use super::{
@@ -1375,14 +1376,32 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         }
                     }
                     ReplicateKind::CounterPlacement => {
-                        let bound = env.resolve(
-                            &defs,
-                            AntecedentSelector::LastWithRole(
-                                AntecedentRole::KeywordCounterPlacement,
-                            ),
-                            None,
-                            OnMiss::Ignore,
-                        );
+                        let bound = env
+                            .resolve(
+                                &defs,
+                                AntecedentSelector::LastWithRole(
+                                    AntecedentRole::KeywordCounterPlacement,
+                                ),
+                                None,
+                                OnMiss::Ignore,
+                            )
+                            // CR 603.12: the clones are pushed at the TAIL of
+                            // `defs` carrying the template's target VERBATIM, so
+                            // a template that reads a gated publisher's
+                            // `TargetFilter::LastCreated` would have that
+                            // chain-context referent transplanted past whatever
+                            // sits in between, where
+                            // `state.last_created_token_ids`, a game-lifetime
+                            // ledger, binds a token from an EARLIER resolution.
+                            // Decline ONLY that shape: the predicate builds the
+                            // clone and asks
+                            // `lower::relink_gated_token_referent_consumers`
+                            // itself whether it lands honestly. Every other
+                            // binding is replicated as printed — CR 608.2c has
+                            // the controller follow the instructions in the
+                            // order WRITTEN, so silently dropping a printed
+                            // replication is the worse error direction.
+                            .filter(|i| !clone_would_transplant_gated_referent(&defs, *i));
                         if let Some(bound_index) = bound {
                             attach_repeat_process_keywords(&mut defs, bound_index, keywords);
                         }
@@ -1821,16 +1840,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             def.description = Some(clause_ir.source.fragment().unwrap_or_default().to_string());
         }
         // CR 608.2c: This clause's link to its parent = the boundary that
-        // SEPARATED the previous clause from this one. A `Sentence` boundary
-        // marks a `SequentialSibling` (next printed instruction, resolves even
-        // when an optional parent is declined); `Comma`/`Then`/none marks a
-        // within-clause `ContinuationStep` (part of the parent's action).
-        def.sub_link = match prev_boundary {
-            Some(ClauseBoundary::Sentence) => SubAbilityLink::SequentialSibling,
-            Some(ClauseBoundary::Then) | Some(ClauseBoundary::Comma) | None => {
-                SubAbilityLink::ContinuationStep
-            }
-        };
+        // SEPARATED the previous clause from this one, translated by the single
+        // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
+        // which the referent walk in `oracle_effect::mod` also consults.
+        def.sub_link = sub_link_after_boundary(prev_boundary);
         // CR 615.5: A "(When|Whenever|If) damage [from a <type> source] is
         // prevented this way, …" rider is printed as its own sentence but is not
         // an independent instruction — its "this way" back-reference binds to the
@@ -2486,6 +2499,14 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // `state.last_created_token_ids` (snapshotted at delayed-trigger
     // creation for the Sacrifice case — CR 603.7c).
     resolve_populated_token_anaphors(&mut defs);
+
+    // CR 603.12 + CR 609.3: A clause whose subject is the token published by a
+    // clause under an affirmative reflexive gate ("When you do, create a token.
+    // Put a +1/+1 counter on that token.") is part of that gated instruction,
+    // not the next independent one — with no token created it can do nothing.
+    // Must run AFTER the anaphor rewrites above, which are what bind the
+    // referent it looks for.
+    relink_gated_token_referent_consumers(&mut defs);
 
     // CR 707.12: "Copy [a card]. You may cast the copy ..." is not a stack
     // copy (CR 707.10). It creates a card copy in the source zone, then casts

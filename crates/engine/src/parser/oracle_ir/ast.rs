@@ -8,7 +8,7 @@ use crate::types::ability::{
     LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
     OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
     SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter,
+    SubAbilityLink, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -1647,6 +1647,26 @@ pub(crate) enum ClauseBoundary {
     Sentence,
     Then,
     Comma,
+}
+
+/// CR 608.2c: the SINGLE translation from the printed boundary that precedes a
+/// clause to the link the clause carries to the one before it. A `Sentence`
+/// boundary marks the next printed instruction (`SequentialSibling`); a
+/// `Comma`/`Then`/absent boundary marks a within-clause `ContinuationStep`.
+///
+/// Two passes need this mapping and MUST agree: `assemble_effect_chain` stamps
+/// `AbilityDefinition::sub_link` with it, and the referent walk
+/// (`parser::oracle_effect::chain_prior_referent_is_created_token`) predicts,
+/// while still in `ClauseIr` space, whether the clauses it walks past will be
+/// continuation steps. Keeping the match here is what makes those two the same
+/// rule rather than two copies of it.
+pub(crate) fn sub_link_after_boundary(boundary: Option<ClauseBoundary>) -> SubAbilityLink {
+    match boundary {
+        Some(ClauseBoundary::Sentence) => SubAbilityLink::SequentialSibling,
+        Some(ClauseBoundary::Then) | Some(ClauseBoundary::Comma) | None => {
+            SubAbilityLink::ContinuationStep
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

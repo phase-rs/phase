@@ -42,17 +42,17 @@ use lower::{
     apply_where_x_quantity_expression, compute_sentence_where_x, consolidate_die_and_coin_defs,
     extract_deal_damage_multi_target, extract_double_counter_multi_target,
     extract_put_counter_multi_target, extract_remove_counter_multi_target,
-    extract_switch_pt_multi_target, is_token_creating_effect, parse_damage_player_scope,
-    parse_for_each_opponent_target_fanout_clause, rebind_clause_recipients_with,
-    rebind_decline_body_recipient, rebind_subject_only_body_recipient,
-    scan_until_next_same_source_exile_invalidation, split_difference_repeat_suffix,
-    strip_any_number_quantifier, strip_each_player_subject, strip_each_scope_who_cant_subject,
-    strip_each_scope_who_didnt_verb_filter_this_way_subject, strip_each_scope_who_does_subject,
-    strip_each_scope_who_doesnt_subject, strip_for_each_opponent_who_doesnt, strip_for_each_prefix,
-    strip_for_each_repeat_suffix, strip_leading_duration, strip_leading_quantifier,
-    strip_leading_return_destination_ext, strip_leading_sequence_connector,
-    strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
-    strip_repeat_count_suffix, strip_return_destination_ext,
+    extract_switch_pt_multi_target, instruction_spine_is_continuation, is_token_creating_effect,
+    parse_damage_player_scope, parse_for_each_opponent_target_fanout_clause,
+    rebind_clause_recipients_with, rebind_decline_body_recipient,
+    rebind_subject_only_body_recipient, scan_until_next_same_source_exile_invalidation,
+    split_difference_repeat_suffix, strip_any_number_quantifier, strip_each_player_subject,
+    strip_each_scope_who_cant_subject, strip_each_scope_who_didnt_verb_filter_this_way_subject,
+    strip_each_scope_who_does_subject, strip_each_scope_who_doesnt_subject,
+    strip_for_each_opponent_who_doesnt, strip_for_each_prefix, strip_for_each_repeat_suffix,
+    strip_leading_duration, strip_leading_quantifier, strip_leading_return_destination_ext,
+    strip_leading_sequence_connector, strip_optional_effect_prefix, strip_player_scope_subject,
+    strip_redundant_flip_win_quantifier, strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
     trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
     try_parse_distribute_counters, try_parse_distribute_damage,
@@ -18819,18 +18819,69 @@ fn chain_prior_referent_is_chosen_target(clauses: &[ClauseIr]) -> bool {
 /// SAFE direction only over-binds toward `LastCreated`, which the typed-target
 /// re-anchor bail prevents; a chain with no token creator falls through to
 /// `false`, leaving non-token self-triggers at `SelfRef`.
+///
+/// CR 603.12 carve-out to the conditional bail: an AFFIRMATIVE reflexive gate
+/// ("when you do" / "if you do") does NOT bail — see the in-body comment for
+/// why, and for the paired re-link that makes it safe.
 fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
-    for prev in clauses.iter().rev() {
-        if prev.condition.is_some() {
+    // CR 608.2c: does an unbroken continuation path still run from the clause
+    // under inspection forward to the consumer being parsed? This is the
+    // parse-time PREDICTION of `lower::gated_instruction_reaches`, built from the
+    // same two authorities that pass reads off the assembled chain:
+    // `sub_link_after_boundary` (boundary → link) and
+    // `instruction_spine_is_continuation` (the within-clause spine). Consulted
+    // ONLY by the gated-publisher carve-out below — an UNGATED publisher's
+    // referent always exists, so its walk is unchanged.
+    let mut gated_publisher_reaches = true;
+    for (idx, prev) in clauses.iter().enumerate().rev() {
+        // CR 603.12 + CR 608.2c: an AFFIRMATIVE reflexive gate is stamped by
+        // `strip_if_you_do_conditional` onto the clause that FOLLOWS the
+        // connector — which, for a reflexive body that creates its own token
+        // (Iroh, Tea Master; Summoner's Sending), is the token-creating clause
+        // itself. That gate publishes no referent (CR 608.2c: the clause's
+        // effect does), so the token is the chain's most-recent object referent
+        // for a later anaphor in the same body. Every OTHER condition keeps the
+        // bail: for those, `resolve_ability_chain`'s condition-false descent
+        // deliberately still resolves the next independent `SequentialSibling`
+        // instruction, and `state.last_created_token_ids` is a game-lifetime
+        // ledger, so a `LastCreated` seed there would bind a STALE token.
+        if prev
+            .condition
+            .as_ref()
+            .is_some_and(|c| !c.is_affirmative_reflexive_gate())
+        {
             return false;
         }
+        let spine_reaches = prev
+            .parsed
+            .sub_ability
+            .as_deref()
+            .is_none_or(instruction_spine_is_continuation);
         if is_token_creating_effect(&prev.parsed.effect) {
-            return true;
+            // CR 603.12: a GATED publisher may create no token, so seeding
+            // `LastCreated` from it is safe only when
+            // `relink_gated_token_referent_consumers` (lower.rs) will move the
+            // consuming clause INTO the gated instruction — which it does only
+            // when the continuation path is unbroken. Predicting the same
+            // condition here is what keeps the two halves one rule: the seeder
+            // can never bind `LastCreated` on a shape the re-link declines,
+            // which is what would leave a STALE bind behind. Any condition still
+            // present at this point is an affirmative gate (the bail above took
+            // every other value), so `is_none` is exactly "ungated".
+            return prev.condition.is_none() || (gated_publisher_reaches && spine_reaches);
         }
         if has_typed_target_widened(&prev.parsed.effect) {
             // A later explicit typed target re-anchors "it" to itself.
             return false;
         }
+        // This clause is being skipped; record whether it breaks the path. Its
+        // own link comes from the boundary printed BEFORE it — i.e. the boundary
+        // trailing `clauses[idx - 1]`, which is exactly the `prev_boundary` the
+        // assembler stamps it from (every clause advances `prev_boundary`,
+        // including the special/absorbed ones that emit no definition).
+        gated_publisher_reaches &= spine_reaches
+            && sub_link_after_boundary(idx.checked_sub(1).and_then(|p| clauses[p].boundary))
+                == SubAbilityLink::ContinuationStep;
         // Carrier / non-referent clause (e.g. "It gains haste") — keep scanning.
     }
     false
@@ -22360,6 +22411,19 @@ pub(super) fn def_is_dig_look(def: &AbilityDefinition) -> bool {
 /// U6-C5: the template is bound by `AntecedentRole::KeywordCounterPlacement` in
 /// `assembly.rs` and handed in as `template_index`; the replicated siblings are
 /// still pushed onto `defs`.
+///
+/// CR 603.12: each clone carries the template's target VERBATIM and is pushed at
+/// the TAIL of `defs`, so a template that reads a gated publisher's
+/// `TargetFilter::LastCreated` would have that chain-context referent
+/// transplanted past whatever sits in between, where
+/// `lower::relink_gated_token_referent_consumers` can no longer reach it and
+/// `state.last_created_token_ids` — a game-lifetime ledger — would bind a token
+/// from an EARLIER resolution. The caller therefore declines the binding when
+/// `lower::clone_would_transplant_gated_referent` holds — a predicate that
+/// answers by building the clone ([`repeat_process_clone_shape`]) and asking
+/// `lower::relink_gated_token_referent_consumers` whether it lands honestly.
+/// Every other template is replicated as printed (CR 608.2c: the controller
+/// follows the instructions in the order written).
 fn attach_repeat_process_keywords(
     defs: &mut Vec<AbilityDefinition>,
     template_index: usize,
@@ -22367,24 +22431,40 @@ fn attach_repeat_process_keywords(
 ) {
     let template = defs[template_index].clone();
     for keyword in keywords {
-        let mut new_def = template.clone();
+        let mut new_def = repeat_process_clone_shape(&template);
         if let Effect::PutCounter { counter_type, .. } = &mut *new_def.effect {
             *counter_type = CounterType::Keyword(keyword.kind());
         }
         if let Some(condition) = &mut new_def.condition {
             rewrite_ability_condition_keyword(condition, keyword);
         }
-        // Each replicated counter placement is its own sequential instruction.
-        new_def.sub_link = SubAbilityLink::SequentialSibling;
-        // CR 608.2c: each per-keyword sibling is an INDEPENDENT OR-branch gated on
-        // its own keyword, so it must resolve even when a preceding sibling's
-        // condition (K0's graveyard-keyword gate) was false. Without this, K1..Kn
-        // never place their counters once K0's gate fails (the same "list
-        // collapse" bug this marker fixes for Mutable Pupa's perpetual grants).
-        new_def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
-        new_def.sub_ability = None;
         defs.push(new_def);
     }
+}
+
+/// The chain shape every clone pushed by [`attach_repeat_process_keywords`]
+/// carries: a verbatim copy of the template that is its own sequential
+/// instruction with no sub-chain of its own.
+///
+/// Single authority, because `lower::clone_would_transplant_gated_referent`
+/// decides whether the binding is safe by building this exact def and asking
+/// `lower::relink_gated_token_referent_consumers` what it would do with it at
+/// the tail. If the two shapes diverged, the guard would answer a question about
+/// a def the assembler never pushes.
+///
+/// CR 608.2c: each per-keyword sibling is an INDEPENDENT OR-branch gated on its
+/// own keyword, so it must resolve even when a preceding sibling's condition
+/// (K0's graveyard-keyword gate) was false. Without
+/// `SiblingCondition::ReplicatedOrBranch`, K1..Kn never place their counters
+/// once K0's gate fails — the "list collapse" bug fixed for Mutable Pupa's
+/// perpetual grants (#6533). It lives here rather than at the push site so the
+/// guard's simulated clone carries it too.
+pub(super) fn repeat_process_clone_shape(template: &AbilityDefinition) -> AbilityDefinition {
+    let mut new_def = template.clone();
+    new_def.sub_link = SubAbilityLink::SequentialSibling;
+    new_def.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+    new_def.sub_ability = None;
+    new_def
 }
 
 /// Membership mirror for `AntecedentRole::KeywordCounterPlacement` — the shape
