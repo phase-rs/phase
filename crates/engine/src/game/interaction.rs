@@ -3571,6 +3571,16 @@ fn interaction_mana_spell_cost_criterion(
     }
 }
 
+/// Uses the enum's Serde representation, which is the protocol's canonical
+/// keyword vocabulary, instead of its unstable debug representation.
+fn interaction_keyword_kind_code(keyword: crate::types::keywords::KeywordKind) -> String {
+    serde_json::to_value(keyword)
+        .expect("fieldless keyword kinds serialize")
+        .as_str()
+        .expect("fieldless keyword kinds serialize as strings")
+        .to_owned()
+}
+
 fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionManaRestriction {
     match restriction {
         ManaRestriction::OnlyForSpell => InteractionManaRestriction::OnlyForSpell,
@@ -3600,12 +3610,12 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
         ManaRestriction::OnlyForXCosts => InteractionManaRestriction::OnlyForXCosts,
         ManaRestriction::OnlyForSpellWithKeywordKind(keyword) => {
             InteractionManaRestriction::OnlyForSpellWithKeywordKind {
-                keyword: format!("{keyword:?}"),
+                keyword: interaction_keyword_kind_code(*keyword),
             }
         }
         ManaRestriction::OnlyForSpellWithKeywordKindFromZone(keyword, zone) => {
             InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone {
-                keyword: format!("{keyword:?}"),
+                keyword: interaction_keyword_kind_code(*keyword),
                 zone: zone_code(*zone),
             }
         }
