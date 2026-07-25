@@ -9893,6 +9893,19 @@ impl WaitingFor {
     /// - Dig (look at N, keep some): the handler enforces the keep_count /
     ///   up_to constraint, uniqueness, and the selectable-cards filter, and
     ///   preserves the chosen order for library-destined keeps.
+    /// - CR 103.5: mulligan bottoming ("puts a number of those cards... on
+    ///   the bottom of their library in any order") is likewise
+    ///   order-insensitive. `MulliganDecision` folds each player's bottoming
+    ///   obligation into their per-entry `phase`; only pending entries
+    ///   currently in `MulliganDecisionPhase::BottomCards` owe a `SelectCards`
+    ///   response, so the guard checks `pending` for at least one such entry
+    ///   rather than gating on the whole variant unconditionally (a mixed
+    ///   pending set can have some players still in `Declare`).
+    ///   `OpeningHandBottomCards` (TL:R 906.6a/e forced pregame bottoming) has
+    ///   no `Declare` sub-state — every pending entry is unconditionally a
+    ///   bottom-cards obligation — so that variant is freeform unconditionally.
+    ///   Both resolve through the same order-insensitive `validate_bottom_selection`
+    ///   (count + hand-membership only; see `game/mulligan.rs`).
     pub fn accepts_freeform_card_selection(&self) -> bool {
         matches!(
             self,
@@ -9900,6 +9913,13 @@ impl WaitingFor {
                 | WaitingFor::ArrangePlanarDeckTopChoice { .. }
                 | WaitingFor::SurveilChoice { .. }
                 | WaitingFor::DigChoice { .. }
+                | WaitingFor::OpeningHandBottomCards { .. }
+        ) || matches!(
+            self,
+            WaitingFor::MulliganDecision { pending, .. }
+                if pending
+                    .iter()
+                    .any(|entry| matches!(entry.phase, MulliganDecisionPhase::BottomCards { .. }))
         )
     }
 
@@ -20215,6 +20235,67 @@ mod tests {
             enter_tapped: false,
         }
         .accepts_freeform_card_selection());
+        // CR 103.5: mulligan bottoming ("...on the bottom of their library in
+        // any order") is freeform whenever any pending entry currently owes a
+        // BottomCards response.
+        assert!(WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 1,
+                    then: PendingMulliganAction::Keep,
+                },
+            }],
+            free_first_mulligan: false,
+        }
+        .accepts_freeform_card_selection());
+        assert!(WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 1,
+                    then: PendingMulliganAction::UseSerumPowder {
+                        object_id: ObjectId(99),
+                    },
+                },
+            }],
+            free_first_mulligan: false,
+        }
+        .accepts_freeform_card_selection());
+        // Mixed pending set: one Declare entry alongside one BottomCards entry
+        // must still be freeform overall — proves `.any()`, not `.all()` or a
+        // first-element-only check.
+        assert!(WaitingFor::MulliganDecision {
+            pending: vec![
+                MulliganDecisionEntry {
+                    player: PlayerId(0),
+                    mulligan_count: 0,
+                    phase: MulliganDecisionPhase::Declare,
+                },
+                MulliganDecisionEntry {
+                    player: PlayerId(1),
+                    mulligan_count: 1,
+                    phase: MulliganDecisionPhase::BottomCards {
+                        count: 1,
+                        then: PendingMulliganAction::Keep,
+                    },
+                },
+            ],
+            free_first_mulligan: false,
+        }
+        .accepts_freeform_card_selection());
+        // TL:R 906.6a/e: opening-hand forced bottoming is unconditionally
+        // freeform — every pending entry is a bottom-cards obligation.
+        assert!(WaitingFor::OpeningHandBottomCards {
+            pending: vec![MulliganBottomEntry {
+                player: PlayerId(0),
+                count: 1,
+            }],
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        }
+        .accepts_freeform_card_selection());
 
         // A sampling of other selection/decision states must NOT be freeform —
         // they remain validated by candidate enumeration.
@@ -20234,6 +20315,19 @@ mod tests {
             player: PlayerId(0),
             cards: vec![],
             source_id: ObjectId(1),
+        }
+        .accepts_freeform_card_selection());
+        // A MulliganDecision whose pending entries are all still in Declare
+        // (no owed bottom-cards obligation yet) must NOT be freeform — the
+        // Keep/Mulligan/UseSerumPowder declaration itself is not a SelectCards
+        // action at all.
+        assert!(!WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: PlayerId(0),
+                mulligan_count: 0,
+                phase: MulliganDecisionPhase::Declare,
+            }],
+            free_first_mulligan: false,
         }
         .accepts_freeform_card_selection());
     }

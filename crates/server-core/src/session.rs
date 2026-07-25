@@ -3237,6 +3237,164 @@ mod tests {
         assert_eq!(&library[..3], &[c, a, b]);
     }
 
+    /// CR 103.5: mulligan bottoming ("puts a number of those cards... on the
+    /// bottom of their library in any order") is a freeform selection that
+    /// the candidate enumerator does not enumerate in every hand-order
+    /// permutation. Before the freeform-skip fix (GH #6342) the server
+    /// rejected any bottom selection whose order didn't match internal hand
+    /// storage order as "Illegal action". The server must bypass the
+    /// candidate gate for a pending `BottomCards` obligation and let
+    /// `handle_mulligan_bottom` validate count + hand-membership structurally.
+    #[test]
+    fn reordered_mulligan_bottom_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{
+            MulliganDecisionEntry, MulliganDecisionPhase, PendingMulliganAction,
+        };
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if bottom_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut hand = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut session.state,
+                CardId(3000 + i),
+                bottom_player,
+                format!("Bottom Card {i}"),
+                Zone::Hand,
+            );
+            hand.push(id);
+        }
+        let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
+        session.state.waiting_for = WaitingFor::MulliganDecision {
+            pending: vec![MulliganDecisionEntry {
+                player: bottom_player,
+                mulligan_count: 1,
+                phase: MulliganDecisionPhase::BottomCards {
+                    count: 2,
+                    then: PendingMulliganAction::Keep,
+                },
+            }],
+            free_first_mulligan: false,
+        };
+
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, a] });
+        assert!(
+            result.is_ok(),
+            "reordered mulligan bottom selection should be accepted, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let player_idx = bottom_player.0 as usize;
+        let hand_after: Vec<ObjectId> = session.state.players[player_idx]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert!(!hand_after.contains(&a));
+        assert!(!hand_after.contains(&b));
+        let library_after: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert!(library_after.contains(&a));
+        assert!(library_after.contains(&b));
+    }
+
+    /// TL:R 906.6a/e: forced opening-hand bottoming (e.g. Tiny Leaders extra
+    /// commanders) is likewise a freeform, order-insensitive selection. Before
+    /// the freeform-skip fix (GH #6342) a reordered selection was rejected as
+    /// "Illegal action". The server must bypass the candidate gate for
+    /// `OpeningHandBottomCards` and let `handle_opening_hand_bottom` validate
+    /// it structurally.
+    #[test]
+    fn reordered_opening_hand_bottom_selection_is_accepted_not_rejected_as_illegal() {
+        use engine::game::zones::create_object;
+        use engine::types::game_state::{MulliganBottomEntry, OpeningHandBottomReason};
+        use engine::types::identifiers::{CardId, ObjectId};
+        use engine::types::zones::Zone;
+
+        let mut mgr = SessionManager::new();
+        let (code, token0) = mgr.create_game(make_deck());
+        let (token1, _) = mgr.join_game(&code, make_deck()).unwrap();
+
+        let session = mgr.sessions.get_mut(&code).unwrap();
+        let bottom_player = PlayerId(if session.state.active_player == PlayerId(0) {
+            1
+        } else {
+            0
+        });
+        let token = if bottom_player == PlayerId(0) {
+            &token0
+        } else {
+            &token1
+        };
+
+        let mut hand = Vec::new();
+        for i in 0..2 {
+            let id = create_object(
+                &mut session.state,
+                CardId(4000 + i),
+                bottom_player,
+                format!("Opening Bottom Card {i}"),
+                Zone::Hand,
+            );
+            hand.push(id);
+        }
+        let (a, b): (ObjectId, ObjectId) = (hand[0], hand[1]);
+        session.state.waiting_for = WaitingFor::OpeningHandBottomCards {
+            pending: vec![MulliganBottomEntry {
+                player: bottom_player,
+                count: 2,
+            }],
+            reason: OpeningHandBottomReason::TinyLeadersMultiCommander,
+        };
+
+        let token = token.to_string();
+        let result =
+            mgr.handle_action(&code, &token, GameAction::SelectCards { cards: vec![b, a] });
+        assert!(
+            result.is_ok(),
+            "reordered opening-hand bottom selection should be accepted, got: {result:?}"
+        );
+
+        let session = mgr.sessions.get(&code).unwrap();
+        let player_idx = bottom_player.0 as usize;
+        let hand_after: Vec<ObjectId> = session.state.players[player_idx]
+            .hand
+            .iter()
+            .copied()
+            .collect();
+        assert!(!hand_after.contains(&a));
+        assert!(!hand_after.contains(&b));
+        let library_after: Vec<ObjectId> = session.state.players[player_idx]
+            .library
+            .iter()
+            .copied()
+            .collect();
+        assert!(library_after.contains(&a));
+        assert!(library_after.contains(&b));
+    }
+
     /// CR 702.19b: a single-blocker trample attacker's controller may keep all
     /// damage on the blocker (trample_damage:0) instead of trampling the excess
     /// through. `candidates.rs` enumerates only the greedy trample-through split,
