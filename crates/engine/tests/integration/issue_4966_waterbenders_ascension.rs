@@ -339,6 +339,7 @@ fn waterbend_spell_only_mana_does_not_make_ability_available() {
 ///     `is_payable_for_activation`), and
 ///   - the offer gate (`can_activate_ability_now` → `can_pay_ability_cost_now`
 ///     → `costs::can_pay`'s `PaymentScope::Activation` arm).
+///
 /// If the offer gate drops the tag (probing `is_payable` with `None`),
 /// tag-scoped mana is invisible to it: the ability is never generated as a
 /// legal action for the UI/AI even though submitting `ActivateAbility`
