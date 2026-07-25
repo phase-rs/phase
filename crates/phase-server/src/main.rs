@@ -3759,7 +3759,7 @@ async fn handle_client_message(
                             events: ai_events,
                             log_entries: ai_log_entries,
                             legal_actions: ai_legal,
-                            legal_actions_by_object: object_action_payloads(&ai_by_object),
+                            legal_actions_by_object: ai_by_object,
                             spell_costs: ai_spell_costs,
                         })
                         .is_err()

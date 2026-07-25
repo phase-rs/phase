@@ -195,7 +195,8 @@ fn priority_cast_exposes_auto_and_manual_and_opaque_manual_submission_starts_pay
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::CastSpell
+                        code: InteractionActionCode::CastSpell,
+                        ..
                     }
                 )
             }) && choice.surfaces.iter().any(|surface| {
@@ -511,7 +512,8 @@ fn exact_priority_choices_distinguish_two_engine_authored_card_objects() {
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::PlayLand
+                        code: InteractionActionCode::PlayLand,
+                        ..
                     }
                 )
             })
@@ -836,6 +838,7 @@ fn modal_schema_includes_mode_indices_and_engine_descriptions() {
         surface,
         InteractionPresentationSurface::Action {
             code: InteractionActionCode::CancelCast,
+            ..
         }
     )));
     let descriptions: std::collections::HashSet<_> = choices
@@ -995,7 +998,8 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
             matches!(
                 surface,
                 InteractionPresentationSurface::Action {
-                    code: InteractionActionCode::ChooseZoneOpponentChooser
+                    code: InteractionActionCode::ChooseZoneOpponentChooser,
+                    ..
                 }
             )
         })
@@ -1093,7 +1097,8 @@ fn tap_land_for_mana_projects_live_castle_output_per_unit_and_rejects_stale_choi
                 matches!(
                     surface,
                     InteractionPresentationSurface::Action {
-                        code: InteractionActionCode::TapLandForMana
+                        code: InteractionActionCode::TapLandForMana,
+                        ..
                     }
                 )
             }) && choice.surfaces.iter().any(|surface| {
