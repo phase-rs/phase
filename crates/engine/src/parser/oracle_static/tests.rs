@@ -1716,6 +1716,152 @@ fn cost_mod_no_mana_value_gate_unchanged() {
     );
 }
 
+/// CR 208.1 + CR 601.2f (#6375): Goreclaw, Terror of Qal Sisma — "Creature spells
+/// you cast with power 4 or greater cost {2} less to cast." restricts the reduction
+/// to creature spells of power ≥ 4. Before the fix the trailing "with power" gate
+/// sat after the "spells you cast" infix and blocked the type trims, so
+/// `spell_filter` came out `null` and EVERY spell was reduced (the reported bug —
+/// a power-3 creature spell was wrongly reduced 5→3 at base). The gate now folds
+/// into `Typed{ Creature, [PtComparison{ Power, Current, GE, 4 }] }`.
+#[test]
+fn cost_mod_power_gate_creature_ge() {
+    let def = parse_static_line(
+        "Creature spells you cast with power 4 or greater cost {2} less to cast.",
+    )
+    .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    // Revert-guard: reverting the power peel yields `spell_filter: None` (reduces
+    // every spell) — this assertion then fails.
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(Creature + power gate), got {spell_filter:?}");
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "creature type restriction lost: {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::GE,
+            value: QuantityExpr::Fixed { value: 4 },
+        }),
+        "missing power >= 4 gate: {tf:?}"
+    );
+}
+
+/// CR 208.1 (#6375): a "with power N or less" cost-modifier subject folds a
+/// `PtComparison { LE }` power gate — the peel reuses the canonical
+/// `parse_pt_comparison` combinator so every comparator direction is covered.
+#[test]
+fn cost_mod_power_gate_le() {
+    let def =
+        parse_static_line("Creature spells you cast with power 2 or less cost {1} less to cast.")
+            .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(Creature + power gate), got {spell_filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::LE,
+            value: QuantityExpr::Fixed { value: 2 },
+        }),
+        "missing power <= 2 gate: {tf:?}"
+    );
+}
+
+/// CR 208.1 (#6375): a bare "with power N" cost-modifier subject (no "or
+/// greater/less") folds an `EQ` power gate — `parse_pt_comparison_tail` maps the
+/// bare threshold to equality.
+#[test]
+fn cost_mod_power_gate_bare_eq() {
+    let def = parse_static_line("Creature spells you cast with power 4 cost {1} less to cast.")
+        .expect("cost reduction should parse");
+    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
+        panic!("expected ModifyCost, got {:?}", def.mode);
+    };
+    let Some(TargetFilter::Typed(tf)) = spell_filter.as_ref() else {
+        panic!("expected Typed(Creature + power gate), got {spell_filter:?}");
+    };
+    assert!(
+        tf.properties.contains(&FilterProp::PtComparison {
+            stat: PtStat::Power,
+            scope: PtValueScope::Current,
+            comparator: Comparator::EQ,
+            value: QuantityExpr::Fixed { value: 4 },
+        }),
+        "missing power == 4 gate: {tf:?}"
+    );
+}
+
+/// CONTROL (#6375): the fix only touches the cost-modifier subject parser — the
+/// attack-trigger parser is untouched. Goreclaw's whole Oracle text still parses
+/// its ATTACK trigger's affected filter to the same `PtComparison{ Power, GE, 4 }`
+/// on `Typed{ Creature }`, proving the trigger path is unaffected.
+#[test]
+fn cost_mod_power_gate_attack_trigger_control() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Creature spells you cast with power 4 or greater cost {2} less to cast.\n\
+         Whenever Goreclaw, Terror of Qal Sisma attacks, each creature you control \
+         with power 4 or greater gets +1/+1 and gains trample until end of turn.",
+        "Goreclaw, Terror of Qal Sisma",
+        &[],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &["Bear".to_string()],
+    );
+    let power_ge_4 = FilterProp::PtComparison {
+        stat: PtStat::Power,
+        scope: PtValueScope::Current,
+        comparator: Comparator::GE,
+        value: QuantityExpr::Fixed { value: 4 },
+    };
+    // Navigate structurally to the attack trigger's granted continuous static and
+    // assert its affected filter is still a creature-typed filter carrying the same
+    // power gate — the cost-modifier fix must not touch the trigger parser.
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| matches!(t.mode, crate::types::TriggerMode::Attacks))
+        .expect("Goreclaw must parse an attack trigger");
+    let execute = trigger
+        .execute
+        .as_ref()
+        .expect("attack trigger must carry an execute ability");
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = execute.effect.as_ref()
+    else {
+        panic!(
+            "attack trigger must grant a continuous static, got {:?}",
+            execute.effect
+        );
+    };
+    let granted = static_abilities
+        .first()
+        .expect("attack trigger must grant one continuous static");
+    let Some(TargetFilter::Typed(tf)) = granted.affected.as_ref() else {
+        panic!(
+            "granted static must affect a Typed(Creature) filter, got {:?}",
+            granted.affected
+        );
+    };
+    assert!(
+        tf.type_filters.contains(&TypeFilter::Creature),
+        "attack trigger's affected filter must be creature-typed: {tf:?}"
+    );
+    assert!(
+        tf.properties.contains(&power_ge_4),
+        "attack trigger must still gate on power >= 4 (unchanged control): {tf:?}"
+    );
+}
+
 /// CR 105.2 + CR 700.6 + CR 205.4a + CR 601.2f: a BARE-word spell-subject filter
 /// for a cost modifier resolves the full color-CATEGORY axis (colorless /
 /// monocolored / multicolored → `ColorCount`), "historic" (→ `Historic`), a named

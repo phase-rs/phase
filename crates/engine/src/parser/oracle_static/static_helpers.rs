@@ -132,13 +132,30 @@ fn strip_cost_mod_mana_value_qualifier(prefix: &str) -> (&str, Option<FilterProp
     }
 }
 
-/// Compose an optional mana-value `FilterProp::Cmc` (from
-/// `strip_cost_mod_mana_value_qualifier`) into the cost-modifier spell filter.
+/// CR 208.1 + CR 601.2f: Peel a trailing "with power N or greater/less" spell-selection
+/// qualifier off a cost-modifier subject (Goreclaw). Mirrors the mana-value qualifier;
+/// reuses the canonical P/T-comparison combinator so GE/LE/EQ are all covered. Covers the
+/// whole power-gated cost-modifier class, not one card.
+fn parse_cost_mod_power_qualifier(prefix: &str) -> OracleResult<'_, (&str, FilterProp)> {
+    let (rest, before) = take_until(" with power ").parse(prefix)?;
+    let (rest, prop) = nom_filter::parse_pt_comparison(rest.trim_start())?;
+    Ok((rest, (before, prop)))
+}
+fn strip_cost_mod_power_qualifier(prefix: &str) -> (&str, Option<FilterProp>) {
+    match parse_cost_mod_power_qualifier(prefix) {
+        Ok((_, (before, prop))) => (before, Some(prop)),
+        Err(_) => (prefix, None),
+    }
+}
+
+/// Compose an optional qualifier `FilterProp` — a mana-value `Cmc` (from
+/// `strip_cost_mod_mana_value_qualifier`) or a `PtComparison` power gate (from
+/// `strip_cost_mod_power_qualifier`) — into the cost-modifier spell filter.
 /// A typed filter absorbs the prop directly; an `Or` (or any non-`Typed`)
-/// filter is `And`-wrapped with a card+prop leaf; a bare mana-value gate with no
-/// type restriction ("spells you cast with mana value 4 or greater") becomes a
-/// card filter carrying the prop.
-fn compose_cost_mod_mana_value(
+/// filter is `And`-wrapped with a card+prop leaf; a bare gate with no type
+/// restriction ("spells you cast with mana value 4 or greater") becomes a card
+/// filter carrying the prop. `None` is identity (no qualifier present).
+fn compose_cost_mod_qualifier_prop(
     filter: Option<TargetFilter>,
     prop: Option<FilterProp>,
 ) -> Option<TargetFilter> {
@@ -682,6 +699,12 @@ pub(crate) fn try_parse_cost_modification(
         // the type words and the whole type+MV restriction is dropped (The Scarlet
         // Witch reduced EVERY spell, not just instants/sorceries — #5606).
         let (without_chosen, mana_value_prop) = strip_cost_mod_mana_value_qualifier(without_chosen);
+        // CR 208.1 + CR 601.2f: Peel a trailing "with power N or greater/less" gate
+        // (Goreclaw: "Creature spells you cast with power 4 or greater cost {2} less")
+        // the same way. Without peeling, the gate sits after the "spells you cast"
+        // infix and blocks the type trims, dropping the whole type+power restriction
+        // (spell_filter came out null and EVERY spell was reduced — #6375).
+        let (without_chosen, power_prop) = strip_cost_mod_power_qualifier(without_chosen);
         let type_desc = without_chosen
             .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
@@ -732,8 +755,11 @@ pub(crate) fn try_parse_cost_modification(
             (None, true) => Some(TargetFilter::HasChosenName),
             (tf, false) => tf,
         };
-        // CR 202.3: fold the peeled mana-value gate back into the spell filter.
-        compose_cost_mod_mana_value(base_filter, mana_value_prop)
+        // CR 202.3 + CR 208.1: fold the peeled mana-value and power gates back into
+        // the spell filter. MV and power are mutually exclusive on real cards, and
+        // composing with `None` is identity, so ordering is harmless.
+        let base = compose_cost_mod_qualifier_prop(base_filter, mana_value_prop);
+        compose_cost_mod_qualifier_prop(base, power_prop)
     } else {
         None
     };

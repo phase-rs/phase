@@ -3484,6 +3484,45 @@ fn spell_object_matches_property(
                 .get(&spell_id)
                 .is_some_and(|obj| !obj.kickers_paid.is_empty())
         }),
+        // CR 208 + CR 601.2f: Power/toughness-gated cost modifiers (Goreclaw's
+        // "creature spells you cast with power 4 or greater cost {2} less") must read
+        // the LIVE spell object's P/T — the SpellCastRecord snapshot carries none.
+        // Resolve the spell object via the filter context and evaluate against
+        // object_pt_value (the same authority the live matcher uses). CR 208.3: a
+        // noncreature spell has power None → object_pt_value → 0, so a GE gate fails
+        // closed for it. Snapshot-only callers (no context / no spell_object_id) fall
+        // through to the fail-closed record arm, unchanged.
+        FilterProp::PtComparison {
+            stat,
+            scope,
+            comparator,
+            value,
+        } => {
+            let Some(context) = context else {
+                return false;
+            };
+            let Some(spell_id) = context.spell_object_id else {
+                return false;
+            };
+            let Some(spell_obj) = context.state.objects.get(&spell_id) else {
+                return false;
+            };
+            // A dynamic (non-`Fixed`) threshold resolves against the modifier's
+            // SOURCE, not the candidate spell. No in-class card needs that today
+            // (Goreclaw is `Fixed(4)`, and the cost-mod parser cannot yet emit a
+            // P/T-relative threshold), so this is the correct scope for the class;
+            // a future spell-relative threshold would resolve with a spell scope.
+            let threshold = match value {
+                QuantityExpr::Fixed { value } => *value,
+                _ => resolve_quantity(
+                    context.state,
+                    value,
+                    context.source_controller,
+                    context.source_id,
+                ),
+            };
+            comparator.evaluate(object_pt_value(spell_obj, *stat, *scope), threshold)
+        }
         _ => spell_record_matches_property(record, prop),
     }
 }
