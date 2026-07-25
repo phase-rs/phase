@@ -395,6 +395,45 @@ fn matching_batched_trigger_events(
         .collect()
 }
 
+/// CR 508.1 + CR 603.2: Split an attack declaration into the singleton event
+/// contexts required by an event-referential attacker demonstrative. A plural
+/// declaration has no single object for "that Wolf" to bind.
+fn singleton_attack_events(
+    defending_player: PlayerId,
+    attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
+) -> Vec<GameEvent> {
+    attacks
+        .into_iter()
+        .map(|(attacker, target)| GameEvent::AttackersDeclared {
+            attacker_ids: vec![attacker],
+            defending_player,
+            attacks: vec![(attacker, target)],
+        })
+        .collect()
+}
+
+fn split_attack_event_into_singletons(event: &GameEvent) -> Option<Vec<GameEvent>> {
+    let GameEvent::AttackersDeclared {
+        defending_player,
+        attacker_ids,
+        attacks,
+    } = event
+    else {
+        return None;
+    };
+    let matching_attacks = attacker_ids
+        .iter()
+        .map(|attacker| {
+            let target = attacks
+                .iter()
+                .find_map(|(attacker_id, target)| (*attacker_id == *attacker).then_some(*target))
+                .unwrap_or(crate::game::combat::AttackTarget::Player(*defending_player));
+            (*attacker, target)
+        })
+        .collect();
+    Some(singleton_attack_events(*defending_player, matching_attacks))
+}
+
 fn contextual_batched_trigger_event(
     state: &GameState,
     event: &GameEvent,
@@ -1440,6 +1479,24 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if matches!(trig_def.mode, TriggerMode::YouAttack)
+                && ability.has_event_source_force_block_recursive()
+            {
+                let matching = super::trigger_matchers::matching_you_attack_pairs(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                );
+                match event {
+                    GameEvent::AttackersDeclared {
+                        defending_player, ..
+                    } => singleton_attack_events(*defending_player, matching),
+                    _ => Vec::new(),
+                }
+                .into_iter()
+                .map(|trigger_event| vec![trigger_event])
+                .collect()
             } else if matches!(trig_def.mode, TriggerMode::Blocks) {
                 super::trigger_matchers::matching_block_events(
                     event,
@@ -1499,6 +1556,16 @@ fn collect_matching_triggers_inner(
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
+            } else if ability.has_event_source_force_block_recursive() {
+                // CR 603.2 + CR 608.2c: every event-source force-block branch
+                // owns one unambiguous attacker. The ordinary attack modes
+                // above narrow by their own matcher; this fallback preserves
+                // singleton identity for any additional attack trigger mode.
+                split_attack_event_into_singletons(event)
+                    .unwrap_or_else(|| vec![event.clone()])
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
             } else {
                 vec![vec![event.clone()]]
             };
@@ -5920,6 +5987,25 @@ pub(crate) fn take_pending_trigger_event_batch(
     }
 }
 
+/// CR 603.3d + CR 509.1c: Extract the one unambiguous attacker named by a
+/// singleton attack trigger. Trigger construction completes before priority, so
+/// this reads the same live incarnation that the stack-push binding observed.
+fn event_attacker_from_trigger_event(
+    state: &GameState,
+    trigger_event: Option<&GameEvent>,
+) -> Option<ObjectIncarnationRef> {
+    let GameEvent::AttackersDeclared { attacker_ids, .. } = trigger_event? else {
+        return None;
+    };
+    let [attacker_id] = attacker_ids.as_slice() else {
+        return None;
+    };
+    state
+        .objects
+        .get(attacker_id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
 /// CR 603.3 + CR 603.3c + CR 603.3d: Push a pending trigger to the stack with
 /// its event batch keyed by entry id. Returns the new entry's `ObjectId` so
 /// callers can stash it in `state.pending_trigger_entry` when the entry is
@@ -6026,6 +6112,11 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
     if let Some(origin) = may_trigger_origin {
         ability.set_may_trigger_origin_recursive(origin);
     }
+    // CR 400.7 + CR 509.1c: Bind either grammatical named-attacker form at
+    // stack creation. In particular, "that Wolf" is the exact object from the
+    // narrowed attack-trigger event, not the triggered ability's source.
+    let event_attacker = event_attacker_from_trigger_event(state, trigger_event.as_ref());
+    ability.bind_force_block_attacker_recursive(event_attacker);
     seed_batched_attack_parent_targets(&mut ability, trigger_event.as_ref());
     seed_event_context_parent_targets(&mut ability, trigger_event.as_ref());
 
@@ -6193,6 +6284,25 @@ fn assign_pending_trigger_entry_ability(
     entry_id: ObjectId,
     source_ability: &ResolvedAbility,
 ) -> bool {
+    let trigger_event = state
+        .stack
+        .iter()
+        .rev()
+        .find(|entry| entry.id == entry_id)
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.as_ref(),
+            _ => None,
+        });
+    let mut assigned_ability = source_ability.clone();
+    // CR 603.3d: Target/mode construction replaces the provisional stack
+    // ability before any player receives priority. Rebind event-referential
+    // force-blocks here so that replacement cannot discard the stack-time
+    // identity for "that Wolf".
+    assigned_ability.bind_force_block_attacker_recursive(event_attacker_from_trigger_event(
+        state,
+        trigger_event,
+    ));
+
     let Some(entry) = state
         .stack
         .iter_mut()
@@ -6204,7 +6314,7 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
-    *ability = source_ability.clone();
+    *ability = assigned_ability;
     true
 }
 
@@ -8106,6 +8216,16 @@ fn evaluate_trigger_condition_with_source(
         TriggerCondition::Descended => player_field(state, controller, |p| p.descended_this_turn),
         TriggerCondition::SourceEnteredThisTurn => source_context.is_some_and(|source| {
             source.source_read(state).entered_battlefield_turn() == Some(state.turn_number)
+        }),
+        // CR 400.7 + CR 508.1 + CR 603.4: the condition is tied to the
+        // trigger source's observed incarnation, not its storage id. It is
+        // checked both when the trigger is created and when it resolves.
+        TriggerCondition::SourceAttackedThisCombat => source_context.is_some_and(|source| {
+            state.combat.as_ref().is_some_and(|combat| {
+                combat
+                    .attacking_incarnations_this_combat
+                    .contains(&source.identity.reference)
+            })
         }),
         TriggerCondition::EchoDue => {
             source_context.is_some_and(|source| source.source_read(state).echo_due())
@@ -10049,6 +10169,11 @@ pub(super) fn build_triggered_ability_from_context(
             resolved.set_scoped_player_recursive(state.active_player);
         }
         resolved.set_trigger_source_recursive(source_context.clone());
+        // CR 400.7 + CR 509.1c: Source-referential force-block instructions
+        // latch their source incarnation as soon as the triggered ability is
+        // instantiated. EventSource remains intentionally unbound until the
+        // individual attack event is attached below.
+        resolved.bind_force_block_attacker_recursive(None);
         if let Some(definition_ref) = definition_ref {
             resolved.set_trigger_definition_ref_recursive(definition_ref.clone());
         }
@@ -12080,6 +12205,170 @@ pub mod tests {
                 },
             ],
             "CR 509.3d creates one stack trigger per qualifying blocker"
+        );
+    }
+
+    /// CR 603.3 + CR 508.1 + CR 509.1c: Tolsimir's source-referential
+    /// intervening-if and its event-referential "that Wolf" are different
+    /// identities. The parsed trigger must bind the attacking Wolf at stack
+    /// creation and force the chosen opposing creature to block that Wolf, not
+    /// Tolsimir. If Tolsimir did not attack, no trigger is created.
+    #[test]
+    fn tolsimir_attack_trigger_runs_from_parser_through_stack_to_block_legality() {
+        use crate::game::combat::{validate_blockers, AttackTarget, AttackerInfo, CombatState};
+        use crate::types::actions::GameAction;
+
+        const ORACLE: &str = "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, target creature an opponent controls blocks that Wolf this combat if able.";
+
+        let parsed =
+            crate::parser::oracle_trigger::parse_trigger_line(ORACLE, "Tolsimir, Midnight's Light");
+
+        let mut no_tolsimir_attack = setup();
+        let inactive_tolsimir = make_creature(
+            &mut no_tolsimir_attack,
+            PlayerId(0),
+            "Tolsimir, Midnight's Light",
+            3,
+            4,
+        );
+        let inactive_wolf = make_creature(&mut no_tolsimir_attack, PlayerId(0), "Wolf", 2, 2);
+        {
+            let wolf = no_tolsimir_attack
+                .objects
+                .get_mut(&inactive_wolf)
+                .expect("wolf exists");
+            wolf.card_types.subtypes.push("Wolf".to_string());
+            wolf.base_card_types = wolf.card_types.clone();
+        }
+        let inactive = no_tolsimir_attack
+            .objects
+            .get_mut(&inactive_tolsimir)
+            .expect("Tolsimir exists");
+        inactive.trigger_definitions.push(parsed.clone());
+        std::sync::Arc::make_mut(&mut inactive.base_trigger_definitions).push(parsed.clone());
+        no_tolsimir_attack.layers_dirty.mark_full();
+        no_tolsimir_attack.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                inactive_wolf,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            )],
+            ..CombatState::default()
+        });
+        let inactive_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![inactive_wolf],
+            defending_player: PlayerId(1),
+            attacks: vec![(inactive_wolf, AttackTarget::Player(PlayerId(1)))],
+        };
+        assert!(
+            collect_pending_triggers(&mut no_tolsimir_attack, &[inactive_event]).is_empty(),
+            "the intervening-if prevents the trigger when Tolsimir did not attack"
+        );
+
+        let mut state = setup();
+        let tolsimir = make_creature(&mut state, PlayerId(0), "Tolsimir, Midnight's Light", 3, 4);
+        let wolf = make_creature(&mut state, PlayerId(0), "First Wolf", 2, 2);
+        let second_wolf = make_creature(&mut state, PlayerId(0), "Second Wolf", 2, 2);
+        let blocker = make_creature(&mut state, PlayerId(1), "Opponent Bear", 2, 2);
+        let second_blocker = make_creature(&mut state, PlayerId(1), "Opponent Elk", 2, 2);
+        for wolf_id in [wolf, second_wolf] {
+            let wolf = state.objects.get_mut(&wolf_id).expect("wolf exists");
+            wolf.card_types.subtypes.push("Wolf".to_string());
+            wolf.base_card_types = wolf.card_types.clone();
+        }
+        let source = state.objects.get_mut(&tolsimir).expect("Tolsimir exists");
+        source.trigger_definitions.push(parsed.clone());
+        std::sync::Arc::make_mut(&mut source.base_trigger_definitions).push(parsed);
+        state.layers_dirty.mark_full();
+        let attacking_incarnations_this_combat = [tolsimir, wolf, second_wolf]
+            .into_iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id]))
+            .collect();
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::new(tolsimir, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+                AttackerInfo::new(wolf, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+                AttackerInfo::new(second_wolf, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
+            ],
+            attacking_incarnations_this_combat,
+            ..CombatState::default()
+        });
+        let attack_event = GameEvent::AttackersDeclared {
+            attacker_ids: vec![wolf, second_wolf],
+            defending_player: PlayerId(1),
+            attacks: vec![
+                (wolf, AttackTarget::Player(PlayerId(1))),
+                (second_wolf, AttackTarget::Player(PlayerId(1))),
+            ],
+        };
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::SourceAttackedThisCombat,
+                PlayerId(0),
+                Some(tolsimir),
+                Some(&attack_event),
+            ),
+            "Tolsimir's observed incarnation attacked during this combat"
+        );
+        let pending = collect_pending_triggers(&mut state, std::slice::from_ref(&attack_event));
+        assert_eq!(
+            pending.len(),
+            2,
+            "each matching Wolf receives an individual event-bound trigger"
+        );
+        for (attacker, target) in [(wolf, blocker), (second_wolf, second_blocker)] {
+            let singleton_event = GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker],
+                defending_player: PlayerId(1),
+                attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            };
+            process_triggers(&mut state, &[singleton_event]);
+            let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+                .expect("target selection setup must succeed")
+                .expect("Tolsimir trigger must request its target");
+            let WaitingFor::TriggerTargetSelection { target_slots, .. } = &waiting else {
+                panic!("expected trigger target selection, got {waiting:?}");
+            };
+            assert_eq!(
+                target_slots.len(),
+                1,
+                "the parsed target survives to stack setup"
+            );
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(target)),
+                "production target selection must expose the chosen opposing creature"
+            );
+            state.waiting_for = waiting;
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                },
+            )
+            .expect("production target choice must succeed");
+        }
+        let mut resolution_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        // CR 613.1: ForceBlock installs a transient continuous effect; blocker
+        // validation reads its layer-applied static definition.
+        crate::game::layers::flush_layers(&mut state);
+
+        assert!(
+            validate_blockers(&state, &[]).is_err(),
+            "the selected creature must block the event Wolf if able"
+        );
+        assert!(
+            validate_blockers(&state, &[(blocker, wolf), (second_blocker, second_wolf)]).is_ok(),
+            "each selected creature must block its own event Wolf"
+        );
+        assert!(
+            validate_blockers(&state, &[(blocker, second_wolf), (second_blocker, wolf)]).is_err(),
+            "the two event-attacker bindings cannot cross"
         );
     }
 
@@ -27592,6 +27881,7 @@ pub mod tests {
             timestamp: 1,
             duration: Duration::Permanent,
             affected: TargetFilter::SpecificObject { id: recipient },
+            affected_recipient: None,
             modifications: vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Suspend {
                     count: 0,
@@ -27687,6 +27977,7 @@ pub mod tests {
                 affected: TargetFilter::SpecificObject {
                     id: exile_recipient,
                 },
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Suspend {
                         count: 0,
@@ -27827,6 +28118,7 @@ pub mod tests {
                     timestamp: 1 + i as u64,
                     duration: Duration::Permanent,
                     affected: TargetFilter::SpecificObject { id: card },
+                    affected_recipient: None,
                     modifications: vec![ContinuousModification::AddKeyword {
                         keyword: Keyword::Suspend {
                             count: 0,
@@ -28658,7 +28950,7 @@ pub mod tests {
             | Keyword::LivingMetal
             | Keyword::Bloodthirst(_)
             | Keyword::Amplify(_)
-            | Keyword::Devour(_)
+            | Keyword::Devour { .. }
             | Keyword::Toxic(_)
             | Keyword::Saddle(_)
             | Keyword::Teamwork(_)

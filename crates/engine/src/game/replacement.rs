@@ -69,6 +69,34 @@ const FINALITY_COUNTER_INDEX: usize = usize::MAX - 5;
 /// card-granted `ReplacementDefinition`, so it uses the existing virtual-ID
 /// protocol shared by intrinsic shield, finality, and compleated effects.
 const COMMANDER_HAND_OR_LIBRARY_RETURN_INDEX: usize = usize::MAX - 6;
+/// CR 702.44a + CR 702.44d: Granted Sunburst — a virtual `Moved`→Battlefield
+/// ETB-counter replacement keyed on the entering spell that was GRANTED
+/// sunburst ("that spell gains sunburst": Solar Array / Lux Artillery). Printed
+/// sunburst is baked as an object-carried `ReplacementDefinition` at synthesis
+/// time (`synthesize_sunburst`); a runtime grant adds a keyword but no
+/// replacement definition, so this reserved candidate surfaces one virtual ETB
+/// replacement per GRANTED instance (base-subtracted, mirroring
+/// `synthesize_granted_keyword_triggers`). CR 702.44d — printed + granted
+/// instances each yield a distinct candidate and apply separately. Only the
+/// entering object's own granted sunburst is at issue, so the reserved index is
+/// keyed on the entering object.
+///
+/// Sunburst and Bloodthirst share the SAME structural gap — a printed as-enters
+/// keyword synthesized into object-carried replacements, versus a runtime grant
+/// that adds only the keyword — so they share the count/apply core
+/// (`granted_keyword_etb_instances`, `apply_granted_keyword_etb_replacement`);
+/// only the reserved index and per-instance-definition builder differ. Any future
+/// granted as-enters keyword adds one more reserved index feeding the same core.
+const GRANTED_SUNBURST_INDEX: usize = usize::MAX - 7;
+/// CR 702.54a + CR 702.54c: Granted Bloodthirst — the Bloodthirst analogue of
+/// `GRANTED_SUNBURST_INDEX`. Bloodlord of Vaasgoth's "Whenever you cast a Vampire
+/// creature spell, it gains bloodthirst 3" adds only the keyword to the cast
+/// spell; printed Bloodthirst is synthesized into carried replacements by
+/// `synthesize_bloodthirst`, so this reserved candidate surfaces one virtual ETB
+/// replacement per GRANTED Bloodthirst instance. Unlike Sunburst, the fixed-N
+/// form is CONDITIONAL (an opponent must have been dealt damage this turn), so the
+/// shared applier honors each granted instance's carried `condition`.
+const GRANTED_BLOODTHIRST_INDEX: usize = usize::MAX - 8;
 
 /// CR 109.4 + CR 108.4a: Cards outside the battlefield/stack have no
 /// controller; if an effect asks for a card's controller, use its owner
@@ -222,6 +250,174 @@ fn object_has_finality_counter(state: &GameState, object_id: ObjectId) -> bool {
         .is_some_and(|count| *count > 0)
 }
 
+/// The reserved virtual-candidate index for each granted as-enters keyword family
+/// (Sunburst, Bloodthirst). One reserved id per keyword feeds the shared
+/// count/apply core, so the applier recovers WHICH keyword's per-instance
+/// definitions to place from `rid.index` alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrantedEtbKeyword {
+    Sunburst,
+    Bloodthirst,
+}
+
+impl GrantedEtbKeyword {
+    fn from_index(index: usize) -> Option<Self> {
+        match index {
+            GRANTED_SUNBURST_INDEX => Some(Self::Sunburst),
+            GRANTED_BLOODTHIRST_INDEX => Some(Self::Bloodthirst),
+            _ => None,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Sunburst => GRANTED_SUNBURST_INDEX,
+            Self::Bloodthirst => GRANTED_BLOODTHIRST_INDEX,
+        }
+    }
+}
+
+fn granted_etb_keyword_replacement_id(object_id: ObjectId, kw: GrantedEtbKeyword) -> ReplacementId {
+    ReplacementId {
+        source: object_id,
+        index: kw.index(),
+    }
+}
+
+fn is_granted_etb_keyword_replacement(rid: ReplacementId) -> bool {
+    GrantedEtbKeyword::from_index(rid.index).is_some()
+}
+
+/// CR 604.1 + CR 613.1f: The count of GRANTED instances of `keyword` on
+/// `object_id` matching `predicate` — the object's EFFECTIVE matching-keyword
+/// count minus its printed (base) matching count.
+///
+/// Printed as-enters keywords (Sunburst, Bloodthirst) are realized through
+/// object-carried `ReplacementDefinition`s at synthesis time; only the granted
+/// instances need a virtual candidate, so subtract `base_keywords` (mirrors
+/// `synthesize_granted_keyword_triggers`). A printed-only keyword returns 0 here —
+/// its counters come from the carried definitions, never this path — which keeps
+/// printed + granted double-applying (CR 702.44d / CR 702.54c).
+///
+/// CRITICAL: the entering spell is still on the STACK when its entry replacement
+/// pipeline runs, and a granted keyword exists only as a continuous effect at that
+/// moment — `obj.keywords` is NOT yet materialized for stack objects.
+/// `effective_off_zone_keywords` is the single authority that resolves the live
+/// keyword list for any zone (materialized list for battlefield objects; base +
+/// ordered continuous grants, including transient effects, for stack/off-zone
+/// objects — CR 613.1f recursion-guarded).
+///
+/// `predicate` keys the count to a specific keyword identity: `Sunburst` is
+/// parameter-less (match the variant); `Bloodthirst(v)` must match a distinct
+/// value so a granted `bloodthirst 3` on top of a printed `bloodthirst 1` counts
+/// one granted 3 and one printed 1 separately (CR 702.54c).
+fn granted_keyword_etb_instances(
+    state: &GameState,
+    object_id: ObjectId,
+    live_keywords: &[crate::types::keywords::Keyword],
+    predicate: impl Fn(&crate::types::keywords::Keyword) -> bool,
+) -> usize {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return 0;
+    };
+    let live = live_keywords.iter().filter(|kw| predicate(kw)).count();
+    let base = obj.base_keywords.iter().filter(|kw| predicate(kw)).count();
+    live.saturating_sub(base)
+}
+
+/// CR 702.44d: number of GRANTED sunburst instances (parameter-less).
+fn granted_sunburst_instances(
+    state: &GameState,
+    object_id: ObjectId,
+    live_keywords: &[crate::types::keywords::Keyword],
+) -> usize {
+    granted_keyword_etb_instances(state, object_id, live_keywords, |kw| {
+        matches!(kw, crate::types::keywords::Keyword::Sunburst)
+    })
+}
+
+/// CR 702.54c: The GRANTED Bloodthirst instances on `object_id`, one entry per
+/// granted instance carrying its `BloodthirstValue`. Counted per DISTINCT value
+/// (effective-minus-base per value) exactly as `synthesize_bloodthirst` emits one
+/// printed replacement per value, so a granted `bloodthirst 3` on a printed
+/// `bloodthirst 1` yields exactly one granted-3 entry here.
+fn granted_bloodthirst_instances(
+    state: &GameState,
+    object_id: ObjectId,
+    live_keywords: &[crate::types::keywords::Keyword],
+) -> Vec<crate::types::keywords::BloodthirstValue> {
+    use crate::types::keywords::Keyword;
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    let live = live_keywords;
+    let distinct_values: Vec<_> = live
+        .iter()
+        .filter_map(|kw| match kw {
+            Keyword::Bloodthirst(v) => Some(v.clone()),
+            _ => None,
+        })
+        .fold(Vec::new(), |mut acc, v| {
+            if !acc.contains(&v) {
+                acc.push(v);
+            }
+            acc
+        });
+    let mut granted = Vec::new();
+    for value in distinct_values {
+        let live_n = live
+            .iter()
+            .filter(|kw| matches!(kw, Keyword::Bloodthirst(v) if *v == value))
+            .count();
+        let base_n = obj
+            .base_keywords
+            .iter()
+            .filter(|kw| matches!(kw, Keyword::Bloodthirst(v) if *v == value))
+            .count();
+        for _ in 0..live_n.saturating_sub(base_n) {
+            granted.push(value.clone());
+        }
+    }
+    granted
+}
+
+/// Whether the granted `kw` virtual candidate should surface for `object_id` at
+/// `event` — i.e. there is at least one granted instance whose carried condition
+/// (if any) holds. This mirrors the PRINTED replacement path, which evaluates a
+/// definition's `condition` at candidate-registration time and does not surface a
+/// candidate whose condition is unmet (so a condition-unmet granted Bloodthirst
+/// raises no spurious CR 616.1 ordering prompt). Sunburst definitions carry no
+/// condition, so this reduces to "has at least one granted instance."
+///
+/// The applier (`apply_granted_keyword_etb_replacement`) re-derives and re-checks
+/// the same per-instance definitions, so registration and application agree.
+fn granted_etb_keyword_candidate_applies(
+    state: &GameState,
+    object_id: ObjectId,
+    kw: GrantedEtbKeyword,
+    event: &ProposedEvent,
+    live_keywords: &[crate::types::keywords::Keyword],
+) -> bool {
+    let controller = state
+        .objects
+        .get(&object_id)
+        .map(replacement_source_player)
+        .unwrap_or(state.active_player);
+    granted_etb_replacement_definitions(state, object_id, kw, live_keywords)
+        .iter()
+        .any(|definition| match &definition.condition {
+            Some(cond) => evaluate_replacement_condition(
+                cond,
+                controller,
+                object_id,
+                state,
+                event.affected_object_id(),
+                event,
+            ),
+            None => true,
+        })
+}
+
 fn compleated_life_paid(state: &GameState, object_id: ObjectId) -> Option<u32> {
     state.objects.get(&object_id).and_then(|obj| {
         (obj.phyrexian_life_paid > 0
@@ -327,6 +523,168 @@ fn apply_compleated_replacement(
         }
         other => other,
     }
+}
+
+/// Build the per-instance `ReplacementDefinition`s for each GRANTED as-enters
+/// keyword instance on `object_id`, using the same shared authority the printed
+/// synthesizer uses so a granted spell places exactly the counters a printed one
+/// would (CR 702.44d / CR 702.54c: each instance works separately).
+///
+/// - Sunburst: N identical copies of `sunburst_replacement_definition`, branching
+///   the counter type on the entering object's PRINTED core types (CR 702.44a).
+/// - Bloodthirst: one `bloodthirst_replacement_definition(value)` per granted
+///   instance, each carrying its own `condition` (CR 702.54a fixed-N is gated on
+///   an opponent having been dealt damage this turn).
+///
+/// `live_keywords` is the already-resolved off-zone keyword list for `object_id`
+/// (`effective_off_zone_keywords`). It is threaded in rather than re-derived per
+/// keyword family because that resolution runs a whole-game continuous-effect
+/// collect, and this function sits on the `find_applicable_replacements` hot path.
+fn granted_etb_replacement_definitions(
+    state: &GameState,
+    object_id: ObjectId,
+    kw: GrantedEtbKeyword,
+    live_keywords: &[crate::types::keywords::Keyword],
+) -> Vec<ReplacementDefinition> {
+    match kw {
+        GrantedEtbKeyword::Sunburst => {
+            let instances = granted_sunburst_instances(state, object_id, live_keywords);
+            // CR 702.44a: sunburst branches on whether the object is entering as a
+            // creature "ignoring any type-changing effects that would affect it" —
+            // i.e. on its PRINTED (characteristic-defining) core types. `card_types`
+            // is the LIVE layer result and type-changing effects do reach stack
+            // objects (CR 613.1d, via `remote_type_layer_recipients`), so reading it
+            // here would honor exactly the effects the rule says to ignore.
+            // `base_card_types` is seeded from the same `card_face.card_type` the
+            // printed synthesizer branches on (`synthesize_sunburst`), keeping the
+            // granted and printed paths identical.
+            let counter_type = state
+                .objects
+                .get(&object_id)
+                .filter(|obj| obj.base_card_types.core_types.contains(&CoreType::Creature))
+                .map(|_| CounterType::Plus1Plus1)
+                .unwrap_or_else(|| CounterType::Generic("charge".to_string()));
+            let definition =
+                crate::database::synthesis::sunburst_replacement_definition(&counter_type);
+            std::iter::repeat_n(definition, instances).collect()
+        }
+        GrantedEtbKeyword::Bloodthirst => {
+            granted_bloodthirst_instances(state, object_id, live_keywords)
+                .iter()
+                .map(crate::database::synthesis::bloodthirst_replacement_definition)
+                .collect()
+        }
+    }
+}
+
+/// CR 702.44a + CR 702.44d + CR 702.54a + CR 702.54c + CR 614.1c: Apply a granted
+/// as-enters-keyword virtual ETB replacement (Sunburst or Bloodthirst) — fold the
+/// as-enters counters onto the entering spell's `ZoneChange`, one placement group
+/// per GRANTED instance.
+///
+/// Each per-instance `ReplacementDefinition` comes from the same shared authority
+/// the printed synthesizer uses (`granted_etb_replacement_definitions`), so a
+/// granted spell places exactly the counters a printed one would; the count is
+/// resolved by `event_modifiers_for_ability` against the entering spell so a
+/// self-scoped quantity ref (Sunburst's `ManaSpentToCast`, Bloodthirst X's damage
+/// total) reads its own cast/damage context (CR 601.2h).
+///
+/// CR 702.54a — Bloodthirst is CONDITIONAL: each granted instance whose carried
+/// `condition` is unmet (no opponent dealt damage this turn) contributes ZERO
+/// counters, routed through the SAME `evaluate_replacement_condition` seam the
+/// printed Bloodthirst path uses. Sunburst definitions carry `condition: None`
+/// and are always applied.
+///
+/// One `enter_with_counters` group is pushed per granted instance (CR 702.44d /
+/// CR 702.54c: each instance works separately), so a counter-doubling replacement
+/// (Doubling Season) doubles each instance's placement independently, exactly as
+/// it would for multiple printed instances.
+fn apply_granted_keyword_etb_replacement(
+    state: &mut GameState,
+    mut event: ProposedEvent,
+    rid: ReplacementId,
+    events: &mut Vec<GameEvent>,
+) -> ProposedEvent {
+    let Some(kw) = GrantedEtbKeyword::from_index(rid.index) else {
+        return event;
+    };
+    // The candidate is keyed on the entering object; bail unchanged if the ids
+    // diverged (defensive) or the event is not the entering spell's ZoneChange.
+    let ProposedEvent::ZoneChange { object_id, .. } = &event else {
+        return event;
+    };
+    if *object_id != rid.source {
+        return event;
+    }
+
+    let live_keywords =
+        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, rid.source);
+    let definitions = granted_etb_replacement_definitions(state, rid.source, kw, &live_keywords);
+    if definitions.is_empty() {
+        return event;
+    }
+
+    // CR 110.2a: a battlefield-entry replacement's condition is evaluated relative
+    // to the entering object's controller (its owner while still on the stack).
+    let controller = state
+        .objects
+        .get(&rid.source)
+        .map(replacement_source_player)
+        .unwrap_or(state.active_player);
+
+    // Resolve each granted instance's counter group, honoring its carried
+    // condition (CR 702.54a Bloodthirst gate), then fold them onto the event.
+    let mut instance_counter_groups: Vec<Vec<_>> = Vec::new();
+    for definition in &definitions {
+        // CR 614.1d + CR 702.54a: skip a granted instance whose condition is unmet
+        // (Bloodthirst fixed-N: no opponent dealt damage this turn). Sunburst's
+        // definition has `condition: None`, so it is always applied.
+        if let Some(cond) = &definition.condition {
+            if !evaluate_replacement_condition(
+                cond,
+                controller,
+                rid.source,
+                state,
+                event.affected_object_id(),
+                &event,
+            ) {
+                continue;
+            }
+        }
+        let modifiers =
+            event_modifiers_for_ability(definition.execute.as_deref(), state, rid.source, &event);
+        if !modifiers.etb_counters.is_empty() {
+            instance_counter_groups.push(modifiers.etb_counters);
+        }
+    }
+    if instance_counter_groups.is_empty() {
+        // No instance placed counters (e.g. Bloodthirst condition unmet, or zero
+        // colors of mana spent): the event passes through unchanged. `rid` is
+        // already recorded in `applied` by the pipeline's `mark_applied`.
+        return event;
+    }
+
+    // Gemini nit (#5802 review): mutate `enter_with_counters` in place on the
+    // event rather than reconstructing every `ZoneChange` field — this survives
+    // new field additions to the variant (no field is manually re-listed).
+    if let ProposedEvent::ZoneChange {
+        enter_with_counters,
+        ..
+    } = &mut event
+    {
+        // CR 702.44d / CR 702.54c: one placement group per granted instance.
+        for group in instance_counter_groups {
+            enter_with_counters.extend(group);
+        }
+    }
+    // The candidate id is already recorded in `applied` by the pipeline's
+    // `mark_applied(rid)` before this applier runs (`for_event`-keyed), so the
+    // `applied` set is threaded through unchanged — no manual re-insert.
+    events.push(GameEvent::ReplacementApplied {
+        source_id: rid.source,
+        event_type: ReplacementEvent::Moved.to_string(),
+    });
+    event
 }
 
 /// CR 614.1: Replacement effects modify events as they would occur.
@@ -542,123 +900,77 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                         .iter()
                         .all(|candidate| candidate.is_optional);
                 let count = pending_replacement_option_count(state, p);
-                let cands: Vec<ReplacementCandidateSummary> =
-                    if p.is_optional && !p.search_found_candidates.is_empty() {
-                        let candidate = &p.search_found_candidates[0];
-                        vec![
-                            ReplacementCandidateSummary {
-                                source_id: candidate.disposition.source.object_id,
-                                source_name: candidate.source_name.clone(),
-                                description: candidate.description.clone(),
-                            },
-                            ReplacementCandidateSummary {
-                                source_id: candidate.disposition.source.object_id,
-                                source_name: candidate.source_name.clone(),
-                                description: "Decline".to_string(),
-                            },
-                        ]
-                    } else if !p.search_found_candidates.is_empty() {
-                        let mut candidates: Vec<_> = p
-                            .search_found_candidates
-                            .iter()
-                            .map(|candidate| ReplacementCandidateSummary {
-                                source_id: candidate.disposition.source.object_id,
-                                source_name: candidate.source_name.clone(),
-                                description: candidate.description.clone(),
-                            })
-                            .collect();
-                        if all_search_found_candidates_optional {
-                            candidates.push(ReplacementCandidateSummary {
-                                source_id: ObjectId(0),
-                                source_name: String::new(),
-                                description: "Use the original found-card destination".to_string(),
-                            });
-                        }
-                        candidates
-                    } else if p.is_optional {
-                        // CR 616.1: replacement-effect choices belong to the affected
-                        // object's controller/owner or the affected player. An optional
-                        // "you may" is one source shown as two branches — both carry
-                        // `candidates[0].source`.
-                        let source_id = p.candidates.first().map(|rid| rid.source);
-                        let (accept_desc, decline_desc) = p
-                            .candidates
-                            .first()
-                            .and_then(|rid| replacement_definition_for_id(state, *rid))
-                            .map(|repl| match &repl.mode {
-                                ReplacementMode::MayCost { cost, .. } => {
-                                    (replacement_cost_description(cost), "Decline".to_string())
-                                }
-                                // CR 702.136a (Riot) / CR 702.98a (Unleash): label an
-                                // Optional replacement's accept branch by the
-                                // replacement's own `description` (which names its source
-                                // keyword, e.g. "Riot — ..." / "Unleash — ..."), falling
-                                // back to the `execute` effect text when there is none.
-                                // The decline branch, when it is a distinct outcome
-                                // (e.g. Riot's "It gains haste"), is labeled by that
-                                // outcome rather than a bare "Decline" — the reported
-                                // bug was that declining silently granted haste with no
-                                // indication; a decline-less Optional (Unleash) keeps a
-                                // plain "Decline".
-                                ReplacementMode::Optional { decline } => {
-                                    let accept = if repl.event
-                                        == crate::types::replacements::ReplacementEvent::Draw
-                                    {
-                                        "Accept".to_string()
-                                    } else {
-                                        repl.description
-                                            .clone()
-                                            .or_else(|| {
-                                                repl.execute
-                                                    .as_ref()
-                                                    .and_then(|e| e.description.clone())
-                                            })
-                                            .unwrap_or_else(|| "Accept".to_string())
-                                    };
-                                    let decline_label = decline
-                                        .as_ref()
-                                        .and_then(|d| d.description.clone())
-                                        .unwrap_or_else(|| "Decline".to_string());
-                                    (accept, decline_label)
-                                }
-                                ReplacementMode::Mandatory => (
-                                    repl.description
-                                        .clone()
-                                        .unwrap_or_else(|| "Accept".to_string()),
-                                    "Decline".to_string(),
-                                ),
-                            })
-                            .unwrap_or_else(|| ("Accept".to_string(), "Decline".to_string()));
-                        let source_id = source_id.unwrap_or(ObjectId(0));
-                        let source_name = name_of(source_id);
-                        vec![
-                            ReplacementCandidateSummary {
-                                source_id,
-                                source_name: source_name.clone(),
-                                description: accept_desc,
-                            },
-                            ReplacementCandidateSummary {
-                                source_id,
-                                source_name,
-                                description: decline_desc,
-                            },
-                        ]
-                    } else {
-                        // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
-                        // outcome-descriptive label derived from its `execute`
-                        // effect, or from its synthetic shield-counter kind.
-                        // `map` (not `filter_map`) guarantees the vec is never
-                        // shorter than `candidate_count`, so the frontend index
-                        // lookup stays aligned.
-                        p.candidates
-                            .iter()
-                            .map(|rid| ReplacementCandidateSummary {
-                                source_id: rid.source,
-                                source_name: name_of(rid.source),
-                                description: replacement_choice_label_for_rid(state, *rid),
-                            })
-                            .collect()
-                    };
+                let cands: Vec<ReplacementCandidateSummary> = if p.is_optional
+                    && !p.search_found_candidates.is_empty()
+                {
+                    let candidate = &p.search_found_candidates[0];
+                    vec![
+                        ReplacementCandidateSummary {
+                            source_id: candidate.disposition.source.object_id,
+                            source_name: candidate.source_name.clone(),
+                            description: candidate.description.clone(),
+                        },
+                        ReplacementCandidateSummary {
+                            source_id: candidate.disposition.source.object_id,
+                            source_name: candidate.source_name.clone(),
+                            description: "Decline".to_string(),
+                        },
+                    ]
+                } else if !p.search_found_candidates.is_empty() {
+                    let mut candidates: Vec<_> = p
+                        .search_found_candidates
+                        .iter()
+                        .map(|candidate| ReplacementCandidateSummary {
+                            source_id: candidate.disposition.source.object_id,
+                            source_name: candidate.source_name.clone(),
+                            description: candidate.description.clone(),
+                        })
+                        .collect();
+                    if all_search_found_candidates_optional {
+                        candidates.push(ReplacementCandidateSummary {
+                            source_id: ObjectId(0),
+                            source_name: String::new(),
+                            description: "Use the original found-card destination".to_string(),
+                        });
+                    }
+                    candidates
+                } else if p.is_optional {
+                    // CR 616.1: replacement-effect choices belong to the affected
+                    // object's controller/owner or the affected player. An optional
+                    // "you may" is one source shown as two branches — both carry
+                    // `candidates[0].source`.
+                    let source_id = p.candidates.first().map(|rid| rid.source);
+                    let (accept_desc, decline_desc) = optional_replacement_choice_labels(state, p);
+                    let source_id = source_id.unwrap_or(ObjectId(0));
+                    let source_name = name_of(source_id);
+                    vec![
+                        ReplacementCandidateSummary {
+                            source_id,
+                            source_name: source_name.clone(),
+                            description: accept_desc,
+                        },
+                        ReplacementCandidateSummary {
+                            source_id,
+                            source_name,
+                            description: decline_desc,
+                        },
+                    ]
+                } else {
+                    // CR 616.1 / CR 614.1c / CR 614.1d: each candidate gets an
+                    // outcome-descriptive label derived from its `execute`
+                    // effect, or from its synthetic shield-counter kind.
+                    // `map` (not `filter_map`) guarantees the vec is never
+                    // shorter than `candidate_count`, so the frontend index
+                    // lookup stays aligned.
+                    p.candidates
+                        .iter()
+                        .map(|rid| ReplacementCandidateSummary {
+                            source_id: rid.source,
+                            source_name: name_of(rid.source),
+                            description: replacement_choice_label_for_rid(state, *rid),
+                        })
+                        .collect()
+                };
                 (count, cands)
             }
         })
@@ -700,14 +1012,101 @@ pub fn park_waiting_for(state: &mut GameState, player: PlayerId) {
     state.waiting_for = replacement_choice_waiting_for(player, state);
 }
 
-/// CR 614.12a: Human-readable accept-label for a `MayCost` replacement prompt.
+/// Labels the two outcomes of an optional replacement choice.
+fn optional_replacement_choice_labels(
+    state: &GameState,
+    pending: &PendingReplacement,
+) -> (String, String) {
+    let Some(replacement_id) = pending.candidates.first().copied() else {
+        return ("Accept".to_string(), "Decline".to_string());
+    };
+
+    if is_commander_hand_or_library_return_replacement(replacement_id) {
+        // CR 903.9b: this rules-source replacement redirects the commander to
+        // the command zone instead of the proposed hand/library destination.
+        return match &pending.proposed {
+            ProposedEvent::ZoneChange { to: Zone::Hand, .. } => (
+                "Move to command zone".to_string(),
+                "Put into hand".to_string(),
+            ),
+            ProposedEvent::ZoneChange {
+                to: Zone::Library, ..
+            } => (
+                "Move to command zone".to_string(),
+                "Put into library".to_string(),
+            ),
+            _ => ("Accept".to_string(), "Decline".to_string()),
+        };
+    }
+
+    replacement_definition_for_id(state, replacement_id)
+        .map(|replacement| match &replacement.mode {
+            ReplacementMode::MayCost { cost, decline } => {
+                let decline = decline
+                    .as_ref()
+                    .and_then(|effect| effect.description.clone())
+                    .unwrap_or_else(|| "Decline".to_string());
+                (replacement_cost_description(cost), decline)
+            }
+            // CR 702.136a (Riot) / CR 702.98a (Unleash): label an optional
+            // replacement's accept branch by its source description, falling
+            // back to its execute effect. A distinct decline outcome names that
+            // outcome rather than using a bare "Decline".
+            ReplacementMode::Optional { decline } => {
+                let accept = if replacement.event == ReplacementEvent::Draw {
+                    "Accept".to_string()
+                } else {
+                    replacement
+                        .description
+                        .clone()
+                        .or_else(|| {
+                            replacement
+                                .execute
+                                .as_ref()
+                                .and_then(|effect| effect.description.clone())
+                        })
+                        .unwrap_or_else(|| "Accept".to_string())
+                };
+                let decline = decline
+                    .as_ref()
+                    .and_then(|effect| effect.description.clone())
+                    .unwrap_or_else(|| "Decline".to_string());
+                (accept, decline)
+            }
+            ReplacementMode::Mandatory => (
+                replacement
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Accept".to_string()),
+                "Decline".to_string(),
+            ),
+        })
+        .unwrap_or_else(|| ("Accept".to_string(), "Decline".to_string()))
+}
+
+/// Human-readable accept-label for a `MayCost` replacement prompt.
 /// Returns a complete imperative phrase (the caller no longer prepends "Pay ")
 /// so non-mana costs read naturally. Exhaustive — a new `AbilityCost` variant
 /// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
-        AbilityCost::Mana { cost } => format!("Pay {cost:?}"),
-        AbilityCost::PayLife { amount } => format!("Pay {amount:?} life"),
+        AbilityCost::Mana { cost } => match cost {
+            crate::types::mana::ManaCost::NoCost => "Pay no mana".to_string(),
+            crate::types::mana::ManaCost::Cost { shards, generic } => {
+                let generic = (*generic > 0).then(|| format!("{{{generic}}}"));
+                let symbols = shards.iter().map(|shard| format!("{{{}}}", shard.symbol()));
+                format!("Pay {}", generic.into_iter().chain(symbols).collect::<String>())
+            }
+            crate::types::mana::ManaCost::SelfManaCost => "Pay its mana cost".to_string(),
+            crate::types::mana::ManaCost::SelfManaValue => "Pay its mana value".to_string(),
+            crate::types::mana::ManaCost::SelfManaCostReduced { reduction } => {
+                format!("Pay its mana cost reduced by {{{reduction}}}")
+            }
+        },
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value },
+        } => format!("Pay {value} life"),
+        AbilityCost::PayLife { .. } => "Pay life".to_string(),
         // CR 614.12a: Karoo self-ETB cost lands.
         AbilityCost::Sacrifice(cost) => match &cost.requirement {
             crate::types::ability::SacrificeRequirement::Count { count } => {
@@ -849,6 +1248,16 @@ fn replacement_choice_label(repl: &ReplacementDefinition) -> String {
 fn replacement_choice_label_for_rid(state: &GameState, rid: ReplacementId) -> String {
     if is_compleated_replacement(rid) {
         return "Compleated: enter with fewer loyalty counters".to_string();
+    }
+    if let Some(kw) = GrantedEtbKeyword::from_index(rid.index) {
+        // CR 702.44a / CR 702.54a: mandatory ETB-counter replacement — only ever
+        // labeled in a CR 616.1 ordering prompt, never an accept/decline choice.
+        return match kw {
+            GrantedEtbKeyword::Sunburst => {
+                "Sunburst: enter with counters for colors of mana spent".to_string()
+            }
+            GrantedEtbKeyword::Bloodthirst => "Bloodthirst: enter with +1/+1 counters".to_string(),
+        };
     }
     if is_finality_counter_replacement(rid) {
         return "Exile it instead".to_string();
@@ -6407,6 +6816,52 @@ pub fn find_applicable_replacements(
         }
     }
 
+    // CR 702.44a + CR 702.44d + CR 702.54a + CR 702.54c + CR 614.1c: Granted
+    // as-enters keywords (Sunburst, Bloodthirst) — a spell GRANTED such a keyword
+    // as it was cast ("that spell gains sunburst": Solar Array / Lux Artillery;
+    // "it gains bloodthirst 3": Bloodlord of Vaasgoth) carries the keyword in its
+    // live keyword set but no object-carried ETB replacement (only printed keywords
+    // are synthesized into `replacement_definitions`). Surface one virtual
+    // ETB-counter candidate PER KEYWORD FAMILY here when the granted spell enters
+    // the battlefield so its as-enters counters are placed. Gated to
+    // `ZoneChange`→Battlefield exactly as the printed definition's `Moved`/
+    // destination gate. One reserved candidate per family covers all that family's
+    // granted instances — its applier emits one counter placement per granted
+    // instance (CR 702.44d / CR 702.54c), and printed instances still apply
+    // separately via their own carried definitions. Ordered against Doubling
+    // Season-class modifiers by the shared enter-with-counters pipeline, exactly
+    // like the printed keyword.
+    if let ProposedEvent::ZoneChange {
+        object_id,
+        to: Zone::Battlefield,
+        ..
+    } = event
+    {
+        // Hot path (`find_applicable_replacements` runs per proposed event, and
+        // AI search clones/replays states constantly): test the CHEAP term first.
+        // `already_applied` is a set lookup, whereas the granted-instance query
+        // resolves the object's live off-zone keyword list — a whole-game
+        // continuous-effect collect plus ordering and per-effect filter
+        // evaluation. That resolution is also hoisted out of the family loop and
+        // computed at most ONCE (lazily, so an all-applied event pays nothing),
+        // then shared by every family instead of being re-swept per family.
+        let mut live_keywords: Option<Vec<crate::types::keywords::Keyword>> = None;
+        for kw in [GrantedEtbKeyword::Sunburst, GrantedEtbKeyword::Bloodthirst] {
+            let rid = granted_etb_keyword_replacement_id(*object_id, kw);
+            if event.already_applied(&rid) {
+                continue;
+            }
+            let live = live_keywords.get_or_insert_with(|| {
+                crate::game::off_zone_characteristics::effective_off_zone_keywords(
+                    state, *object_id,
+                )
+            });
+            if granted_etb_keyword_candidate_applies(state, *object_id, kw, event, live) {
+                candidates.push(rid);
+            }
+        }
+    }
+
     // CR 702.89a: Umbra armor — a destroy of a permanent enchanted by an Umbra is
     // a candidate for the virtual umbra-armor replacement. Offered independently of
     // the shield-counter match above so a permanent carrying both a shield counter
@@ -7149,6 +7604,12 @@ fn apply_single_replacement(
 
     if is_compleated_replacement(rid) {
         return Ok(apply_compleated_replacement(state, proposed, rid, events));
+    }
+
+    if is_granted_etb_keyword_replacement(rid) {
+        return Ok(apply_granted_keyword_etb_replacement(
+            state, proposed, rid, events,
+        ));
     }
 
     if let Some(kind) = shield_counter_replacement_kind(rid) {
@@ -7927,6 +8388,19 @@ fn candidate_materiality(
         return CandidateMateriality::Unconditional;
     }
 
+    // CR 616.1 + CR 614.1c: a granted as-enters keyword (Sunburst / Bloodthirst)
+    // APPENDS to the event's counter payload — an ADDITIVE Count write. Two
+    // appenders commute (append 2 + append 3 = 5 either way), but an appender does
+    // NOT commute with a counter doubler on the same event ((0+N)*2 vs 0*2+N), so
+    // classifying it `Disjoint` would silently suppress the CR 616.1e ordering
+    // choice against a Doubling Season-class Count writer (review on #5802).
+    if is_granted_etb_keyword_replacement(rid) {
+        return CandidateMateriality::Writes {
+            field: EventField::Count,
+            commute: CommuteClass::Additive,
+        };
+    }
+
     // CR 614.10: the turn-scoped combat skip fully prevents the BeginPhase event,
     // so it is unconditional like the umbra-armor / shield-counter destroy.
     if is_turn_scoped_combat_skip_replacement(rid) {
@@ -8074,11 +8548,12 @@ fn candidate_materiality(
             }
             // ETB-counter replacements (`PutCounter`) only *append* to
             // `enter_with_counters`, so they never conflict. `Effect::Choose`
-            // (the as-enters color choice) runs after the ZoneChange and
-            // touches no shared event field. Both are explicitly recognized as
-            // order-independent so they do NOT fall through to the conservative
-            // material default below.
-            Effect::PutCounter { .. } | Effect::Choose { .. } => {}
+            // (the as-enters color choice) and `Effect::ChoosePermanent` (the
+            // as-enters object choice — Metamorphic Alteration) run after the
+            // ZoneChange and touch no shared event field. Both are explicitly
+            // recognized as order-independent so they do NOT fall through to
+            // the conservative material default below.
+            Effect::PutCounter { .. } | Effect::Choose { .. } | Effect::ChoosePermanent { .. } => {}
             // CR 614.1a + CR 111.1: Full token substitution on a CreateToken
             // event rewrites `CreateToken::spec` in the applier. Two different
             // substitutions on one event are last-applied-wins and stay
@@ -9942,14 +10417,17 @@ mod tests {
                 cost: AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: amount },
                 },
-                decline: Some(Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::SetTapState {
-                        target: TargetFilter::SelfRef,
-                        scope: EffectScope::Single,
-                        state: TapStateChange::Tap,
-                    },
-                ))),
+                decline: Some(Box::new(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::SetTapState {
+                            target: TargetFilter::SelfRef,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        },
+                    )
+                    .description("It enters tapped".to_string()),
+                )),
             })
             .valid_card(TargetFilter::SelfRef)
     }
@@ -9990,6 +10468,19 @@ mod tests {
             result,
             ReplacementResult::NeedsChoice(PlayerId(0))
         ));
+        let WaitingFor::ReplacementChoice { candidates, .. } =
+            replacement_choice_waiting_for(PlayerId(0), &state)
+        else {
+            panic!("expected replacement choice prompt");
+        };
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.description.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Pay 2 life", "It enters tapped"],
+            "the decline choice must describe its branch outcome"
+        );
 
         let result = continue_replacement(&mut state, 1, &mut events);
         let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
@@ -11158,6 +11649,60 @@ mod tests {
         assert!(
             candidates.iter().all(|c| c.source_id == ObjectId(20)),
             "both accept and decline must carry the source object (ObjectId(20))"
+        );
+    }
+
+    #[test]
+    fn commander_hand_or_library_replacement_labels_both_destinations() {
+        let commander = ObjectId(21);
+        for (destination, decline_label) in [
+            (Zone::Hand, "Put into hand"),
+            (Zone::Library, "Put into library"),
+        ] {
+            let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
+            state.pending_replacement = Some(PendingReplacement {
+                proposed: ProposedEvent::zone_change(
+                    commander,
+                    Zone::Battlefield,
+                    destination,
+                    None,
+                ),
+                sacrifice_provenance: None,
+                candidates: vec![commander_hand_or_library_return_replacement_id(commander)],
+                search_found_candidates: Vec::new(),
+                depth: 0,
+                is_optional: true,
+                library_placement: None,
+                excess_recipient: None,
+                lifelink_bonus: 0,
+                may_cost_paid: false,
+                may_cost_remaining: None,
+            });
+
+            let WaitingFor::ReplacementChoice { candidates, .. } =
+                replacement_choice_waiting_for(PlayerId(0), &state)
+            else {
+                panic!("expected commander replacement choice for {destination:?}");
+            };
+
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.description.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Move to command zone", decline_label],
+                "CR 903.9b choices must name the resulting zone, not generic accept/decline"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_life_may_cost_uses_a_display_label() {
+        assert_eq!(
+            replacement_cost_description(&AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            }),
+            "Pay 2 life"
         );
     }
 

@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { useTranslation } from "react-i18next";
 
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
+import { EngineModeBadge } from "./EngineModeBadge.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
@@ -94,7 +95,10 @@ export function GameMenu({
   return (
     <div
       ref={menuRef}
-      className="fixed z-40 flex flex-col items-start"
+      /* Row, not a column: the engine badge sits beside the menu button. The
+         dropdown below is absolutely positioned, so it stays anchored to this
+         container's left edge and is unaffected by the row's flow. */
+      className="fixed z-40 flex items-center gap-2"
       style={{
         left: "calc(env(safe-area-inset-left) + 0.5rem)",
         top: "calc(env(safe-area-inset-top) + var(--game-top-overlay-offset, 0px) + 0.75rem)",
@@ -129,6 +133,7 @@ export function GameMenu({
           </svg>
         </button>
       </div>
+      <EngineModeBadge />
       {open && (
         <div
           aria-label={t("gameMenu.menu")}

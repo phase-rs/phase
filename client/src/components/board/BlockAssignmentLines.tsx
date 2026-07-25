@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
+import { blockerAssignmentPairs, useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
@@ -10,7 +10,10 @@ import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
 import type { ObjectId, PlayerId } from "../../adapter/types.ts";
-import { filterVisibleBlockerPairs } from "./blockAssignmentVisibility.ts";
+import {
+  filterVisibleBlockerPairs,
+  type BlockerAssignmentPair,
+} from "./blockAssignmentVisibility.ts";
 
 const BLOCK_COLOR = "rgba(56,189,248,0.95)";
 const BLOCK_COLOR_HEAD = "rgba(56,189,248,0.9)";
@@ -89,10 +92,10 @@ export function BlockAssignmentLines() {
         </marker>
       </defs>
       {showCreatureArrows &&
-        Array.from(positions.entries()).map(([blockerId, pos]) => {
+        Array.from(positions.entries()).map(([pairKey, pos]) => {
           const d = arcPath(pos.from, pos.to);
           return (
-            <g key={blockerId}>
+            <g key={pairKey}>
               <path
                 d={d}
                 stroke="black"
@@ -219,18 +222,22 @@ function useHudBlockIndicators(
 }
 
 function useMergedPairs(
-  uiAssignments: Map<ObjectId, ObjectId>,
+  uiAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
   engineAssignments: Record<string, ObjectId[]> | null,
-): Map<ObjectId, ObjectId> {
+): BlockerAssignmentPair[] {
   return useMemo(() => {
-    const merged = new Map(uiAssignments);
+    const merged = new Map<string, BlockerAssignmentPair>();
+    for (const pair of blockerAssignmentPairs(uiAssignments)) {
+      merged.set(pair.join(":"), pair);
+    }
     if (engineAssignments) {
       for (const [blockerId, attackerIds] of Object.entries(engineAssignments)) {
-        if (attackerIds.length > 0) {
-          merged.set(Number(blockerId), attackerIds[0]);
+        for (const attackerId of attackerIds) {
+          const pair: BlockerAssignmentPair = [Number(blockerId), attackerId];
+          merged.set(pair.join(":"), pair);
         }
       }
     }
-    return merged;
+    return Array.from(merged.values());
   }, [uiAssignments, engineAssignments]);
 }

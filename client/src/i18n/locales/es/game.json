@@ -248,6 +248,7 @@
     "target": "Objetivo",
     "copy": "Copia",
     "copyTooltip": "Ficha copia de una carta real",
+    "cantBeBlocked": "No puede ser bloqueada",
     "ringBearer": "Anillo",
     "ringBearerTooltip": "Portador del Anillo",
     "hiddenAttachments": "+{{count}} more attached",
@@ -662,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Debe bloquear a {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1709,6 +1711,23 @@
     "targetLand": "el objetivo de tierra",
     "targetCreature": "el objetivo de criatura",
     "targetChoice": "esta elección de objetivo"
+  },
+  "giftRecipient": {
+    "title": "Elegir destinatario del regalo",
+    "subtitle": "Elige qué oponente recibe el regalo prometido."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "¿Prometer un regalo?",
+      "pay": "Prometer {{gift}}",
+      "decline": "Lanzar sin prometer",
+      "kind": {
+        "card": "una carta",
+        "treasure": "un Tesoro",
+        "food": "un Alimento",
+        "tappedFish": "un Pez girado"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Elegir oponente para chocar",

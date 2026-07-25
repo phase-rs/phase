@@ -10,9 +10,9 @@ use super::ability::{
     AdditionalCostInstance, AdditionalCostInstancePayment, AttackSubject, BeholdCostAction,
     CastTimingPermission, CastVariantPaid, CategoryChooserScope, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator, ContinuousModification,
-    ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CostPaidObjectSnapshot,
-    CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
+    ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
+    CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, Duration, EffectKind,
+    FaceDownProfile, GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
     PermanentEntryMode, PileSource, QuantityExpr, ResolvedAbility, SearchDestinationSplit,
     SearchSelectionConstraint, StaticCondition, TapCreaturesAggregate, TargetFilter, TargetRef,
     ThisWayCause, TriggerCondition, TriggerDefinition, TriggerDefinitionRef, TriggerEntry,
@@ -3582,6 +3582,22 @@ pub struct PendingPerPlayerZoneChoice {
     pub accumulated: bool,
 }
 
+/// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
+/// `ChangeZoneAll` instruction that places multiple owners' cards at the same
+/// library position with `random_order: false`. The first owner's batch is
+/// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
+/// batches drain after each batch completes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingMassLibraryOrderChoice {
+    pub source_id: ObjectId,
+    pub library_position: crate::types::ability::LibraryPosition,
+    pub track_exiled_by_source: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<crate::types::ability::Duration>,
+    /// Remaining (owner, cards) batches in APNAP order after the current prompt.
+    pub remaining_batches: Vec<(PlayerId, Vec<ObjectId>)>,
+}
+
 /// CR 101.4: If players make choices for one instruction, they choose in
 /// APNAP order before the simultaneous action happens.
 /// CR 701.21a: To sacrifice a permanent, its controller moves it from the
@@ -6247,8 +6263,11 @@ pub enum CombatTaxPending {
         /// band for blocking (CR 702.22h).
         bands: Vec<Vec<crate::types::identifiers::ObjectIncarnationRef>>,
     },
+    /// CR 400.7 + CR 509.1d: Both sides of each proposed block pair are
+    /// snapshotted. A blocker or attacker that leaves and re-enters during the
+    /// payment pause is a different object and cannot receive the locked quote.
     Block {
-        assignments: Vec<(ObjectId, ObjectId)>,
+        assignments: Vec<(ObjectIncarnationRef, ObjectIncarnationRef)>,
     },
 }
 
@@ -7536,6 +7555,13 @@ pub enum WaitingFor {
         valid_targets: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_mana_value: Option<u32>,
+        /// CR 707.2 + CR 707.2c: Why this choice was raised — whether the
+        /// entering object becomes the copy (`BecomeCopy`, default for
+        /// serde back-compat) or the chosen permanent's values are latched onto
+        /// a source Aura's host (`PersistChosenAttribute`, Metamorphic
+        /// Alteration). Read at the answer in `handle_copy_target_choice`.
+        #[serde(default)]
+        purpose: CopyTargetPurpose,
     },
     /// CR 701.44d: Player chooses which of their remaining permanents explores next.
     ExploreChoice {
@@ -8088,6 +8114,23 @@ pub enum WaitingFor {
         /// Zero for the first prompt and for non-kicker optional costs.
         #[serde(default)]
         times_kicked: u32,
+        /// CR 601.2b / CR 702.174a: Origin of the optional cost being offered so
+        /// the UI can present Gift-specific promise copy without sniffing card text.
+        #[serde(default)]
+        origin: crate::types::ability::AdditionalCostOrigin,
+        /// CR 702.174: When `origin` is Gift, the gift kind for UI labels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gift_kind: Option<crate::types::keywords::GiftKind>,
+        pending_cast: Box<PendingCast>,
+    },
+    /// CR 702.174a: After promising a Gift with ≥2 opponents, choose which
+    /// opponent receives the gift. Distinct from `ChooseAnnouncingOpponent`
+    /// (CR 115.1 target-chooser).
+    ChooseGiftRecipient {
+        player: PlayerId,
+        candidates: Vec<PlayerId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gift_kind: Option<crate::types::keywords::GiftKind>,
         pending_cast: Box<PendingCast>,
     },
     /// CR 702.47a–e: As an Arcane (or other matching-subtype) spell is cast, its
@@ -9476,6 +9519,7 @@ impl WaitingFor {
             WaitingFor::ModeChoice { .. } => "ModeChoice",
             WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::ChooseGiftRecipient { .. } => "ChooseGiftRecipient",
             WaitingFor::SpliceOffer { .. } => "SpliceOffer",
             WaitingFor::DefilerPayment { .. } => "DefilerPayment",
             WaitingFor::CastOffer { .. } => "CastOffer",
@@ -9622,6 +9666,7 @@ impl WaitingFor {
             | WaitingFor::ModeChoice { player, .. }
             | WaitingFor::DiscardToHandSize { player, .. }
             | WaitingFor::OptionalCostChoice { player, .. }
+            | WaitingFor::ChooseGiftRecipient { player, .. }
             | WaitingFor::SpliceOffer { player, .. }
             | WaitingFor::DefilerPayment { player, .. }
             | WaitingFor::AbilityModeChoice { player, .. }
@@ -9752,6 +9797,7 @@ impl WaitingFor {
             | WaitingFor::TargetSelection { pending_cast, .. }
             | WaitingFor::ModeChoice { pending_cast, .. }
             | WaitingFor::OptionalCostChoice { pending_cast, .. }
+            | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
@@ -9786,6 +9832,7 @@ impl WaitingFor {
             | WaitingFor::TargetSelection { pending_cast, .. }
             | WaitingFor::ModeChoice { pending_cast, .. }
             | WaitingFor::OptionalCostChoice { pending_cast, .. }
+            | WaitingFor::ChooseGiftRecipient { pending_cast, .. }
             | WaitingFor::SpliceOffer { pending_cast, .. }
             | WaitingFor::DefilerPayment { pending_cast, .. }
             | WaitingFor::ActivationCostOneOfChoice { pending_cast, .. }
@@ -12242,6 +12289,10 @@ pub struct GameState {
     /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_player_scope_sacrifice_choice: Option<PendingPlayerScopeSacrificeChoice>,
+    /// CR 401.4: Remaining per-owner library-order batches for a mass
+    /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_mass_library_order_choice: Option<PendingMassLibraryOrderChoice>,
     /// CR 101.4 + CR 701.23i: Pending private selections for a simultaneous
     /// scoped self-library search. Kept separate from the generic continuation
     /// so the action phase cannot begin before every player has chosen.
@@ -12867,6 +12918,11 @@ pub struct TransientContinuousEffect {
     pub timestamp: u64,
     pub duration: Duration,
     pub affected: TargetFilter,
+    /// CR 400.7: A one-shot effect that resolved on a specific target must not
+    /// apply to a later incarnation that reuses the same storage id. `None`
+    /// preserves the dynamic affected-set semantics required by general TCEs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_recipient: Option<ObjectIncarnationRef>,
     pub modifications: Vec<ContinuousModification>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condition: Option<StaticCondition>,
@@ -16207,6 +16263,7 @@ impl GameState {
             merged_card_component_route: None,
             resolution_coin_flip: None,
             pending_player_scope_sacrifice_choice: None,
+            pending_mass_library_order_choice: None,
             pending_scoped_library_search: None,
             pending_library_search_delivery: None,
             pending_search_found_batch: None,
@@ -16559,6 +16616,7 @@ impl GameState {
                 timestamp,
                 duration,
                 affected,
+                affected_recipient: None,
                 modifications,
                 condition,
                 duration_subject: None,
@@ -16566,6 +16624,19 @@ impl GameState {
             });
         self.layers_dirty.mark_full();
         id
+    }
+
+    /// Bind a transient effect to the exact recipient resolved by a one-shot
+    /// instruction. Dynamic effects intentionally leave this unset.
+    pub fn set_transient_affected_recipient(&mut self, id: u64, recipient: ObjectIncarnationRef) {
+        if let Some(tce) = self
+            .transient_continuous_effects
+            .iter_mut()
+            .find(|tce| tce.id == id)
+        {
+            tce.affected_recipient = Some(recipient);
+            self.layers_dirty.mark_full();
+        }
     }
 
     /// CR 611.2b + CR 110.5d: bind a target-relative `ForAsLongAs` duration to a
@@ -17540,6 +17611,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         //     Priority`, effects/mod.rs:759) or a constant direct-assigned count across a real
         //     copy-token loop, so COMPARING never suppresses a legitimate loop's detection.
         pending_player_scope_sacrifice_choice: _,
+        pending_mass_library_order_choice: _,
         pending_scoped_library_search: _,
         pending_library_search_delivery: _,
         pending_search_found_batch: _,
@@ -17739,6 +17811,8 @@ impl PartialEq for GameState {
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
+            && self.pending_mass_library_order_choice
+                == other.pending_mass_library_order_choice
             && self.pending_scoped_library_search == other.pending_scoped_library_search
             && self.pending_library_search_delivery == other.pending_library_search_delivery
             && self.pending_search_found_batch == other.pending_search_found_batch
@@ -20843,6 +20917,14 @@ mod tests {
                 repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
             },
             times_kicked: 0,
+            origin: crate::types::ability::AdditionalCostOrigin::Other,
+            gift_kind: None,
+            pending_cast: dummy_pending(),
+        }));
+        variants.push(Box::new(WaitingFor::ChooseGiftRecipient {
+            player: PlayerId(0),
+            candidates: vec![PlayerId(1)],
+            gift_kind: Some(crate::types::keywords::GiftKind::Card),
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::AbilityModeChoice {
@@ -20984,7 +21066,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 35);
+        assert_eq!(variants.len(), 36);
     }
 
     #[test]

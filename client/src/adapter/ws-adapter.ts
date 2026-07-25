@@ -281,6 +281,22 @@ export class WebSocketAdapter implements EngineAdapter {
     return this._playerId;
   }
 
+  /** Reconnect credentials for this session, or null until the server has
+   *  assigned them (i.e. game creation has completed). Solo-AI native games
+   *  persist this so a suspended game can be resumed by constructing a
+   *  `kind: "reconnect"` adapter. The player token is issued once at creation
+   *  and lives only client-side — it is the reconnect security boundary. */
+  get nativeSession(): { gameCode: string; playerId: PlayerId; playerToken: string } | null {
+    if (this._gameCode === null || this._playerId === null || this.playerToken === null) {
+      return null;
+    }
+    return {
+      gameCode: this._gameCode,
+      playerId: this._playerId,
+      playerToken: this.playerToken,
+    };
+  }
+
   onEvent(listener: WsAdapterEventListener): () => void {
     this.listeners.push(listener);
     return () => {

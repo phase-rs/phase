@@ -57,6 +57,12 @@ fn drive_cast(runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId], pr
                     .act(GameAction::DecideOptionalCost { pay: promise_gift })
                     .expect("decide gift");
             }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let opponent = candidates[0];
+                runner
+                    .act(GameAction::ChooseGiftRecipient { opponent })
+                    .expect("choose gift recipient");
+            }
             WaitingFor::TargetSelection { .. } => {
                 let t = targets[next_target];
                 next_target += 1;

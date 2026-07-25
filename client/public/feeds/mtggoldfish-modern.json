@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "modern",
   "version": 1,
-  "updated": "2026-07-23T00:00:00Z",
+  "updated": "2026-07-25T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/modern",
   "decks": [
     {
@@ -148,137 +148,6 @@
         {
           "count": 3,
           "name": "Wrath of the Skies"
-        }
-      ]
-    },
-    {
-      "name": "Affinity",
-      "author": "MTGGoldfish",
-      "colors": [
-        "U",
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 1,
-          "name": "Arcbound Ravager"
-        },
-        {
-          "count": 4,
-          "name": "Claws of Gix"
-        },
-        {
-          "count": 2,
-          "name": "Disruptor Flute"
-        },
-        {
-          "count": 4,
-          "name": "Engineered Explosives"
-        },
-        {
-          "count": 4,
-          "name": "Experimental Synthesizer"
-        },
-        {
-          "count": 4,
-          "name": "Fiery Islet"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 4,
-          "name": "Kappa Cannoneer"
-        },
-        {
-          "count": 1,
-          "name": "Memnite"
-        },
-        {
-          "count": 4,
-          "name": "Mishra's Bauble"
-        },
-        {
-          "count": 4,
-          "name": "Mox Opal"
-        },
-        {
-          "count": 4,
-          "name": "Pinnacle Emissary"
-        },
-        {
-          "count": 1,
-          "name": "Shadowspear"
-        },
-        {
-          "count": 2,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 1,
-          "name": "Sink into Stupor"
-        },
-        {
-          "count": 1,
-          "name": "Skateboard"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 1,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Tormod's Crypt"
-        },
-        {
-          "count": 4,
-          "name": "Urza's Saga"
-        },
-        {
-          "count": 4,
-          "name": "Weapons Manufacturing"
-        },
-        {
-          "count": 1,
-          "name": "Welding Jar"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Blood Moon"
-        },
-        {
-          "count": 3,
-          "name": "Consign to Memory"
-        },
-        {
-          "count": 1,
-          "name": "Damping Sphere"
-        },
-        {
-          "count": 2,
-          "name": "Emry, Lurker of the Loch"
-        },
-        {
-          "count": 3,
-          "name": "Galvanic Blast"
-        },
-        {
-          "count": 2,
-          "name": "Metallic Rebuke"
-        },
-        {
-          "count": 2,
-          "name": "Mystical Dispute"
         }
       ]
     },
@@ -436,11 +305,11 @@
       ]
     },
     {
-      "name": "Ruby Storm",
+      "name": "Affinity",
       "author": "MTGGoldfish",
       "colors": [
-        "R",
-        "W"
+        "U",
+        "R"
       ],
       "tags": [
         "metagame"
@@ -448,141 +317,121 @@
       "main": [
         {
           "count": 1,
-          "name": "Sacred Foundry"
+          "name": "Arcbound Ravager"
+        },
+        {
+          "count": 4,
+          "name": "Claws of Gix"
         },
         {
           "count": 2,
-          "name": "Artist's Talent"
+          "name": "Disruptor Flute"
         },
         {
           "count": 4,
-          "name": "Ruby Medallion"
+          "name": "Engineered Explosives"
         },
         {
           "count": 4,
-          "name": "Ral, Monsoon Mage"
+          "name": "Experimental Synthesizer"
+        },
+        {
+          "count": 4,
+          "name": "Fiery Islet"
         },
         {
           "count": 1,
-          "name": "Grapeshot"
+          "name": "Island"
         },
         {
           "count": 4,
-          "name": "Mountain"
+          "name": "Kappa Cannoneer"
         },
         {
           "count": 1,
-          "name": "Flashback"
+          "name": "Memnite"
         },
         {
           "count": 4,
-          "name": "Manamorphose"
+          "name": "Mishra's Bauble"
         },
         {
           "count": 4,
-          "name": "Pyretic Ritual"
-        },
-        {
-          "count": 1,
-          "name": "Gemstone Caverns"
-        },
-        {
-          "count": 1,
-          "name": "Elegant Parlor"
+          "name": "Mox Opal"
         },
         {
           "count": 4,
-          "name": "Desperate Ritual"
-        },
-        {
-          "count": 4,
-          "name": "Reckless Impulse"
-        },
-        {
-          "count": 3,
-          "name": "Past in Flames"
+          "name": "Pinnacle Emissary"
         },
         {
           "count": 1,
-          "name": "Commercial District"
-        },
-        {
-          "count": 3,
-          "name": "Bloodstained Mire"
-        },
-        {
-          "count": 1,
-          "name": "Sunbaked Canyon"
+          "name": "Shadowspear"
         },
         {
           "count": 2,
-          "name": "Valakut Awakening"
+          "name": "Shivan Reef"
         },
         {
-          "count": 2,
-          "name": "Wish"
+          "count": 1,
+          "name": "Sink into Stupor"
         },
         {
-          "count": 2,
-          "name": "Arid Mesa"
+          "count": 1,
+          "name": "Skateboard"
         },
         {
           "count": 4,
-          "name": "Wrenn's Resolve"
+          "name": "Spirebluff Canal"
         },
         {
-          "count": 2,
-          "name": "Scalding Tarn"
+          "count": 1,
+          "name": "Steam Vents"
         },
         {
-          "count": 2,
-          "name": "Wooded Foothills"
+          "count": 4,
+          "name": "Tormod's Crypt"
         },
         {
-          "count": 3,
-          "name": "Hex Magic"
+          "count": 4,
+          "name": "Urza's Saga"
+        },
+        {
+          "count": 4,
+          "name": "Weapons Manufacturing"
+        },
+        {
+          "count": 1,
+          "name": "Welding Jar"
         }
       ],
       "sideboard": [
         {
+          "count": 2,
+          "name": "Blood Moon"
+        },
+        {
           "count": 3,
-          "name": "Prismatic Ending"
+          "name": "Consign to Memory"
         },
         {
           "count": 1,
-          "name": "Wear // Tear"
+          "name": "Damping Sphere"
         },
         {
-          "count": 4,
-          "name": "Orim's Chant"
+          "count": 2,
+          "name": "Emry, Lurker of the Loch"
         },
         {
-          "count": 1,
-          "name": "Past in Flames"
+          "count": 3,
+          "name": "Galvanic Blast"
         },
         {
-          "count": 1,
-          "name": "Grapeshot"
+          "count": 2,
+          "name": "Metallic Rebuke"
         },
         {
-          "count": 1,
-          "name": "Empty the Warrens"
-        },
-        {
-          "count": 1,
-          "name": "Brotherhood's End"
-        },
-        {
-          "count": 1,
-          "name": "Abrade"
-        },
-        {
-          "count": 1,
-          "name": "Stormscale Scion"
-        },
-        {
-          "count": 1,
-          "name": "Flashback"
+          "count": 2,
+          "name": "Mystical Dispute"
         }
       ]
     },
@@ -733,6 +582,157 @@
         {
           "count": 1,
           "name": "Walking Ballista"
+        }
+      ]
+    },
+    {
+      "name": "Ruby Storm",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R",
+        "W"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 1,
+          "name": "Sacred Foundry"
+        },
+        {
+          "count": 2,
+          "name": "Artist's Talent"
+        },
+        {
+          "count": 4,
+          "name": "Ruby Medallion"
+        },
+        {
+          "count": 4,
+          "name": "Ral, Monsoon Mage"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Flashback"
+        },
+        {
+          "count": 4,
+          "name": "Manamorphose"
+        },
+        {
+          "count": 4,
+          "name": "Pyretic Ritual"
+        },
+        {
+          "count": 1,
+          "name": "Gemstone Caverns"
+        },
+        {
+          "count": 1,
+          "name": "Elegant Parlor"
+        },
+        {
+          "count": 4,
+          "name": "Desperate Ritual"
+        },
+        {
+          "count": 4,
+          "name": "Reckless Impulse"
+        },
+        {
+          "count": 3,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Commercial District"
+        },
+        {
+          "count": 3,
+          "name": "Bloodstained Mire"
+        },
+        {
+          "count": 1,
+          "name": "Sunbaked Canyon"
+        },
+        {
+          "count": 2,
+          "name": "Valakut Awakening"
+        },
+        {
+          "count": 2,
+          "name": "Wish"
+        },
+        {
+          "count": 2,
+          "name": "Arid Mesa"
+        },
+        {
+          "count": 4,
+          "name": "Wrenn's Resolve"
+        },
+        {
+          "count": 2,
+          "name": "Scalding Tarn"
+        },
+        {
+          "count": 2,
+          "name": "Wooded Foothills"
+        },
+        {
+          "count": 3,
+          "name": "Hex Magic"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 3,
+          "name": "Prismatic Ending"
+        },
+        {
+          "count": 1,
+          "name": "Wear // Tear"
+        },
+        {
+          "count": 4,
+          "name": "Orim's Chant"
+        },
+        {
+          "count": 1,
+          "name": "Past in Flames"
+        },
+        {
+          "count": 1,
+          "name": "Grapeshot"
+        },
+        {
+          "count": 1,
+          "name": "Empty the Warrens"
+        },
+        {
+          "count": 1,
+          "name": "Brotherhood's End"
+        },
+        {
+          "count": 1,
+          "name": "Abrade"
+        },
+        {
+          "count": 1,
+          "name": "Stormscale Scion"
+        },
+        {
+          "count": 1,
+          "name": "Flashback"
         }
       ]
     },

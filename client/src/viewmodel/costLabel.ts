@@ -8,6 +8,7 @@ import type {
   SerializedAbilityCost,
 } from "../adapter/types.ts";
 import { getCrewPower, getSaddlePower } from "./keywordProps.ts";
+import { renderDescription } from "../utils/description.ts";
 
 // Converts Rust ManaCostShard variant names to MTG abbreviations.
 // This is the canonical bridge between engine serialization and display—
@@ -402,27 +403,78 @@ export function abilityChoiceLabel(
       description: `Tap ${object.name} to help pay this spell's cost.`,
     };
   }
+  if (action.type === "TapLandForMana") {
+    const mana = action.data.selection.atomic_combination ?? [action.data.selection.mana_type];
+    const symbols = mana
+      .map((manaType) => MANA_COLOR_ABBREVIATION[manaType] ?? "C")
+      .map((symbol) => `{${symbol}}`)
+      .join("");
+    return { label: `Tap for ${symbols}` };
+  }
   if (action.type === "ActivateAbility") {
     const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost
+    // DELIBERATE SPLIT PREDICATE: this branch keys on the effect AST, NOT on the engine's
+    // `is_mana_ability` flag — only the `description` below is CR 605.1a-gated. Narrowing
+    // this predicate to the flag would push a Loyalty+Mana ability (Chandra, Torch of
+    // Defiance's `+1: Add {R}{R}`) down to the tail below, whose `stripCostPrefix` renders
+    // "Add {R}{R}." — a trailing period instead of today's "Add {R}{R}". Measured, not
+    // assumed. Leaving the label branch alone keeps the loyalty path byte-identical.
     if (ability?.effect?.type === "Mana" && ability.effect.produced) {
       const produced = ability.effect.produced;
+      // CR 605.1a: `is_mana_ability` is the ENGINE's mana-ability verdict
+      // (`game/mana_abilities.rs::is_mana_ability`) — it excludes loyalty abilities AND
+      // targeted mana effects (`multi_target` / embedded `Effect::Mana{target}`).
+      // Gate on the flag, never on the effect AST: a cost line under a LoyaltyBadge would
+      // double-render the cost that GamePage's `stripLoyaltyCostPrefix` exists to suppress.
+      // The flag is optional on the wire, so `=== true` treats absent as "not a mana
+      // ability" — the convention documented at `viewmodel/cardActionChoice.ts:29-32`.
+      // Second conjunct: only ENGINE-AUTHORED cost text is worth showing. With no
+      // description `abilityLabel` falls back to `formatCost`, which is partial over the
+      // engine's cost surface — 20 of the 32 `AbilityCost` variants have no arm and answer
+      // the literal word "Activate" (`TapCreatures` and `RemoveCounter` among them, i.e.
+      // exactly the costs on Relic of Legends' second ability and on Pentad Prism), and a
+      // `Composite`/`OneOf` with no `costs` answers "". `Sacrifice` and `Composite` DO have
+      // arms ("Sacrifice", "{T}, Sacrifice") — this conjunct is not about them.
+      // Descriptionless mana abilities are the engine-synthesized intrinsics
+      // (`database/synthesis.rs`, `game/layers.rs::basic_land_mana_ability`, and the
+      // `game/effects/token.rs` predefined-token abilities) — the wire sends Island with
+      // `description: null` — and every land with two or more basic land types carries one
+      // per type, so this conjunct is what keeps a dual/triome's already-distinct
+      // "Add {W}"/"Add {U}" options from each gaining an identical, uninformative "{T}".
+      // Known bounded gap: a permanent carrying two descriptionless mana abilities of the
+      // same produced shape (Treasure + Gold) still renders two identical options; the fix
+      // is engine-authored cost text, not a second frontend parse of the cost AST.
+      // CR 602.1a: the activation cost is everything before the colon — for two abilities
+      // producing identical mana it is the ONLY discriminator the engine ships.
+      // CR 201.5: `~` binds to the object that has the ability, which is `object` here.
+      const costLine =
+        ability.is_mana_ability === true && ability.description
+          ? renderDescription(abilityLabel(ability), object.name)
+          : undefined;
       if (produced.type === "Fixed" && produced.colors?.length) {
         const symbols = produced.colors.map((c) => `{${MANA_COLOR_ABBREVIATION[c] ?? c}}`).join("");
-        return { label: `Add ${symbols}` };
+        return { label: `Add ${symbols}`, description: costLine };
       }
       if (produced.type === "Colorless") {
-        return { label: "Add {C}" };
+        return { label: "Add {C}", description: costLine };
       }
       if (produced.type === "AnyOneColor") {
         const count = formatQuantity((produced as { count?: QuantityExpr | number }).count, 1);
         return {
           label: count === "1" ? "Add one mana of any color" : `Add ${count} mana of any one color`,
+          description: costLine,
         };
       }
     }
-    const label = abilityLabel(ability);
-    const description = ability?.description ? stripCostPrefix(ability.description) : undefined;
+    // CR 201.5: the non-mana tail feeds the SAME choice modal as the mana branch above and
+    // must bind `~` to the same object, or one row renders "Sacrifice Ghost Quarter" while
+    // the next renders "Sacrifice ~". Both halves leak in the live dump (29 abilities in the
+    // cost text, 27 in the effect text, e.g. "{T}: ~ deals 1 damage to any target.").
+    const label = renderDescription(abilityLabel(ability), object.name);
+    const description = ability?.description
+      ? renderDescription(stripCostPrefix(ability.description), object.name)
+      : undefined;
     return { label, description };
   }
   if (action.type === "CastSpell") {

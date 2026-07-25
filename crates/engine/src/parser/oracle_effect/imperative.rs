@@ -25,6 +25,7 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_nom::quantity as nom_quantity;
+use crate::parser::oracle_nom::target as nom_target;
 use crate::parser::oracle_static::parse_activated_ability_cost_head;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_may_look_at_face_down_filter,
@@ -34,11 +35,11 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BounceSelection, CardSelectionMode,
     CategoryChooserScope, ChoiceType, Chooser, ContinuousModification, ControlWindow,
     ControllerRef, CopyRetargetPermission, CounterAdjustment, DigSource, DoorLockOp, Duration,
-    Effect, EffectScope, FaceDownProfile, FilterProp, GrantedAbilityScope, LibraryPosition,
-    MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount, PreventionScope, PtStat,
-    PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, SearchSelectionConstraint,
-    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter, ZoneOwner,
+    Effect, EffectScope, FaceDownProfile, FilterProp, ForceBlockAttackerRef, GrantedAbilityScope,
+    LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount,
+    PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, ReassembleControlMode,
+    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
+    TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -2359,10 +2360,13 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enter_with_counters,
         } => {
-            let origin = if matches!(target, TargetFilter::ExiledBySource) {
-                Some(Zone::Exile)
-            } else {
-                origin
+            let origin = match &target {
+                TargetFilter::ExiledBySource => Some(Zone::Exile),
+                TargetFilter::TrackedSetFiltered {
+                    caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                    ..
+                } => Some(Zone::Exile),
+                _ => origin,
             };
             Effect::ChangeZoneAll {
                 origin,
@@ -5051,6 +5055,71 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
     }
 }
 
+/// CR 710.4 + CR 608.2k: Which anaphor class names the permanent in a
+/// "flip &lt;x&gt;" instruction. The two classes bind differently — a self-deictic
+/// always names the object the ability is on, while a bare object pronoun
+/// routes through `resolve_pronoun_target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlipSubjectAnaphor {
+    SelfDeictic,
+    ObjectPronoun,
+}
+
+/// CR 710.4: `flip`/`flips` + the permanent being flipped, anchored at `eof`.
+///
+/// This covers the ENTIRE printed flip-card corpus (21 cards), which uses
+/// exactly three surface forms:
+/// - "flip this creature" — Budoka Gardener, Bushi Tenderfoot, Initiate of
+///   Blood, Jushi Apprentice, Nezumi Graverobber, Nezumi Shortfang, Orochi
+///   Eggwatcher
+/// - "flip it" — Akki Lavarunner, Kitsune Mystic, Student of Elements, and the
+///   five ki-counter Ascendants (Budoka Pupil, Callow Jushi, Cunning Bandit,
+///   Faithful Squire, Hired Muscle)
+/// - "flip &lt;name&gt;" — Erayo, Kuon, Rune-Tail, Sasaya; `normalize_card_name_refs`
+///   has already rewritten the legendary short name to `~` before this runs
+///
+/// CR 710 defines no "flip target &lt;permanent&gt;" form — a flip instruction is
+/// always self-referential — so this recognizer is deliberately closed over
+/// self-references and the bare object pronoun rather than falling through to
+/// `parse_target`. That closure is also what keeps CR 705.1 coin flips out:
+/// "flip a coin" matches no arm here, and the coin recognizers in
+/// `parse_imperative_family_ast` are tried first regardless.
+fn parse_flip_permanent_subject(input: &str) -> OracleResult<'_, FlipSubjectAnaphor> {
+    let (input, _) = alt((tag("flip "), tag("flips "))).parse(input)?;
+    let (input, anaphor) = alt((
+        // Longest-match first: with the `eof` anchor outside this `alt`, a bare
+        // "it" arm would consume the head of "itself" and then fail without
+        // backtracking.
+        value(
+            FlipSubjectAnaphor::ObjectPronoun,
+            alt((tag("itself"), tag("it"))),
+        ),
+        value(FlipSubjectAnaphor::SelfDeictic, tag("~")),
+        // CR 700.7: "this" / "this <permanent type>" self-deictics ("this
+        // [something]" refers to that particular object), nested on the shared
+        // "this" prefix.
+        value(
+            FlipSubjectAnaphor::SelfDeictic,
+            preceded(
+                tag("this"),
+                opt(preceded(
+                    tag(" "),
+                    alt((
+                        tag("creature"),
+                        tag("permanent"),
+                        tag("artifact"),
+                        tag("enchantment"),
+                        tag("land"),
+                    )),
+                )),
+            ),
+        ),
+    ))
+    .parse(input)?;
+    let (input, _) = eof.parse(input)?;
+    Ok((input, anaphor))
+}
+
 pub(super) fn parse_utility_imperative_ast(
     text: &str,
     lower: &str,
@@ -5252,6 +5321,25 @@ pub(super) fn parse_utility_imperative_ast(
         if !matches!(target, TargetFilter::Any) {
             return Some(UtilityImperativeAst::Transform { target });
         }
+    }
+    // CR 710.4: the Kamigawa flip-card instruction. See
+    // `parse_flip_permanent_subject` for the corpus and the coin-flip
+    // separation (CR 705.1).
+    if let Some(anaphor) = nom_parse_lower(lower, parse_flip_permanent_subject) {
+        return Some(UtilityImperativeAst::FlipPermanent {
+            target: match anaphor {
+                // CR 700.7 + CR 201.5: a self-deictic always names the object
+                // the ability is on — CR 700.7 governs the "this <type>" form
+                // ("this [something]" refers to that particular object), CR
+                // 201.5 the "~" name form (text referring to the object by name).
+                FlipSubjectAnaphor::SelfDeictic => TargetFilter::SelfRef,
+                // CR 608.2k: the bare object pronoun binds through the same
+                // anaphor dispatch as "transform it" — a typed trigger subject
+                // resolves to the triggering source, self-ref/any/none stays on
+                // the source.
+                FlipSubjectAnaphor::ObjectPronoun => resolve_pronoun_target(ctx, "it"),
+            },
+        });
     }
     // CR 613.4d: switch power and toughness — two surface forms (sibling branches):
     //   - prepositional: "switch the power and toughness of <target>" (Inversion
@@ -5661,6 +5749,8 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
             starting_loyalty_from_casualty_sacrifice: false,
         },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
+        // CR 710.4: Kamigawa flip cards.
+        UtilityImperativeAst::FlipPermanent { target } => Effect::FlipPermanent { target },
         UtilityImperativeAst::Attach {
             attachment, target, ..
         } => Effect::Attach { attachment, target },
@@ -6524,17 +6614,31 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             choice_count: _,
             enter_with_counters,
         } => {
-            // CR 610.3: Mass filters (ExiledBySource, TrackedSet) act on all matching
-            // objects without individual targeting — use ChangeZoneAll.
+            // CR 610.3: Mass filters (ExiledBySource, TrackedSet,
+            // TrackedSetFiltered) act on all matching objects without individual
+            // targeting — use ChangeZoneAll. Bounded "up to N" picks from the
+            // tracked set ("put up to one land discarded this way") remain
+            // `ChangeZone` so the player selects a subset at resolution.
             // ExiledBySource always originates from Exile regardless of inferred zone.
             // CR 122.1: ChangeZoneAll has no counter-stamping channel — those
             // patterns are single-target only in current Oracle text, so the
             // mass-filter branch deliberately drops `enter_with_counters`.
             if matches!(
                 target,
-                TargetFilter::ExiledBySource | TargetFilter::TrackedSet { .. }
+                TargetFilter::ExiledBySource
+                    | TargetFilter::TrackedSet { .. }
+                    | TargetFilter::TrackedSetFiltered { .. }
             ) && enter_with_counters.is_empty()
+                && !up_to
             {
+                let origin = match target {
+                    TargetFilter::TrackedSetFiltered {
+                        caused_by: Some(crate::types::ability::ThisWayCause::Exiled),
+                        ..
+                    } => origin.or(Some(Zone::Exile)),
+                    TargetFilter::TrackedSetFiltered { .. } => origin,
+                    _ => origin.or(Some(Zone::Exile)),
+                };
                 Effect::ChangeZoneAll {
                     // CR 608.2c + CR 400.7: A tracked-set / impulse mass move
                     // defaults to scanning Exile (cascade, impulse-draw, and the
@@ -6543,7 +6647,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     // (Breach the Multiverse's graveyard choose stamps
                     // `origin: Some(Graveyard)` in `parse_put_ast`), honor it so
                     // the chosen cards are read out of the right zone.
-                    origin: origin.or(Some(Zone::Exile)),
+                    origin,
                     destination,
                     target,
                     // CR 110.2a: Preserve the parsed entering-controller override
@@ -8274,7 +8378,12 @@ pub(super) fn parse_exile_ast(
     } else {
         parsed_target
     };
-    let origin = super::infer_origin_zone(rest_lower);
+    // CR 400.7 (issue #6505): infer the origin zone excluding ONLY a trailing
+    // compound conjunct ("and their graveyard", Strategic Betrayal) so its
+    // sibling graveyard leg cannot leak Zone::Graveyard onto the battlefield
+    // creature leg — while a non-"and" qualifier ("instead of putting it into
+    // its owner's graveyard") still defines this leg's origin.
+    let origin = super::infer_origin_zone(&super::compound_exile_origin_scan(rest_text, rem));
     Some(ZoneCounterImperativeAst::Exile {
         origin,
         target,
@@ -10040,6 +10149,15 @@ pub(super) fn parse_imperative_family_ast(
             .parse(lower)
             .ok()
             .map(|(_, ast)| ast)
+            // CR 710.4 vs CR 705.1: every coin-flip form is tried first, so the
+            // Kamigawa flip-card instruction ("flip this creature" / "flip it" /
+            // "flip <name>") can only reach this fallback once no coin arm has
+            // matched. `parse_flip_permanent_subject` is itself closed over
+            // self-references, so the two mechanics cannot collide either way.
+            .or_else(|| {
+                parse_utility_imperative_ast(text, lower, ctx)
+                    .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast)))
+            })
         }
         // CR 701.52: "roll to visit your Attractions" (not a generic d20/d6 roll).
         "roll" | "rolls" => {
@@ -10231,18 +10349,9 @@ pub(super) fn parse_imperative_family_ast(
 
         // ── Combat-related ──
 
-        // CR 509.1g: "block [object] this turn/combat if able"
-        // Handles: "block this turn if able", "blocks ~ this turn if able",
-        // "blocks it this combat if able", "blocks this creature this turn if able"
-        "block" | "blocks" => {
-            if nom_primitives::scan_contains(lower, "this turn if able")
-                || nom_primitives::scan_contains(lower, "this combat if able")
-            {
-                Some(ImperativeFamilyAst::ForceBlock)
-            } else {
-                None
-            }
-        }
+        // CR 509.1c: the named attacker is a semantic referent, not a source-id
+        // inference. "that Wolf" means the narrowed attacking event subject.
+        "block" | "blocks" => parse_force_block_ast(lower, ctx),
         // CR 509.1c: "must be blocked [this turn] [if able]"
         "must" => {
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("must be blocked").parse(lower) {
@@ -11735,6 +11844,87 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
     }
 }
 
+/// CR 509.1c: Parse the force-block grammar after preserving the named attacker
+/// axis. This is intentionally a small nom production rather than a text
+/// substring check: the referent and duration survive lowering independently.
+fn parse_force_block_ast(input: &str, ctx: &ParseContext) -> Option<ImperativeFamilyAst> {
+    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("block "), tag("blocks ")))
+        .parse(input)
+        .ok()?;
+    let parse_duration = |tail| {
+        all_consuming(terminated(
+            alt((
+                value(
+                    Duration::UntilEndOfTurn,
+                    tag::<_, _, OracleError<'_>>("this turn if able"),
+                ),
+                value(Duration::UntilEndOfCombat, tag("this combat if able")),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(tail)
+        .ok()
+        .map(|(_, duration)| duration)
+    };
+
+    if let Some(duration) = parse_duration(rest) {
+        return Some(ImperativeFamilyAst::ForceBlock {
+            attacker: None,
+            duration,
+        });
+    }
+    if let Ok((tail, _)) =
+        alt((tag::<_, _, OracleError<'_>>("~ "), tag("this creature "))).parse(rest)
+    {
+        if let Some(duration) = parse_duration(tail) {
+            return Some(ImperativeFamilyAst::ForceBlock {
+                attacker: Some(ForceBlockAttackerRef::Source),
+                duration,
+            });
+        }
+    }
+    if let Ok((tail, _)) = tag::<_, _, OracleError<'_>>("it ").parse(rest) {
+        if ctx.in_trigger && matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
+            if let Some(duration) = parse_duration(tail) {
+                return Some(ImperativeFamilyAst::ForceBlock {
+                    attacker: Some(ForceBlockAttackerRef::EventSource),
+                    duration,
+                });
+            }
+        }
+    }
+    // CR 603.2 + CR 506.3: an event-referential demonstrative needs a typed
+    // attacking-creature antecedent from a trigger. The shared nom production
+    // rejects arbitrary text and non-attacker nouns before this effect is built.
+    if ctx.in_trigger && matches!(ctx.subject.as_ref(), Some(TargetFilter::Typed(_))) {
+        if let Ok((tail, _referent)) = nom_target::parse_demonstrative_attacker_referent(rest) {
+            if let Some(duration) = parse_duration(tail) {
+                return Some(ImperativeFamilyAst::ForceBlock {
+                    attacker: Some(ForceBlockAttackerRef::EventSource),
+                    duration,
+                });
+            }
+        }
+    }
+
+    // Preserve the existing generic grammar: modifiers between "block(s)" and
+    // the duration still produce an attacker-agnostic requirement. Exact
+    // source/event referents above take precedence when their typed forms match.
+    if nom_primitives::scan_contains(rest, "this turn if able") {
+        Some(ImperativeFamilyAst::ForceBlock {
+            attacker: None,
+            duration: Duration::UntilEndOfTurn,
+        })
+    } else if nom_primitives::scan_contains(rest, "this combat if able") {
+        Some(ImperativeFamilyAst::ForceBlock {
+            attacker: None,
+            duration: Duration::UntilEndOfCombat,
+        })
+    } else {
+        None
+    }
+}
+
 fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
     match ast {
         ImperativeFamilyAst::Structured(ast) => lower_imperative_ast(ast),
@@ -11745,8 +11935,10 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
         },
-        ImperativeFamilyAst::ForceBlock => Effect::ForceBlock {
+        ImperativeFamilyAst::ForceBlock { attacker, duration } => Effect::ForceBlock {
             target: TargetFilter::Any,
+            attacker,
+            duration,
         },
         ImperativeFamilyAst::ForceAttack {
             duration,

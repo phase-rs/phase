@@ -207,6 +207,45 @@ describe("PermanentCard", () => {
     expect(screen.queryByText("Copy")).not.toBeInTheDocument();
   });
 
+  it("renders the engine-authored temporary can't-be-blocked badge with its public source", () => {
+    const gameState = makeState();
+    gameState.derived = { temporary_cant_be_blocked: { 1: 2 } };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    const badge = screen.getByLabelText("Can't be blocked");
+    fireEvent.pointerEnter(badge.closest(".group")!);
+
+    expect(screen.getByRole("tooltip")).toBeVisible();
+    expect(screen.getByRole("tooltip")).toHaveTextContent(
+      "Can't be blocked (from Test Equipment)",
+    );
+  });
+
+  it("renders the engine-authored temporary can't-be-blocked badge on a face-down recipient without source attribution", () => {
+    const gameState = makeState();
+    gameState.objects[1].face_down = true;
+    gameState.derived = { temporary_cant_be_blocked: { 1: null } };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Can't be blocked")).toBeInTheDocument();
+    expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
+  });
+
+  it("does not render a temporary can't-be-blocked badge without an engine marker", () => {
+    const gameState = makeState();
+    gameState.derived = {};
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    expect(screen.getByLabelText("Test Creature")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Can't be blocked")).not.toBeInTheDocument();
+  });
+
   it("never badges a face-down permanent as a copy (CR 708.2)", () => {
     // A face-down permanent has only the characteristics its face-down rules
     // grant, so surfacing "Copy" would leak what it really is. The engine omits
@@ -1409,5 +1448,39 @@ describe("PermanentCard", () => {
     ).toBeInTheDocument();
     // Departed source is dropped — no fromSource span renders.
     expect(screen.queryByText(/\(from/)).not.toBeInTheDocument();
+  });
+
+  // CR 201.5: the engine ships `~` as the self-reference token, so the blocked-ability
+  // tooltip must bind it to the host object's name (mirrors CardPreview, the other
+  // `blocked_abilities` consumer). Description is abridged from the reported Kilo board dump
+  // (object 110) and asserted against this fixture's own name: the engine text continues "Its
+  // controller may search their library for a basic land card, put it onto the battlefield,
+  // then shuffle." — elided because that tail carries no `~` and so moves neither assertion.
+  it("substitutes ~ with the source name in the blocked-ability tooltip", () => {
+    const gameState = makeState();
+    gameState.objects[1] = {
+      ...gameState.objects[1],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "{T}, Sacrifice ~: Destroy target land.",
+          effect: { type: "Destroy" },
+        },
+      ] satisfies GameObject["abilities"],
+      blocked_abilities: [
+        { ability_index: 0, sources: [1], type: "CantBeActivated" },
+      ],
+    };
+    useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+
+    renderPermanent();
+
+    // Reach-guard: the row rendered, so the negative below is not vacuous. `GameplayTooltip`
+    // portals to document.body, hence the body-scoped negative.
+    expect(
+      screen.getByText(/\{T\}, Sacrifice Test Creature: Destroy target land\./),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("~");
   });
 });

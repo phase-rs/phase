@@ -1,6 +1,34 @@
 {
   "entries": [
     {
+      "id": 181,
+      "date": "2026-07-25",
+      "title": "Kamigawa flip cards arrive",
+      "tags": [
+        "new-cards",
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "multiplayer"
+      ],
+      "body": "✨ New Cards & Mechanics\n• Kamigawa flip cards now work: 19 cards can flip to their alternate face while correctly retaining their color and mana cost (Bushi Tenderfoot, Budoka Gardener, Nezumi Shortfang, Kitsune Mystic, Akki Lavarunner, and the Ascendants)\n\n🛠️ Cards That Now Work Right\n• Devour now honors what it says to sacrifice: Famished Worldsire can devour lands, Caprichrome artifacts, and Feasting Hobbit Food, while ordinary Devour still takes creatures\n• Shadow of the Goblin correctly distinguishes cards played or cast from outside your hand; Doppelgang makes the intended X copies for each of its X targets\n• Strategic Betrayal lets the targeted opponent choose a creature they control without wrongly targeting it, so Ward and similar abilities behave correctly\n• Lion’s Eye Diamond, Diamond Lion, and Bomat Courier can activate a \"discard your hand\" cost with no cards in hand\n• Peerless Recycling and other Gift cards retain the opponent you chose, including in multiplayer games; Grindstone repeats its mill while the milled cards share a color\n• Mutable Pupa grants each matching perpetual keyword independently, Kathril can choose a different creature for each conditional counter, and reflexive \"that token\" effects follow the token they just created (Iroh, Tea Master; Summoner’s Sending)\n\n⚔️ Combat & Gameplay\n• Effects that force a creature to block now bind to the relevant combat event, and temporary unblockable effects are visible while they apply\n\n🖥️ Interface\n• Card previews stay open reliably, including over Remote Desktop; printed mana costs fit cleanly in a card’s title bar\n• Mana abilities with the same result are labeled by their actual activation cost, and unlimited counter growth is shown consistently in the hover panel\n• Desktop native games restore saved sessions more reliably, avoid a flashing Windows console, and no longer hit setup races in peer-to-peer or multi-AI games\n• Replacement-effect choices are clearer at a glance\n\n🌐 Multiplayer\n• Hosted peer-to-peer games no longer initialize the host more than once after a failed attempt",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1530478339129610251"
+    },
+    {
+      "id": 180,
+      "date": "2026-07-24",
+      "title": "Resume solo games on desktop",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface",
+        "ai",
+        "multiplayer"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• Unearthed creatures and similar \"exile it instead\" riders now exile correctly whenever they leave the battlefield, including replacements granted by another permanent (Rotting Rats, Geth, Thane of Contracts)\n• Wilhelt, the Rotcleaver no longer makes Zombies when a decayed creature dies; Toxrill, the Corrosive counts slime counters on each affected creature\n• Depthshaker Titan leaves itself alone when you choose zero artifacts, while Conjurer’s Mantle, Consuming Vapors, Lictor’s Pheromone Trail, Portent, Volcanic Vision, Wheel and Deal, Fevered Visions, Riptide Gearhulk, and Aura/Equipment damage triggers now follow their printed targets and effects\n• Metamorphic Alteration now lets you choose a creature as it enters and makes the enchanted creature a copy; Sunburst and Bloodthirst granted to a spell now work as it enters (Solar Array, Lux Artillery, Bloodlord of Vaasgoth)\n• Flickering Ward and other protection effects preserve Auras that the protection specifically exempts\n\n⚔️ Combat & Gameplay\n• Auto-pay can use choice-free self-sacrificing mana sources such as Gold tokens, even when they are tapped or summoning sick, without skipping real costs such as Lion’s Eye Diamond’s discard\n• Adventure cards now present only their legal cast face\n\n🖥️ Interface\n• Desktop solo games using the native engine can be resumed after leaving the game; Windows now starts draft pools reliably, and a failed native connection visibly falls back to the browser engine\n• Hosted peer-to-peer games can use the native engine, while the desktop app better shows provisioning progress, engine replay, shell art, fullscreen, and turn-order results\n• Mobile hand cards support hold, scrub, and drag previews; Alt-pinned card previews reset cleanly when you inspect another card\n• Opponent hand visibility, active deck art, and several WebKit rendering details are restored\n\n🤖 AI\n• AI now recognizes poison-counter and graveyard-type-diversity game plans, improving choices around infect, toxic, proliferate, delirium, and graveyard payoffs\n\n🌐 Multiplayer\n• Native commander opponents retain their names, and the client restores split opponent-hand visibility",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1530253950669029406"
+    },
+    {
       "id": 179,
       "date": "2026-07-22",
       "title": "Plargg and Nassari’s chaos spell works",

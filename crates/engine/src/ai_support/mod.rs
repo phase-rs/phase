@@ -4809,6 +4809,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             };
             obj.static_definitions = vec![def].into();
         }
@@ -4931,6 +4932,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             };
             obj.static_definitions = vec![def].into();
         }

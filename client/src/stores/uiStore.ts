@@ -3,10 +3,26 @@ import type {
   GameAction,
   ObjectId,
   PlayerId,
+  TurnOrderSlotView,
 } from "../adapter/types";
 import { DICE_ROLL_DURATION_MS, TURN_BANNER_DURATION_MS } from "../animation/types";
 import { usePreferencesStore } from "./preferencesStore";
 import type { FilterKey } from "../components/modal/cardChoice/gridSelection";
+
+/**
+ * Ephemeral, player-selected blocker pairs. A creature can block more than one
+ * attacker, so the value is a set rather than a single attacker id.
+ */
+export type BlockerAssignments = Map<ObjectId, Set<ObjectId>>;
+
+/** Flatten the UI's per-blocker representation at the engine action boundary. */
+export function blockerAssignmentPairs(
+  assignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
+): [ObjectId, ObjectId][] {
+  return Array.from(assignments, ([blockerId, attackerIds]) =>
+    Array.from(attackerIds, (attackerId): [ObjectId, ObjectId] => [blockerId, attackerId]),
+  ).flat();
+}
 
 /**
  * A dice-roll / coin-flip moment to animate, surfaced from engine-authored
@@ -25,6 +41,12 @@ export type DiceRollPayload =
       context: "startingPlayer" | "ability";
       /** Starting-player contest: the high roller who takes the first turn. */
       winner?: PlayerId;
+      /** Engine-authored opening turn sequence for multiplayer games. The
+       *  overlay renders this directly so every seat can see its first-turn
+       *  position without reconstructing turn order from raw state. */
+      turnOrder?: TurnOrderSlotView[];
+      /** Engine-authored one-based turn position for the current viewer. */
+      viewerTurnNumber?: number;
       /** Starting-player contest only (CR 103.1): the roll-off by round. Round 0
        *  is every seat; each later round is the previous round's tied-max group
        *  that rerolled. Rendered round-by-round so the winner is always the high
@@ -88,10 +110,6 @@ function flushPendingShow(): void {
   const apply = pendingShow.apply;
   pendingShow = null;
   apply();
-}
-let lastPointer = { x: 0, y: 0 };
-if (typeof window !== "undefined") {
-  window.addEventListener("pointermove", (e) => { lastPointer = { x: e.clientX, y: e.clientY }; }, { passive: true });
 }
 
 // Serial FIFO for dice/coin overlays. Full-screen "moment" overlays are mutually
@@ -157,7 +175,7 @@ interface UiStoreState {
   /** CR 702.22c: attacking bands declared this combat (each inner array is one
    *  band of attacker ids). Empty when no bands are declared. */
   attackerBands: ObjectId[][];
-  blockerAssignments: Map<ObjectId, ObjectId>;
+  blockerAssignments: BlockerAssignments;
   combatClickHandler: ((id: ObjectId) => void) | null;
   previewSticky: boolean;
   isDragging: boolean;
@@ -259,7 +277,7 @@ interface UiStoreActions {
   selectAllAttackers: (ids: ObjectId[]) => void;
   setAttackerBands: (bands: ObjectId[][]) => void;
   assignBlocker: (blockerId: ObjectId, attackerId: ObjectId) => void;
-  removeBlockerAssignment: (blockerId: ObjectId) => void;
+  removeBlockerAssignment: (blockerId: ObjectId, attackerId?: ObjectId) => void;
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setPreviewSticky: (sticky: boolean) => void;
@@ -368,7 +386,16 @@ export const useUiStore = create<UiStore>()((set, get) => ({
       }
       cancelPendingShow();
       const applyInspect = () =>
-        set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 });
+        set((s) => ({
+          inspectedObjectId: id,
+          inspectedFaceIndex: faceIndex ?? 0,
+          // Inspecting a DIFFERENT object replaces (dismisses) the previous
+          // preview, so a pinned Alt state must not leak onto the new card —
+          // Alt has to be pressed again to expand it. Re-inspecting the SAME
+          // object (e.g. a face flip or a re-hover) preserves the pin so the
+          // reader isn't kicked out mid-scroll.
+          altHeld: s.inspectedObjectId === id ? s.altHeld : false,
+        }));
       // Configurable hover latency (cardPreviewHoverDelayMs). The delay gates only
       // the FIRST appearance on a hover-capable device: while a preview is already
       // open, sweeping to an adjacent card switches instantly, and the "shift"
@@ -422,11 +449,18 @@ export const useUiStore = create<UiStore>()((set, get) => ({
         // traverse the gap from the card to the panel and click "Report a Problem"
         // or scroll rulings. Toggling Alt off (or a click outside) still dismisses.
         if (get().altHeld) return;
-        const el = document.elementFromPoint(lastPointer.x, lastPointer.y);
         // Keep the preview (and finish a delay that already elapsed) when the
-        // pointer is still over an inspectable card or the preview panel. This
-        // makes stale leaves from Framer Motion layout updates harmless.
-        if (el?.closest("[data-card-hover], [data-card-preview]")) {
+        // pointer is still over an inspectable card. Ask the browser for its own
+        // `:hover` element rather than sampling elementFromPoint() against a
+        // JS-tracked pointer: that coordinate is only as fresh as the last
+        // `pointermove`, and over sparse/coalesced streams (remote-desktop / RDP
+        // webviews) it lands a few px off the card while the OS cursor is still
+        // on it — so a spurious Framer-Motion mouseleave's 50ms clear would
+        // false-fire and cancel a live preview (visible only with a non-zero
+        // hover delay, where the re-show is deferred rather than instant).
+        // `:hover` is the engine's continuous hit-test, correct with no
+        // pointermove event at all.
+        if (document.querySelector("[data-card-hover]:hover") != null) {
           flushPendingShow();
           return;
         }
@@ -529,14 +563,26 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   assignBlocker: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
-      next.set(blockerId, attackerId);
+      const attackerIds = new Set(next.get(blockerId));
+      attackerIds.add(attackerId);
+      next.set(blockerId, attackerIds);
       return { blockerAssignments: next };
     }),
 
-  removeBlockerAssignment: (blockerId) =>
+  removeBlockerAssignment: (blockerId, attackerId) =>
     set((state) => {
       const next = new Map(state.blockerAssignments);
-      next.delete(blockerId);
+      if (attackerId === undefined) {
+        next.delete(blockerId);
+      } else {
+        const attackerIds = new Set(next.get(blockerId));
+        attackerIds.delete(attackerId);
+        if (attackerIds.size === 0) {
+          next.delete(blockerId);
+        } else {
+          next.set(blockerId, attackerIds);
+        }
+      }
       return { blockerAssignments: next };
     }),
 

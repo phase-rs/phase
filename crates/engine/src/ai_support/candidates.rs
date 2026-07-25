@@ -742,6 +742,20 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        WaitingFor::ChooseGiftRecipient {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseGiftRecipient {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::BetweenGamesChoosePlayDraw { player, .. } => vec![
             candidate(
                 GameAction::ChoosePlayDraw { play_first: true },
@@ -836,6 +850,20 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        WaitingFor::ChooseGiftRecipient {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|opponent| {
+                candidate(
+                    GameAction::ChooseGiftRecipient {
+                        opponent: *opponent,
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::ManaPayment {
             player,
             convoke_mode,
@@ -889,7 +917,7 @@ pub fn candidate_actions_broad_with_probe(
             valid_blocker_ids,
             valid_block_targets,
             ..
-        } => blocker_actions(*player, valid_blocker_ids, valid_block_targets),
+        } => blocker_actions(state, *player, valid_blocker_ids, valid_block_targets),
         WaitingFor::UntapChoice {
             player, candidates, ..
         } => candidates
@@ -4260,6 +4288,7 @@ fn attacker_actions(
 }
 
 fn blocker_actions(
+    state: &GameState,
     player: PlayerId,
     valid_blocker_ids: &[crate::types::identifiers::ObjectId],
     valid_block_targets: &std::collections::HashMap<
@@ -4267,29 +4296,29 @@ fn blocker_actions(
         Vec<crate::types::identifiers::ObjectId>,
     >,
 ) -> Vec<CandidateAction> {
-    let mut actions = vec![candidate(
-        GameAction::DeclareBlockers {
-            assignments: Vec::new(),
-        },
-        TacticalClass::Block,
-        Some(player),
-    )];
+    let mut proposals = vec![Vec::new()];
 
     for &blocker_id in valid_blocker_ids {
         if let Some(targets) = valid_block_targets.get(&blocker_id) {
             for &attacker_id in targets {
-                actions.push(candidate(
-                    GameAction::DeclareBlockers {
-                        assignments: vec![(blocker_id, attacker_id)],
-                    },
-                    TacticalClass::Block,
-                    Some(player),
-                ));
+                proposals.push(vec![(blocker_id, attacker_id)]);
             }
         }
     }
 
-    actions
+    let mut seen = HashSet::new();
+    crate::game::combat::complete_blocker_proposals(state, player, &proposals)
+        .into_iter()
+        .filter_map(|action| {
+            let GameAction::DeclareBlockers { assignments } = &action else {
+                return None;
+            };
+            let mut key = assignments.clone();
+            key.sort_unstable();
+            seen.insert(key)
+                .then(|| candidate(action, TacticalClass::Block, Some(player)))
+        })
+        .collect()
 }
 
 fn select_cards_variants(

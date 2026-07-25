@@ -27,6 +27,46 @@ fn parse_self_reference_subject(input: &str) -> OracleResult<'_, ()> {
     Err(oracle_err(input))
 }
 
+/// CR 707.2c + CR 613.1a + CR 303.4: "Enchanted <subject> is a copy of the
+/// chosen <type>." — Metamorphic Alteration's companion static. Emits the
+/// parse-time `ContinuousModification::CopyChosen` MARKER affecting the
+/// enchanted host. The marker is a Layer-1 no-op at apply time: the real copy
+/// is installed as a `CopyValues` transient continuous effect when the
+/// `Effect::ChoosePermanent` as-enters choice is answered (per CR 707.2c the
+/// copiable values are fixed only when the effect first starts to apply).
+/// Emitting the static keeps the printed line "supported" and documents the
+/// copy layer on the card. The donor type after "the chosen" is informational
+/// (the concrete copy source is picked at entry), so it is required to parse
+/// but is not otherwise threaded.
+fn parse_enchanted_is_copy_of_chosen(tp: &TextPair, text: &str) -> Option<StaticDefinition> {
+    let rest = nom_tag_tp(tp, "enchanted ")?;
+    // Subject type of the enchanted host (creature / permanent). Trim the
+    // trailing period first so the donor phrase parses to an empty remainder.
+    let subject_lower = rest.lower.trim_end_matches('.').trim();
+    let (subject_filter, after_subject) = parse_type_phrase(subject_lower);
+    let TargetFilter::Typed(mut subject) = subject_filter else {
+        return None;
+    };
+    let (donor_lower, _) = tag::<_, _, OracleError<'_>>(" is a copy of the chosen ")
+        .parse(after_subject)
+        .ok()?;
+    // The donor type ("creature" / "permanent") must parse and fully consume the
+    // remainder — a trailing rider (e.g. "except it has flying") is not modeled
+    // by the marker, so bail rather than silently drop it.
+    let (_donor_filter, donor_rest) = parse_type_phrase(donor_lower);
+    if !donor_rest.trim().is_empty() {
+        return None;
+    }
+    // CR 303.4 + CR 613.1: the static affects the enchanted host.
+    subject.properties.push(FilterProp::EnchantedBy);
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(subject))
+            .modifications(vec![ContinuousModification::CopyChosen])
+            .description(text.to_string()),
+    )
+}
+
 /// CR 208.1 + CR 113.7: Parse the dynamic referent of a "{X} … less to activate,
 /// where X is [source]'s {power|toughness|mana value}" activated-ability cost
 /// reduction (Agatha of the Vile Cauldron — "where X is Agatha's power", which
@@ -1232,6 +1272,14 @@ pub(crate) fn parse_static_line_inner(
     if let Some(def) = parse_becomes_equipment_with_ability(&tp, &text) {
         return Some(def);
     }
+    // CR 707.2c + CR 613.1a + CR 303.4: "Enchanted <subject> is a copy of the
+    // chosen <type>" — Metamorphic Alteration's companion static. Must precede
+    // `parse_enchanted_is_type`, whose "is a <type>" copula would otherwise try
+    // (and fail) to read "copy" as a card type.
+    if let Some(def) = parse_enchanted_is_copy_of_chosen(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 613.1d + CR 205.1a: "Enchanted [permanent-type] is a [type] [with base P/T N/N]
     // [in addition to its other types]" — type-changing aura effects.
     // Must come before the basic-land-type handler which is a subset of this pattern.

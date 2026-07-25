@@ -104,9 +104,9 @@ use crate::types::ability::FilterProp;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ContinuousModification, ControllerRef, Duration, Effect,
     GuessSubject, ModalChoice, MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, StaticCondition,
-    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    QuantityExpr, QuantityRef, RepeatContinuation, ReplacementDefinition, ResolvedAbility,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -1357,6 +1357,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ScopedPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -1813,6 +1814,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         | TriggerCondition::CastSpellThisTurn { .. }
         | TriggerCondition::SpellCastWithVariantThisTurn { .. }
         | TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
@@ -2262,6 +2264,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource
@@ -2504,6 +2507,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::ScopedPlayer
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::None
         | TargetFilter::Any
         | TargetFilter::Player
@@ -2695,6 +2699,12 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
             legacy_static_definition(definition)
         }
         ContinuousModification::GrantTrigger { trigger } => legacy_trigger_definition(trigger),
+        // A granted object-hosted replacement can nest a frozen tag in its
+        // execute body or its `valid_card` scope filter — distinct traversal from
+        // GrantTrigger (a ReplacementDefinition, not a TriggerDefinition).
+        ContinuousModification::GrantReplacement { replacement } => {
+            legacy_replacement_definition(replacement)
+        }
         ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
             legacy_target_filter(source)
@@ -2710,6 +2720,9 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
             legacy_quantity_expr(value)
         }
         ContinuousModification::CopyValues { .. }
+        // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
+        // frozen event-context tag.
+        | ContinuousModification::CopyChosen
         | ContinuousModification::SetName { .. }
         | ContinuousModification::SetTextName { .. }
         | ContinuousModification::AddPower { .. }
@@ -2758,6 +2771,14 @@ fn legacy_continuous_modification(m: &ContinuousModification) -> bool {
     }
 }
 
+/// A granted object-hosted `ReplacementDefinition` can carry a frozen tag in its
+/// `execute` redirect body or its `valid_card` scope filter. Mirrors
+/// `legacy_trigger_definition` for the replacement-granting layer-6 case.
+fn legacy_replacement_definition(rd: &ReplacementDefinition) -> bool {
+    rd.execute.as_deref().is_some_and(legacy_definition)
+        || rd.valid_card.as_ref().is_some_and(legacy_target_filter)
+}
+
 /// A granted / emblem `TriggerDefinition` can carry a frozen tag in its firing
 /// filters (`valid_card`/`valid_source`), its intervening-if condition, or its
 /// execute body.
@@ -2804,6 +2825,8 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::HideawayConceal { target }
         | Effect::ChooseCard { target, .. }
         | Effect::Transform { target }
+        // CR 710.4: same single-target-slot shape as `Transform`.
+        | Effect::FlipPermanent { target }
         | Effect::Shuffle { target }
         | Effect::Reveal { target }
         | Effect::TargetOnly { target }
@@ -2811,7 +2834,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Unsuspect { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target }
         | Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
         | Effect::BecomeSaddled { target }
@@ -2841,6 +2863,10 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
+
+        Effect::ForceBlock {
+            target, duration, ..
+        } => legacy_target_filter(target) || legacy_duration(duration),
 
         Effect::GainActivatedAbilitiesOfTarget {
             target,
@@ -3159,6 +3185,9 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::CastFromZone {
             target, duration, ..
         } => legacy_target_filter(target) || odur(duration),
+        // CR 707.2c (Metamorphic Alteration): the copy-source choice pool is a
+        // target filter; walk it for legacy event-refs like every other filter.
+        Effect::ChoosePermanent { filter } => legacy_target_filter(filter),
         Effect::GenericEffect {
             duration,
             target,
@@ -3578,9 +3607,10 @@ fn read_object_scope(scope: &ObjectScope, kind: StateKind) -> RwProfile {
 /// board `ObjectPt` characteristic read.
 fn share_quality_operand_read(f: &TargetFilter) -> RwProfile {
     match f {
-        TargetFilter::LastRevealed | TargetFilter::SelfRef | TargetFilter::SourceOrPaired => {
-            RwProfile::empty()
-        }
+        TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired => RwProfile::empty(),
         // Fail-closed: any other reference is a live board characteristic read.
         _ => reads_board_of(StateKind::ObjectPt),
     }
@@ -3648,6 +3678,7 @@ fn walk_ability(
         source_incarnation: _, // self-transform epoch latch, no read/write effect
         trigger_source: _,     // exact triggered-source authority, no read/write effect
         trigger_definition_ref: _, // exact trigger occurrence, no read/write effect
+        force_block_attacker: _, // exact force-block referent, no read/write effect
         controller: _,
         original_controller: _,
         scoped_player: _,
@@ -3674,6 +3705,7 @@ fn walk_ability(
         target_selection_mode: _,
         chosen_players: _,
         sub_link: _,
+        sibling_condition: _, // replication marker, no read/write effect
         replacement_applied: _,
         parent_target_missing_reason: _,
     } = a;
@@ -3794,6 +3826,7 @@ fn walk_definition(
         target_selection_mode: _,
         sub_link: _,
         iteration_kind_binding: _,
+        sibling_condition: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -4891,6 +4924,10 @@ fn rw_effect(
         } => obj(StateKind::ObjectPt, target),
         Effect::SwitchPT { target } => obj(StateKind::ObjectPt, target),
         Effect::Transform { target } => obj(StateKind::ObjectPt, target),
+        // CR 710.1b: flipping replaces the permanent's power and toughness
+        // (along with its name, type line, and text box) — the same
+        // `ObjectPt` write axis `Transform` records.
+        Effect::FlipPermanent { target } => obj(StateKind::ObjectPt, target),
         Effect::BecomeCopy {
             target,
             recipient,
@@ -5320,6 +5357,14 @@ fn rw_effect(
             p.merge(rw_duration(duration));
             (p, None)
         }
+        Effect::ForceBlock {
+            target, duration, ..
+        } => {
+            let mut p = ext_write(StateKind::Other);
+            flag_legacy_write_target(&mut p, target);
+            p.merge(rw_duration(duration));
+            (p, None)
+        }
         // §L14 (CR 500.8): an additional phase/step is a turn-structure write.
         Effect::AdditionalPhase {
             target: _,
@@ -5472,7 +5517,6 @@ fn rw_effect(
         | Effect::RevealFromHand { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
         | Effect::BecomeUnprepared { .. }
         | Effect::BecomeSaddled { .. }
         | Effect::SetClassLevel { .. }
@@ -5482,6 +5526,11 @@ fn rw_effect(
         // and may add counters from a live property read. Fail closed until the
         // copy/counter sub-steps have a precise profile.
         | Effect::EachPlayerCopyChosen { .. }
+        // CR 707.2c (Metamorphic Alteration): raised only from the Aura-ETB
+        // replacement path; on answer it installs a Layer-1 copy on the Aura's
+        // host. Never resolves through the intra-ability chain — fail-closed
+        // conservative keeps the exhaustive match honest.
+        | Effect::ChoosePermanent { .. }
         | Effect::Myriad
         | Effect::Encore
         | Effect::CombineHost { .. }
@@ -6055,6 +6104,7 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         }
         TriggerCondition::DuringPlayersTurn { player } => rw_player_filter(player),
         TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
         | TriggerCondition::SourceIsHarnessed
         | TriggerCondition::SourceIsAttacking
         | TriggerCondition::SourceIsTransformed
@@ -6294,6 +6344,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::ExiledBySource

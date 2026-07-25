@@ -534,6 +534,14 @@ export class P2PHostAdapter implements EngineAdapter {
   private nativeBridge: NativeP2PBridge | null = null;
   private nativeInitialSetupPending = false;
   private listeners: P2PAdapterEventListener[] = [];
+  /**
+   * Mirrors WasmAdapter's initialization contract: setup runs exactly once,
+   * and concurrent callers share its in-flight promise. The lobby initializes
+   * the host before advertising it; the game-page handoff later calls
+   * initialize again while seeding gameStore.
+   */
+  private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   private guestSessions = new Map<PlayerId, PeerSession>();
   private guestDecks = new Map<PlayerId, DeckListPayload["player"]>();
@@ -570,10 +578,7 @@ export class P2PHostAdapter implements EngineAdapter {
   private pregameOpQueue: Promise<void> = Promise.resolve();
   private resolvePregameReady!: () => void;
   private rejectPregameReady!: (err: unknown) => void;
-  private readonly pregameReady: Promise<void> = new Promise((resolve, reject) => {
-    this.resolvePregameReady = resolve;
-    this.rejectPregameReady = reject;
-  });
+  private pregameReady!: Promise<void>;
   private allowPartialStart = false;
 
   /**
@@ -1093,7 +1098,35 @@ export class P2PHostAdapter implements EngineAdapter {
     }
   }
 
+  private resetPregameReady(): void {
+    this.pregameReady = new Promise((resolve, reject) => {
+      this.resolvePregameReady = resolve;
+      this.rejectPregameReady = reject;
+    });
+    // Initialization can fail before a guest arrives to await this gate. Keep
+    // that rejection observable to a queued guest while preventing it from
+    // becoming an unhandled rejection when no guest exists yet.
+    void this.pregameReady.catch(() => {});
+  }
+
+  private unsubscribeHostConnections(): void {
+    this.hostConnectionUnsub?.();
+    this.hostConnectionUnsub = null;
+  }
+
   async initialize(): Promise<void> {
+    if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
+    this.resetPregameReady();
+    const pending = this.initializeInner();
+    this.initPromise = pending;
+    pending.catch(() => {
+      if (this.initPromise === pending) this.initPromise = null;
+    });
+    return pending;
+  }
+
+  private async initializeInner(): Promise<void> {
     traceAdapter("Host", "initialize-start", { isResume: this.isResume });
     // Subscribe SYNCHRONOUSLY before any `await`. `hostRoom()` buffers
     // inbound guest connections that arrived between peer-open and the
@@ -1147,6 +1180,7 @@ export class P2PHostAdapter implements EngineAdapter {
       }
       this.resolvePregameReady();
     } catch (err) {
+      this.unsubscribeHostConnections();
       this.rejectPregameReady(err);
       throw err;
     }
@@ -1158,6 +1192,7 @@ export class P2PHostAdapter implements EngineAdapter {
       });
     }
     traceAdapter("Host", "initialize-complete", {});
+    this.initialized = true;
   }
 
   private handleNewConnection(conn: DataConnection): void {
@@ -1637,7 +1672,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * clears the persistence before disposing.
    */
   dispose(): void {
-    if (this.hostConnectionUnsub) this.hostConnectionUnsub();
+    this.unsubscribeHostConnections();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);
     }

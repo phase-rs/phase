@@ -1215,6 +1215,11 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .first()
             .map(|&opponent| GameAction::ChooseAnnouncingOpponent { opponent }),
 
+        // CR 702.174a: Gift recipient — fall back to the first candidate.
+        WaitingFor::ChooseGiftRecipient { candidates, .. } => candidates
+            .first()
+            .map(|&opponent| GameAction::ChooseGiftRecipient { opponent }),
+
         // Adventure/MDFC/alt-cost choice: default to the "normal" face/cost.
         WaitingFor::CastOffer {
             kind: CastOfferKind::Adventure { .. },
@@ -2782,7 +2787,11 @@ pub(crate) fn deterministic_choice(
                 &config.profile,
                 Some(valid_block_targets),
             );
-            return Some(GameAction::DeclareBlockers { assignments });
+            return Some(engine::game::combat::complete_blocker_proposal(
+                state,
+                ai_player,
+                &assignments,
+            ));
         }
         return Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),
@@ -2839,7 +2848,11 @@ fn deterministic_combat_choice(
                 profile,
                 Some(valid_block_targets),
             );
-            return Some(GameAction::DeclareBlockers { assignments });
+            return Some(engine::game::combat::complete_blocker_proposal(
+                state,
+                ai_player,
+                &assignments,
+            ));
         }
         return Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),
@@ -5671,6 +5684,8 @@ mod tests {
                 repeatability: engine::types::ability::AdditionalCostRepeatability::Repeatable,
             },
             times_kicked: 0,
+            origin: engine::types::ability::AdditionalCostOrigin::Kicker,
+            gift_kind: None,
             pending_cast: Box::new(pending),
         };
         state
