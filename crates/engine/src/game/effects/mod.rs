@@ -12353,6 +12353,26 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: a continuation that exiles a face-down pile must receive the
+    /// preceding instruction's tracked set when its top-library count is dynamic.
+    /// `ExileFaceDownPile::count` is carried by the exhaustive quantity visitor,
+    /// rather than by a one-off predicate arm.
+    #[test]
+    fn exile_face_down_pile_tracked_count_marks_effect_as_referencing_tracked_set() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::SelfRef,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        };
+
+        assert!(
+            effect_references_tracked_set(&effect),
+            "a tracked face-down-pile count must make the continuation consume the chain tracked set"
+        );
+    }
+
     /// CR 118.1 + CR 603.12a: the repeated-optional-payment driver pays each
     /// iteration in line and reads the failure flag immediately, so it must admit
     /// ONLY a pure, static mana `PayCost` (Hawkeye's `{1}`). A PayCost whose cost

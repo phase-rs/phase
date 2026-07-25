@@ -15042,6 +15042,9 @@ impl Effect {
             Effect::ExileTop { count, .. } => {
                 f(count);
             }
+            Effect::ExileFaceDownPile { count, .. } => {
+                f(count);
+            }
             Effect::Connive { count, .. } => {
                 f(count);
             }
@@ -15305,6 +15308,7 @@ impl Effect {
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::BecomeCopy { .. }
+            | Effect::ChoosePermanent { .. }
             | Effect::GainActivatedAbilitiesOfTarget { .. }
             | Effect::ChooseCard { .. }
             | Effect::ChooseCounterKind { .. }
@@ -15317,6 +15321,7 @@ impl Effect {
             | Effect::Cleanup { .. }
             | Effect::Shuffle { .. }
             | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
             | Effect::RevealFromHand { .. }
             | Effect::Reveal { .. }
             | Effect::RevealTop { .. }
