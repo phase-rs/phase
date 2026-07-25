@@ -23735,6 +23735,30 @@ mod tests {
     }
 
     #[test]
+    fn force_block_serde_preserves_named_attacker_and_legacy_defaults() {
+        let named = Effect::ForceBlock {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            attacker: Some(ForceBlockAttackerRef::EventSource),
+            duration: Duration::UntilEndOfCombat,
+        };
+        let json = serde_json::to_string(&named).expect("serialize named force block");
+        assert_eq!(
+            serde_json::from_str::<Effect>(&json).expect("deserialize named force block"),
+            named
+        );
+
+        let legacy = r#"{"type":"ForceBlock","target":{"type":"Any"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Effect>(legacy).expect("deserialize legacy force block"),
+            Effect::ForceBlock {
+                target: TargetFilter::Any,
+                attacker: None,
+                duration: Duration::UntilEndOfTurn,
+            }
+        );
+    }
+
+    #[test]
     fn effect_cleanup_typed_fields_roundtrip() {
         let effect = Effect::Cleanup {
             clear_remembered: true,

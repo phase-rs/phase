@@ -5169,10 +5169,13 @@ fn build_provoke_trigger() -> TriggerDefinition {
         Effect::ForceBlock {
             target: TargetFilter::ParentTarget,
             attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
-            duration: Duration::UntilEndOfTurn,
+            duration: Duration::UntilEndOfCombat,
         },
     )
-    .description("CR 509.1c: that creature blocks this creature this turn if able".to_string());
+    .description(
+        "CR 702.39a + CR 509.1c: that creature blocks this creature this combat if able"
+            .to_string(),
+    );
 
     // CR 702.39a + CR 701.26b: "you may have target creature ... untap" — the
     // optional parent body untaps the chosen defender, then force-blocks it.
@@ -5187,7 +5190,7 @@ fn build_provoke_trigger() -> TriggerDefinition {
     .optional()
     .sub_ability(force_block)
     .description(
-        "Provoke — untap target creature defending player controls; it blocks this turn if able"
+        "Provoke — untap target creature defending player controls; it blocks this combat if able"
             .to_string(),
     );
 
@@ -13578,7 +13581,8 @@ mod provoke_synthesis_tests {
                 &*sub.effect,
                 Effect::ForceBlock {
                     target: TargetFilter::ParentTarget,
-                    ..
+                    attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
+                    duration: Duration::UntilEndOfCombat,
                 }
             ),
             "sub-ability must force-block the parent (untapped) target via ParentTarget, got {:?}",
@@ -13904,6 +13908,13 @@ mod provoke_runtime_tests {
             forced,
             "Provoke must apply MustBlockAttacker bound to the provoking attacker, \
              reusing the existing source-referential ForceBlock resolver"
+        );
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.duration == Duration::UntilEndOfCombat),
+            "CR 702.39a's forced block lasts only for this combat"
         );
 
         assert!(events.iter().any(|e| matches!(

@@ -326,6 +326,23 @@ describe("ActionButton", () => {
     });
   });
 
+  it("clears a pending blocker when the engine supplies a new declaration prompt", () => {
+    render(<ActionButton />);
+
+    act(() => useUiStore.getState().combatClickHandler?.(100));
+    expect(screen.getByText("Select attacker for blocker")).toBeInTheDocument();
+
+    const nextPrompt = blockerPrompt();
+    act(() => {
+      useGameStore.setState({
+        gameState: createGameState(nextPrompt),
+        waitingFor: nextPrompt,
+      });
+    });
+
+    expect(screen.queryByText("Select attacker for blocker")).not.toBeInTheDocument();
+  });
+
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {
     useGameStore.setState({
       gameMode: "online",

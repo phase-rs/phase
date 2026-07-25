@@ -20875,7 +20875,7 @@ fn static_must_be_blocked_still_routes_to_static_parser() {
 #[test]
 fn force_block_with_self_ref() {
     // "Target creature blocks ~ this turn if able" (e.g., Auriok Siege Sled)
-    let e = parse_effect("Target creature blocks ~ this turn if able");
+    let e = parse_effect("Target creature blocks ~ this turn if able.");
     assert!(
         matches!(
             e,
@@ -20883,7 +20883,6 @@ fn force_block_with_self_ref() {
                 target: TargetFilter::Typed(_),
                 attacker: Some(crate::types::ability::ForceBlockAttackerRef::Source),
                 duration: Duration::UntilEndOfTurn,
-                ..
             }
         ),
         "Expected ForceBlock with typed target, got {:?}",
@@ -20916,7 +20915,7 @@ fn force_block_blocks_it_this_combat() {
         subject: Some(TargetFilter::Typed(TypedFilter::creature())),
         ..ParseContext::default()
     };
-    let e = parse_effect_clause("Target creature blocks it this combat if able", &mut ctx).effect;
+    let e = parse_effect_clause("Target creature blocks it this combat if able.", &mut ctx).effect;
     assert!(
         matches!(
             e,

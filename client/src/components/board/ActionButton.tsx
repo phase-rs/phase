@@ -137,6 +137,13 @@ export function ActionButton() {
     [waitingFor],
   );
 
+  // A new declaration prompt invalidates a partially selected blocker from the
+  // prior prompt, even though both prompts share the same combat mode.
+  const blockerPrompt = waitingFor?.type === "DeclareBlockers" ? waitingFor : null;
+  useEffect(() => {
+    setPendingBlocker(null);
+  }, [blockerPrompt]);
+
   // Blocker click handler
   const handleBlockerClick = useCallback(
     (objectId: ObjectId) => {

@@ -1482,21 +1482,18 @@ fn collect_matching_triggers_inner(
             } else if matches!(trig_def.mode, TriggerMode::YouAttack)
                 && ability.has_event_source_force_block_recursive()
             {
-                let GameEvent::AttackersDeclared {
-                    defending_player, ..
-                } = event
-                else {
-                    unreachable!("YouAttack triggers match only attack declarations");
-                };
-                singleton_attack_events(
-                    *defending_player,
-                    super::trigger_matchers::matching_you_attack_pairs(
-                        event,
-                        trig_def,
-                        &source_context,
-                        state,
-                    ),
-                )
+                let matching = super::trigger_matchers::matching_you_attack_pairs(
+                    event,
+                    trig_def,
+                    &source_context,
+                    state,
+                );
+                match event {
+                    GameEvent::AttackersDeclared {
+                        defending_player, ..
+                    } => singleton_attack_events(*defending_player, matching),
+                    _ => Vec::new(),
+                }
                 .into_iter()
                 .map(|trigger_event| vec![trigger_event])
                 .collect()
@@ -12192,6 +12189,7 @@ pub mod tests {
     #[test]
     fn tolsimir_attack_trigger_runs_from_parser_through_stack_to_block_legality() {
         use crate::game::combat::{validate_blockers, AttackTarget, AttackerInfo, CombatState};
+        use crate::types::actions::GameAction;
 
         const ORACLE: &str = "Whenever a Wolf you control attacks, if Tolsimir, Midnight's Light attacked this combat, target creature an opponent controls blocks that Wolf this combat if able.";
 
@@ -12256,12 +12254,17 @@ pub mod tests {
         let source = state.objects.get_mut(&tolsimir).expect("Tolsimir exists");
         source.trigger_definitions.push(parsed.clone());
         std::sync::Arc::make_mut(&mut source.base_trigger_definitions).push(parsed);
+        let attacking_incarnations_this_combat = [tolsimir, wolf, second_wolf]
+            .into_iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id]))
+            .collect();
         state.combat = Some(CombatState {
             attackers: vec![
                 AttackerInfo::new(tolsimir, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
                 AttackerInfo::new(wolf, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
                 AttackerInfo::new(second_wolf, AttackTarget::Player(PlayerId(1)), PlayerId(1)),
             ],
+            attacking_incarnations_this_combat,
             ..CombatState::default()
         });
         let attack_event = GameEvent::AttackersDeclared {
@@ -12272,39 +12275,55 @@ pub mod tests {
                 (second_wolf, AttackTarget::Player(PlayerId(1))),
             ],
         };
-        let pending = collect_pending_triggers(&mut state, &[attack_event]);
+        assert!(
+            check_trigger_condition(
+                &state,
+                &TriggerCondition::SourceAttackedThisCombat,
+                PlayerId(0),
+                Some(tolsimir),
+                Some(&attack_event),
+            ),
+            "Tolsimir's observed incarnation attacked during this combat"
+        );
+        let pending = collect_pending_triggers(&mut state, std::slice::from_ref(&attack_event));
         assert_eq!(
             pending.len(),
             2,
             "each matching Wolf receives an individual event-bound trigger"
         );
-        let mut stack_events = Vec::new();
-        for mut pending in pending {
+        for (attacker, target) in [(wolf, blocker), (second_wolf, second_blocker)] {
+            let singleton_event = GameEvent::AttackersDeclared {
+                attacker_ids: vec![attacker],
+                defending_player: PlayerId(1),
+                attacks: vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+            };
+            process_triggers(&mut state, &[singleton_event]);
+            let waiting = crate::game::engine::begin_pending_trigger_target_selection(&mut state)
+                .expect("target selection setup must succeed")
+                .expect("Tolsimir trigger must request its target");
+            let WaitingFor::TriggerTargetSelection { target_slots, .. } = &waiting else {
+                panic!("expected trigger target selection, got {waiting:?}");
+            };
             assert_eq!(
-                pending.pending.target_constraints.len(),
+                target_slots.len(),
                 1,
                 "the parsed target survives to stack setup"
             );
-            let attacker = match pending.pending.trigger_event.as_ref() {
-                Some(GameEvent::AttackersDeclared { attacker_ids, .. }) => {
-                    match attacker_ids.as_slice() {
-                        [attacker] => *attacker,
-                        _ => panic!("event-source force block requires one attacker"),
-                    }
-                }
-                _ => panic!("Tolsimir trigger must retain its attack event"),
-            };
-            pending.pending.ability.targets = vec![TargetRef::Object(if attacker == wolf {
-                blocker
-            } else {
-                second_blocker
-            })];
-            push_pending_trigger_to_stack_with_event_batch(
-                &mut state,
-                pending.pending,
-                pending.trigger_events,
-                &mut stack_events,
+            assert!(
+                target_slots[0]
+                    .legal_targets
+                    .contains(&TargetRef::Object(target)),
+                "production target selection must expose the chosen opposing creature"
             );
+            state.waiting_for = waiting;
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                },
+            )
+            .expect("production target choice must succeed");
         }
         let mut resolution_events = Vec::new();
         crate::game::stack::resolve_top(&mut state, &mut resolution_events);

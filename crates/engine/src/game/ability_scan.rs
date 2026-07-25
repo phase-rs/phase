@@ -1143,9 +1143,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::ForceBlock { target, .. } => {
+        Effect::ForceBlock {
+            target,
+            attacker: _,
+            duration,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
+            acc = acc.or(scan_duration(duration, mode));
             acc
         }
         Effect::ForceAttack {

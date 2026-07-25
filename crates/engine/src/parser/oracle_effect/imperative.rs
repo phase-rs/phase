@@ -11847,13 +11847,16 @@ fn parse_force_block_ast(input: &str, ctx: &ParseContext) -> Option<ImperativeFa
         .parse(input)
         .ok()?;
     let parse_duration = |tail| {
-        all_consuming(alt((
-            value(
-                Duration::UntilEndOfTurn,
-                tag::<_, _, OracleError<'_>>("this turn if able"),
-            ),
-            value(Duration::UntilEndOfCombat, tag("this combat if able")),
-        )))
+        all_consuming(terminated(
+            alt((
+                value(
+                    Duration::UntilEndOfTurn,
+                    tag::<_, _, OracleError<'_>>("this turn if able"),
+                ),
+                value(Duration::UntilEndOfCombat, tag("this combat if able")),
+            )),
+            opt(tag(".")),
+        ))
         .parse(tail)
         .ok()
         .map(|(_, duration)| duration)

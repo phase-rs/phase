@@ -38,4 +38,17 @@ describe("filterVisibleBlockerPairs", () => {
       [30, 300],
     ]);
   });
+
+  it("retains every pair when one visible blocker blocks multiple attackers", () => {
+    const pairs: [number, number][] = [
+      [10, 100],
+      [10, 200],
+    ];
+    const objects = { 10: { controller: 2 } };
+
+    expect(filterVisibleBlockerPairs(pairs, objects, new Set([0, 2]))).toEqual([
+      [10, 100],
+      [10, 200],
+    ]);
+  });
 });

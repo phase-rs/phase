@@ -2831,7 +2831,6 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::Unsuspect { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target, .. }
         | Effect::BecomePrepared { target }
         | Effect::BecomeUnprepared { target }
         | Effect::BecomeSaddled { target }
@@ -2861,6 +2860,10 @@ fn legacy_effect(x: &Effect) -> bool {
         | Effect::AddTargetReplacement { target, .. }
         | Effect::DiscardCard { target, .. }
         | Effect::Animate { target, .. } => legacy_target_filter(target),
+
+        Effect::ForceBlock {
+            target, duration, ..
+        } => legacy_target_filter(target) || legacy_duration(duration),
 
         Effect::GainActivatedAbilitiesOfTarget {
             target,
@@ -5344,6 +5347,14 @@ fn rw_effect(
             target,
             required_player: _,
             duration,
+        } => {
+            let mut p = ext_write(StateKind::Other);
+            flag_legacy_write_target(&mut p, target);
+            p.merge(rw_duration(duration));
+            (p, None)
+        }
+        Effect::ForceBlock {
+            target, duration, ..
         } => {
             let mut p = ext_write(StateKind::Other);
             flag_legacy_write_target(&mut p, target);

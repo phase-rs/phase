@@ -59,8 +59,6 @@ function useObjectAnchors(objectIds: ObjectId[]): Map<ObjectId, Anchor> {
 
 function badgeTone(status: BlockerConstraint["status"]): string {
   switch (status) {
-    case "satisfied":
-      return "border-emerald-300/60 bg-emerald-950/85 text-emerald-100";
     case "pending":
       return "border-rose-300/50 bg-rose-950/85 text-rose-100 animate-pulse";
     case "info":
@@ -97,8 +95,6 @@ export function BlockerConstraintBadges() {
             ? t("combat.cantBlockBadge")
             : exactNames.length > 0
               ? t("combat.mustBlockExactBadge", { attacker: exactNames.join(", ") })
-            : req.status === "satisfied"
-              ? t("combat.mustBlockSatisfiedBadge")
               : t("combat.mustBlockBadge");
         // Display-only source attribution: suppress a self-source (intrinsic
         // requirement shows a bare badge) and skip ids that no longer resolve

@@ -4093,7 +4093,6 @@ fn detect_duration_this_turn(
         matches!(
             x,
             TriggerCondition::SourceEnteredThisTurn
-                | TriggerCondition::SourceAttackedThisCombat
                 | TriggerCondition::DealtDamageBySourceThisTurn
                 | TriggerCondition::DealtDamageThisTurnBySource { .. }
                 | TriggerCondition::FirstTimeObjectTappedThisTurn

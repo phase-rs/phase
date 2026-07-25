@@ -2353,7 +2353,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::PhaseIn { target }
-        | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
         | Effect::Transform { target }
         // CR 710.4: the flipping permanent is the effect's single reported target.
@@ -2363,6 +2362,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Regenerate { target }
         | Effect::RemoveAllDamage { target } => {
             d.push(("target".into(), fmt_target(target)));
+        }
+        Effect::ForceBlock {
+            target,
+            attacker,
+            duration,
+        } => {
+            d.push(("target".into(), fmt_target(target)));
+            if let Some(attacker) = attacker {
+                d.push(("attacker".into(), format!("{attacker:?}")));
+            }
+            if *duration != Duration::UntilEndOfTurn {
+                d.push(("duration".into(), format!("{duration:?}")));
+            }
         }
         // CR 702.50a: EpicCopy's parameters live in its snapshotted ability.
         Effect::EpicCopy { .. } => {}
