@@ -47131,9 +47131,14 @@ fn triumph_of_saint_katherine_lowers_to_atomic_face_down_pile() {
         &["Creature".to_string()],
         &["Human".to_string(), "Warrior".to_string()],
     );
-    let effect = &parsed.triggers[0].ability.effect;
+    let effect = parsed.triggers[0]
+        .execute
+        .as_ref()
+        .expect("dies trigger must have an execute ability")
+        .effect
+        .as_ref();
     assert!(matches!(
-        effect.as_ref(),
+        effect,
         Effect::ExileFaceDownPile {
             object: TargetFilter::TriggeringSource,
             player: TargetFilter::Controller,

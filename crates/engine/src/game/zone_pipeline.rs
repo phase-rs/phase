@@ -3030,7 +3030,7 @@ mod w3_library_placement_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ReplacementDefinition, ReplacementMode, TargetFilter,
+        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;
