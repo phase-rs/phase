@@ -94,6 +94,7 @@ mod cr733_resolved_commands_p0;
 mod cr733_resolved_commands_p1;
 mod cr733_resolved_commands_p2;
 mod cr733_resolved_draw;
+mod cr733_resolved_enter_tapped;
 mod cr733_resolved_frame_transition;
 mod cr733_resolved_trigger_collection;
 mod cr733_resolved_zone_change;

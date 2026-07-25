@@ -2453,10 +2453,22 @@ pub(crate) fn deliver_replaced_zone_change(
             }
         }
         // CR 614.1: Apply enter-tapped if the effect or replacement set it.
-        if should_tap.resolve(false) && to == Zone::Battlefield {
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = true;
-            }
+        // CR 701.26a: Only an untapped permanent can be tapped, so route the
+        // entry tap through the single object-status authority — it captures
+        // the exact incarnation and prior state as a resolved command instead
+        // of writing `tapped` raw. The existence guard preserves the prior
+        // silent skip when the object is no longer present.
+        if should_tap.resolve(false)
+            && to == Zone::Battlefield
+            && state.objects.contains_key(&object_id)
+        {
+            crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                object_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                true,
+            )
+            .expect("an entering permanent must satisfy the resolved tap precondition");
         }
         // CR 603.6a + CR 400.7: Record which ability placed this permanent so
         // anti-recursion intervening-ifs ("if it wasn't put onto the battlefield
