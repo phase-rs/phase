@@ -1497,7 +1497,7 @@ impl BlockDeclarationConstraints {
                 let maximum = extra_block_limit(state, object).min(attackers.len() as u32) as usize;
                 Some(blocker_assignment_choices(blocker, &attackers, maximum))
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let mut future_requirement_satisfaction =
             vec![vec![false; requirements.len()]; choices.len() + 1];

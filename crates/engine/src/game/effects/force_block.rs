@@ -68,6 +68,7 @@ pub fn resolve(
         }
         // An unavailable named referent cannot become a generic requirement.
         // The instruction has no attacker it can require a block against.
+        Some(_) => return Ok(()),
         None if has_named_attacker => return Ok(()),
         None => StaticMode::MustBlock,
     };
