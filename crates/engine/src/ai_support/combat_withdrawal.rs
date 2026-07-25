@@ -443,6 +443,21 @@ mod tests {
             .expect("combat exists")
             .blocker_assignments
             .clear();
+        state
+            .combat
+            .as_mut()
+            .expect("combat exists")
+            .blocker_to_attacker
+            .clear();
+        state
+            .combat
+            .as_mut()
+            .expect("combat exists")
+            .attackers
+            .iter_mut()
+            .find(|entry| entry.object_id == attacker)
+            .expect("attacker exists")
+            .blocked = false;
         install_target_selection(
             &mut state,
             source,

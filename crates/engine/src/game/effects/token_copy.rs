@@ -4216,6 +4216,8 @@ mod tests {
         let token_id = ObjectId(state.next_object_id - 1);
         let token = &state.objects[&token_id];
         assert_eq!(token.base_loyalty, Some(1));
+        assert_eq!(token.printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
+        assert_eq!(token.base_printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
         assert_eq!(
             token.counters.get(&CounterType::Loyalty).copied(),
             Some(1),

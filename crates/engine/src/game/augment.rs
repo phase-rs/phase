@@ -388,6 +388,7 @@ fn merged_copiable_values(
         power: Some(host_values.power.unwrap_or(0) + augment.base_power.unwrap_or(0)),
         toughness: Some(host_values.toughness.unwrap_or(0) + augment.base_toughness.unwrap_or(0)),
         loyalty: host_values.loyalty,
+        // CR 707.2: The merged object's copiable loyalty characteristic follows its host.
         printed_loyalty: host_values.printed_loyalty,
         keywords,
         abilities: Arc::new(abilities),

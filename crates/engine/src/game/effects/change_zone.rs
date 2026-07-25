@@ -2070,6 +2070,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
@@ -9495,7 +9496,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: Some(3),
-                printed_loyalty: None,
+                printed_loyalty: Some(PrintedLoyalty::Fixed(3)),
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],

@@ -185,6 +185,7 @@ pub struct BackFaceData {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: The face's printed loyalty determines loyalty counters on entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4: Defense of a battle (printed number while off the battlefield).
@@ -441,6 +442,8 @@ pub struct GameObject {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: Printed loyalty is the entry-counter baseline; battlefield
+    /// loyalty itself is counter-derived (CR 306.5c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4c: Defense of a battle on the battlefield — derived from defense
@@ -526,6 +529,8 @@ pub struct GameObject {
     pub base_name: String,
     #[serde(default)]
     pub base_loyalty: Option<u32>,
+    /// CR 306.5b: Printed-loyalty baseline restored after layered copy effects;
+    /// live loyalty remains derived from counters on the battlefield (CR 306.5c).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4a: Printed defense number (off-battlefield defense).
@@ -1940,6 +1945,9 @@ impl GameObject {
         }
         if self.base_loyalty.is_none() && self.loyalty.is_some() {
             self.base_loyalty = self.loyalty;
+        }
+        if self.base_printed_loyalty.is_none() && self.printed_loyalty.is_some() {
+            self.base_printed_loyalty = self.printed_loyalty;
         }
         if self.base_name.is_empty() && !self.name.is_empty() {
             self.base_name = self.name.clone();

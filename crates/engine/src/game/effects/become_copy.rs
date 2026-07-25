@@ -325,6 +325,7 @@ mod tests {
     use crate::game::turns::execute_cleanup;
     use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{Effect, StaticCondition, TargetFilter, TargetRef};
+    use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::counter::CounterType;
     use crate::types::identifiers::CardId;
@@ -448,6 +449,55 @@ mod tests {
         assert!(source.card_types.core_types.contains(&CoreType::Creature));
         assert!(source.card_types.subtypes.contains(&"Bear".to_string()));
         assert!(source.keywords.contains(&Keyword::Trample));
+    }
+
+    #[test]
+    fn become_copy_starting_loyalty_override_is_copiable() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_creature(&mut state, 1, PlayerId(0), "X Walker", 0, 0);
+        {
+            let target = state.objects.get_mut(&target_id).expect("target exists");
+            target.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Planeswalker],
+                subtypes: vec!["Test".to_string()],
+            };
+            target.card_types = target.base_card_types.clone();
+            target.base_loyalty = Some(0);
+            target.loyalty = Some(0);
+            target.base_printed_loyalty = Some(PrintedLoyalty::X);
+            target.printed_loyalty = Some(PrintedLoyalty::X);
+        }
+        let recipient_id = create_creature(&mut state, 2, PlayerId(0), "Copy", 1, 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                recipient: TargetFilter::SelfRef,
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::SetStartingLoyalty {
+                    value: 1,
+                }],
+            },
+            vec![TargetRef::Object(target_id)],
+            recipient_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("copy resolves");
+        evaluate_layers(&mut state);
+
+        let recipient = &state.objects[&recipient_id];
+        assert_eq!(recipient.printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
+        assert_eq!(recipient.loyalty, Some(1));
+        let subsequent_copy = compute_current_copiable_values(&state, recipient_id)
+            .expect("copy recipient has copiable values");
+        assert_eq!(
+            subsequent_copy.printed_loyalty,
+            Some(PrintedLoyalty::Fixed(1)),
+            "CR 707.9b: a later copy sees the starting-loyalty exception, not X"
+        );
     }
 
     #[test]
