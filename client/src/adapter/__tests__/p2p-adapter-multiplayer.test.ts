@@ -417,6 +417,32 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     expect(mockSetMultiplayerMode).toHaveBeenCalledTimes(1);
   });
 
+  it("retries failed initialization without duplicating guest connections", async () => {
+    const { adapter, emitConnection } = makeHost(2);
+    mockInitialize
+      .mockRejectedValueOnce(new Error("worker startup failed"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(adapter.initialize()).rejects.toThrow("worker startup failed");
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises(20);
+
+    expect(mockInitialize).toHaveBeenCalledTimes(2);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+    ]);
+    const messages = await guest.getSentMessages();
+    expect(messages.filter((message) => (message as { type?: string }).type === "seat_snapshot"))
+      .toHaveLength(1);
+    expect(messages.some((message) => (message as { type?: string }).type === "kick")).toBe(false);
+  });
+
   it("rejects a non-Oathbreaker guest signature spell before game setup", async () => {
     mockCheckDeckCompatibility.mockResolvedValueOnce({
       selected_format_compatible: false,
