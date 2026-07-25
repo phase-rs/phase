@@ -3031,7 +3031,7 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
 ///   their behalf (CR 104.3a). It is no longer an action after the game has
 ///   ended, when there is no authorized submitter.
 /// - **Preference actions** (SetPhaseStops, SetPriorityPassingMode,
-///   CancelAutoPass) are per-player UI
+///   CancelAutoPass, ReorderHand) are per-player UI
 ///   settings. They have no CR semantics, mutate only the submitter's own
 ///   preference slot, and may legitimately fire at any time — e.g. the human
 ///   toggles a phase stop while the AI holds priority. The downstream handlers
@@ -3050,7 +3050,6 @@ fn check_actor_authorization(
             GameAction::Debug(_)
                 | GameAction::GrantDebugPermission { .. }
                 | GameAction::RevokeDebugPermission { .. }
-                | GameAction::ReorderHand { .. }
         )
     {
         return Ok(());

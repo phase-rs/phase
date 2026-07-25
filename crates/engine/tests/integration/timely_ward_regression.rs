@@ -104,9 +104,10 @@ fn timely_ward_cast_targeting_commander_succeeds() {
 fn timely_ward_cast_targeting_noncommander_is_rejected_at_finalize() {
     // CR 601.3d: With a non-commander creature as the chosen target, the
     // target-dependent flash condition fails at the finalize-time validation
-    // gate. The cast must be rejected (and the stack-entry placeholder
-    // popped). Prior to this fix the parser emitted the flash permission
-    // unconditionally and the cast went through against any target.
+    // gate. The cast must be rejected while preserving the stack-entry
+    // announcement placeholder for a corrected choice. Prior to this fix the
+    // parser emitted the flash permission unconditionally and the cast went
+    // through against any target.
     let Some(db) = load_db() else {
         return;
     };

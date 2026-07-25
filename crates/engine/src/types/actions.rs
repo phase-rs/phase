@@ -1452,6 +1452,7 @@ impl GameAction {
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }
+                | GameAction::ReorderHand { .. }
         )
     }
 

@@ -2215,9 +2215,14 @@ fn cancel_auto_pass_routes_by_actor() {
 fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
     let preferences = vec![
         GameAction::CancelAutoPass,
-        GameAction::SetPhaseStops { stops: vec![] },
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
         GameAction::SetPriorityPassingMode {
-            mode: crate::types::game_state::PriorityPassingMode::Standard,
+            mode: crate::types::game_state::PriorityPassingMode::SkipLowUseWindows,
         },
         GameAction::SetPriorityYield {
             op: PriorityYieldOp::ClearAll,
@@ -2238,6 +2243,32 @@ fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
                 until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
             },
         );
+        match &action {
+            GameAction::CancelAutoPass => {
+                state.auto_pass.insert(
+                    PlayerId(1),
+                    crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                        until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+                    },
+                );
+            }
+            GameAction::SetPriorityYield { .. } => state.add_priority_yield(
+                PlayerId(1),
+                crate::types::game_state::YieldTarget::AllCopies {
+                    card_id: CardId(1),
+                    trigger_description: None,
+                },
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => state.set_may_trigger_auto_choice(
+                may_trigger_key(PlayerId(1), ObjectId(1)),
+                crate::types::game_state::AutoMayChoice::Accept,
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => {
+                state.set_trigger_order_template(persistent_order_template(PlayerId(1), 1));
+            }
+            GameAction::SetPhaseStops { .. } | GameAction::SetPriorityPassingMode { .. } => {}
+            _ => unreachable!("preference list is exhaustive"),
+        }
         let waiting_for = state.waiting_for.clone();
         let priority_passes = state.priority_passes.clone();
 
@@ -2266,6 +2297,44 @@ fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
             "{} consumed P0's active auto-pass session",
             action.variant_name()
         );
+        match action {
+            GameAction::CancelAutoPass => assert!(
+                !state.auto_pass.contains_key(&PlayerId(1)),
+                "CancelAutoPass must remove the actor's own session"
+            ),
+            GameAction::SetPhaseStops { stops } => assert_eq!(
+                state.phase_stops.get(&PlayerId(1)),
+                Some(&stops),
+                "SetPhaseStops must persist the actor's stops"
+            ),
+            GameAction::SetPriorityPassingMode { mode } => assert_eq!(
+                state.priority_passing_modes.get(&PlayerId(1)),
+                Some(&mode),
+                "SetPriorityPassingMode must persist the actor's mode"
+            ),
+            GameAction::SetPriorityYield { .. } => assert!(
+                !state
+                    .priority_yields
+                    .iter()
+                    .any(|yielded| yielded.player == PlayerId(1)),
+                "SetPriorityYield::ClearAll must clear the actor's yields"
+            ),
+            GameAction::SetMayTriggerAutoChoice { .. } => assert!(
+                state
+                    .may_trigger_auto_choices
+                    .iter()
+                    .all(|record| record.key.player != PlayerId(1)),
+                "SetMayTriggerAutoChoice::ClearAll must clear the actor's choices"
+            ),
+            GameAction::SetTriggerOrderTemplate { .. } => assert!(
+                state
+                    .decision_templates
+                    .iter()
+                    .all(|template| template.owner != PlayerId(1)),
+                "SetTriggerOrderTemplate::ClearAll must clear the actor's templates"
+            ),
+            _ => unreachable!("preference list is exhaustive"),
+        }
     }
 }
 
@@ -4334,10 +4403,23 @@ fn game_over_rejects_ordinary_actions_but_keeps_preferences_actor_scoped() {
     apply(
         &mut state,
         PlayerId(1),
-        GameAction::SetPhaseStops { stops: vec![] },
+        GameAction::SetPhaseStops {
+            stops: vec![crate::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: crate::types::phase::PhaseStopScope::AllTurns,
+            }],
+        },
     )
     .expect("preferences remain actor-scoped after GameOver");
     assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+    assert_eq!(
+        state.phase_stops.get(&PlayerId(1)),
+        Some(&vec![crate::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: crate::types::phase::PhaseStopScope::AllTurns,
+        }]),
+        "actor-scoped preference must persist after GameOver"
+    );
 }
 
 #[test]

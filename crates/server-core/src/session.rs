@@ -1837,6 +1837,7 @@ mod tests {
     #[test]
     fn reorder_hand_succeeds_while_opponent_has_priority() {
         let (mut mgr, code, token0, token1) = setup_two_player_game();
+        let history_before = mgr.sessions.get(&code).unwrap().takeback_history.len();
 
         // Determine which player has priority; inject two ObjectIds into the
         // *other* player's hand so we can test off-priority reordering.
@@ -1880,6 +1881,11 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(hand, vec![id_b, id_a]);
+        assert_eq!(
+            session.takeback_history.len(),
+            history_before,
+            "a cosmetic hand reorder must not create a takeback checkpoint"
+        );
     }
 
     /// `ReorderHand` with a non-permutation (wrong element) is rejected by the
@@ -1935,8 +1941,7 @@ mod tests {
         );
     }
 
-    /// Manual payment remains accepted because the engine receives the submitted
-    /// action directly; candidates are advisory rather than an admission gate.
+    /// Manual payment remains accepted and reaches the engine unchanged.
     #[test]
     fn engine_apply_accepts_manual_payment_mode_casts() {
         let (mut mgr, code, token0, _token1) = setup_two_player_game();
@@ -1966,6 +1971,17 @@ mod tests {
             result.is_ok(),
             "Manual-mode cast must be validated by the engine: {:?}",
             result.err()
+        );
+        assert_eq!(
+            mgr.sessions
+                .get(&code)
+                .unwrap()
+                .state
+                .pending_cast
+                .as_ref()
+                .map(|cast| cast.payment_mode),
+            Some(CastPaymentMode::Manual),
+            "the engine must receive the submitted manual payment mode unchanged"
         );
     }
 
@@ -2572,16 +2588,19 @@ mod tests {
         // Discriminating: this "remove 2 of 3" submit is absent from the coarse
         // candidate set ({[], remove-all}) but is legal under the engine's
         // structural validation.
-        let result = mgr.handle_action(
-            &code,
-            &token,
-            GameAction::ChooseCountersToRemove {
-                selections: vec![CounterRemoveChoice {
-                    counter_type: CounterType::Plus1Plus1,
-                    count: 2,
-                }],
-            },
+        let intermediate_removal = GameAction::ChooseCountersToRemove {
+            selections: vec![CounterRemoveChoice {
+                counter_type: CounterType::Plus1Plus1,
+                count: 2,
+            }],
+        };
+        let session = mgr.sessions.get(&code).unwrap();
+        let (candidates, _, _) = engine_legal_actions_full(&session.state);
+        assert!(
+            !candidates.contains(&intermediate_removal),
+            "the intermediate removal must be absent from coarse candidates"
         );
+        let result = mgr.handle_action(&code, &token, intermediate_removal);
 
         assert!(
             result.is_ok(),
