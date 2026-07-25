@@ -2,18 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
-import { useUiStore } from "../../stores/uiStore.ts";
+import { blockerAssignmentPairs, useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import { arcPath } from "../../hooks/useAttackerArrowPositions.ts";
 import { objectAnchorSelector } from "../../utils/objectAnchorSelector.ts";
 import { getVisibleBoardPlayerIds, isOneOnOne } from "../../viewmodel/gameStateView.ts";
-import type { ObjectId, PlayerId } from "../../adapter/types.ts";
-import { filterVisibleBlockerPairs } from "./blockAssignmentVisibility.ts";
+import type { BlockerAssignmentPair, ObjectId, PlayerId } from "../../adapter/types.ts";
 
 const BLOCK_COLOR = "rgba(56,189,248,0.95)";
 const BLOCK_COLOR_HEAD = "rgba(56,189,248,0.9)";
+const EMPTY_BLOCKER_ASSIGNMENT_PAIRS: readonly BlockerAssignmentPair[] = [];
 
 export function BlockAssignmentLines() {
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
@@ -37,17 +37,13 @@ export function BlockAssignmentLines() {
     [focusedOpponent, gameState, localPlayerId, multiplayerBoardLayout],
   );
 
-  const pairs = useMergedPairs(blockerAssignments, combat?.blocker_to_attacker ?? null);
-  const visibleBlockerPairs = useMemo(
-    () => filterVisibleBlockerPairs(pairs, objects ?? null, visiblePlayerIds),
-    [objects, pairs, visiblePlayerIds],
+  const pairs = useMergedPairs(
+    blockerAssignments,
+    gameState?.derived?.blocker_assignment_pairs ?? EMPTY_BLOCKER_ASSIGNMENT_PAIRS,
   );
+  const positions = useRafPositions(pairs);
 
-  const positions = useRafPositions(visibleBlockerPairs);
-
-  const isVisible =
-    combatMode === "blockers" ||
-    (combat !== null && Object.keys(combat.blocker_to_attacker).length > 0);
+  const isVisible = combatMode === "blockers" || pairs.length > 0;
 
   // Compute HUD→attacker indicator arrows for off-screen blocking opponents
   const hudIndicators = useHudBlockIndicators(
@@ -89,10 +85,10 @@ export function BlockAssignmentLines() {
         </marker>
       </defs>
       {showCreatureArrows &&
-        Array.from(positions.entries()).map(([blockerId, pos]) => {
+        Array.from(positions.entries()).map(([pairKey, pos]) => {
           const d = arcPath(pos.from, pos.to);
           return (
-            <g key={blockerId}>
+            <g key={pairKey}>
               <path
                 d={d}
                 stroke="black"
@@ -219,18 +215,17 @@ function useHudBlockIndicators(
 }
 
 function useMergedPairs(
-  uiAssignments: Map<ObjectId, ObjectId>,
-  engineAssignments: Record<string, ObjectId[]> | null,
-): Map<ObjectId, ObjectId> {
+  uiAssignments: ReadonlyMap<ObjectId, ReadonlySet<ObjectId>>,
+  engineAssignments: readonly BlockerAssignmentPair[],
+): BlockerAssignmentPair[] {
   return useMemo(() => {
-    const merged = new Map(uiAssignments);
-    if (engineAssignments) {
-      for (const [blockerId, attackerIds] of Object.entries(engineAssignments)) {
-        if (attackerIds.length > 0) {
-          merged.set(Number(blockerId), attackerIds[0]);
-        }
-      }
+    const merged = new Map<string, BlockerAssignmentPair>();
+    for (const pair of blockerAssignmentPairs(uiAssignments)) {
+      merged.set(pair.join(":"), pair);
     }
-    return merged;
+    for (const pair of engineAssignments) {
+      merged.set(pair.join(":"), pair);
+    }
+    return Array.from(merged.values());
   }, [uiAssignments, engineAssignments]);
 }

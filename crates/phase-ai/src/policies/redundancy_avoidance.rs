@@ -23,6 +23,8 @@
 //! Shipped predicates (see `redundancy_delta` arms):
 //! - `Tap` — every candidate target is already tapped.
 //! - `Untap` — every candidate target is already untapped.
+//! - `FlipPermanent` — every candidate target is already flipped (CR 710.4:
+//!   flipping is one-way, so re-flipping a flipped permanent is a no-op).
 //! - `Pump` — every candidate target already has an active
 //!   `UntilEndOfTurn` pump from this same source with matching P/T.
 //! - `GainLife` — controller's life ≥ `LIFE_DIMINISHING_RETURNS`.
@@ -147,6 +149,10 @@ const KIND_ADD_COUNTER_ZERO: i64 = 9;
 /// CR 601.3b: Activating a flash-cast permission (Alchemist's Refuge class)
 /// when no hand spell would gain instant-speed timing.
 const KIND_FLASH_CAST_PERMISSION: i64 = 10;
+/// CR 710.4: Flipping is a one-way process — once a permanent is flipped it can
+/// never become unflipped. Targeting an already-flipped permanent with a flip
+/// instruction is therefore a deterministic no-op, unlike two-way `Transform`.
+const KIND_FLIP_ALREADY_FLIPPED: i64 = 11;
 
 pub struct RedundancyAvoidancePolicy;
 
@@ -358,6 +364,11 @@ fn redundancy_delta(
             }
             Some(_) => None,
         },
+        // CR 710.4: flipping is one-way — an already-flipped permanent can never
+        // become unflipped, so a flip instruction on it is a deterministic no-op.
+        // Unlike two-way `Transform` (which stays in the no-op list below), this
+        // admits a target-aware redundancy signal when every candidate is flipped.
+        Effect::FlipPermanent { target } => flip_redundancy(state, source_id, target),
 
         // ----- Variants with no shipped redundancy check -----
         //
@@ -446,6 +457,9 @@ fn redundancy_delta(
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::CopyTokenBlockingAttacker { .. }
         | Effect::BecomeCopy { .. }
+        // CR 707.2c (Metamorphic Alteration): as-enters copy choice carries no
+        // "redundant if already controlled" signal for this policy.
+        | Effect::ChoosePermanent { .. }
         | Effect::GainActivatedAbilitiesOfTarget { .. }
         | Effect::ChooseCard { .. }
         | Effect::PutCounterAll { .. }
@@ -464,6 +478,7 @@ fn redundancy_delta(
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
@@ -773,6 +788,32 @@ fn tap_redundancy(
         .all(|id| state.objects.get(id).is_some_and(|o| o.tapped));
     if all_tapped {
         Some((-3.0, KIND_TAP, candidates.len() as i64))
+    } else {
+        None
+    }
+}
+
+/// Flip-on-flipped: every candidate match already has `obj.flipped == true`.
+///
+/// CR 710.4: flipping is a one-way process — once a permanent is flipped it can
+/// never become unflipped. A flip instruction whose entire candidate set is
+/// already flipped therefore does nothing, exactly like tap-on-tapped. This is
+/// the axis on which `FlipPermanent` diverges from the two-way `Transform`,
+/// which stays in the no-op list because re-transforming flips the face back.
+fn flip_redundancy(
+    state: &GameState,
+    source_id: ObjectId,
+    target: &TargetFilter,
+) -> Option<(f64, i64, i64)> {
+    let candidates = resolved_candidate_targets(state, source_id, target);
+    if candidates.is_empty() {
+        return None;
+    }
+    let all_flipped = candidates
+        .iter()
+        .all(|id| state.objects.get(id).is_some_and(|o| o.flipped));
+    if all_flipped {
+        Some((-3.0, KIND_FLIP_ALREADY_FLIPPED, candidates.len() as i64))
     } else {
         None
     }
@@ -1303,6 +1344,63 @@ mod tests {
             panic!("expected Score verdict");
         };
         assert_eq!(delta, 0.0, "untap on tapped should not penalise");
+    }
+
+    #[test]
+    fn flip_on_flipped_source_penalized() {
+        // CR 710.4: flipping is one-way, so a flip instruction targeting an
+        // already-flipped permanent is a deterministic no-op — same -3.0
+        // classification as tap-on-tapped.
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_creature_with_ability(
+            &mut state,
+            "Kenzo the Hardhearted",
+            Effect::FlipPermanent {
+                target: TargetFilter::SelfRef,
+            },
+        );
+        state.objects.get_mut(&obj_id).unwrap().flipped = true;
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(
+            delta, -3.0,
+            "flip on already-flipped should emit -3.0 delta"
+        );
+    }
+
+    #[test]
+    fn flip_on_unflipped_source_not_penalized() {
+        // Reach guard: same effect, unflipped target — the flip is meaningful,
+        // so the redundancy arm must NOT fire (proves the -3.0 above is driven
+        // by the `flipped` state, not an upstream short-circuit).
+        let mut state = GameState::new_two_player(0);
+        let obj_id = make_creature_with_ability(
+            &mut state,
+            "Bushi Tenderfoot",
+            Effect::FlipPermanent {
+                target: TargetFilter::SelfRef,
+            },
+        );
+        // default flipped = false -- flipping is a real state change here
+
+        let config = AiConfig::default();
+        let ai_ctx = AiContext::empty(&config.weights);
+        let decision = priority_decision();
+        let candidate = activate_candidate(obj_id);
+        let ctx = mk_ctx(&state, &decision, &candidate, &config, &ai_ctx);
+
+        let PolicyVerdict::Score { delta, .. } = RedundancyAvoidancePolicy.verdict(&ctx) else {
+            panic!("expected Score verdict");
+        };
+        assert_eq!(delta, 0.0, "flip on unflipped must not penalise");
     }
 
     #[test]

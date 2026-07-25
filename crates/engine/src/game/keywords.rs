@@ -12,7 +12,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
-    EmbalmCost, EternalizeCost, FlashbackCost, Keyword, KeywordKind, ProtectionTarget,
+    EmbalmCost, EternalizeCost, FlashbackCost, GiftKind, Keyword, KeywordKind, ProtectionTarget,
 };
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -78,6 +78,15 @@ pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Optio
             ))),
             FlashbackCost::NonMana(ability_cost) => Some(FlashbackCost::NonMana(ability_cost)),
         },
+        _ => None,
+    }
+}
+
+/// CR 702.174a: Effective Gift kind for casting prompts (hand / stack included).
+/// Routes through [`effective_keyword_for_object`] so off-zone grants are visible.
+pub fn effective_gift_kind(state: &GameState, object_id: ObjectId) -> Option<GiftKind> {
+    match effective_keyword_for_object(state, object_id, KeywordKind::Gift)? {
+        Keyword::Gift(kind) => Some(kind),
         _ => None,
     }
 }

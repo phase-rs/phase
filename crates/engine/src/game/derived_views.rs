@@ -20,9 +20,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
 use crate::game::stack::{effective_stack_ability, stack_display_groups, StackDisplayGroup};
 use crate::types::ability::{
-    ContinuousModification, GameRestriction, KeywordAction, ProhibitedActivity, RestrictionExpiry,
-    RestrictionPlayerScope, TargetRef,
+    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
+    RestrictionExpiry, RestrictionPlayerScope, TargetRef,
 };
+use crate::types::attribution::EffectRef;
 use crate::types::card::TokenImageRef;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -32,6 +33,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::layers::Layer;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -191,6 +193,17 @@ pub struct TurnOrderSlotView {
     pub player: PlayerId,
     pub slot_index: u8,
     pub turns_from_now: u8,
+    /// One-based display position in the projected turn order. Kept here so
+    /// clients do not turn the engine's zero-based distance into an ordinal.
+    pub turn_number: u8,
+    /// Whether this row belongs to the viewing player. Clients consume this
+    /// display classification rather than comparing player IDs themselves.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_viewer: bool,
+    /// Whether this projected slot is the game's starting player. It is only
+    /// true while that player is also the current turn representative.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_starting_player: bool,
 }
 
 /// Engine-authored projections used by the display layer. Keep this struct
@@ -210,6 +223,22 @@ pub struct DerivedViews {
     /// keyword.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub battlefield_keyword_badges: HashMap<ObjectId, Vec<Keyword>>,
+
+    /// CR 509.1b + CR 611.2c: creatures with a live, temporary
+    /// `CantBeBlocked` grant. The optional value is the granting source only
+    /// while that source remains a public, phased-in battlefield object; `None`
+    /// retains the badge without exposing an unavailable source.
+    ///
+    /// Keyed by recipient ObjectId; absent when no such grant is active.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub temporary_cant_be_blocked: HashMap<ObjectId, Option<ObjectId>>,
+    /// CR 509.1g: public blocker-to-attacker relationships, flattened as
+    /// `(blocker, attacker)` pairs for combat-line rendering. This is sorted
+    /// deterministically so equivalent combat states have stable wire output.
+    /// The filtered-view projection is explicitly derived from authoritative
+    /// combat state because a transport filter may clear raw combat details.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_assignment_pairs: Vec<(ObjectId, ObjectId)>,
 
     /// CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
     /// currently supplied by a copy effect (Layer 1a) — Clone, Phantasmal
@@ -312,6 +341,12 @@ pub struct DerivedViews {
     /// order from raw state.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_order: Vec<TurnOrderSlotView>,
+
+    /// One-based projected turn position for the viewing player. This keeps
+    /// player-specific turn-order interpretation in the engine while allowing
+    /// the client to render "You take turn N" directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer_turn_number: Option<u8>,
 
     /// CR 732.2a: the `∞` HUD rows — one per (attributed player, pumped axis) of
     /// every unbounded-resource loop in `GameState::unbounded_resources`. The
@@ -508,9 +543,53 @@ fn object_has_copy_effect(state: &GameState, object_id: ObjectId) -> bool {
     })
 }
 
+/// CR 509.1b + CR 611.2c + CR 613.1f: return the public source for the first
+/// live, until-end-of-turn `CantBeBlocked` modification attributed to this
+/// recipient in the current ability layer. `Some(None)` means the grant is
+/// active but its source is no longer a public, phased-in battlefield object.
+///
+/// Attribution is the layer engine's authoritative record of modifications
+/// that actually applied. Reading its indexed `EffectRef` avoids re-scanning
+/// raw effect filters, which could disagree with the resolved layer recipient.
+fn temporary_cant_be_blocked_source(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<Option<ObjectId>> {
+    let effects = state
+        .attribution
+        .get(&object_id)?
+        .by_layer
+        .get(&Layer::Ability)?;
+    effects.iter().find_map(|effect_ref| {
+        let EffectRef::Transient { id, mod_index } = effect_ref else {
+            return None;
+        };
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|effect| effect.id == *id)?;
+        (effect.duration == Duration::UntilEndOfTurn
+            && crate::game::layers::transient_effect_is_live(state, effect)
+            && matches!(
+                effect.modifications.get(*mod_index),
+                Some(ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantBeBlocked
+                })
+            ))
+        .then(|| {
+            state
+                .objects
+                .get(&effect.source_id)
+                .filter(|source| source.zone == Zone::Battlefield && source.is_phased_in())
+                .map(|_| effect.source_id)
+        })
+    })
+}
+
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        blocker_assignment_pairs: blocker_assignment_pairs(state),
         ..DerivedViews::default()
     };
 
@@ -544,6 +623,9 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
             .collect();
         if !badges.is_empty() {
             views.battlefield_keyword_badges.insert(obj_id, badges);
+        }
+        if let Some(source_id) = temporary_cant_be_blocked_source(state, obj_id) {
+            views.temporary_cant_be_blocked.insert(obj_id, source_id);
         }
         // CR 613.2a + CR 707.2 / CR 708.2: see `copied_permanents`. Matched
         // through the same `matches_target_filter` the layer engine uses to
@@ -636,7 +718,9 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // Commander short-circuit below).
     views.player_status = player_status_views(state);
 
-    views.turn_order = turn_order_views(state);
+    let (turn_order, viewer_turn_number) = turn_order_views(state, viewer);
+    views.turn_order = turn_order;
+    views.viewer_turn_number = viewer_turn_number;
 
     // CR 732.2a: project every unbounded-resource loop into per-(player, axis)
     // `∞` HUD rows. Runs in every format (placed BEFORE the Commander
@@ -715,7 +799,47 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 509.1g: blocking relationships are public information. Preserve this
+    // display projection even when a viewer-safe state intentionally omits raw
+    // combat records unrelated to rendering.
+    views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
     views
+}
+
+/// CR 509.1g: flatten each blocking creature's chosen attacking creatures into
+/// stable public display pairs. One blocker may legitimately appear more than
+/// once when an effect permits it to block multiple attackers.
+fn blocker_assignment_pairs(state: &GameState) -> Vec<(ObjectId, ObjectId)> {
+    let mut pairs = state
+        .combat
+        .as_ref()
+        .into_iter()
+        .flat_map(|combat| {
+            combat
+                .blocker_to_attacker
+                .iter()
+                .flat_map(|(&blocker, attackers)| {
+                    attackers
+                        .iter()
+                        .copied()
+                        .map(move |attacker| (blocker, attacker))
+                })
+        })
+        .filter(|&(blocker, attacker)| {
+            is_live_battlefield_object(state, blocker)
+                && is_live_battlefield_object(state, attacker)
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    pairs
+}
+
+fn is_live_battlefield_object(state: &GameState, object_id: ObjectId) -> bool {
+    state.battlefield.contains(&object_id)
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.zone == Zone::Battlefield)
 }
 
 fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
@@ -725,7 +849,10 @@ fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
     (submitters.len() == 1).then(|| submitters[0])
 }
 
-fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
+fn turn_order_views(
+    state: &GameState,
+    viewer: Option<PlayerId>,
+) -> (Vec<TurnOrderSlotView>, Option<u8>) {
     let mut seen = BTreeSet::new();
     let representatives: Vec<PlayerId> = state
         .seat_order
@@ -740,10 +867,10 @@ fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
         .collect();
 
     if representatives.len() <= 2 {
-        return Vec::new();
+        return (Vec::new(), None);
     }
 
-    crate::game::turns::projected_turn_order(state, representatives.len())
+    let turn_order: Vec<_> = crate::game::turns::projected_turn_order(state, representatives.len())
         .into_iter()
         .enumerate()
         .map(|(index, player)| {
@@ -752,9 +879,18 @@ fn turn_order_views(state: &GameState) -> Vec<TurnOrderSlotView> {
                 player,
                 slot_index,
                 turns_from_now: slot_index,
+                turn_number: slot_index + 1,
+                is_viewer: viewer == Some(player),
+                is_starting_player: slot_index == 0 && player == state.current_starting_player,
             }
         })
-        .collect()
+        .collect();
+    let viewer_turn_number = turn_order
+        .iter()
+        .find(|slot| slot.is_viewer)
+        .map(|slot| slot.turn_number);
+
+    (turn_order, viewer_turn_number)
 }
 
 /// CR 732.2a: which player's HUD a pumped `axis` belongs to, given the loop's
@@ -1282,6 +1418,7 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::CombatState;
     use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -1299,6 +1436,7 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
+    use std::collections::HashMap;
 
     fn setup_commander_game(num_players: u8) -> GameState {
         let mut state = GameState::new(FormatConfig::commander(), num_players, 42);
@@ -1336,6 +1474,120 @@ mod tests {
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
         );
+    }
+
+    #[test]
+    fn blocker_assignment_pairs_are_sorted_and_exclude_stale_objects() {
+        let mut state = GameState::new_two_player(42);
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let first_attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_blocker = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Stale Blocker".to_string(),
+            Zone::Graveyard,
+        );
+        let stale_attacker = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Stale Attacker".to_string(),
+            Zone::Graveyard,
+        );
+        let absorbed_component = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Absorbed Component".to_string(),
+            Zone::Battlefield,
+        );
+        state.battlefield.retain(|&id| id != absorbed_component);
+        state.combat = Some(CombatState {
+            blocker_to_attacker: HashMap::from([
+                (
+                    blocker,
+                    vec![second_attacker, stale_attacker, first_attacker],
+                ),
+                (stale_blocker, vec![first_attacker]),
+                (absorbed_component, vec![second_attacker]),
+            ]),
+            ..CombatState::default()
+        });
+        let expected = vec![(blocker, first_attacker), (blocker, second_attacker)];
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(views.blocker_assignment_pairs, expected);
+    }
+
+    #[test]
+    fn blocker_assignment_pairs_survive_filtered_client_wire_serialization() {
+        let mut state = GameState::new_two_player(42);
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.combat = Some(CombatState {
+            blocker_to_attacker: HashMap::from([(blocker, vec![attacker])]),
+            ..CombatState::default()
+        });
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(0)),
+        ))
+        .expect("serialize filtered client state");
+        let client: ClientGameState =
+            serde_json::from_str(&json).expect("deserialize filtered client state");
+        assert_eq!(
+            client.derived.blocker_assignment_pairs,
+            vec![(blocker, attacker)],
+            "the authoritative public blocking pair survives the filtered viewer wire path"
+        );
+    }
+
+    #[test]
+    fn empty_blocker_assignment_pairs_omit_the_wire_key() {
+        let empty_json =
+            serde_json::to_string(&DerivedViews::default()).expect("empty derived views serialize");
+        assert!(
+            !empty_json.contains("blocker_assignment_pairs"),
+            "empty blocker pairs omit their wire key"
+        );
+        let empty_round_trip: DerivedViews =
+            serde_json::from_str(&empty_json).expect("empty derived views deserialize");
+        assert!(empty_round_trip.blocker_assignment_pairs.is_empty());
     }
 
     #[test]
@@ -1662,15 +1914,26 @@ mod tests {
                     player: PlayerId(0),
                     slot_index: 0,
                     turns_from_now: 0,
+                    turn_number: 1,
+                    is_viewer: false,
+                    is_starting_player: true,
                 },
                 TurnOrderSlotView {
                     player: PlayerId(0),
                     slot_index: 1,
                     turns_from_now: 1,
+                    turn_number: 2,
+                    is_viewer: false,
+                    is_starting_player: false,
                 },
             ],
             "same player can be both NOW and NEXT when an extra turn is queued"
         );
+
+        let viewer_views = derive_views(&state, Some(PlayerId(2)));
+        assert_eq!(viewer_views.viewer_turn_number, Some(3));
+        assert!(viewer_views.turn_order[2].is_viewer);
+        assert_eq!(viewer_views.turn_order[2].turn_number, 3);
 
         let json =
             serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");

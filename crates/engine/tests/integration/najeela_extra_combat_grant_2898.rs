@@ -83,6 +83,7 @@ fn najeela_chain(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

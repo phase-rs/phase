@@ -73,7 +73,9 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, SubAbilityLink};
+    use crate::types::ability::{
+        AbilityKind, QuantityExpr, SiblingCondition, SpellContext, SubAbilityLink,
+    };
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -91,6 +93,7 @@ mod tests {
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            force_block_attacker: None,
             targets: vec![],
             kind: AbilityKind::Activated,
             sub_ability: None,
@@ -128,6 +131,7 @@ mod tests {
             repeat_until: None,
             replacement_applied: Default::default(),
             sub_link: SubAbilityLink::ContinuationStep,
+            sibling_condition: SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,

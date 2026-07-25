@@ -1286,6 +1286,35 @@ fn parse_disguise_keyword_line(text: &str) -> Option<Keyword> {
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
 /// handling the "from" preposition used by protection keywords.
+/// CR 702.82a / CR 702.82c: "Devour [quality] N".
+///
+/// Plain "Devour N" (CR 702.82a) sacrifices creatures; the qualified form
+/// "Devour [quality] N" (CR 702.82c) sacrifices [quality] permanents. The
+/// optional type qualifier sits between the keyword name and the count, so the
+/// grammar is `"devour " (type_filter " ")? number`. `parse_type_filter_word`
+/// errors on a bare number, so `opt` yields `None` for the plain form and the
+/// quality defaults to `TypeFilter::Creature` (CR 702.82a). The word emits a
+/// canonical-case `Subtype` (e.g. Food), so the synthesized runtime filter's
+/// subtype membership test matches the canonical "Food" name. Returns
+/// `(keyword, unconsumed)`.
+fn parse_devour_keyword_line(text: &str) -> Option<(Keyword, &str)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("devour ").parse(text).ok()?;
+    let (rest, quality) = opt((
+        crate::parser::oracle_nom::target::parse_type_filter_word,
+        tag::<_, _, OracleError<'_>>(" "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (unconsumed, n) = nom_primitives::parse_number.parse(rest).ok()?;
+    Some((
+        Keyword::Devour {
+            n,
+            quality: quality.map_or(TypeFilter::Creature, |(q, _)| q),
+        },
+        unconsumed,
+    ))
+}
+
 pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     use crate::types::keywords::PartnerType;
 
@@ -1334,6 +1363,13 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
 
     if let Some(kw) = parse_bloodthirst_keyword_line(text) {
         return Some((kw, ""));
+    }
+
+    // CR 702.82a / CR 702.82c: "Devour [quality] N" — the optional type qualifier
+    // precedes the count, so this must run BEFORE the generic numeric-count path,
+    // which would capture only N and silently drop the quality (the reported bug).
+    if let Some(result) = parse_devour_keyword_line(text) {
+        return Some(result);
     }
 
     if let Some(kw) = parse_firebending_keyword_line(text) {
@@ -1826,28 +1862,16 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // tail is precisely what the strict router must see in order to reject
     // "<kw> N <semantic clause>" (e.g. "crew 2 if it's an artifact").
     let (param, unconsumed): (Cow<'_, str>, &str) = if is_numeric_count_keyword(name) {
-        // CR 702.82c: "Devour [quality] N" is a variant where the count follows a
-        // leading type qualifier — Famished Worldsire's "Devour land 3" enters
-        // with three +1/+1 counters per sacrificed LAND, so the numeric token
-        // sits after "land". Take the count at the head; if a non-numeric
-        // qualifier word precedes it, skip that one word and retry, so the count
-        // is captured rather than lost to the keyword's `FromStr` `unwrap_or(1)`
-        // fallback (which produced the reported Devour 1).
-        let count_src = if nom_primitives::parse_number.parse(rest).is_ok() {
-            rest
-        } else {
-            (
-                take_until::<_, _, OracleError<'_>>(" "),
-                tag::<_, _, OracleError<'_>>(" "),
-            )
-                .parse(rest)
-                .map_or(rest, |(after_qualifier, _)| after_qualifier)
-        };
-        match nom_primitives::parse_number.parse(count_src) {
+        // Bare-integer count keywords (Vanishing/Fading/Renown/Frenzy/Bushido/…):
+        // take only the leading integer and surface the trailing clause as
+        // `unconsumed` so the strict router can reject "<kw> N <semantic clause>".
+        // (CR 702.82c "Devour [quality] N" is handled upstream by
+        // `parse_devour_keyword_line`, so no qualifier-skip is needed here.)
+        match nom_primitives::parse_number.parse(rest) {
             // `remainder` is the clause the permissive contract drops on the
             // floor. Surface it; the strict router turns it into a rejection.
             Ok((remainder, _)) => (
-                Cow::Borrowed(&count_src[..count_src.len() - remainder.len()]),
+                Cow::Borrowed(&rest[..rest.len() - remainder.len()]),
                 remainder,
             ),
             // No leading integer: the whole `rest` goes to `FromStr`, so whatever
@@ -2413,7 +2437,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Bloodthirst(_) => "bloodthirst".to_string(),
         Keyword::Amplify(_) => "amplify".to_string(),
         Keyword::Graft(_) => "graft".to_string(),
-        Keyword::Devour(_) => "devour".to_string(),
+        Keyword::Devour { .. } => "devour".to_string(),
         Keyword::Toxic(_) => "toxic".to_string(),
         Keyword::Saddle(_) => "saddle".to_string(),
         Keyword::Teamwork(_) => "teamwork".to_string(),
@@ -2814,22 +2838,42 @@ mod tests {
     }
 
     /// CR 702.82c: "Devour [quality] N" (Famished Worldsire — "Devour land 3")
-    /// puts the count after the type qualifier. The numeric-count extractor must
-    /// skip the leading qualifier word so the count is 3, not the `FromStr`
-    /// `unwrap_or(1)` fallback (which produced the reported Devour 1).
+    /// puts the count after the type qualifier. The parser must capture BOTH the
+    /// count and the quality — the quality axis is the reported bug: dropping it
+    /// yields the CR 702.82a creature default for a land-quality card.
     #[test]
     fn parse_granted_keyword_fragment_devour_quality_qualifier_count() {
+        // CR 702.82c: land quality — the discriminating case. REVERTS to
+        // `quality: Creature` (i.e. this assertion FAILS) if the qualifier is
+        // dropped, which is exactly the reported bug.
         assert_eq!(
             parse_granted_keyword_fragment("devour land 3"),
-            Some(Keyword::Devour(3))
+            Some(Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Land,
+            })
         );
-        // CR 702.82a: the plain "Devour N" form is unaffected.
+        // CR 702.82a: the plain "Devour N" form defaults to the creature quality.
         assert_eq!(
             parse_granted_keyword_fragment("devour 3"),
-            Some(Keyword::Devour(3))
+            Some(Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Creature,
+            })
         );
-        // Regression: a sibling numeric-count keyword still extracts its leading
-        // count — the qualifier-skip only fires on the parse_number-fails branch.
+        // CR 702.82c + CR 205.3g: an artifact SUBTYPE quality (Feasting Hobbit —
+        // "Devour Food 3") canonicalizes to `Subtype("Food")` so the runtime
+        // subtype membership test matches the canonical "Food" name.
+        assert_eq!(
+            parse_granted_keyword_fragment("devour food 3"),
+            Some(Keyword::Devour {
+                n: 3,
+                quality: TypeFilter::Subtype("Food".to_string()),
+            })
+        );
+        // Regression (BLOCKING 2): a sibling numeric-count keyword still extracts
+        // its leading count — the devour-qualifier path did not cannibalize the
+        // generic numeric-count branch that Vanishing/Fading/Renown rely on.
         assert_eq!(
             parse_granted_keyword_fragment("vanishing 3"),
             Some(Keyword::Vanishing(3))

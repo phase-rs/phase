@@ -24,6 +24,7 @@
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
+use engine::types::{card::LayoutKind, card_type::CoreType};
 
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
@@ -52,6 +53,40 @@ pub use ramp_keepables::RampKeepablesMulligan;
 pub use spellslinger_keepables::SpellslingerKeepablesMulligan;
 pub use tokens_wide_keepables::TokensWideKeepablesMulligan;
 pub use tribal_density::TribalDensityMulligan;
+
+/// Returns the alternative face only for modal double-faced cards. Other
+/// double-faced layouts cannot be played as either face from a hand (CR 712.12).
+pub(super) fn modal_back_face(
+    object: &engine::game::game_object::GameObject,
+) -> Option<&engine::game::game_object::BackFaceData> {
+    object
+        .back_face
+        .as_ref()
+        .filter(|face| face.layout_kind == Some(LayoutKind::Modal))
+}
+
+/// Whether this hand card can be played as a land. MDFCs are one card, so an
+/// alternative land face contributes one land source even while its spell face
+/// remains available to the rest of mulligan evaluation (CR 712.12).
+pub(super) fn is_land_source(object: &engine::game::game_object::GameObject) -> bool {
+    object.card_types.core_types.contains(&CoreType::Land)
+        || modal_back_face(object)
+            .is_some_and(|face| face.card_types.core_types.contains(&CoreType::Land))
+}
+
+/// Whether this hand card has a nonland face that can be cast as a spell.
+pub(super) fn has_spell_face(object: &engine::game::game_object::GameObject) -> bool {
+    !object.card_types.core_types.contains(&CoreType::Land)
+        || modal_back_face(object)
+            .is_some_and(|face| !face.card_types.core_types.contains(&CoreType::Land))
+}
+
+/// Whether this hand card is a land without a spell face. Upper-bound land
+/// heuristics use this rather than [`is_land_source`] so a flexible MDFC is not
+/// treated as flood merely because it can also be played as a land.
+pub(super) fn is_land_only_source(object: &engine::game::game_object::GameObject) -> bool {
+    is_land_source(object) && !has_spell_face(object)
+}
 
 /// Whether the player under consideration is on the play or on the draw this
 /// game. Derived from `GameState::current_starting_player` at call time —

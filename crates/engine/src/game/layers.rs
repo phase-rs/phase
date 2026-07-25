@@ -15,7 +15,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::DisplaySource;
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
-    is_runtime_target_die_exile_replacement,
+    is_runtime_host_lifetime_replacement, is_runtime_target_die_exile_replacement,
 };
 use crate::game::quantity::{
     continuous_modification_dynamic_quantity, filter_uses_recipient, quantity_expr_uses_recipient,
@@ -694,9 +694,13 @@ pub(crate) fn prune_lapsed_controller_controls_source(state: &mut GameState) {
 /// CR 611.2b + CR 400.7: the captured source leaving play, OR the host leaving
 /// and re-entering as a new object (same storage ObjectId), ends the can't-untap
 /// continuous effect permanently — drop the gated def from base+live so it
-/// cannot revive on a same-ObjectId re-entry. Called from `zones.rs` on a
-/// battlefield exit, OUTSIDE `evaluate_layers`, so it marks layers full on change
-/// (mirroring `prune_host_left_effects`).
+/// cannot revive on a same-ObjectId re-entry. The same host-left arm also drops
+/// the turn-bound die-exile rider and the host-lifetime exile rider
+/// (`UntilHostLeavesPlay`, CR 702.84a): a base-installed rider must NOT revive
+/// when the object re-enters as a new CR 400.7 object reusing the same storage
+/// key. Called from `zones.rs` (`:481`) on a battlefield exit, OUTSIDE
+/// `evaluate_layers`, so it marks layers full on change (mirroring
+/// `prune_host_left_effects`).
 ///
 /// The predicate is purely id-based (`departed_id`), so no `&state` gate read is
 /// needed — each object is mutated in a single pass: case (b) the captured
@@ -720,15 +724,20 @@ pub(crate) fn prune_controller_controls_source_on_leave(
                         if source == departed_id
                 )
         };
-        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def or a
-        // turn-bound die-exile rider on the departing host is eligible to be dropped.
-        // The host-left arm must not wipe printed replacements or unrelated runtime riders.
+        // CR 400.7 + CR 611.2a: Only a lapsed `ControllerControlsSource` def, a
+        // turn-bound die-exile rider, or a host-lifetime exile rider
+        // (`UntilHostLeavesPlay`, CR 702.84a) on the departing host is eligible
+        // to be dropped. The host-left arm must not wipe printed replacements or
+        // unrelated runtime riders. Dropping the host-lifetime rider from
+        // base+live here is what prevents it reviving on a same-ObjectId
+        // re-entry (CR 400.7 — the returning object is new).
         let drop = |def: &crate::types::ability::ReplacementDefinition| {
             (matches!(
                 def.condition,
                 Some(ReplacementCondition::ControllerControlsSource { .. })
             ) && is_lapsed(def))
                 || (host_left && is_runtime_target_die_exile_replacement(def))
+                || (host_left && is_runtime_host_lifetime_replacement(def))
         };
         let before_live = obj.replacement_definitions.len();
         obj.replacement_definitions.retain(|d| !drop(d));
@@ -2243,6 +2252,7 @@ pub fn evaluate_layers(state: &mut GameState) {
 
     // Step 5: Clear dirty flag. A full evaluation satisfies any pending request
     // (Clean / EnteredObjects / Full).
+    crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
 }
 
@@ -2982,6 +2992,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -4594,6 +4605,17 @@ fn expand_granted_triggered_abilities(
 /// consults it too, so a display projection can never claim an effect is live
 /// after the layer engine has stopped applying it.
 pub(crate) fn transient_effect_is_live(state: &GameState, tce: &TransientContinuousEffect) -> bool {
+    // CR 400.7: a recipient that has changed zones is a new object, so a
+    // continuous effect tied to its prior incarnation cannot keep applying.
+    if let Some(recipient) = tce.affected_recipient {
+        if !state
+            .objects
+            .get(&recipient.object_id)
+            .is_some_and(|object| ObjectIncarnationRef::from_object(object) == recipient)
+        {
+            return false;
+        }
+    }
     // UntilHostLeavesPlay: skip if source is no longer on the battlefield
     if tce.duration == Duration::UntilHostLeavesPlay
         && !state
@@ -6095,6 +6117,13 @@ fn apply_continuous_effect_filtered(
         };
 
         match &effect.modification {
+            // CR 707.2c + CR 613.1a: `CopyChosen` is a parse-time marker for
+            // Metamorphic Alteration's "enchanted creature is a copy of the
+            // chosen creature" static. The copy is materialized exactly once —
+            // as a latched `CopyValues` TCE installed at the
+            // `Effect::ChoosePermanent` answer (values fixed per CR 707.2c) —
+            // so applying anything here would double-install. Explicit no-op.
+            ContinuousModification::CopyChosen => {}
             ContinuousModification::CopyValues {
                 values,
                 display_source,
@@ -6228,7 +6257,7 @@ fn apply_continuous_effect_filtered(
                 // Ward/Annihilator each apply independently). `evaluate_layers` resets
                 // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
                 // accumulates unbounded across re-evaluations.
-                if resolved_keyword.sums_across_instances() {
+                if resolved_keyword.instances_must_coexist() {
                     obj.keywords.push(resolved_keyword.clone());
                 } else if resolved_keyword.overrides_same_kind_on_grant() {
                     // CR 613.7: this grant is a single-authoritative-value keyword — the
@@ -6325,7 +6354,7 @@ fn apply_continuous_effect_filtered(
                 for (keyword_output_index, kw) in add_chosen_keywords.iter().enumerate() {
                     // CR 702.164b: summing keywords (Toxic) accumulate rather
                     // than dedup, mirroring the plain `AddKeyword` arm above.
-                    if kw.sums_across_instances() || !obj.keywords.contains(kw) {
+                    if kw.instances_must_coexist() || !obj.keywords.contains(kw) {
                         obj.keywords.push(kw.clone());
                     }
                     for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(kw)
@@ -6650,6 +6679,24 @@ fn apply_continuous_effect_filtered(
                     obj.static_definitions.push(*definition.clone());
                 }
             }
+            // CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+            // to the recipient. Mirror of `GrantStaticAbility` — push the cloned
+            // `ReplacementDefinition` onto `obj.replacement_definitions` so the
+            // granted replacement fires as a genuine replacement effect (its
+            // `valid_card: SelfRef` binds to this recipient object). Re-derived
+            // each layer pass (`obj.replacement_definitions` was reset to base at
+            // the start of the pass); structural-equality dedup keeps repeated
+            // grants (multiple sources, or a single static parsed twice)
+            // idempotent, matching the GrantTrigger / GrantStaticAbility invariant.
+            ContinuousModification::GrantReplacement { replacement } => {
+                if !obj
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|rd| rd == replacement.as_ref())
+                {
+                    obj.replacement_definitions.push(*replacement.clone());
+                }
+            }
             ContinuousModification::AddStaticMode { mode } => {
                 // CR 509.1b + CR 105.4 + CR 609.6 (issue #327): When the
                 // granted static mode carries an `IsChosenColor` filter prop,
@@ -6968,6 +7015,7 @@ pub(crate) fn compute_current_copiable_values(
             // the overridden loyalty value.
             ContinuousModification::SetStartingLoyalty { value } => {
                 values.loyalty = Some(*value);
+                values.printed_loyalty = Some(crate::types::card::PrintedLoyalty::Fixed(*value));
             }
             // CR 707.9a: A copy effect that grants/retains an ability ("…
             // and it has this ability") makes that ability part of the
@@ -13767,6 +13815,7 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying,
                 }],
@@ -13799,6 +13848,7 @@ mod tests {
                     condition: StaticCondition::SourceIsTapped,
                 },
                 affected: TargetFilter::SelfRef,
+                affected_recipient: None,
                 modifications: vec![ContinuousModification::AddKeyword {
                     keyword: Keyword::Flying,
                 }],
@@ -17225,6 +17275,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17290,6 +17341,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17756,6 +17808,7 @@ mod tests {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: Default::default(),
             trigger_definitions: Default::default(),

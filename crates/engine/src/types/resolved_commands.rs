@@ -12,11 +12,12 @@ use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContex
 use super::ability::TriggerDefinitionRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
-use super::game_state::SpellCastRecord;
+use super::game_state::{SpellCastRecord, ZoneChangeRecord};
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
+use super::zones::Zone;
 
 /// Globally ordered identity of a resolved command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -143,6 +144,44 @@ pub struct ResolvedObjectCounterCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// One exact CR 701.27a transform of a double-faced permanent.
+///
+/// CR 613.7g: a permanent that transforms receives a NEW timestamp, which
+/// orders it against continuous effects in the layer system. Replay installs
+/// the exact recorded timestamp instead of re-drawing one from
+/// `GameState::next_timestamp` — mirroring the zone-change family's
+/// `entry_timestamp` — so a retained-prefix replay cannot silently reorder
+/// layer application. The face payloads are not recorded: swapping the stashed
+/// `back_face` with the displayed face is a structural operation over data the
+/// object already carries, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectTransformCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_transformed: bool,
+    pub resulting_transformed: bool,
+    pub resulting_timestamp: u64,
+    /// CR 701.27f: the post-transform count used to ignore stale self-transform
+    /// instructions from abilities already on the stack.
+    pub resulting_transformation_count: u32,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved transform.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectTransformReplayInvariantError {
+    #[error("transform command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("transform occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("transform precondition mismatch: expected transformed {expected}, found {found}")]
+    TransformedPreconditionMismatch { expected: bool, found: bool },
+    #[error("transform command object {0:?} has no back face to swap")]
+    MissingBackFace(ObjectId),
+}
+
 /// The audience that received one exact revealed-card fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedInformationAudience {
@@ -242,6 +281,26 @@ pub enum ResolvedLedgerEdit {
         source: super::identifiers::ObjectId,
         permission: ResolvedOncePerTurnPermission,
     },
+    /// CR 121.1 + CR 121.2 + CR 121.4: Install one settled draw's bookkeeping
+    /// after its zone transition has already been resolved. `drawn_object` is
+    /// `None` only for an attempted draw from an empty library.
+    CardsDrawn {
+        player: PlayerId,
+        drawn_object: Option<ObjectIncarnationRef>,
+        attempted_empty_library: bool,
+        expected_has_drawn_this_turn: bool,
+        resulting_has_drawn_this_turn: bool,
+        expected_cards_drawn_this_turn: u32,
+        resulting_cards_drawn_this_turn: u32,
+        expected_cards_drawn_this_step: u32,
+        resulting_cards_drawn_this_step: u32,
+        expected_drew_from_empty_library: bool,
+        resulting_drew_from_empty_library: bool,
+        expected_drawn_cards_len: u32,
+        resulting_drawn_cards_len: u32,
+        expected_first_card_drawn_this_turn: Option<ObjectId>,
+        resulting_first_card_drawn_this_turn: Option<ObjectId>,
+    },
 }
 
 /// One exact per-event ledger mutation with its causal node.
@@ -264,6 +323,53 @@ pub struct ResolvedLibraryShuffleCommand {
     pub pre_word_pos: u128,
     pub post_word_pos: u128,
     pub cause: RulesExecutionNodeRef,
+}
+
+/// One exact transition of an object occurrence between zone containers.
+///
+/// CR 400.7: the command binds the source occurrence and its resulting
+/// incarnation, so replay neither selects a new object nor creates a new
+/// incarnation. CR 613.7d: battlefield-entry timestamps are captured by the
+/// ordinary path and installed exactly on replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedZoneChangeCommand {
+    pub object: ObjectIncarnationRef,
+    pub resulting_incarnation: u64,
+    pub from: Zone,
+    pub to: Zone,
+    /// Zero-based position after the source occurrence has been removed.
+    pub destination_position: usize,
+    pub owner: PlayerId,
+    pub entry_timestamp: Option<u64>,
+    pub turn_zone_change_index: usize,
+    pub zone_change_record: ZoneChangeRecord,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved zone transition.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedZoneChangeReplayInvariantError {
+    #[error("zone-change command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("zone-change occurrence mismatch: expected {expected:?}, found {found:?}")]
+    OccurrenceMismatch {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("zone-change owner mismatch: expected {expected:?}, found {found:?}")]
+    OwnerMismatch { expected: PlayerId, found: PlayerId },
+    #[error("zone-change source-zone mismatch: expected {expected:?}, found {found:?}")]
+    SourceZoneMismatch { expected: Zone, found: Zone },
+    #[error("zone-change destination position mismatch: expected {expected}, found {found}")]
+    DestinationPositionMismatch { expected: usize, found: usize },
+    #[error("zone-change turn-record index mismatch: expected {expected}, found {found}")]
+    TurnRecordIndexMismatch { expected: usize, found: usize },
+    #[error("zone-change battlefield entry is missing its timestamp")]
+    MissingBattlefieldEntryTimestamp,
+    #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
+    UnexpectedNonbattlefieldTimestamp,
+    #[error("zone-change installed incarnation mismatch: expected {expected}, found {found}")]
+    ResultingIncarnationMismatch { expected: u64, found: u64 },
 }
 
 /// One bounded structural transition of the resolution-frame stack.
@@ -320,9 +426,11 @@ pub enum ResolvedRulesCommand {
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
+    ObjectTransform(ResolvedObjectTransformCommand),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
+    ZoneChange(Box<ResolvedZoneChangeCommand>),
     FrameTransition(Box<ResolvedFrameTransitionCommand>),
     TriggerCollection(ResolvedTriggerCollectionCommand),
 }
@@ -679,8 +787,17 @@ pub enum ResolvedLedgerEditReplayInvariantError {
     UnknownPlayer(PlayerId),
     SpellCastPreconditionMismatch,
     AbilityActivationPreconditionMismatch,
+    CardsDrawnPreconditionMismatch,
+    DrawnObjectMismatch {
+        expected: ObjectIncarnationRef,
+        found: Option<ObjectIncarnationRef>,
+    },
+    DrawnObjectStillInLibrary(ObjectIncarnationRef),
     TriggerAlreadyRecorded,
-    TriggerCountPreconditionMismatch { expected: u32, found: u32 },
+    TriggerCountPreconditionMismatch {
+        expected: u32,
+        found: u32,
+    },
     PermissionAlreadyConsumed(ResolvedOncePerTurnPermission),
     CounterOverflow,
 }
@@ -698,6 +815,18 @@ impl std::fmt::Display for ResolvedLedgerEditReplayInvariantError {
             Self::AbilityActivationPreconditionMismatch => write!(
                 f,
                 "resolved activated-ability command does not match its ledger prefix"
+            ),
+            Self::CardsDrawnPreconditionMismatch => write!(
+                f,
+                "resolved draw-bookkeeping command does not match its ledger prefix"
+            ),
+            Self::DrawnObjectMismatch { expected, found } => write!(
+                f,
+                "resolved drawn-object occurrence mismatch: expected {expected:?}, found {found:?}"
+            ),
+            Self::DrawnObjectStillInLibrary(object) => write!(
+                f,
+                "resolved drawn-object occurrence remained in its library: {object:?}"
             ),
             Self::TriggerAlreadyRecorded => {
                 write!(
@@ -1178,6 +1307,28 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::LibraryShuffle(command))
     }
 
+    /// Records one exact zone-container transition under its causal node.
+    pub fn record_zone_change(
+        &mut self,
+        command: ResolvedZoneChangeCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ZoneChange(Box::new(command)),
+        )
+    }
+
+    /// Records one exact CR 701.27a transform under its causal node.
+    pub fn record_object_transform(
+        &mut self,
+        command: ResolvedObjectTransformCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ObjectTransform(command),
+        )
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1398,9 +1549,11 @@ impl ResolvedRulesJournal {
                 ResolvedRulesCommand::PlayerEdit(_)
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::ObjectTransform(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
+                | ResolvedRulesCommand::ZoneChange(_)
                 | ResolvedRulesCommand::FrameTransition(_)
                 | ResolvedRulesCommand::TriggerCollection(_) => {}
             }
@@ -1634,6 +1787,28 @@ impl ResolvedRulesJournal {
                     ));
                 }
             }
+            ResolvedRulesCommand::ZoneChange(command) => {
+                if entry.node != command.cause || zone_change_command_is_invalid(command) {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "zone-change command has an invalid occurrence, receipt, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectTransform(command) => {
+                // CR 701.27a: a transform turns the permanent to its OTHER face,
+                // so a recorded transform that leaves `transformed` unchanged is
+                // not a transform that ever happened.
+                if entry.node != command.cause
+                    || command.expected_old_transformed == command.resulting_transformed
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "transform command does not change the displayed face, or has an \
+                         unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
             ResolvedRulesCommand::FrameTransition(command) => {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
@@ -1719,7 +1894,24 @@ fn information_command_is_invalid(command: &ResolvedInformationCommand) -> bool 
         })
 }
 
-fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
+fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
+    let record = &command.zone_change_record;
+    let changes_incarnation = command.from != command.to;
+    command.object.incarnation == LEGACY_INCARNATION
+        || command.owner != record.owner
+        || record.object_id != command.object.object_id
+        || record.from_zone != Some(command.from)
+        || record.to_zone != command.to
+        || record.turn_zone_change_index != command.turn_zone_change_index
+        || (changes_incarnation && command.resulting_incarnation <= command.object.incarnation)
+        || (!changes_incarnation && command.resulting_incarnation != command.object.incarnation)
+        || (command.to == Zone::Battlefield) != command.entry_timestamp.is_some()
+        || (command.to == Zone::Battlefield
+            && record.entered_incarnation != Some(command.resulting_incarnation))
+        || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
+}
+
+pub(crate) fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
     match edit {
         ResolvedLedgerEdit::SpellCast {
             expected_game_count,
@@ -1740,6 +1932,59 @@ fn ledger_edit_is_invalid(edit: &ResolvedLedgerEdit) -> bool {
             expected_game_count,
             ..
         } => *expected_turn_count == u32::MAX || *expected_game_count == u32::MAX,
+        ResolvedLedgerEdit::CardsDrawn {
+            drawn_object,
+            attempted_empty_library,
+            expected_has_drawn_this_turn,
+            resulting_has_drawn_this_turn,
+            expected_cards_drawn_this_turn,
+            resulting_cards_drawn_this_turn,
+            expected_cards_drawn_this_step,
+            resulting_cards_drawn_this_step,
+            expected_drew_from_empty_library,
+            resulting_drew_from_empty_library,
+            expected_drawn_cards_len,
+            resulting_drawn_cards_len,
+            expected_first_card_drawn_this_turn,
+            resulting_first_card_drawn_this_turn,
+            ..
+        } => {
+            let settled_card = drawn_object.is_some();
+            let expected_first = if let Some(object) = drawn_object {
+                expected_first_card_drawn_this_turn.or(Some(object.object_id))
+            } else {
+                *expected_first_card_drawn_this_turn
+            };
+            (!settled_card && !attempted_empty_library)
+                || *resulting_has_drawn_this_turn
+                    != if settled_card {
+                        true
+                    } else {
+                        *expected_has_drawn_this_turn
+                    }
+                || *resulting_cards_drawn_this_turn
+                    != if settled_card {
+                        expected_cards_drawn_this_turn.saturating_add(1)
+                    } else {
+                        *expected_cards_drawn_this_turn
+                    }
+                || *resulting_cards_drawn_this_step
+                    != if settled_card {
+                        expected_cards_drawn_this_step.saturating_add(1)
+                    } else {
+                        *expected_cards_drawn_this_step
+                    }
+                || *resulting_drew_from_empty_library
+                    != (*expected_drew_from_empty_library || *attempted_empty_library)
+                || *expected_drawn_cards_len == u32::MAX
+                || *resulting_drawn_cards_len
+                    != if settled_card {
+                        expected_drawn_cards_len + 1
+                    } else {
+                        *expected_drawn_cards_len
+                    }
+                || *resulting_first_card_drawn_this_turn != expected_first
+        }
         ResolvedLedgerEdit::TriggerFired {
             edit: ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old },
             ..
@@ -1754,6 +1999,12 @@ fn ledger_edit_has_legacy_object_identity(edit: &ResolvedLedgerEdit) -> bool {
         edit,
         ResolvedLedgerEdit::TriggerFired { trigger, .. }
             if trigger.source.incarnation == LEGACY_INCARNATION
+    ) || matches!(
+        edit,
+        ResolvedLedgerEdit::CardsDrawn {
+            drawn_object: Some(object),
+            ..
+        } if object.incarnation == LEGACY_INCARNATION
     )
 }
 

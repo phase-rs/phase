@@ -12,7 +12,7 @@ use crate::types::ability::{
     SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -185,6 +185,9 @@ pub struct BackFaceData {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: The face's printed loyalty determines loyalty counters on entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4: Defense of a battle (printed number while off the battlefield).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defense: Option<u32>,
@@ -340,6 +343,18 @@ pub struct EmblemSource {
     pub printed_ref: Option<PrintedCardRef>,
 }
 
+/// CR 702.16p: Start-time attachment exemption captured for one continuous
+/// protection modification (`static_definitions` index + `modifications` index
+/// on the grant source) and host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectionStartSnapshot {
+    pub resolved_quality: crate::types::keywords::ProtectionTarget,
+    pub attachment_ids: Vec<ObjectId>,
+}
+
+/// `(static_definitions index, modifications index, host object id)`.
+pub type ProtectionEffectHostKey = (usize, usize, ObjectId);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -381,6 +396,12 @@ pub struct GameObject {
     /// `None` if unattached. See `AttachTarget` for variants.
     pub attached_to: Option<AttachTarget>,
     pub attachments: Vec<ObjectId>,
+    /// CR 702.16p: Per [`StaticGateKey::def_index`] on this source and enchanted
+    /// host, the controlled attachments matching that effect's resolved protection
+    /// quality when it first started applying to that host.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub protection_start_exempt_attachments:
+        HashMap<ProtectionEffectHostKey, ProtectionStartSnapshot>,
     /// CR 702.95b-d: Soulbond pair relationship. Pairing is symmetric:
     /// if `A.paired_with == Some(B)`, then `B.paired_with == Some(A)`.
     /// This is independent from attachments; paired creatures are not
@@ -421,6 +442,10 @@ pub struct GameObject {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    /// CR 306.5b: Printed loyalty is the entry-counter baseline; battlefield
+    /// loyalty itself is counter-derived (CR 306.5c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4c: Defense of a battle on the battlefield — derived from defense
     /// counters. Kept in sync with `CounterType::Defense` by layer evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -504,6 +529,10 @@ pub struct GameObject {
     pub base_name: String,
     #[serde(default)]
     pub base_loyalty: Option<u32>,
+    /// CR 306.5b: Printed-loyalty baseline restored after layered copy effects;
+    /// live loyalty remains derived from counters on the battlefield (CR 306.5c).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4a: Printed defense number (off-battlefield defense).
     #[serde(default)]
     pub base_defense: Option<u32>,
@@ -660,6 +689,13 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 702.174a: Opponent chosen when this object's Gift cost was paid.
+    /// Mirrors `SpellContext.gift_recipient`; stamped at cast finalize
+    /// (kickers_paid pattern). Cleared by `reset_for_battlefield_exit` /
+    /// `reset_for_battlefield_entry` (CR 400.7); restored across Stack→Battlefield
+    /// only via `CastLinkSnapshot` (CR 400.7d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gift_recipient: Option<PlayerId>,
     /// CR 601.2b/f/h + CR 702.157a: Count of non-kicker repeatable
     /// additional costs paid while casting the spell that produced this
     /// permanent. Kept separate from `kickers_paid` so Squad does not inherit
@@ -1131,6 +1167,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         power: _,
         toughness: _,
         loyalty: _,
+        printed_loyalty: _,
         defense: _,
         token_rules_text: _,
         card_types: _,
@@ -1158,6 +1195,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_toughness: _,
         base_name: _,
         base_loyalty: _,
+        base_printed_loyalty: _,
         base_defense: _,
         base_card_types: _,
         base_mana_cost: _,
@@ -1185,6 +1223,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cost_x_paid: _,
         fused_split_spell: _,
         kickers_paid: _,
+        gift_recipient: _,
         additional_cost_payment_count: _,
         additional_cost_payments: _,
         convoked_creatures: _,
@@ -1249,6 +1288,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         phyrexian_life_paid: _,
         mana_spent_source_snapshots: _,
         phase_status: _,
+        protection_start_exempt_attachments: _,
     } = o;
 }
 
@@ -1906,6 +1946,9 @@ impl GameObject {
         if self.base_loyalty.is_none() && self.loyalty.is_some() {
             self.base_loyalty = self.loyalty;
         }
+        if self.base_printed_loyalty.is_none() && self.printed_loyalty.is_some() {
+            self.base_printed_loyalty = self.printed_loyalty;
+        }
         if self.base_name.is_empty() && !self.name.is_empty() {
             self.base_name = self.name.clone();
         }
@@ -1981,6 +2024,7 @@ impl GameObject {
             dealt_deathtouch_damage: false,
             attached_to: None,
             attachments: Vec::new(),
+            protection_start_exempt_attachments: HashMap::new(),
             paired_with: None,
             pair_controller: None,
             counters: HashMap::new(),
@@ -1990,6 +2034,7 @@ impl GameObject {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             token_rules_text: None,
             card_types: CardType::default(),
@@ -2017,6 +2062,7 @@ impl GameObject {
             base_toughness: None,
             base_name: name.clone(),
             base_loyalty: None,
+            base_printed_loyalty: None,
             base_defense: None,
             base_card_types: CardType::default(),
             base_mana_cost: ManaCost::default(),
@@ -2043,6 +2089,7 @@ impl GameObject {
             cost_x_paid: None,
             fused_split_spell: false,
             kickers_paid: Vec::new(),
+            gift_recipient: None,
             additional_cost_payment_count: 0,
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
@@ -2253,6 +2300,11 @@ impl GameObject {
         // event as `cast_from_zone`; clear it on zone change for the same reason.
         self.cast_spell_keywords.clear();
         self.kickers_paid.clear();
+        // CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance (who was
+        // promised the gift when this permanent was cast). A re-entering object
+        // has no memory of a prior Gift promise — clear before CastLinkSnapshot
+        // restores it for Stack→Battlefield cast resolution only.
+        self.gift_recipient = None;
         self.additional_cost_payment_count = 0;
         self.additional_cost_payments.clear();
         // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
@@ -2286,6 +2338,7 @@ impl GameObject {
         self.power = self.base_power;
         self.toughness = self.base_toughness;
         self.loyalty = self.base_loyalty;
+        self.printed_loyalty = self.base_printed_loyalty;
         // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.
         self.defense = self.base_defense;
         self.card_types = self.base_card_types.clone();
@@ -2345,6 +2398,10 @@ impl GameObject {
         // runs (zones.rs: exit seam → snapshot → reset), so latched trigger
         // contexts keep the payment record of the departing incarnation.
         self.clear_cast_payment_stamps();
+        // CR 400.7 + CR 702.174a: Gift recipient is the same cast-link class as
+        // kickers_paid / payment stamps — a blinked or reanimated permanent must
+        // not deliver (or condition on) a prior incarnation's Gift promise.
+        self.gift_recipient = None;
         // CR 611.2f: the cast-time keyword snapshot is bound to the same casting
         // event as `cast_from_zone`; clear it on the same zone-change boundary.
         self.cast_spell_keywords.clear();
@@ -2355,6 +2412,7 @@ impl GameObject {
         // CR 305.1 + CR 603.4: Land-play provenance is likewise battlefield-
         // entry scoped and must not survive a later zone change.
         self.played_from_zone = None;
+        self.protection_start_exempt_attachments.clear();
         self.convoked_creatures.clear();
         // CR 702.103f: `bestow_form` is intentionally NOT cleared here.
         // The zone-exit cleanup in `apply_zone_exit_cleanup` (zones.rs) reads
@@ -2765,6 +2823,49 @@ mod tests {
         );
     }
 
+    /// CR 400.7 + CR 702.174a: Gift recipient is cast-link provenance and must
+    /// clear on battlefield exit — a blinked/reanimated permanent cannot keep a
+    /// prior incarnation's Gift promise.
+    #[test]
+    fn reset_for_battlefield_exit_clears_gift_recipient() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Scrapshooter".to_string(),
+            Zone::Battlefield,
+        );
+        obj.gift_recipient = Some(PlayerId(1));
+
+        obj.reset_for_battlefield_exit();
+
+        assert!(
+            obj.gift_recipient.is_none(),
+            "gift_recipient must clear on battlefield exit (CR 400.7)"
+        );
+    }
+
+    /// CR 400.7d: Entry reset also clears Gift recipient so effect-driven puts
+    /// (Reanimate) cannot resurrect a stamp that somehow survived exile/GY.
+    #[test]
+    fn reset_for_battlefield_entry_clears_gift_recipient() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Scrapshooter".to_string(),
+            Zone::Graveyard,
+        );
+        obj.gift_recipient = Some(PlayerId(1));
+
+        obj.reset_for_battlefield_entry(1, 1);
+
+        assert!(
+            obj.gift_recipient.is_none(),
+            "gift_recipient must clear on battlefield entry (CR 400.7d)"
+        );
+    }
+
     /// CR 400.7d + CR 603.4 (issue #5943 review round): the zone-change
     /// snapshot latches all four trigger-relevant mana-payment stamps — including the
     /// per-mana-unit source-snapshot vector — into the owned trigger source
@@ -2901,6 +3002,28 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_game_object_payload_defaults_printed_loyalty_provenance() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        obj.printed_loyalty = Some(PrintedLoyalty::X);
+        obj.base_printed_loyalty = Some(PrintedLoyalty::X);
+
+        let mut json = serde_json::to_value(&obj).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("printed_loyalty");
+        fields.remove("base_printed_loyalty");
+
+        let legacy: GameObject = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.printed_loyalty, None);
+        assert_eq!(legacy.base_printed_loyalty, None);
     }
 
     #[test]

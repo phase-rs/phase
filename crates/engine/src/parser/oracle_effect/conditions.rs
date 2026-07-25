@@ -11,7 +11,8 @@ use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower};
 use super::super::oracle_nom::condition::{
-    inject_controller_you, parse_cast_using_teamwork_phrase, parse_spell_target_superlative_suffix,
+    inject_controller_you, parse_cast_using_teamwork_phrase,
+    parse_scoped_player_opponent_and_has_condition, parse_spell_target_superlative_suffix,
     parse_you_put_onto_battlefield_this_way_clause, parse_zone_changed_this_way_clause,
 };
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -1531,6 +1532,46 @@ pub(super) fn strip_coin_flip_conditional(text: &str) -> (Option<AbilityConditio
         Ok((i, AbilityCondition::CoinFlipOutcome { result }))
     }) {
         Some((condition, remainder)) => (Some(condition), remainder.to_string()),
+        None => (None, text.to_string()),
+    }
+}
+
+/// CR 608.2c + CR 701.17a: Strip "if [N] cards that share a [quality] were
+/// milled this way," ahead of a "repeat this process" directive →
+/// `QuantityCheck` over `ObjectCountBySharedQuality { LastZoneChanged, Max }`.
+pub(super) fn strip_milled_shared_quality_conditional(
+    text: &str,
+) -> (Option<AbilityCondition>, String) {
+    use crate::types::ability::AggregateFunction;
+
+    let lower = text.to_lowercase();
+    match nom_on_lower(text, &lower, |i| {
+        let (i, _) = tag::<_, _, OracleError<'_>>("if ").parse(i)?;
+        let (i, n) = alt((
+            value(2i32, tag("two")),
+            map(nom_primitives::parse_number, |n| n as i32),
+        ))
+        .parse(i)?;
+        let (i, _) = tag(" cards that share a ").parse(i)?;
+        let (i, quality) = crate::parser::oracle_target::parse_shared_quality(i)?;
+        let (i, _) = tag(" were milled this way").parse(i)?;
+        let (i, _) = opt(alt((tag(","), tag(", ")))).parse(i)?;
+        Ok((i, (n, quality)))
+    }) {
+        Some(((n, quality), remainder)) => {
+            let condition = AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCountBySharedQuality {
+                        filter: TargetFilter::LastZoneChanged,
+                        quality,
+                        aggregate: AggregateFunction::Max,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: n },
+            };
+            (Some(condition), remainder.trim_start().to_string())
+        }
         None => (None, text.to_string()),
     }
 }
@@ -3119,6 +3160,32 @@ pub(super) fn strip_suffix_conditional(
     // (threshold forms are owned upstream by strip_property_conditional).
     if let Some(cond) = parse_source_pt_comparison_condition_text(condition_text) {
         return (Some(cond), text[..if_pos].trim().to_string());
+    }
+    // CR 608.2c: "that creature has <keyword>" / "that permanent has <keyword>"
+    // are in NON_REHOMEABLE_CONDITION_PREFIXES, so — like the "it has " colored-
+    // mana and source-P/T gates above — this TRAILING zone-change object gate must
+    // run BEFORE the rehomeable bail or it would never reach the condition parser.
+    // It binds the TRIGGER's event-bound entering object
+    // (`AbilityCondition::ZoneChangeObjectMatchesFilter`, evaluated against
+    // `state.current_trigger_event`), which is DISJOINT from the leading-only
+    // `strip_target_keyword_instead` path (`AbilityCondition::TargetHasKeywordInstead`,
+    // evaluated against `ability.targets` — a spell/ability TARGET): a genuinely
+    // different anaphor source (event object vs. chosen target), not a duplicate
+    // of the same concept. Mutable Pupa's "…if that creature has <keyword>" riders.
+    //
+    // This is gated on trigger context, mirroring `strip_counter_conditional`'s
+    // identical demonstrative-subject handling ("that creature has … counter" is
+    // offered `if !in_trigger` there). `ZoneChangeObjectMatchesFilter` reads
+    // `state.current_trigger_event`, which is only meaningful inside a trigger's
+    // resolution; outside a trigger the demonstrative "that creature" is the
+    // spell's target, NOT an entering object, so this branch must decline and
+    // leave the non-trigger form to whatever else handles it (nothing currently
+    // emits `ZoneChangeObjectMatchesFilter` for a non-trigger keyword predicate)
+    // rather than misfire an event-bound gate against a spell target.
+    if ctx.in_trigger {
+        if let Some(cond) = parse_zone_change_object_has_keyword_condition(condition_text) {
+            return (Some(cond), text[..if_pos].trim().to_string());
+        }
     }
     if !condition_text_is_rehomeable(condition_text) {
         return (None, text.to_string());
@@ -5793,6 +5860,34 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(maybe_negate(cond, negated));
     }
 
+    // CR 102.2 / CR 102.3 + CR 603.2b + CR 608.2c: A phase trigger over
+    // "each player's" step binds `ScopedPlayer`; a later leading condition can
+    // constrain that SAME player by both relationship and scalar state:
+    // "the player is your opponent and has <hand/life predicate>".
+    //
+    // The grammar returns both independent legs. Compose them here from
+    // existing conditions: `ScopedPlayerMatches(Opponent)` plus the bridged
+    // `HandSize/LifeTotal { ScopedPlayer }` quantity check. Full consumption
+    // and the exact context equality are both required. Other relative-player
+    // contexts (triggering/target/defending/chosen/etc.) deliberately fall
+    // through unchanged rather than reinterpreting their referent as a
+    // per-player phase iteration.
+    if matches!(
+        ctx.relative_player_scope.as_ref(),
+        Some(ControllerRef::ScopedPlayer)
+    ) {
+        if let Ok((_, (filter, scalar))) =
+            all_consuming(parse_scoped_player_opponent_and_has_condition).parse(lower.as_str())
+        {
+            return Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::ScopedPlayerMatches { filter },
+                    static_condition_to_ability_condition(&scalar, ctx)?,
+                ],
+            });
+        }
+    }
+
     let (rest, condition) = parse_inner_condition(&lower).ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -6607,13 +6702,91 @@ fn parse_entered_or_cast_from_zone_ability_condition(lower: &str) -> Option<Abil
     Some(entered_or_cast_from_zone_condition(zone))
 }
 
+/// CR 608.2c: which predicate form followed the shared `"that <noun> "` prefix
+/// in a zone-change object gate. Typed (not a bool) per the typed-enum mandate,
+/// so the caller routes each form to its own `TargetFilter` construction. The
+/// copula form (`is/isn't [a/an] <type>`) carries a type phrase; the keyword
+/// form (`has/doesn't have <keyword>`) carries a keyword name.
+enum ZoneChangeObjectPredicate<'a> {
+    /// Remaining text is a type phrase (parsed via `parse_type_phrase`).
+    Type(&'a str),
+    /// Remaining text is a keyword name (parsed via `Keyword::from_str`).
+    Keyword(&'a str),
+}
+
+/// Build the `TargetFilter` for a parsed zone-change object predicate. Copula →
+/// type filter (rejecting `Any`/leftover, as before); keyword → a single
+/// `FilterProp::WithKeyword` typed filter, mirroring the "it has [keyword]" arm.
+fn zone_change_object_predicate_filter(
+    predicate: ZoneChangeObjectPredicate<'_>,
+) -> Option<TargetFilter> {
+    match predicate {
+        ZoneChangeObjectPredicate::Type(type_text) => {
+            let (filter, leftover) = parse_type_phrase(type_text);
+            if matches!(filter, TargetFilter::Any) || !leftover.trim().is_empty() {
+                return None;
+            }
+            Some(filter)
+        }
+        ZoneChangeObjectPredicate::Keyword(keyword_text) => {
+            let keyword: Keyword = keyword_text
+                .trim()
+                .parse()
+                .unwrap_or(Keyword::Unknown(String::new()));
+            if matches!(keyword, Keyword::Unknown(_)) {
+                return None;
+            }
+            Some(TargetFilter::Typed(TypedFilter {
+                properties: vec![FilterProp::WithKeyword { value: keyword }],
+                ..Default::default()
+            }))
+        }
+    }
+}
+
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
-    let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
-    let (filter, leftover) = parse_type_phrase(type_text);
-    if matches!(filter, TargetFilter::Any) || !leftover.trim().is_empty() {
+    let (predicate, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
+    // Copula-form only. The keyword form (`has/doesn't have <keyword>`) is
+    // reachable through this ungated leading-conditional route
+    // (`strip_leading_general_conditional` → `try_nom_condition_as_ability_condition`),
+    // which runs BEFORE the dedicated `strip_target_keyword_instead` stripper.
+    // Accepting `Keyword` here would hijack CR 608.2c "If that creature has
+    // <keyword>, [effect] instead" cards (Porcelain Zealot, Cut Propulsion,
+    // Burn the Impure, Compleat Devotion, Hexgold Slash) into a
+    // `ZoneChangeObjectMatchesFilter` that only reads `current_trigger_event`
+    // (always `None` off-trigger), permanently killing their "instead" branch.
+    // The keyword form must flow ONLY through the `ctx.in_trigger`-gated
+    // `parse_zone_change_object_has_keyword_condition` (Mutable Pupa's rider).
+    if matches!(predicate, ZoneChangeObjectPredicate::Keyword(_)) {
         return None;
     }
+    let filter = zone_change_object_predicate_filter(predicate)?;
 
+    Some(maybe_negate(
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter,
+        },
+        negated,
+    ))
+}
+
+/// CR 608.2c: the KEYWORD-form-only slice of the trailing zone-change object gate
+/// — "that creature has <keyword>" / "that permanent has <keyword>" (Mutable
+/// Pupa's per-keyword riders). Split out from
+/// `parse_zone_change_object_matches_filter_condition` so `strip_suffix_conditional`
+/// can early-except ONLY this form (its `"that <noun> has "` prefixes live in
+/// `NON_REHOMEABLE_CONDITION_PREFIXES`), while the copula form keeps flowing
+/// through its existing downstream `try_nom_condition_as_ability_condition` route.
+pub(super) fn parse_zone_change_object_has_keyword_condition(
+    lower: &str,
+) -> Option<AbilityCondition> {
+    let (predicate, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
+    if !matches!(predicate, ZoneChangeObjectPredicate::Keyword(_)) {
+        return None;
+    }
+    let filter = zone_change_object_predicate_filter(predicate)?;
     Some(maybe_negate(
         AbilityCondition::ZoneChangeObjectMatchesFilter {
             origin: None,
@@ -6664,9 +6837,20 @@ fn parse_outcome_this_way_condition(lower: &str) -> Option<AbilityCondition> {
     ))
 }
 
+/// Predicate-head discriminant for `parse_zone_change_object_type_text`: whether
+/// the matched head was the copula (type phrase follows) or the "has" form
+/// (keyword follows), plus the negation flag. Local selector so the remainder
+/// `&str` (only known after the `alt` matches) maps into the typed
+/// `ZoneChangeObjectPredicate` payload.
+#[derive(Clone, Copy)]
+enum PredicateHead {
+    Type,
+    Keyword,
+}
+
 fn parse_zone_change_object_type_text(
     input: &str,
-) -> nom::IResult<&str, (&str, bool), OracleError<'_>> {
+) -> nom::IResult<&str, (ZoneChangeObjectPredicate<'_>, bool), OracleError<'_>> {
     let (input, _) = tag("that ").parse(input)?;
     let (input, _) = alt((
         tag("permanent"),
@@ -6680,9 +6864,13 @@ fn parse_zone_change_object_type_text(
         tag("card"),
     ))
     .parse(input)?;
-    let (input, negated) = alt((
+    // Two predicate forms share the `"that <noun> "` prefix: the copula
+    // (`is/isn't [a/an] <type>`) and the keyword form (`has / doesn't have
+    // <keyword>`). Composed as one `alt()` over the predicate heads; each arm
+    // yields `(negated, head)` and the remainder becomes the head's payload.
+    let (input, (negated, head)) = alt((
         value(
-            true,
+            (true, PredicateHead::Type),
             alt((
                 tag(" is not an "),
                 tag(" is not a "),
@@ -6692,10 +6880,22 @@ fn parse_zone_change_object_type_text(
                 tag(" isn't "),
             )),
         ),
-        value(false, alt((tag(" is an "), tag(" is a "), tag(" is ")))),
+        value(
+            (false, PredicateHead::Type),
+            alt((tag(" is an "), tag(" is a "), tag(" is "))),
+        ),
+        value(
+            (true, PredicateHead::Keyword),
+            alt((tag(" doesn't have "), tag(" does not have "))),
+        ),
+        value((false, PredicateHead::Keyword), tag(" has ")),
     ))
     .parse(input)?;
-    Ok(("", (input, negated)))
+    let predicate = match head {
+        PredicateHead::Type => ZoneChangeObjectPredicate::Type(input),
+        PredicateHead::Keyword => ZoneChangeObjectPredicate::Keyword(input),
+    };
+    Ok(("", (predicate, negated)))
 }
 
 fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition> {
@@ -6947,7 +7147,36 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
+    use crate::types::ability::{AggregateFunction, PlayerFilter, SharedQuality};
     use crate::types::counter::{CounterMatch, CounterType};
+
+    #[test]
+    fn strip_milled_shared_quality_conditional_maps_grindstone_gate() {
+        let (cond, rest) = strip_milled_shared_quality_conditional(
+            "if two cards that share a color were milled this way, repeat this process",
+        );
+        assert_eq!(rest, "repeat this process");
+        assert!(
+            matches!(
+                cond,
+                Some(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountBySharedQuality {
+                            filter: TargetFilter::LastZoneChanged,
+                            quality: SharedQuality::Color,
+                            aggregate: AggregateFunction::Max,
+                            ..
+                        },
+                        ..
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 2 },
+                    ..
+                })
+            ),
+            "got {cond:?}"
+        );
+    }
 
     /// CR 400.7 + CR 608.2c: S07 Batch 1 — the leading-"if" active-voice
     /// this-way gates must resolve to their typed conditions (previously they
@@ -7106,6 +7335,83 @@ mod tests {
             ),
             "got {cond:?}"
         );
+    }
+
+    /// CR 102.2 / CR 102.3 + CR 603.2b + CR 608.2c: a leading
+    /// relationship-qualified phase-player condition is preserved with its
+    /// body and lowers to both existing condition legs. This exercises the
+    /// production leading-condition splitter, not just the leaf bridge.
+    #[test]
+    fn scoped_phase_player_opponent_and_hand_gate_preserves_leading_body() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
+            ..Default::default()
+        };
+        let (condition, body) = strip_leading_general_conditional(
+            "If the player is your opponent and has four or more cards in hand, this enchantment deals 2 damage to that player",
+            &mut ctx,
+        );
+
+        assert_eq!(
+            body, "this enchantment deals 2 damage to that player",
+            "the leading gate must be peeled without changing the body"
+        );
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::And {
+                conditions: vec![
+                    AbilityCondition::ScopedPlayerMatches {
+                        filter: PlayerFilter::Opponent,
+                    },
+                    AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::ScopedPlayer,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 4 },
+                    },
+                ],
+            })
+        );
+    }
+
+    /// The relationship grammar itself succeeds for every row (the reach
+    /// guard), but the effect bridge must decline unless the surrounding
+    /// context is exactly `ScopedPlayer`. This prevents an early grammar
+    /// failure from making any negative assertion vacuous.
+    #[test]
+    fn scoped_phase_player_opponent_bridge_declines_other_relative_scopes() {
+        let input = "the player is your opponent and has four or more cards in hand";
+        let assert_declines = |scope: Option<ControllerRef>| {
+            assert!(
+                all_consuming(parse_scoped_player_opponent_and_has_condition)
+                    .parse(input)
+                    .is_ok(),
+                "reach guard: the direct relationship grammar must succeed"
+            );
+            let mut ctx = ParseContext {
+                relative_player_scope: scope.clone(),
+                ..Default::default()
+            };
+            assert_eq!(
+                try_nom_condition_as_ability_condition(input, &mut ctx),
+                None,
+                "non-scoped relative player must be declined: {scope:?}"
+            );
+        };
+
+        for scope in [
+            Some(ControllerRef::TriggeringPlayer),
+            Some(ControllerRef::TargetPlayer),
+            Some(ControllerRef::ParentTargetController),
+            Some(ControllerRef::DefendingPlayer),
+            Some(ControllerRef::SourceChosenPlayer),
+            None,
+        ] {
+            assert_declines(scope);
+        }
     }
 
     #[test]

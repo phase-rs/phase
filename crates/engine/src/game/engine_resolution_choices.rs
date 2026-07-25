@@ -797,10 +797,8 @@ fn validate_exact_keep_on_top_selection(
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
 /// library "in any order", so a legal keep-on-top selection is any duplicate-free
-/// subset of the looked-at cards (order is the player's free choice). Because the
-/// multiplayer server bypasses its candidate-enumeration legality gate for these
-/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
-/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// subset of the looked-at cards (order is the player's free choice). `apply()` is
+/// the validation boundary: a foreign id or a duplicate would corrupt the
 /// library `retain`+`insert` (relocating or duplicating a card), so reject both
 /// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
 fn validate_keep_on_top_selection(
@@ -4970,6 +4968,14 @@ pub(super) fn handle_resolution_choice(
                             &library_position,
                             events,
                         );
+                        if let Some(next_owner) =
+                            effects::change_zone::resume_next_mass_library_order_choice(state)
+                        {
+                            state.priority_player = next_owner;
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     } else {
                         // The selected EffectZoneChoice is now consumed. Clear it
                         // before the pipeline may park a CR 616.1 prompt; otherwise
@@ -6824,6 +6830,10 @@ fn finish_effect_zone_put_at_library_position(
         &library_position,
         events,
     );
+    if let Some(next_owner) = effects::change_zone::resume_next_mass_library_order_choice(state) {
+        state.priority_player = next_owner;
+        return;
+    }
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state
@@ -6901,6 +6911,22 @@ pub(crate) fn run_batch_completion(
             enters_under,
             events,
         ),
+        BatchCompletion::ExileFaceDownPileDeliveryComplete {
+            player,
+            source_id,
+            members,
+            required_member_count,
+        } => effects::exile_face_down_pile::complete_exile_face_down_pile_delivery(
+            state,
+            player,
+            source_id,
+            members,
+            required_member_count,
+            events,
+        ),
+        BatchCompletion::ExileFaceDownPileReturnComplete { source_id } => {
+            effects::exile_face_down_pile::complete_exile_face_down_pile_return(source_id, events)
+        }
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,

@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 30
-- **Distinct cards implicated:** 4734
-- **Total card appearances across root causes:** 4768 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4733
+- **Total card appearances across root causes:** 4767 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 This is the prioritized "fix N root causes → unlock M cards" backlog: the top handful of root causes account for the majority of broken cards.
 
@@ -13,7 +13,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 746 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 591 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 590 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 404 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
 | 4 | Conjoined / chained second effect clause dropped | 387 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 330 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
@@ -805,7 +805,7 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (591 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (590 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -985,7 +985,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Feed the Infection
 - Festival
 - Feudkiller's Verdict
-- Fevered Visions
 - Fiery Encore
 - Fight for the Throne
 - Filigree Fracture
@@ -1115,7 +1114,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lethal Throwdown
 - Liberating Combustion
 - Liberator, Urza's Battlethopter
-- Lictor
 - Lifecraft Awakening
 - Lighthouse Chronologist
 - Lightning Dart
@@ -1817,7 +1815,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Wandering Wolf
 - Warren Pilferers
 - Wei Assassins
-- Wheel and Deal
 - Wicked Slumber
 - Wildcall
 - Will of the Abzan

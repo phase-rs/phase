@@ -301,6 +301,7 @@ pub enum InteractionActionCode {
     ChooseZoneOpponentChooser,
     ChoosePileOpponent,
     ChooseAnnouncingOpponent,
+    ChooseGiftRecipient,
     ChooseAssistPlayer,
     CommitAssistPayment,
     MulliganDecision,

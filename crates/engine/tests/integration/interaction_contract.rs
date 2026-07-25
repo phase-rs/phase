@@ -1109,7 +1109,7 @@ fn preference_and_failed_actions_preserve_capability_but_same_actor_progress_rot
 }
 
 #[test]
-fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
+fn preference_action_does_not_advance_auto_pass_or_rotate_capability() {
     let mut state = GameState::new_two_player(42);
     bind(&mut state, "preference-auto-pass");
     let initial = state.active_interaction_slots[0].interaction_id.clone();
@@ -1125,15 +1125,15 @@ fn preference_action_rotates_capability_when_internal_auto_pass_advances() {
         P0,
         GameAction::SetPhaseStops { stops: Vec::new() },
     )
-    .expect("the preference update triggers the configured auto-pass loop");
+    .expect("the actor-scoped preference update is legal");
     assert!(matches!(
         state.waiting_for,
-        WaitingFor::Priority { player: P1 }
+        WaitingFor::Priority { player: P0 }
     ));
     assert!(state
         .active_interaction_slots
         .iter()
-        .all(|slot| slot.interaction_id != initial));
+        .any(|slot| slot.interaction_id == initial));
 }
 
 #[test]

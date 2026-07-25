@@ -7,7 +7,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -1334,6 +1334,16 @@ pub enum ChosenAttribute {
     /// Replace-on-rechoose: the {Left,Right} hijack in `choose.rs` removes any
     /// prior `Direction` before pushing, so only the "last chosen" survives.
     Direction(SeatDirection),
+    /// CR 707.2c + CR 614.12a + CR 400.7: The copiable-values snapshot chosen as
+    /// an `Effect::ChoosePermanent` Aura entered (Metamorphic Alteration:
+    /// "choose a creature"). Like `Card` and `TributeOutcome`, this is
+    /// ENGINE-SET (written directly at the `CopyTargetChoice` answer, not
+    /// produced through `ChoiceType`/`from_choice`) — it records the frozen
+    /// snapshot the companion copy effect was installed from, and, being stored
+    /// in `chosen_attributes`, is cleared automatically when the Aura changes
+    /// zones (CR 400.7), which is exactly the copy's lifetime. Boxed to keep
+    /// the enum small (mirrors the copy-value box idiom).
+    CopiableSnapshot(Box<LatchedCopiableSnapshot>),
 }
 
 impl ChosenAttribute {
@@ -1395,6 +1405,13 @@ impl ChosenAttribute {
             // option set to persist a typed `Direction` rather than a `Label`.
             Self::Direction(_) => ChoiceType::Labeled {
                 options: vec!["Left".into(), "Right".into()],
+            },
+            // Engine-set, never player-prompted (written directly at the
+            // `CopyTargetChoice` answer, not via `from_choice`). Mirrors the
+            // `Card` placeholder: an empty `Labeled` template rather than
+            // inventing a spurious copy-snapshot choice category.
+            Self::CopiableSnapshot(_) => ChoiceType::Labeled {
+                options: Vec::new(),
             },
         }
     }
@@ -2448,6 +2465,20 @@ pub enum Duration {
     Permanent,
 }
 
+/// The attacker named by a force-block instruction.
+///
+/// This intentionally has only exact single-object referents. A filter would
+/// allow resolution to reselect a different attacker after the trigger event;
+/// CR 400.7 requires the event object, not a later object sharing its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ForceBlockAttackerRef {
+    /// "blocks this creature if able" / Provoke's source-referential form.
+    Source,
+    /// "blocks that Wolf if able" from a narrowed attack trigger event.
+    EventSource,
+}
+
 // ---------------------------------------------------------------------------
 // Game restriction system — composable runtime restrictions
 // ---------------------------------------------------------------------------
@@ -2602,6 +2633,19 @@ pub enum RestrictionExpiry {
     UntilEndOfNextTurnOf {
         player: PlayerId,
     },
+    /// CR 614.1a + CR 400.7: a runtime-installed replacement bound to the
+    /// lifetime of the OBJECT hosting it (the "if it would leave the
+    /// battlefield, exile it instead" rider of Unearth / Gruesome Encore /
+    /// Whip of Erebos, CR 702.84a). It is ONLY meaningful on an object-hosted
+    /// `ReplacementDefinition::expiry`; it is meaningless for the state-hosted
+    /// `GameRestriction` / `pending_damage_replacements` that share this enum,
+    /// and it is NEVER pruned by turn machinery (no untap/cleanup step ends it).
+    /// It lapses solely via the battlefield-exit prune
+    /// (`zones.rs` -> `layers.rs::prune_controller_controls_source_on_leave`).
+    /// Three operational consequences follow: it is base-installed so it
+    /// survives CR 613.1 layer reseeds; it is non-copiable (CR 707.2); and its
+    /// base+live copies are pruned together when the host leaves play.
+    UntilHostLeavesPlay,
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.
@@ -4765,6 +4809,11 @@ pub enum TargetFilter {
     /// (Amareth, the Lustrous) and by `AbilityCondition::ObjectsShareQuality`
     /// subject slots.
     LastRevealed,
+    /// CR 608.2c: Resolves to the card(s) most recently moved to a public zone
+    /// by the resolving spell or ability (`state.last_zone_changed_ids`). Used
+    /// by anaphoric "milled this way" / "exiled this way" quantity gates
+    /// (Grindstone) and `ObjectCountBySharedQuality` population filters.
+    LastZoneChanged,
     /// CR 400.7j + CR 608.2k: Resolves to the object paid as a cost for the
     /// resolving spell or ability. Used by effects such as "the exiled card"
     /// after an exile-as-cost clause.
@@ -8743,6 +8792,10 @@ pub enum AdditionalCostOrigin {
     /// any optional additional cost) and lets Teamwork compose with another
     /// object additional cost in the announcement queue.
     Teamwork,
+    /// CR 702.174a: Gift — optional “choose an opponent” additional cost. A
+    /// dedicated origin distinguishes a promised gift from an unrelated optional
+    /// additional cost and lets the UI present Gift-specific promise copy.
+    Gift,
     #[default]
     Other,
 }
@@ -10847,6 +10900,22 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
+    /// CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." The
+    /// controller chooses a permanent matching `filter` as the Aura enters
+    /// (CR 614.12a: the choice is made before the permanent enters). Unlike
+    /// `BecomeCopy` — where the *entering* object becomes the copy — this effect
+    /// latches the chosen permanent's copiable values and applies them to a
+    /// *separate* recipient: the Aura's enchanted host (Metamorphic Alteration).
+    /// Runtime discrimination is `CopyTargetPurpose::PersistChosenAttribute`;
+    /// emission is gated on `LinkedChoiceKind::CopyChosenHost` (companion
+    /// `ContinuousModification::CopyChosen` is a parse-time marker only). The
+    /// copy is materialized once, at the choice answer, as a Layer-1
+    /// `CopyValues` transient continuous effect whose values are fixed per
+    /// CR 707.2c (determined when the copy effect first starts to apply).
+    ChoosePermanent {
+        #[serde(default = "default_target_filter_any")]
+        filter: TargetFilter,
+    },
     /// CR 113.1a + CR 113.10 + CR 611.2 + CR 611.2c + CR 613.1f: Grant the
     /// recipient(s) all activated abilities of a chosen target object, for a
     /// duration. Unlike the static-side `ContinuousModification::GrantAllActivatedAbilitiesOf`
@@ -11165,6 +11234,27 @@ pub enum Effect {
         #[serde(default = "default_target_filter_self_ref")]
         target: TargetFilter,
     },
+    /// CR 710.4: Flip a Kamigawa flip permanent — a one-way status change
+    /// (CR 110.5) after which the card's alternative name, text box, type line,
+    /// power, and toughness apply (CR 710.1b) while it remains on the
+    /// battlefield.
+    ///
+    /// Deliberately a sibling of [`Effect::Transform`] rather than a
+    /// parameterization of it: CR 701.27a restricts transforming to permanents
+    /// represented by double-faced cards, and CR 710.1c holds a flipped
+    /// permanent's color and mana cost FIXED where transforming swaps them.
+    /// The two live in different CR sections (701.27 vs 710) with different
+    /// copiable-value semantics, so the shared "turn the card over" surface is
+    /// not a single parameterized axis.
+    ///
+    /// Every printed flip instruction names the permanent itself ("flip this
+    /// creature" / "flip it" / "flip <name>"), so `target` is `SelfRef` for the
+    /// whole corpus; it is a `TargetFilter` for uniformity with `Transform` and
+    /// so an anaphoric trigger subject can bind the flipping permanent.
+    FlipPermanent {
+        #[serde(default = "default_target_filter_self_ref")]
+        target: TargetFilter,
+    },
     /// Search a player's library for card(s) matching a filter.
     /// The destination is handled by the sub_ability chain (ChangeZone + Shuffle).
     SearchLibrary {
@@ -11313,6 +11403,22 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         face_down: bool,
     },
+    /// CR 406.3 + CR 608.2c: Exile one explicit object and the top `count`
+    /// cards of `player`'s library face down as one pile. The resolver keeps the
+    /// exact proposed member list through replacement resolution: the pile is
+    /// shuffled and returned only when every member actually reached exile.
+    /// This models the Triumph of Saint Katherine class's "If you do" rider
+    /// without allowing a partial pile to be returned.
+    ExileFaceDownPile {
+        /// The non-library member of the pile (normally the triggering source
+        /// in its owner's graveyard).
+        object: TargetFilter,
+        /// The player whose library supplies the top cards and receives the
+        /// completed pile back on top.
+        player: TargetFilter,
+        /// Number of top-library cards required in addition to `object`.
+        count: QuantityExpr,
+    },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
     /// solely to designate a target referenced by subsequent sentences via "that creature".
@@ -11430,10 +11536,18 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 509.1g: Target creature must block this turn if able.
+    /// CR 509.1c: Target creature must block this turn/combat if able.
     ForceBlock {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
+        /// The exact grammatical attacker referent, if the instruction names
+        /// one. `None` remains the generic "blocks this turn if able" form.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attacker: Option<ForceBlockAttackerRef>,
+        /// `this combat` expires at end of combat; legacy payloads without a
+        /// duration retain the established `this turn` lifetime.
+        #[serde(default = "default_duration_until_end_of_turn")]
+        duration: Duration,
     },
     /// CR 508.1d: Target creature must attack the required player this turn/combat if able.
     ForceAttack {
@@ -14090,6 +14204,9 @@ impl Effect {
             | Effect::Discard { target, .. }
             | Effect::Shuffle { target, .. }
             | Effect::Transform { target, .. }
+            // CR 710.4: the flipping permanent is named by the effect's target
+            // slot exactly like `Transform`'s.
+            | Effect::FlipPermanent { target, .. }
             | Effect::RevealHand { target, .. }
             | Effect::Reveal { target, .. }
             | Effect::TargetOnly { target, .. }
@@ -14203,6 +14320,7 @@ impl Effect {
 
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
+            | Effect::ExileFaceDownPile { player, .. }
             | Effect::ExchangeLifeWithStat { player, .. }
             | Effect::ExileFromTopUntil { player, .. }
             // CR 119.3: `GainLife.player` is a TargetFilter. `extract_target_filter_from_effect`
@@ -14384,6 +14502,10 @@ impl Effect {
             // target) picked at resolution time via
             // `WaitingFor::ReturnAsAuraTarget`. No stack-push target slot.
             | Effect::ReturnAsAura { .. }
+            // CR 614.12a + CR 707.2c: Metamorphic Alteration's "As this Aura
+            // enters, choose a creature" is an as-enters replacement CHOICE picked
+            // via `WaitingFor::CopyTargetChoice`, never a stack-declared target.
+            | Effect::ChoosePermanent { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::ForEachCategory { .. }
             | Effect::ChooseAndSacrificeRest { .. }
@@ -14589,6 +14711,7 @@ impl Effect {
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
             | Effect::ExileTop { count, .. }
+            | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
             | Effect::FlipCoins { count, .. }
@@ -14689,6 +14812,8 @@ impl Effect {
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::BecomeCopy { .. }
+            // CR 707.2c: the copy-source choice carries no magnitude.
+            | Effect::ChoosePermanent { .. }
             | Effect::GainActivatedAbilitiesOfTarget { .. }
             | Effect::ChooseCard { .. }
             | Effect::MultiplyCounter { .. }
@@ -14706,6 +14831,7 @@ impl Effect {
             | Effect::SetRoomDoorLock { .. }
             | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
             | Effect::Reveal { .. }
             | Effect::TargetOnly { .. }
@@ -14842,6 +14968,7 @@ impl Effect {
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
             | Effect::ExileTop { count, .. }
+            | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
             | Effect::FlipCoins { count, .. }
@@ -14942,6 +15069,8 @@ impl Effect {
             | Effect::HideawayConceal { .. }
             | Effect::CopyTokenBlockingAttacker { .. }
             | Effect::BecomeCopy { .. }
+            // CR 707.2c: the copy-source choice carries no magnitude.
+            | Effect::ChoosePermanent { .. }
             | Effect::GainActivatedAbilitiesOfTarget { .. }
             | Effect::ChooseCard { .. }
             | Effect::MultiplyCounter { .. }
@@ -14959,6 +15088,7 @@ impl Effect {
             | Effect::SetRoomDoorLock { .. }
             | Effect::ExtraTurn { .. }
             | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
             | Effect::RevealTop { .. }
             | Effect::Reveal { .. }
             | Effect::TargetOnly { .. }
@@ -15152,6 +15282,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::HideawayConceal { .. } => "HideawayConceal",
         Effect::CopyTokenBlockingAttacker { .. } => "CopyTokenBlockingAttacker",
         Effect::BecomeCopy { .. } => "BecomeCopy",
+        Effect::ChoosePermanent { .. } => "ChoosePermanent",
         Effect::GainActivatedAbilitiesOfTarget { .. } => "GainActivatedAbilitiesOfTarget",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
@@ -15171,6 +15302,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Discard { .. } => "Discard",
         Effect::Shuffle { .. } => "Shuffle",
         Effect::Transform { .. } => "Transform",
+        Effect::FlipPermanent { .. } => "FlipPermanent",
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::SearchOutsideGame { .. } => "SearchOutsideGame",
         Effect::RevealHand { .. } => "RevealHand",
@@ -15178,6 +15310,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Reveal { .. } => "Reveal",
         Effect::RevealTop { .. } => "RevealTop",
         Effect::ExileTop { .. } => "ExileTop",
+        Effect::ExileFaceDownPile { .. } => "ExileFaceDownPile",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::OpponentGuess { .. } => "OpponentGuess",
@@ -15371,6 +15504,7 @@ pub enum EffectKind {
     Tribute,
     TimeTravel,
     BecomeMonarch,
+    ChoosePermanent,
     NoOp,
     Proliferate,
     ProliferateTarget,
@@ -15496,6 +15630,7 @@ pub enum EffectKind {
     GivePlayerCounter,
     LoseAllPlayerCounters,
     ExileFromTopUntil,
+    ExileFaceDownPile,
     RevealUntil,
     Discover,
     Heist,
@@ -15552,6 +15687,8 @@ pub enum EffectKind {
     DraftFromSpellbook,
     ChooseOneOf,
     ChooseCounterAdjustment,
+    /// CR 710.4: a Kamigawa flip permanent was flipped to its alternative face.
+    FlipPermanent,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -15653,6 +15790,7 @@ impl From<&Effect> for EffectKind {
             // is bookkeeping layered on top of the same token-copy creation.
             Effect::CopyTokenBlockingAttacker { .. } => EffectKind::CopyTokenOf,
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
+            Effect::ChoosePermanent { .. } => EffectKind::ChoosePermanent,
             Effect::GainActivatedAbilitiesOfTarget { .. } => {
                 EffectKind::GainActivatedAbilitiesOfTarget
             }
@@ -15672,6 +15810,7 @@ impl From<&Effect> for EffectKind {
             Effect::Discard { .. } => EffectKind::Discard,
             Effect::Shuffle { .. } => EffectKind::Shuffle,
             Effect::Transform { .. } => EffectKind::Transform,
+            Effect::FlipPermanent { .. } => EffectKind::FlipPermanent,
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::SearchOutsideGame { .. } => EffectKind::SearchOutsideGame,
             Effect::RevealHand { .. } => EffectKind::Reveal,
@@ -15770,6 +15909,7 @@ impl From<&Effect> for EffectKind {
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
             Effect::LoseAllPlayerCounters { .. } => EffectKind::LoseAllPlayerCounters,
             Effect::ExileFromTopUntil { .. } => EffectKind::ExileFromTopUntil,
+            Effect::ExileFaceDownPile { .. } => EffectKind::ExileFaceDownPile,
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Heist { .. } => EffectKind::Heist,
@@ -16368,6 +16508,12 @@ pub struct AbilityDefinition {
     /// counter type must be rewritten to the current iteration's counter kind
     /// before resolution. `None` (default) = branch is fixed (e.g. "+1/+1").
     pub iteration_kind_binding: Option<IterationKindBinding>,
+    /// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
+    /// `SequentialSibling` continuation with its OWN gating condition must still be
+    /// checked when a PRECEDING sibling's condition was
+    /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
+    /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
+    pub sibling_condition: SiblingCondition,
 }
 
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
@@ -16443,6 +16589,8 @@ struct AbilityDefinitionRepr<'a> {
     sub_link: SubAbilityLink,
     #[serde(skip_serializing_if = "Option::is_none")]
     iteration_kind_binding: &'a Option<IterationKindBinding>,
+    #[serde(skip_serializing_if = "SiblingCondition::is_default")]
+    sibling_condition: SiblingCondition,
 }
 
 impl Serialize for AbilityDefinition {
@@ -16487,6 +16635,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link,
             iteration_kind_binding,
+            sibling_condition,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -16526,6 +16675,7 @@ impl Serialize for AbilityDefinition {
             repeat_until,
             sub_link: *sub_link,
             iteration_kind_binding,
+            sibling_condition: *sibling_condition,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -16634,6 +16784,8 @@ struct AbilityDefinitionDe {
     sub_link: SubAbilityLink,
     #[serde(default)]
     iteration_kind_binding: Option<IterationKindBinding>,
+    #[serde(default)]
+    sibling_condition: SiblingCondition,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -16683,6 +16835,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             repeat_until: de.repeat_until,
             sub_link: de.sub_link,
             iteration_kind_binding: de.iteration_kind_binding,
+            sibling_condition: de.sibling_condition,
         })
     }
 }
@@ -16690,22 +16843,32 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
 /// CR 608.2c: How a `sub_ability` relates to its parent in the resolution chain.
 /// Determines whether the sub is part of the parent's action (skipped when an
 /// optional parent is declined) or an independent following instruction (always
-/// resolves). Derived at parse time from the `ClauseBoundary` separating the
-/// two clauses in the printed Oracle text.
+/// resolves). Seeded at parse time from the `ClauseBoundary` separating the two
+/// clauses in the printed Oracle text.
+///
+/// **The value is semantic, not purely syntactic.** The sentence boundary is the
+/// default reading, but a later parse pass may override it when the printed text
+/// makes a separate sentence part of the previous instruction anyway — see
+/// `parser::oracle_effect::lower::relink_gated_token_referent_consumers`, which
+/// re-tags a separate-sentence clause whose only subject is a token created by a
+/// gated clause before it ("…create a token. Put a +1/+1 counter on that
+/// token."). Do not add a consumer that infers a *sentence boundary* from this
+/// field; infer only the *dependency* the variant docs describe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SubAbilityLink {
-    /// Within-sentence continuation (comma / "then" joined). The sub is a
-    /// resolution step of the parent's instruction — Squadron Hawk
+    /// The sub is a resolution step of the parent's instruction — Squadron Hawk
     /// "...put them into your hand, then shuffle." Skipped when an optional
-    /// parent is declined. This is the default: an unmarked sub is a
-    /// continuation, preserving today's runtime behavior for every existing
+    /// parent is declined. Ordinarily a within-sentence continuation (comma /
+    /// "then" joined), but also a separate sentence that depends on the
+    /// parent's action for its subject. This is the default: an unmarked sub is
+    /// a continuation, preserving today's runtime behavior for every existing
     /// chain.
     #[default]
     ContinuationStep,
-    /// Separate-sentence sibling instruction (sentence boundary). The sub is
-    /// the NEXT printed instruction, independent of the parent — Ponder
-    /// "You may shuffle." "Draw a card." Always resolves, even when an
+    /// The sub is the NEXT printed instruction, independent of the parent —
+    /// Ponder "You may shuffle." "Draw a card." Always resolves, even when an
     /// optional parent is declined (CR 608.2c "in the order written").
+    /// Ordinarily produced by a sentence boundary.
     SequentialSibling,
 }
 
@@ -16713,6 +16876,36 @@ impl SubAbilityLink {
     /// `skip_serializing_if` predicate — the default needs no JSON byte.
     pub fn is_continuation(link: &Self) -> bool {
         matches!(link, Self::ContinuationStep)
+    }
+}
+
+/// CR 702.1c ("the same is true") + CR 608.2c (written order): whether a
+/// `SequentialSibling` continuation with its OWN gating condition must still be
+/// checked when a PRECEDING sibling's condition was
+/// false. `Dependent` (default) is today's behavior — the continuation's own
+/// condition/effect may presuppose the preceding sibling's effect actually ran
+/// (Thieving Skydiver's "If that artifact is an Equipment" presupposes
+/// `GainControl` produced a target), so it is skipped alongside a failed
+/// predecessor. `ReplicatedOrBranch` marks a sibling produced by per-item
+/// keyword-list replication ("The same is true for…" is CR 702.1c; "Repeat
+/// this process for…" follows CR 608.2c) — each item is an INDEPENDENT OR-branch checked on its own
+/// keyword, so it must be evaluated regardless of any other branch's outcome.
+/// Stamped ONLY by the `ReplicatePerKeyword` lowering helpers
+/// (`attach_repeat_process_keywords`, `attach_perpetual_keyword_grants`) —
+/// never by ordinary sentence-boundary `SequentialSibling` stamping — so it
+/// cannot leak into a Thieving-Skydiver-shaped dependent continuation that
+/// also happens to carry `SequentialSibling`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SiblingCondition {
+    #[default]
+    Dependent,
+    ReplicatedOrBranch,
+}
+
+impl SiblingCondition {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_default(cond: &Self) -> bool {
+        matches!(cond, Self::Dependent)
     }
 }
 
@@ -16837,6 +17030,7 @@ impl AbilityDefinition {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             iteration_kind_binding: None,
+            sibling_condition: SiblingCondition::Dependent,
         }
     }
 
@@ -17003,6 +17197,64 @@ impl AbilityDefinition {
         self.modal = Some(modal);
         self.mode_abilities = mode_abilities;
         self
+    }
+
+    /// CR 603.12: Does this clause carry its own copy of an affirmative
+    /// reflexive gate, in the narrow POSITION-INDEPENDENT form, so that the
+    /// resolver drops it on the gate-false path wherever it sits in the chain?
+    ///
+    /// Lives here rather than in the parser because
+    /// `parser::oracle_effect::lower::clone_would_transplant_gated_referent`
+    /// uses it to decide whether a "Repeat this process for …" clone is honest
+    /// at its landing slot, and the `no_sequential_sibling_reads_last_created`
+    /// regression test must exempt exactly the nodes that predicate accepts.
+    /// `pub` specifically because a test under `crates/engine/tests/` cannot
+    /// call a private `fn` in `lower`, so the alternative was a second copy of
+    /// the predicate inside the test.
+    ///
+    /// It is NOT the engine's single authority for this shape, and does not
+    /// claim to be. `game::effects::resolve_optional_effect_decision` carries a
+    /// structurally identical inlined copy on the RUNTIME twin type — the same
+    /// two fields, the same `AbilityCondition::is_optional_effect_performed`,
+    /// the same conjunction — and it cannot call this method: its receiver is
+    /// `ResolvedAbility`, not `AbilityDefinition`, with no `Deref`/`From`
+    /// bridge between them (measured, not assumed: wiring the call there fails
+    /// to compile with E0599, method not found for `&ResolvedAbility`).
+    /// Unifying the two would take a trait over both types — a resolver-side
+    /// abstraction with its own blast radius, which this change deliberately
+    /// does not introduce.
+    ///
+    /// `parser::oracle_effect::attach_repeat_process_keywords` clones
+    /// `condition` and `else_ability` verbatim, and the resolver's
+    /// condition-false path (`game::effects::resolve_ability_chain`) reads BOTH
+    /// — at two different places, which is why both are tested here:
+    ///
+    /// * a false condition never runs the clause's own effect; `else_ability`
+    ///   decides what runs INSTEAD. With an else present the resolver resolves
+    ///   the else branch and RETURNS, so the clause's `sub_ability` tail never
+    ///   runs at all and the cloned else — a second copy of a printed
+    ///   instruction — executes. "The descent just drops this clause" would then
+    ///   be the wrong description of the outcome.
+    /// * with no else present the resolver walks `sub_ability` for the next
+    ///   `SequentialSibling`, skipping one whose own condition is false and
+    ///   which itself has no else.
+    ///
+    /// Only `EffectOutcome { OptionalEffectPerformed }` qualifies, NOT the whole
+    /// of [`AbilityCondition::is_affirmative_reflexive_gate`]. Its evaluator
+    /// reads `context.optional_effect_performed` and
+    /// `state.cost_payment_failed_flag`, which are chain-scoped and therefore
+    /// position-independent. `WhenYouDo`'s evaluator is
+    /// `!(matches!(ability.effect, PayCost | Discard | DiscardCard) &&
+    /// cost_payment_failed_flag)` — it keys on the effect it RIDES, so on a
+    /// cloned `PutCounter` it is a constant `true` and gates nothing. Measured:
+    /// the same fixture with `If you do` leaves a stale pre-seeded token at `{}`
+    /// and with `When you do` puts a `Keyword(FirstStrike)` counter on it.
+    pub fn is_self_gated_reflexive(&self) -> bool {
+        self.else_ability.is_none()
+            && self
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
     }
 }
 
@@ -17510,6 +17762,99 @@ impl AbilityCondition {
         matches!(self, AbilityCondition::EffectOutcome { .. })
     }
 
+    /// CR 603.12 + CR 608.2c: True for the AFFIRMATIVE reflexive-conditional
+    /// gates — exactly the image of
+    /// `parser::oracle_nom::condition::parse_affirmative_reflexive_connector`
+    /// ("when you do", "if you do", "if they do", "if that player does",
+    /// "if the player does", "if a player does").
+    ///
+    /// Such a gate does not introduce an object referent (CR 608.2c: the
+    /// clause's *effect* publishes the referent, its gate does not), and its
+    /// true-branch is exactly "the antecedent action occurred" (CR 603.12). Two
+    /// parse-time sites consume this classification and MUST agree: the referent
+    /// walk (`parser::oracle_effect::chain_prior_referent_is_created_token`) and
+    /// the re-link pass
+    /// (`parser::oracle_effect::lower::relink_gated_token_referent_consumers`).
+    /// Widening one without the other re-opens the stale-`LastCreated` bind.
+    ///
+    /// Classified on the VALUE, not on the phrase that produced it:
+    /// `AbilityCondition::effect_performed()` is also constructed at
+    /// non-connector sites, and the classification is sound for all of them
+    /// because the value itself means "the antecedent optional effect was
+    /// performed" — a token created under it may not exist, whatever text minted
+    /// the gate.
+    ///
+    /// The NEGATED half (`if they don't` → `Not{OptionalEffectPerformed}`) is
+    /// deliberately excluded: its body runs precisely when the antecedent did
+    /// NOT happen, so folding the gate away would invert the guarantee.
+    ///
+    /// Exhaustive, no wildcard: a new `AbilityCondition` variant must be
+    /// classified here deliberately, not silently defaulted (mirrors
+    /// `game::effects::should_resolve_subability_on_optional_decline`).
+    pub fn is_affirmative_reflexive_gate(&self) -> bool {
+        match self {
+            AbilityCondition::WhenYouDo
+            | AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            } => true,
+            AbilityCondition::EffectOutcome {
+                signal:
+                    EffectOutcomeSignal::CurrentScopeSucceeded | EffectOutcomeSignal::Guessed { .. },
+            } => false,
+            AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::QuantityCheck { .. }
+            | AbilityCondition::PreviousEffectAmount { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::ConditionInstead { .. }
+            | AbilityCondition::And { .. }
+            | AbilityCondition::Or { .. }
+            | AbilityCondition::Not { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::NthResolutionThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
     pub fn is_optional_effect_performed(&self) -> bool {
         matches!(
             self,
@@ -17677,6 +18022,10 @@ pub struct SpellContext {
     /// `None` until that choice is made (and for the single-opponent default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announcing_opponent: Option<PlayerId>,
+    /// CR 702.174a: Opponent chosen when the Gift additional cost was paid.
+    /// Distinct from `announcing_opponent` (CR 115.1 target-chooser).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gift_recipient: Option<PlayerId>,
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
     pub additional_cost_paid: bool,
@@ -17934,6 +18283,9 @@ pub enum TriggerCondition {
     /// CR 400.7 + CR 603.4: True when the source permanent entered the
     /// battlefield this turn.
     SourceEnteredThisTurn,
+    /// CR 400.7 + CR 508.1 + CR 603.4: True only when this exact source
+    /// incarnation attacked during the current combat.
+    SourceAttackedThisCombat,
     /// CR 702.30a: Echo intervening-if for a permanent that has not yet had
     /// its next-controller-upkeep echo payment handled.
     EchoDue,
@@ -19625,6 +19977,30 @@ pub struct StaticDefinition {
     /// serialized statics (all unrestricted) round-trip unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass_beneficiary: Option<ControllerRef>,
+    /// CR 702.16n / CR 702.16p: When this continuous static grants protection,
+    /// attachments matching this exemption are not put into their owners'
+    /// graveyards as a state-based action by *this* protection instance
+    /// (Flickering Ward / Pentarch Ward / Ward cycle / Benevolent Blessing).
+    /// Other protection instances from the same quality still apply normally.
+    /// `None` = no exemption (ordinary protection). Serde-defaulted so
+    /// pre-existing card-data round-trips unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protection_does_not_remove: Option<ProtectionDoesNotRemove>,
+}
+
+/// CR 702.16n / CR 702.16p: Which attachments a protection-granting continuous
+/// effect does not remove via SBA (and, for the already-attached form, which
+/// may remain attached when the effect starts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProtectionDoesNotRemove {
+    /// CR 702.16n: "This effect doesn't remove this Aura." — the grant source.
+    Source,
+    /// CR 702.16n: "This effect doesn't remove Auras." (Spectra Ward).
+    Auras,
+    /// CR 702.16p: "doesn't remove Auras and Equipment you control that are
+    /// already attached to it" (Benevolent Blessing). New same-quality
+    /// attachments remain illegal; only already-attached controlled ones stay.
+    ControlledAttachmentsAlreadyAttached,
 }
 
 impl StaticDefinition {
@@ -19644,6 +20020,7 @@ impl StaticDefinition {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         }
     }
 
@@ -19658,6 +20035,12 @@ impl StaticDefinition {
 
     pub fn modifications(mut self, mods: Vec<ContinuousModification>) -> Self {
         self.modifications = mods;
+        self
+    }
+
+    /// CR 702.16n / CR 702.16p: Attach the protection SBA exemption rider.
+    pub fn protection_does_not_remove(mut self, exemption: ProtectionDoesNotRemove) -> Self {
+        self.protection_does_not_remove = Some(exemption);
         self
     }
 
@@ -20502,6 +20885,8 @@ pub struct CopiableValues {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     pub keywords: Vec<Keyword>,
     /// Ability-set fields are `Arc<Vec<_>>` so copy-effect propagation from
     /// source to target uses refcount sharing rather than deep clones.
@@ -20509,6 +20894,47 @@ pub struct CopiableValues {
     pub trigger_definitions: Arc<Vec<TriggerDefinition>>,
     pub replacement_definitions: Arc<Vec<ReplacementDefinition>>,
     pub static_definitions: Arc<Vec<StaticDefinition>>,
+}
+
+/// CR 707.2b + CR 707.2c + CR 111.1: A copiable-values snapshot latched when an
+/// `Effect::ChoosePermanent` choice is answered (`CopyTargetPurpose::PersistChosenAttribute`).
+/// Per CR 707.2c the copiable values a static copy effect grants are determined
+/// only when the effect first starts to apply, and per CR 707.2b later changes
+/// to the chosen object never propagate — so the values are frozen here rather
+/// than re-read live. The display trio (`display_source` / `printed_ref` /
+/// `token_image_ref`) is art routing only (NOT a CR 707.2 copiable value),
+/// carried so the enchanted host renders the chosen creature's art; it mirrors
+/// the identical trio on `ContinuousModification::CopyValues`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedCopiableSnapshot {
+    pub values: CopiableValues,
+    #[serde(default)]
+    pub display_source: DisplaySource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_ref: Option<PrintedCardRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_image_ref: Option<TokenImageRef>,
+}
+
+/// CR 707.2 + CR 707.2c: Why a `WaitingFor::CopyTargetChoice` was raised, which
+/// determines how the answer is consumed in `handle_copy_target_choice`.
+/// `BecomeCopy` (default for serde back-compat with pre-existing serialized
+/// enter-as-a-copy waits) resolves the entering object into a copy of the
+/// chosen permanent. `PersistChosenAttribute` (Metamorphic Alteration) latches
+/// the chosen permanent's copiable values onto the source Aura and installs a
+/// copy effect on the Aura's enchanted host instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type")]
+pub enum CopyTargetPurpose {
+    /// CR 707.2: the entering object (the clone) becomes a copy of the chosen
+    /// permanent, acquiring its copiable values. Every classic enter-as-a-copy
+    /// card (Clone, Phantasmal Image, Vesuva, meld/embalm copy tokens).
+    #[default]
+    BecomeCopy,
+    /// CR 707.2c + CR 614.12a: the chosen permanent's copiable values are
+    /// latched and applied to a *separate* recipient (the source Aura's host)
+    /// rather than to the entering object. Metamorphic Alteration.
+    PersistChosenAttribute,
 }
 
 /// CR 702.143d + CR 702 (alternative-cost cast-from-off-zone family): how a
@@ -20569,6 +20995,18 @@ pub enum ContinuousModification {
         #[serde(default)]
         token_image_ref: Option<TokenImageRef>,
     },
+    /// CR 707.2c + CR 613.1a: Parse-time MARKER for the static ability
+    /// "enchanted creature is a copy of the chosen creature" (Metamorphic
+    /// Alteration). It exists so the card's static parse claims copy support at
+    /// Layer 1, but it carries NO layered behavior: the actual copy is
+    /// materialized once — at the `Effect::ChoosePermanent` answer — as a
+    /// `CopyValues` transient continuous effect whose values are latched per
+    /// CR 707.2c (fixed when the copy effect first starts to apply). Applying it
+    /// in the layer pipeline would double-install the copy, so its
+    /// `apply_continuous_effect` arm is an explicit no-op. Layered at
+    /// `Layer::Copy` purely for correct copy-layer ordering/dependency
+    /// bookkeeping alongside the real `CopyValues` TCE.
+    CopyChosen,
     /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
     /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's
     /// Mind Swap). Applied in Layer 1 so the override is part of the copy's
@@ -20652,6 +21090,25 @@ pub enum ContinuousModification {
     /// preserved and the trigger fires correctly.
     GrantTrigger {
         trigger: Box<TriggerDefinition>,
+    },
+    /// CR 614.1a + CR 614.6 + CR 613.1f: Grant an object-hosted replacement
+    /// effect to the affected object (Layer 6, ability-adding). The layer-6
+    /// mirror of `GrantTrigger`: where that variant pushes a `TriggerDefinition`
+    /// onto `obj.trigger_definitions`, this pushes a `ReplacementDefinition` onto
+    /// `obj.replacement_definitions` so the granted replacement's event/scope
+    /// metadata is preserved and it fires as a genuine replacement (CR 614.6).
+    ///
+    /// Models the "it gains 'If ~ would leave the battlefield, exile it instead
+    /// of putting it anywhere else'" reanimation rider (Geth, Thane of Contracts;
+    /// Llanowar Greenwidow; Realmbreaker, the Invasion Tree; Spirit-Sister's
+    /// Call; Elemental Expressionist's until-EOT grant). The rider's `~`
+    /// self-reference resolves to the object that gains the ability (CR 201.5b),
+    /// which is the reanimated permanent, not the granting source. Re-derived
+    /// each layer pass (`obj.replacement_definitions` is reset to base at the
+    /// start of the pass); structural-equality dedup keeps repeated grants
+    /// idempotent, exactly like `GrantTrigger` / `GrantStaticAbility`.
+    GrantReplacement {
+        replacement: Box<ReplacementDefinition>,
     },
     RemoveAllAbilities,
     AddType {
@@ -21078,6 +21535,12 @@ pub struct ResolvedAbility {
     /// `ability_index` remains presentation/compatibility only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger_definition_ref: Option<TriggerDefinitionRef>,
+    /// CR 400.7 + CR 509.1c: Exact attacker selected by a source- or
+    /// event-source-referential force-block instruction. This is bound when the
+    /// triggered ability is put on the stack, before targets are chosen; it is
+    /// deliberately separate from the parsed grammatical selector on `Effect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_block_attacker: Option<ObjectIncarnationRef>,
     pub controller: PlayerId,
     /// CR 109.5: The controller of the spell or ability before any
     /// resolution-time player-scope iteration rebinds the acting player.
@@ -21278,6 +21741,15 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 702.1c ("the same is true") + CR 608.2c (written order): Copied through
+    /// from the originating `AbilityDefinition`. When `ReplicatedOrBranch`, this
+    /// `SequentialSibling` is an INDEPENDENT
+    /// per-item OR-branch produced by keyword-list replication (Mutable Pupa,
+    /// Kathril) and must be evaluated by `resolve_chain_body` regardless of a
+    /// preceding sibling's failed gate. `Dependent` (default) preserves the
+    /// prior skip-with-failed-predecessor behavior. See [`SiblingCondition`].
+    #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
+    pub sibling_condition: SiblingCondition,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
     /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
@@ -21352,9 +21824,11 @@ impl ResolvedAbility {
             repeat_until: None,
             replacement_applied: HashSet::new(),
             sub_link: SubAbilityLink::ContinuationStep,
+            sibling_condition: SiblingCondition::Dependent,
             source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            force_block_attacker: None,
             modal: None,
             mode_abilities: Vec::new(),
             parent_target_missing_reason: None,
@@ -21418,6 +21892,79 @@ impl ResolvedAbility {
         }
     }
 
+    /// Preserve the exact named attacker through target selection and every
+    /// continuation of a triggered force-block instruction. The parser carries
+    /// only its grammatical selector; this stores the one event-time object
+    /// identity that resolution is permitted to use.
+    pub fn bind_force_block_attacker_recursive(
+        &mut self,
+        event_attacker: Option<ObjectIncarnationRef>,
+    ) {
+        if let Effect::ForceBlock {
+            attacker: Some(selector),
+            ..
+        } = &self.effect
+        {
+            self.force_block_attacker = match selector {
+                ForceBlockAttackerRef::Source => self
+                    .trigger_source
+                    .as_ref()
+                    .map(|source| source.identity.reference),
+                ForceBlockAttackerRef::EventSource => event_attacker,
+            };
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_force_block_attacker_recursive(event_attacker);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_force_block_attacker_recursive(event_attacker);
+        }
+    }
+
+    /// Whether any resolution branch names the attacker from its triggering
+    /// attack event. Such an ability must receive one singleton attack event
+    /// per pending trigger; a plural event has no single "that Wolf" referent.
+    pub fn has_event_source_force_block_recursive(&self) -> bool {
+        matches!(
+            &self.effect,
+            Effect::ForceBlock {
+                attacker: Some(ForceBlockAttackerRef::EventSource),
+                ..
+            }
+        ) || self
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.has_event_source_force_block_recursive())
+            || self
+                .else_ability
+                .as_ref()
+                .is_some_and(|else_branch| else_branch.has_event_source_force_block_recursive())
+    }
+
+    /// Bind only source-referential force-block effects at the shared stack
+    /// boundary. Event-source effects are intentionally left untouched because
+    /// their authority is the singleton triggering event, not the stack entry's
+    /// source object.
+    pub fn bind_force_block_source_recursive(&mut self, source: Option<ObjectIncarnationRef>) {
+        if source.is_some()
+            && matches!(
+                &self.effect,
+                Effect::ForceBlock {
+                    attacker: Some(ForceBlockAttackerRef::Source),
+                    ..
+                }
+            )
+        {
+            self.force_block_attacker = source;
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.bind_force_block_source_recursive(source);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.bind_force_block_source_recursive(source);
+        }
+    }
+
     /// Clears provenance that distinguishes otherwise identical triggered
     /// abilities for structural comparison. This deliberately clears the
     /// complete owned authorities together; retaining either a source context
@@ -21427,6 +21974,7 @@ impl ResolvedAbility {
         self.source_incarnation = None;
         self.trigger_source = None;
         self.trigger_definition_ref = None;
+        self.force_block_attacker = None;
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.clear_trigger_identity_recursive();
         }
@@ -23185,6 +23733,7 @@ mod tests {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         let json = serde_json::to_string(&static_def).unwrap();
         let deserialized: StaticDefinition = serde_json::from_str(&json).unwrap();
@@ -23376,6 +23925,30 @@ mod tests {
     }
 
     #[test]
+    fn force_block_serde_preserves_named_attacker_and_legacy_defaults() {
+        let named = Effect::ForceBlock {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            attacker: Some(ForceBlockAttackerRef::EventSource),
+            duration: Duration::UntilEndOfCombat,
+        };
+        let json = serde_json::to_string(&named).expect("serialize named force block");
+        assert_eq!(
+            serde_json::from_str::<Effect>(&json).expect("deserialize named force block"),
+            named
+        );
+
+        let legacy = r#"{"type":"ForceBlock","target":{"type":"Any"}}"#;
+        assert_eq!(
+            serde_json::from_str::<Effect>(legacy).expect("deserialize legacy force block"),
+            Effect::ForceBlock {
+                target: TargetFilter::Any,
+                attacker: None,
+                duration: Duration::UntilEndOfTurn,
+            }
+        );
+    }
+
+    #[test]
     fn effect_cleanup_typed_fields_roundtrip() {
         let effect = Effect::Cleanup {
             clear_remembered: true,
@@ -23478,6 +24051,7 @@ mod tests {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             }],
             duration: Some(Duration::UntilEndOfTurn),
             target: None,

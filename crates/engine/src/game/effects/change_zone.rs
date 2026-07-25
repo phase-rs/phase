@@ -1390,6 +1390,82 @@ pub(crate) fn process_one_zone_move_with_terminal(
     result
 }
 
+/// CR 401.4: Group object ids by owner in APNAP order for per-owner library
+/// arrangement prompts.
+fn group_object_ids_by_owner_apnap(
+    state: &GameState,
+    object_ids: &[ObjectId],
+) -> Vec<(PlayerId, Vec<ObjectId>)> {
+    use std::collections::HashMap;
+    let mut by_owner: HashMap<PlayerId, Vec<ObjectId>> = HashMap::new();
+    for &id in object_ids {
+        let owner = state.objects[&id].owner;
+        by_owner.entry(owner).or_default().push(id);
+    }
+    crate::game::players::apnap_order(state)
+        .into_iter()
+        .filter_map(|pid| by_owner.remove(&pid).map(|cards| (pid, cards)))
+        .collect()
+}
+
+fn mass_library_order_effect_zone_choice(
+    owner: PlayerId,
+    cards: Vec<ObjectId>,
+    source_id: ObjectId,
+    library_position: crate::types::ability::LibraryPosition,
+    track_exiled_by_source: bool,
+    duration: Option<crate::types::ability::Duration>,
+) -> WaitingFor {
+    let choice_count = cards.len();
+    WaitingFor::EffectZoneChoice {
+        player: owner,
+        cards,
+        count: choice_count,
+        min_count: choice_count,
+        up_to: false,
+        source_id,
+        effect_kind: EffectKind::PutAtLibraryPosition,
+        zone: Zone::Library,
+        destination: None,
+        enter_tapped: EtbTapState::Unspecified,
+        enter_transformed: false,
+        enters_under_player: None,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source,
+        face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        count_param: 0,
+        library_position: Some(library_position),
+        is_cost_payment: false,
+        enters_modified_if: None,
+        duration,
+    }
+}
+
+/// CR 401.4: After one owner batch of a mass library-order prompt completes,
+/// surface the next owner's `EffectZoneChoice` if any remain.
+pub(crate) fn resume_next_mass_library_order_choice(state: &mut GameState) -> Option<PlayerId> {
+    let mut pending = state.pending_mass_library_order_choice.take()?;
+    let (owner, cards) = pending.remaining_batches.first()?.clone();
+    pending.remaining_batches.remove(0);
+    if pending.remaining_batches.is_empty() {
+        state.pending_mass_library_order_choice = None;
+    } else {
+        state.pending_mass_library_order_choice = Some(pending.clone());
+    }
+    state.waiting_for = mass_library_order_effect_zone_choice(
+        owner,
+        cards,
+        pending.source_id,
+        pending.library_position,
+        pending.track_exiled_by_source,
+        pending.duration,
+    );
+    Some(owner)
+}
+
 /// Move all objects matching the filter from `Origin` zone to `Destination` zone.
 pub fn resolve_all(
     state: &mut GameState,
@@ -1664,6 +1740,47 @@ pub fn resolve_all(
             .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
     {
         state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
+    }
+
+    // CR 401.4: When multiple objects are placed at the same library position
+    // simultaneously and `random_order` is false, the owner arranges their
+    // relative order ("in any order" restates this default). Route through the
+    // shared `EffectZoneChoice` + `PutAtLibraryPosition` production path instead
+    // of silently picking an engine-default batch order.
+    if dest_zone == Zone::Library
+        && effect_library_position.is_some()
+        && !random_order
+        && matching.len() > 1
+    {
+        let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
+        let (first_owner, first_cards) = owner_batches
+            .first()
+            .expect("matching.len() > 1 guarantees at least one owner batch")
+            .clone();
+        let remaining_batches: Vec<_> = owner_batches.into_iter().skip(1).collect();
+        if !remaining_batches.is_empty() {
+            state.pending_mass_library_order_choice =
+                Some(crate::types::game_state::PendingMassLibraryOrderChoice {
+                    source_id: ability.source_id,
+                    library_position: effect_library_position
+                        .clone()
+                        .expect("library-order branch requires an explicit library position"),
+                    track_exiled_by_source,
+                    duration: ability.duration.clone(),
+                    remaining_batches,
+                });
+        }
+        state.waiting_for = mass_library_order_effect_zone_choice(
+            first_owner,
+            first_cards,
+            ability.source_id,
+            effect_library_position
+                .clone()
+                .expect("library-order branch requires an explicit library position"),
+            track_exiled_by_source,
+            ability.duration.clone(),
+        );
+        return Ok(());
     }
 
     // CR 401.4: When placing objects on the bottom of a library "in a random
@@ -1953,6 +2070,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::actions::GameAction;
+    use crate::types::card::PrintedLoyalty;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLinkKind, StackEntry, StackEntryKind, ZoneChangeRecord};
@@ -5553,6 +5671,162 @@ mod tests {
             !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
             "should not prompt for zone choice when multi-target min=0 chose 0"
         );
+    }
+
+    /// CR 401.4: Mass library-bottom placement must prompt each card's owner to
+    /// arrange order, not the spell's `filter_controller` when those differ.
+    #[test]
+    fn change_zone_all_library_bottom_order_prompts_card_owner_not_controller() {
+        let mut state = GameState::new_two_player(42);
+        let card_a = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(1),
+            "Opponent Revealed A".to_string(),
+            Zone::Library,
+        );
+        let card_b = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(1),
+            "Opponent Revealed B".to_string(),
+            Zone::Library,
+        );
+        let card_c = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(1),
+            "Opponent Revealed C".to_string(),
+            Zone::Library,
+        );
+        state.players[1].library = im::vector![card_a, card_b, card_c];
+        state.last_revealed_ids = vec![card_a, card_b, card_c];
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "opponent-owned cards must be ordered by their owner, not the caster"
+                );
+                assert_eq!(cards.len(), 3);
+                assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    /// CR 401.4: When one mass move covers multiple owners' cards, each owner
+    /// receives an independent library-order prompt in APNAP order.
+    #[test]
+    fn change_zone_all_library_bottom_order_prompts_each_owner_sequentially() {
+        let mut state = GameState::new_two_player(42);
+        let p0_card = create_object(
+            &mut state,
+            CardId(711),
+            PlayerId(0),
+            "Self Revealed".to_string(),
+            Zone::Library,
+        );
+        let p1_a = create_object(
+            &mut state,
+            CardId(712),
+            PlayerId(1),
+            "Opponent Revealed A".to_string(),
+            Zone::Library,
+        );
+        let p1_b = create_object(
+            &mut state,
+            CardId(713),
+            PlayerId(1),
+            "Opponent Revealed B".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library = im::vector![p0_card];
+        state.players[1].library = im::vector![p1_a, p1_b];
+        state.last_revealed_ids = vec![p0_card, p1_a, p1_b];
+        state.active_player = PlayerId(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: false,
+            },
+            vec![],
+            ObjectId(901),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "APNAP: active player's batch first even when active player is not seat 0"
+                );
+                let mut sorted = cards.clone();
+                sorted.sort_by_key(|id| id.0);
+                let mut expect = vec![p1_a, p1_b];
+                expect.sort_by_key(|id| id.0);
+                assert_eq!(sorted, expect);
+            }
+            other => panic!("expected first-owner EffectZoneChoice, got {other:?}"),
+        }
+        assert!(
+            state.pending_mass_library_order_choice.is_some(),
+            "non-active owner batch must remain queued"
+        );
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![p1_a, p1_b],
+            },
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(0), "second owner receives their batch");
+                assert_eq!(cards, &vec![p0_card]);
+            }
+            other => panic!("expected second-owner EffectZoneChoice, got {other:?}"),
+        }
     }
 
     /// Build an Exhume-shaped ability: `Effect::ChangeZone` Graveyard →
@@ -9222,6 +9496,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: Some(3),
+                printed_loyalty: Some(PrintedLoyalty::Fixed(3)),
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],

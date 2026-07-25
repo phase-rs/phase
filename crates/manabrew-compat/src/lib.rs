@@ -1723,6 +1723,9 @@ pub fn convert_available_action(action: &GameAction, id: String) -> AvailableAct
         GameAction::ChooseAnnouncingOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.announcing-opponent-unsupported")
         }
+        GameAction::ChooseGiftRecipient { .. } => {
+            AvailableActionConversion::Unsupported("local.gift-recipient-unsupported")
+        }
         GameAction::ChoosePileOpponent { .. } => {
             AvailableActionConversion::Unsupported("local.pile-opponent-unsupported")
         }
@@ -2156,7 +2159,11 @@ fn build_card_dto<L: CardTextLookup>(
         },
         summoning_sick: !redacted && object.has_summoning_sickness,
         is_copy: false,
-        is_double_faced: !redacted && object.back_face.is_some(),
+        // CR 712.16 + CR 710.1b: the engine owns "is this permanent
+        // double-faced?". `back_face.is_some()` is not that predicate — a CR 710
+        // flip card parks its alternative half in the same slot (as do Adventure
+        // and Omen cards), so the raw check reports every flip card as a DFC.
+        is_double_faced: !redacted && engine::game::transform::is_double_faced_permanent(object),
         is_transformed: !redacted && object.transformed,
         is_face_down: object.face_down,
         is_bestowed: !redacted && object.bestow_form.is_some(),

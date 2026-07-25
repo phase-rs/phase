@@ -5174,6 +5174,20 @@ fn extract_if_condition_with_card_name(
         );
     }
 
+    // CR 400.7 + CR 508.1 + CR 603.4: source-combat history is a distinct
+    // grammar production, not a card-text table entry. The scanner applies the
+    // nom production at word boundaries so a leading intervening-if is retained
+    // while later sentence-local conditionals remain outside this function.
+    if let Some((prefix, _, rest)) = scan_preceded(&lower, |i| {
+        tag::<_, _, OracleError<'_>>("if ~ attacked this combat").parse(i)
+    }) {
+        let clause_len = lower.len() - prefix.len() - rest.len();
+        return (
+            strip_condition_clause(text, prefix.len(), clause_len),
+            Some(TriggerCondition::SourceAttackedThisCombat),
+        );
+    }
+
     // Simple pattern→condition extractions (no dynamic parsing or guards needed).
     if let Some(result) = try_extract_simple_condition(
         &tp,
@@ -11566,6 +11580,38 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
 ///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
+    // damage-source subjects are article-less determiners — "enchanted creature"
+    // (the creature an Aura is attached to, CR 303.4b) and "equipped creature"
+    // (the creature an Equipment is attached to, CR 301.5a). Both name THIS
+    // permanent's attached creature as the damage source, so they resolve to
+    // `TargetFilter::AttachedTo` — a precise reference to the attached creature,
+    // not `Typed(Equipped/EnchantedBy)` (which would match any equipped/enchanted
+    // creature on the battlefield). Recognized here — before the article-anchored
+    // parse below, which would reject them for lacking an article — so
+    // "enchanted/equipped creature deals damage to a player" is classified as a
+    // DamageDone trigger. Without this, the strict subject parse fails and the
+    // pattern falls through to `condition_introduces_target_player`, mis-binding a
+    // later "that player" anaphor to `TargetPlayer` (which surfaces a phantom
+    // companion Player target slot at runtime) instead of the damaged
+    // `TriggeringPlayer` (Sigil of Sleep, the Sword cycle, Hammer of Ruin, …).
+    // Each branch consumes the trailing space so the caller can chain into
+    // `tag("deals ")`, mirroring the article path's own trailing-space consume.
+    if let Ok((rest, filter)) = alt((
+        value(
+            TargetFilter::AttachedTo,
+            tag::<_, _, OracleError<'_>>("enchanted creature "),
+        ),
+        value(
+            TargetFilter::AttachedTo,
+            tag::<_, _, OracleError<'_>>("equipped creature "),
+        ),
+    ))
+    .parse(input)
+    {
+        return Ok((rest, filter));
+    }
+
     // CR 109.4: printed damage-source phrases either use an article
     // ("a source") or the article-less determiner "another source" (Ghyrson).
     // Parse "another" on the same axis as the article so it can feed the
@@ -16750,9 +16796,16 @@ fn is_land_play_filter(tf: &TypedFilter) -> bool {
 /// tail: "you play a card from exile" yields an exile-origin constraint, while
 /// bare "you play a card" yields the unrestricted (`Any`) origin. The subject
 /// must be followed only by end-of-input, the effect comma, or that zone tail.
-/// Restricted to the exact second-person bare-card form. Qualified variants
-/// such as "a player plays a card exiled with ~" need additional linked-card
-/// filtering before they can safely share this parser arm.
+///
+/// CR 601.1a + CR 701.18b: The explicitly-spelled-out "play a land or cast a
+/// spell" is the same event pair as "play a card" — a player plays a card by
+/// playing it as a land OR casting it as a spell — so it routes to the identical
+/// `PlayCard` trigger with the shared origin tail gating both halves
+/// (Shadow of the Goblin — "from anywhere other than your hand"; Flubs, the
+/// Fool / Infernal Sovereign / The Endstone — no tail → `Any`). Restricted to
+/// the exact second-person forms. Qualified variants such as "a player plays a
+/// card exiled with ~" need additional linked-card filtering before they can
+/// safely share this parser arm.
 fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
     let (after_prefix, _) = alt((
         tag::<_, _, OracleError<'_>>("whenever "),
@@ -16766,9 +16819,12 @@ fn parse_play_card_trigger_subject(lower: &str) -> Option<OriginConstraint> {
     )
     .parse(after_prefix)
     .ok()?;
-    let (after_card, _) = tag::<_, _, OracleError<'_>>("a card")
-        .parse(after_verb)
-        .ok()?;
+    let (after_card, _) = alt((
+        value((), tag::<_, _, OracleError<'_>>("a card")),
+        value((), tag("a land or cast a spell")),
+    ))
+    .parse(after_verb)
+    .ok()?;
     // CR 601.1a + CR 400.1: An optional "from <zone>" tail restricts the play
     // origin ("whenever you play a card from exile"). The shared cast-origin
     // combinator consumes the "from " prefix and the zone phrase; absent a

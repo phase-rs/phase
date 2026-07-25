@@ -6803,7 +6803,12 @@ mod tests {
             "mass force-block must not request a target, got {:?}",
             def.target_prompt
         );
-        let Effect::ForceBlock { target } = &*def.effect else {
+        let Effect::ForceBlock {
+            target,
+            attacker,
+            duration,
+        } = &*def.effect
+        else {
             panic!("expected ForceBlock, got {:?}", def.effect);
         };
         let TargetFilter::Typed(filter) = target else {
@@ -6811,6 +6816,8 @@ mod tests {
         };
         assert_eq!(filter.controller, Some(ControllerRef::Opponent));
         assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert_eq!(*attacker, None);
+        assert_eq!(*duration, Duration::UntilEndOfTurn);
     }
 
     /// CR 702.3b: the subjectless conjunct recognizer accepts every grammatical

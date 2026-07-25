@@ -4,10 +4,11 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BounceSelection,
     CastingPermission, ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment,
-    CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, OutsideGameSourcePool,
-    PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter,
+    CounterSourceRider, DoorLockOp, Duration, Effect, FaceDownProfile, ForceBlockAttackerRef,
+    LibraryPosition, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint,
+    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
+    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -531,8 +532,11 @@ pub(crate) enum ImperativeFamilyAst {
     Explore,
     /// CR 702.162a: Connive.
     Connive,
-    /// CR 509.1g: Block this turn if able.
-    ForceBlock,
+    /// CR 509.1c: Block this turn/combat if able.
+    ForceBlock {
+        attacker: Option<ForceBlockAttackerRef>,
+        duration: Duration,
+    },
     /// CR 508.1d: Attack a required player this turn/combat if able. The
     /// `required_player` filter selects whom the forced attacker must attack —
     /// `TargetFilter::Controller` for "attacks you", or
@@ -1208,6 +1212,14 @@ pub(crate) enum UtilityImperativeAst {
     Transform {
         target: TargetFilter,
     },
+    /// CR 710.4: the Kamigawa flip-card instruction ("flip this creature" /
+    /// "flip it" / "flip <name>"). A sibling of [`UtilityImperativeAst::Transform`]
+    /// rather than a parameterization of it because CR 701.27a and CR 710 are
+    /// different game actions with different copiable-value semantics
+    /// (CR 710.1c holds color and mana cost fixed).
+    FlipPermanent {
+        target: TargetFilter,
+    },
     Attach {
         attachment: TargetFilter,
         target: TargetFilter,
@@ -1635,6 +1647,26 @@ pub(crate) enum ClauseBoundary {
     Sentence,
     Then,
     Comma,
+}
+
+/// CR 608.2c: the SINGLE translation from the printed boundary that precedes a
+/// clause to the link the clause carries to the one before it. A `Sentence`
+/// boundary marks the next printed instruction (`SequentialSibling`); a
+/// `Comma`/`Then`/absent boundary marks a within-clause `ContinuationStep`.
+///
+/// Two passes need this mapping and MUST agree: `assemble_effect_chain` stamps
+/// `AbilityDefinition::sub_link` with it, and the referent walk
+/// (`parser::oracle_effect::chain_prior_referent_is_created_token`) predicts,
+/// while still in `ClauseIr` space, whether the clauses it walks past will be
+/// continuation steps. Keeping the match here is what makes those two the same
+/// rule rather than two copies of it.
+pub(crate) fn sub_link_after_boundary(boundary: Option<ClauseBoundary>) -> SubAbilityLink {
+    match boundary {
+        Some(ClauseBoundary::Sentence) => SubAbilityLink::SequentialSibling,
+        Some(ClauseBoundary::Then) | Some(ClauseBoundary::Comma) | None => {
+            SubAbilityLink::ContinuationStep
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
