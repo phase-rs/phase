@@ -1357,6 +1357,9 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
         let viewer = PlayerId(player_id as u8);
         let filtered = filter_state_for_viewer(state, viewer);
         let legal = legal_actions_result_for_viewer(state, viewer);
+        let viewer_interaction = engine::game::interaction::derive_viewer_interaction(
+            state, &filtered, viewer,
+        );
         to_js(&ViewerSnapshot {
             state: filtered,
             actions: legal.actions,
@@ -1365,9 +1368,7 @@ pub fn get_viewer_snapshot_js(player_id: u32) -> JsValue {
             spell_costs: legal.spell_costs,
             legal_actions_by_object: legal.legal_actions_by_object,
             stuck_diagnostic: legal.stuck_diagnostic,
-            viewer_interaction: engine::game::interaction::derive_viewer_interaction(
-                state, &filtered, viewer,
-            ),
+            viewer_interaction,
         })
     }) {
         Ok(val) => val,
