@@ -3601,7 +3601,6 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Manifest { .. }
         | Effect::ManifestDread
         | Effect::Cloak { .. }
-        | Effect::ExileFaceDownPile { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }

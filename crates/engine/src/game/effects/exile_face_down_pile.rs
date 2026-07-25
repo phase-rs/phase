@@ -91,7 +91,7 @@ fn resolve_pile_object(
 /// exiled face down and skips both shuffle and return.
 pub(crate) fn complete_exile_face_down_pile_delivery(
     state: &mut GameState,
-    player: crate::types::player::PlayerId,
+    _player: crate::types::player::PlayerId,
     source_id: ObjectId,
     mut members: Vec<ObjectId>,
     required_member_count: usize,

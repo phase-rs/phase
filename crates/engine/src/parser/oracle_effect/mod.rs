@@ -26656,11 +26656,15 @@ fn parse_exile_object_and_top_face_down_pile_ir(
     ctx: &ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
-    let (rest, _) = tag("exile it and the top ").parse(lower.as_str()).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("exile it and the top ")
+        .parse(lower.as_str())
+        .ok()?;
     let (rest, count) = nom_primitives::parse_number(rest).ok()?;
     let (_, _) = all_consuming(terminated(
-        tag(" cards of your library in a face-down pile. if you do, shuffle that pile and put it back on top of your library"),
-        opt(tag(".")),
+        tag::<_, _, OracleError<'_>>(
+            " cards of your library in a face-down pile. if you do, shuffle that pile and put it back on top of your library",
+        ),
+        opt(tag::<_, _, OracleError<'_>>(".")),
     ))
     .parse(rest)
     .ok()?;

@@ -14711,6 +14711,7 @@ impl Effect {
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
             | Effect::ExileTop { count, .. }
+            | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
             | Effect::FlipCoins { count, .. }
@@ -14967,6 +14968,7 @@ impl Effect {
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
             | Effect::ExileTop { count, .. }
+            | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
             | Effect::FlipCoins { count, .. }
