@@ -8323,6 +8323,41 @@ fn is_bloodthirst_x_etb_replacement(replacement: &ReplacementDefinition) -> bool
 /// creature sacrificed"). `PreviousEffectAmount` is NOT used — it reads
 /// `last_effect_amount`, which the ranged Sacrifice never stamps.
 ///
+fn type_filter_noun(filter: &TypeFilter, plural: bool) -> String {
+    let noun = match filter {
+        TypeFilter::Creature => "creature",
+        TypeFilter::Land => "land",
+        TypeFilter::Artifact => "artifact",
+        TypeFilter::Enchantment => "enchantment",
+        TypeFilter::Instant => "instant",
+        TypeFilter::Sorcery => "sorcery",
+        TypeFilter::Planeswalker => "planeswalker",
+        TypeFilter::Battle => "battle",
+        TypeFilter::Kindred => "kindred",
+        TypeFilter::Permanent => "permanent",
+        TypeFilter::Card => "card",
+        TypeFilter::Any => "permanent",
+        TypeFilter::Non(inner) => return format!("non-{}", type_filter_noun(inner, plural)),
+        TypeFilter::Subtype(subtype) => {
+            let noun = subtype.to_lowercase();
+            return if plural { format!("{noun}s") } else { noun };
+        }
+        TypeFilter::AnyOf(filters) => {
+            return filters
+                .iter()
+                .map(|filter| type_filter_noun(filter, plural))
+                .collect::<Vec<_>>()
+                .join(" or ");
+        }
+    };
+
+    if plural {
+        format!("{noun}s")
+    } else {
+        noun.into()
+    }
+}
+
 /// CR 702.82c "Devour [quality]" variant: `Keyword::Devour { n, quality }`
 /// carries both N and the sacrifice-pool quality. `quality: TypeFilter::Creature`
 /// is the CR 702.82a default (plain "Devour N"); a non-creature quality (Land for
@@ -8367,13 +8402,8 @@ pub fn synthesize_devour(face: &mut CardFace) {
 
         // CR 702.82a / CR 702.82c: display noun for the sacrifice pool. Cosmetic —
         // the idempotency predicate keys on structure, not this text.
-        let quality_noun = match quality {
-            TypeFilter::Creature => "creature".to_string(),
-            TypeFilter::Land => "land".to_string(),
-            TypeFilter::Artifact => "artifact".to_string(),
-            TypeFilter::Subtype(s) => s.to_lowercase(),
-            other => format!("{other:?}").to_lowercase(),
-        };
+        let quality_noun = type_filter_noun(quality, false);
+        let quality_noun_plural = type_filter_noun(quality, true);
 
         // CR 122.1: N +1/+1 counters per creature sacrificed this way. The
         // per-creature count is `EventContextAmount` (resolves to the number
@@ -8422,7 +8452,7 @@ pub fn synthesize_devour(face: &mut CardFace) {
             },
         )
         .description(format!(
-            "CR 702.82a: Devour {n} — sacrifice any number of {quality_noun}s; this \
+            "CR 702.82a: Devour {n} — sacrifice any number of {quality_noun_plural}; this \
              permanent enters with {n} +1/+1 counter{} per {quality_noun} sacrificed.",
             if n == 1 { "" } else { "s" }
         ))
@@ -8436,7 +8466,7 @@ pub fn synthesize_devour(face: &mut CardFace) {
             destination_zone: Some(Zone::Battlefield),
             description: Some(format!(
                 "CR 702.82a + CR 614.1c: Devour {n} — as this creature enters, \
-                 you may sacrifice any number of {quality_noun}s; it enters with {n} \
+                you may sacrifice any number of {quality_noun_plural}; it enters with {n} \
                  +1/+1 counter{} for each {quality_noun} sacrificed this way.",
                 if n == 1 { "" } else { "s" }
             )),
