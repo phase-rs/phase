@@ -715,6 +715,17 @@ pub fn emit_trace_for_candidate(
 /// debug builds panic so the gap surfaces during testing instead of silently
 /// degrading AI play into cast/cancel churn.
 fn fallback_action(state: &GameState) -> Option<GameAction> {
+    // CR 601.2c: A spell's target step must use the engine's current legal
+    // target list. `target_slots` is a historical snapshot and can be stale
+    // after earlier selections; if no current legal action remains, abort the
+    // in-flight cast rather than fabricating an illegal required-target skip.
+    if matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
+        return engine::ai_support::legal_actions(state)
+            .into_iter()
+            .find(|action| matches!(action, GameAction::ChooseTarget { .. }))
+            .or(Some(GameAction::CancelCast));
+    }
+
     // Pending-cast states can always be escaped with CancelCast (CR 601.2).
     // Check this before the exhaustive match so every pending-cast variant
     // is covered without repeating CancelCast per-arm.
@@ -860,11 +871,10 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .copied()
             .map(|target| GameAction::ChooseEntryAttackTarget { target }),
 
-        // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is
         // already on the stack. ChooseTarget { target: None } signals
         // "no legal target" and causes the trigger to fizzle (CR 608.2b).
-        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+        WaitingFor::TriggerTargetSelection { .. } => {
             Some(GameAction::ChooseTarget { target: None })
         }
 
@@ -4271,6 +4281,64 @@ mod tests {
         ))
     }
 
+    fn spell_target_selection_state(
+        current_legal_targets: Vec<TargetRef>,
+        stale_slot_targets: Vec<TargetRef>,
+        optional: bool,
+    ) -> GameState {
+        let mut state = make_state();
+        let spell_id = add_spell_to_hand(&mut state, PlayerId(0), "Targeting Spell", 0);
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            Vec::new(),
+            spell_id,
+            PlayerId(0),
+        );
+        let pending_cast = engine::types::game_state::PendingCast::new(
+            spell_id,
+            CardId(spell_id.0),
+            ability,
+            engine::types::mana::ManaCost::NoCost,
+        );
+
+        state.players[PlayerId(0).0 as usize]
+            .hand
+            .retain(|&object_id| object_id != spell_id);
+        state.objects.get_mut(&spell_id).unwrap().zone = Zone::Stack;
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(spell_id.0),
+                ability: None,
+                casting_variant: engine::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        state.waiting_for = WaitingFor::TargetSelection {
+            player: PlayerId(0),
+            pending_cast: Box::new(pending_cast),
+            target_slots: vec![engine::types::game_state::TargetSelectionSlot {
+                legal_targets: stale_slot_targets,
+                optional,
+                chooser: None,
+            }],
+            mode_labels: Vec::new(),
+            selection: engine::types::game_state::TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets,
+            },
+        };
+        state
+    }
+
     /// Minimal ChooseManaColor SingleColor state with the given option list and
     /// pending cast. The `context` is a degenerate `ResolvingEffect` resume — the
     /// pre-emption never inspects it, only `choice` and `state.pending_cast`.
@@ -4971,6 +5039,45 @@ mod tests {
         let action = choose_action(&state, PlayerId(0), &config, &mut rng);
 
         assert_eq!(action, Some(GameAction::ChooseTarget { target: None }));
+    }
+
+    #[test]
+    fn fallback_spell_target_selection_uses_current_legal_target_when_slot_is_stale() {
+        let target = TargetRef::Player(PlayerId(1));
+        let mut state = spell_target_selection_state(
+            vec![target.clone()],
+            vec![TargetRef::Player(PlayerId(0))],
+            false,
+        );
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(
+            action,
+            GameAction::ChooseTarget {
+                target: Some(target),
+            }
+        );
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+    }
+
+    #[test]
+    fn fallback_spell_target_selection_skips_optional_empty_current_slot() {
+        let mut state =
+            spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], true);
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::ChooseTarget { target: None });
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
+    }
+
+    #[test]
+    fn fallback_spell_target_selection_cancels_required_empty_current_slot() {
+        let mut state =
+            spell_target_selection_state(Vec::new(), vec![TargetRef::Player(PlayerId(1))], false);
+
+        let action = fallback_action(&state).expect("fallback returns an action");
+        assert_eq!(action, GameAction::CancelCast);
+        assert!(engine::game::engine::apply_as_current(&mut state, action).is_ok());
     }
 
     /// Regression test: AI must produce DeclareBlockers action even when the
