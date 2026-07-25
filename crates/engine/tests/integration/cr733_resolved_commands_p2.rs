@@ -76,6 +76,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::ObjectCounter(command) => {
             engine::game::effects::counters::apply_resolved_counter_edit(state, command).unwrap();
         }
+        ResolvedRulesCommand::ObjectTransform(command) => {
+            engine::game::transform::apply_resolved_transform(state, command).unwrap();
+        }
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
@@ -182,6 +185,7 @@ fn exact_mana_spend_rejects_a_second_removal() {
             ResolvedRulesCommand::PlayerEdit(_)
             | ResolvedRulesCommand::ObjectStatus(_)
             | ResolvedRulesCommand::ObjectCounter(_)
+            | ResolvedRulesCommand::ObjectTransform(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
             | ResolvedRulesCommand::ZoneChange(_)

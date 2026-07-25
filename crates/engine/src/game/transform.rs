@@ -1,6 +1,9 @@
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::resolved_commands::{
+    ResolvedObjectTransformCommand, ResolvedObjectTransformReplayInvariantError,
+};
 use crate::types::zones::Zone;
 
 use super::engine::EngineError;
@@ -97,9 +100,77 @@ pub fn transform_permanent(
     // self-transform instructions from abilities already on the stack.
     obj.transformation_count = obj.transformation_count.wrapping_add(1);
 
+    let reference = ObjectIncarnationRef::from_object(obj);
+    let resulting_transformed = obj.transformed;
+    let resulting_transformation_count = obj.transformation_count;
+
     crate::game::layers::mark_layers_full(state);
 
+    // CR 733: journal the settled transform through its owning family. Every
+    // no-op guard above returned before the swap, so only a transform that
+    // actually changed the displayed face is recorded.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_object_transform(ResolvedObjectTransformCommand {
+            object: reference,
+            expected_old_transformed: !resulting_transformed,
+            resulting_transformed,
+            resulting_timestamp: ts,
+            resulting_transformation_count,
+            cause,
+        })
+        .expect("resolved transform must have a live journal cause");
+
     events.push(GameEvent::Transformed { object_id });
+
+    Ok(())
+}
+
+/// CR 701.27a + CR 613.7g: Apply one exact already-resolved transform.
+///
+/// This installs the recorded face swap, displayed-face flag, timestamp, and
+/// transformation count. It re-runs none of `transform_permanent`'s CR 701.27
+/// eligibility guards — those decided at resolve time, and a command only
+/// exists because the transform actually happened.
+pub fn apply_resolved_transform(
+    state: &mut GameState,
+    command: &ResolvedObjectTransformCommand,
+) -> Result<(), ResolvedObjectTransformReplayInvariantError> {
+    let object = state.objects.get(&command.object.object_id).ok_or(
+        ResolvedObjectTransformReplayInvariantError::UnknownObject(command.object.object_id),
+    )?;
+    let found = ObjectIncarnationRef::from_object(object);
+    if found != command.object {
+        return Err(ResolvedObjectTransformReplayInvariantError::StaleObject {
+            expected: command.object,
+            found,
+        });
+    }
+    if object.transformed != command.expected_old_transformed {
+        return Err(
+            ResolvedObjectTransformReplayInvariantError::TransformedPreconditionMismatch {
+                expected: command.expected_old_transformed,
+                found: object.transformed,
+            },
+        );
+    }
+    let back_face = object.back_face.clone().ok_or(
+        ResolvedObjectTransformReplayInvariantError::MissingBackFace(command.object.object_id),
+    )?;
+
+    let obj = state
+        .objects
+        .get_mut(&command.object.object_id)
+        .expect("validated transform command object remains live");
+    let displayed = snapshot_object_face(obj);
+    apply_back_face_to_object(obj, back_face);
+    obj.back_face = Some(displayed);
+    obj.transformed = command.resulting_transformed;
+    obj.timestamp = command.resulting_timestamp;
+    obj.transformation_count = command.resulting_transformation_count;
+
+    crate::game::layers::mark_layers_full(state);
 
     Ok(())
 }

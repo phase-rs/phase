@@ -41,6 +41,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::ObjectCounter(command) => {
             engine::game::effects::counters::apply_resolved_counter_edit(state, command).unwrap();
         }
+        ResolvedRulesCommand::ObjectTransform(command) => {
+            engine::game::transform::apply_resolved_transform(state, command).unwrap();
+        }
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }

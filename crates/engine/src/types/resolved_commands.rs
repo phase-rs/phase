@@ -144,6 +144,44 @@ pub struct ResolvedObjectCounterCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// One exact CR 701.27a transform of a double-faced permanent.
+///
+/// CR 613.7g: a permanent that transforms receives a NEW timestamp, which
+/// orders it against continuous effects in the layer system. Replay installs
+/// the exact recorded timestamp instead of re-drawing one from
+/// `GameState::next_timestamp` — mirroring the zone-change family's
+/// `entry_timestamp` — so a retained-prefix replay cannot silently reorder
+/// layer application. The face payloads are not recorded: swapping the stashed
+/// `back_face` with the displayed face is a structural operation over data the
+/// object already carries, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectTransformCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_transformed: bool,
+    pub resulting_transformed: bool,
+    pub resulting_timestamp: u64,
+    /// CR 701.27f: the post-transform count used to ignore stale self-transform
+    /// instructions from abilities already on the stack.
+    pub resulting_transformation_count: u32,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved transform.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectTransformReplayInvariantError {
+    #[error("transform command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("transform occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("transform precondition mismatch: expected transformed {expected}, found {found}")]
+    TransformedPreconditionMismatch { expected: bool, found: bool },
+    #[error("transform command object {0:?} has no back face to swap")]
+    MissingBackFace(ObjectId),
+}
+
 /// The audience that received one exact revealed-card fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedInformationAudience {
@@ -388,6 +426,7 @@ pub enum ResolvedRulesCommand {
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
+    ObjectTransform(ResolvedObjectTransformCommand),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1279,6 +1318,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 701.27a transform under its causal node.
+    pub fn record_object_transform(
+        &mut self,
+        command: ResolvedObjectTransformCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ObjectTransform(command),
+        )
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1499,6 +1549,7 @@ impl ResolvedRulesJournal {
                 ResolvedRulesCommand::PlayerEdit(_)
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::ObjectTransform(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -1740,6 +1791,20 @@ impl ResolvedRulesJournal {
                 if entry.node != command.cause || zone_change_command_is_invalid(command) {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "zone-change command has an invalid occurrence, receipt, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectTransform(command) => {
+                // CR 701.27a: a transform turns the permanent to its OTHER face,
+                // so a recorded transform that leaves `transformed` unchanged is
+                // not a transform that ever happened.
+                if entry.node != command.cause
+                    || command.expected_old_transformed == command.resulting_transformed
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "transform command does not change the displayed face, or has an \
+                         unrelated cause"
                             .to_string(),
                     ));
                 }
