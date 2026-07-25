@@ -10468,7 +10468,9 @@ mod tests {
             result,
             ReplacementResult::NeedsChoice(PlayerId(0))
         ));
-        let WaitingFor::ReplacementChoice { candidates, .. } = &state.waiting_for else {
+        let WaitingFor::ReplacementChoice { candidates, .. } =
+            replacement_choice_waiting_for(PlayerId(0), &state)
+        else {
             panic!("expected replacement choice prompt");
         };
         assert_eq!(
