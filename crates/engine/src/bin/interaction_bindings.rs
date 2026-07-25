@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 
 use engine::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
-    InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
-    InteractionAvailability, InteractionChoice, InteractionChoiceStatus,
-    InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionIntentCode,
-    InteractionManaAbilityActivationScope, InteractionManaColor, InteractionManaComparator,
-    InteractionManaRestriction, InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
+    InteractionActionCode, InteractionAggregateFunction, InteractionAvailability,
+    InteractionChoice, InteractionChoiceStatus, InteractionDamageAssignmentMode,
+    InteractionGroupConstraint, InteractionIntentCode, InteractionManaAbilityActivationScope,
+    InteractionManaColor, InteractionManaComparator, InteractionManaRestriction,
+    InteractionManaSpecialAction, InteractionManaSpellCostCriterion,
     InteractionManaZoneSpendPolarity, InteractionObjectProperty, InteractionOpportunity,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
