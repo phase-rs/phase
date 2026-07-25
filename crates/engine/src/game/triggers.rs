@@ -12327,6 +12327,9 @@ pub mod tests {
         let mut resolution_events = Vec::new();
         crate::game::stack::resolve_top(&mut state, &mut resolution_events);
         crate::game::stack::resolve_top(&mut state, &mut resolution_events);
+        // CR 613.1: ForceBlock installs a transient continuous effect; blocker
+        // validation reads its layer-applied static definition.
+        crate::game::layers::flush_layers(&mut state);
 
         assert!(
             validate_blockers(&state, &[]).is_err(),
