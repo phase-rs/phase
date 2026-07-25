@@ -6,7 +6,9 @@ import type {
   LegalActionsResult,
   ManaCost,
   ObjectId,
+  ObjectAction,
 } from "../adapter/types";
+import type { ViewerInteraction } from "../adapter/generated/interaction";
 import type { SeatMutation, SeatView } from "../multiplayer/seatTypes";
 
 /**
@@ -24,8 +26,9 @@ export interface LegalActionsWire {
   legalActions: GameAction[];
   autoPassRecommended?: boolean;
   manaPaymentShortcutActions?: GameAction[];
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   spellCosts?: Record<string, ManaCost>;
+  viewerInteraction?: ViewerInteraction;
 }
 
 /** Host-side: project an engine `LegalActionsResult` onto the wire shape. */
@@ -36,6 +39,7 @@ export function legalActionsToWire(result: LegalActionsResult): LegalActionsWire
     manaPaymentShortcutActions: result.manaPaymentShortcutActions ?? [],
     legalActionsByObject: result.legalActionsByObject,
     spellCosts: result.spellCosts,
+    viewerInteraction: result.viewerInteraction,
   };
 }
 
@@ -47,6 +51,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
     manaPaymentShortcutActions: wire.manaPaymentShortcutActions ?? [],
     legalActionsByObject: wire.legalActionsByObject,
     spellCosts: wire.spellCosts,
+    viewerInteraction: wire.viewerInteraction,
   };
 }
 
@@ -76,7 +81,7 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  *       sub-phase on WaitingFor::MulliganDecision; the MulliganBottomCards
  *       variant was removed
  */
-export const WIRE_PROTOCOL_VERSION = 14 as const;
+export const WIRE_PROTOCOL_VERSION = 15 as const;
 
 export type P2PMessage =
   | { type: "guest_deck"; deckData: unknown; displayName?: string; reservationToken?: string }

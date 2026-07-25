@@ -11,12 +11,14 @@ import type {
   LegalActionsResult,
   ManaCost,
   MatchConfig,
+  ObjectAction,
   ObjectId,
   PlayerId,
   PersistedGameState,
   StuckDecisionDiagnostic,
   WaitingFor,
 } from "../adapter/types";
+import type { ViewerInteraction } from "../adapter/generated/interaction";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { getPlayerId } from "../hooks/usePlayerId";
@@ -24,7 +26,7 @@ import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersiste
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
-export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic"> {
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "manaPaymentShortcutActions" | "spellCosts" | "legalActionsByObject" | "stuckDiagnostic" | "viewerInteraction"> {
   return {
     legalActions: result.actions,
     autoPassRecommended: result.autoPassRecommended,
@@ -32,6 +34,7 @@ export function legalResultState(result: LegalActionsResult): Pick<GameStoreStat
     spellCosts: result.spellCosts ?? {},
     legalActionsByObject: result.legalActionsByObject ?? {},
     stuckDiagnostic: result.stuckDiagnostic ?? null,
+    viewerInteraction: result.viewerInteraction ?? null,
   };
 }
 
@@ -106,7 +109,7 @@ interface GameStoreState {
    * `legalActions`; frontend "what can I do with this card?" lookups go
    * through this map instead of inferring action availability from objects.
    */
-  legalActionsByObject: Record<string, GameAction[]>;
+  legalActionsByObject: Record<string, ObjectAction[]>;
   /**
    * Engine-owned non-fatal progress-wedge diagnostic (an engine anomaly, not a
    * rules outcome) — present only when the current decision is wedged (no legal
@@ -114,6 +117,8 @@ interface GameStoreState {
    * (drives `StuckDecisionToast`).
    */
   stuckDiagnostic: StuckDecisionDiagnostic | null;
+  /** Viewer-scoped interaction projection from the same engine snapshot. */
+  viewerInteraction: ViewerInteraction | null;
   stateHistory: GameState[];
   turnCheckpoints: GameState[];
   /**
@@ -341,6 +346,7 @@ const initialState: GameStoreState = {
   spellCosts: {},
   legalActionsByObject: {},
   stuckDiagnostic: null,
+  viewerInteraction: null,
   stateHistory: [],
   turnCheckpoints: [],
   lobbyProgress: null,

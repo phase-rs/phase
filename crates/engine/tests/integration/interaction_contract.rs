@@ -23,6 +23,7 @@ use engine::types::game_state::{
 use engine::types::identifiers::CardId;
 use engine::types::interaction::{
     InteractionActionCode, InteractionAvailability, InteractionChoiceId,
+    InteractionManaAbilityActivationScope, InteractionManaRestriction,
     InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
     InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
     InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
@@ -1063,6 +1064,116 @@ fn mana_group_schema_exposes_engine_authored_symbols() {
             .map(str::to_string)
             .collect()
     );
+}
+
+#[test]
+fn tap_land_for_mana_projects_live_castle_output_per_unit_and_rejects_stale_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let castle = scenario
+        .add_land_from_oracle(
+            P0,
+            "Castle Garenbrig",
+            "{T}: Add {G}.\n{T}: Add {G}{G}{G}{G}{G}{G}. Spend this mana only to cast creature spells or activate abilities of creatures.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    bind(runner.state_mut(), "live-castle-mana-output");
+
+    let view = priority_view(runner.state());
+    let interaction_id = view.opportunities[0].interaction_id.clone();
+    let InteractionOpportunityResponse::ExactChoices { choices } = &view.opportunities[0].response
+    else {
+        panic!("priority is projected as exact choices");
+    };
+    let castle_choices: Vec<_> = choices
+        .iter()
+        .filter(|choice| {
+            choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Action {
+                        code: InteractionActionCode::TapLandForMana
+                    }
+                )
+            }) && choice.surfaces.iter().any(|surface| {
+                matches!(
+                    surface,
+                    InteractionPresentationSurface::Object {
+                        role: InteractionRoleCode::Source,
+                        reference,
+                        ..
+                    } if reference == &castle.0.to_string()
+                )
+            })
+        })
+        .collect();
+    assert_eq!(
+        castle_choices.len(),
+        2,
+        "Castle exposes both mana abilities"
+    );
+
+    let (one_green, six_green) = castle_choices
+        .iter()
+        .map(|choice| {
+            let produced: Vec<_> = choice
+                .surfaces
+                .iter()
+                .filter_map(|surface| match surface {
+                    InteractionPresentationSurface::Mana {
+                        role: InteractionRoleCode::ProducedMana,
+                        symbols,
+                        restrictions,
+                        ..
+                    } => Some((symbols, restrictions)),
+                    _ => None,
+                })
+                .collect();
+            (choice.id.clone(), produced)
+        })
+        .fold(
+            (None, None),
+            |(one, six), (choice_id, produced)| match produced.len() {
+                1 => (Some(choice_id), six),
+                6 => (one, Some((choice_id, produced))),
+                count => panic!("unexpected Castle mana output count: {count}"),
+            },
+        );
+    let one_green = one_green.expect("the unrestricted one-green ability is projected");
+    let (six_green, six_output) = six_green.expect("the restricted six-green ability is projected");
+    assert!(six_output.iter().all(|(symbols, restrictions)| {
+        *symbols == &vec!["G".to_string()]
+            && *restrictions
+                == &vec![InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+                    spell_type: "Creature".to_string(),
+                    ability: InteractionManaAbilityActivationScope::OfSpellType,
+                }]
+    }));
+
+    submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id: interaction_id.clone(),
+            response: InteractionResponse::Choose {
+                choice_id: one_green,
+            },
+        },
+    )
+    .expect("the sibling one-green option is a legal activation");
+    let stale = submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id,
+            response: InteractionResponse::Choose {
+                choice_id: six_green,
+            },
+        },
+    )
+    .expect_err("the six-green choice is stale after its sibling tapped the land");
+    assert_eq!(stale.code, InteractionReasonCode::StaleInteraction);
 }
 
 #[test]

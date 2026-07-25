@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::ai_support::{
     validated_candidate_actions_for_semantic_owner, ActionMetadata, CandidateAction,
     FilterPipeline, TacticalClass,
@@ -34,21 +37,27 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::interaction::{
     ActiveInteractionSlot, AggregateComparator, AmountAssignment, ConfirmSemantics,
-    InteractionActionCode, InteractionAggregateFunction, InteractionAvailability,
-    InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
+    InteractionActionCode, InteractionActionId, InteractionAggregateFunction,
+    InteractionAvailability, InteractionChoice, InteractionChoiceId, InteractionChoiceStatus,
     InteractionDamageAssignmentMode, InteractionGroupConstraint, InteractionId,
-    InteractionIntentCode, InteractionManaColor, InteractionObjectProperty, InteractionOpportunity,
-    InteractionOpportunityResponse, InteractionOutcomeCode, InteractionPresentationSurface,
-    InteractionPreview, InteractionPreviewRequest, InteractionPreviewStatus, InteractionProgress,
-    InteractionReasonCode, InteractionRelationConstraint, InteractionRelationSourceConstraint,
-    InteractionResponse, InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
+    InteractionIntentCode, InteractionManaAbilityActivationScope, InteractionManaColor,
+    InteractionManaComparator, InteractionManaRestriction, InteractionManaSpecialAction,
+    InteractionManaSpellCostCriterion, InteractionManaZoneSpendPolarity, InteractionObjectProperty,
+    InteractionOpportunity, InteractionOpportunityResponse, InteractionOutcomeCode,
+    InteractionPresentationSurface, InteractionPreview, InteractionPreviewRequest,
+    InteractionPreviewStatus, InteractionProgress, InteractionReasonCode,
+    InteractionRelationConstraint, InteractionRelationSourceConstraint, InteractionResponse,
+    InteractionResponseSpec, InteractionRoleCode, InteractionSessionId,
     InteractionShortcutCountSpec, InteractionShortcutDecision, InteractionShortcutPoint,
     InteractionShortcutPointKind, InteractionShortcutReply, InteractionShortcutResponseCode,
     InteractionSlotKind, InteractionSubmission, InteractionSummaryCode, InteractionWaitingForCode,
     InteractionWaitingForKind, InteractionZoneCode, SelectionConstraint, SimultaneousDecisionKind,
     ViewerInteraction, MAX_INTERACTION_LIST_LEN,
 };
-use crate::types::mana::{ManaColor, ManaCost, ManaType};
+use crate::types::mana::{
+    AbilityActivationScope, ManaColor, ManaCost, ManaRestriction, ManaType, SpecialAction,
+    SpellCostCriterion, ZoneSpendPolarity,
+};
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -60,7 +69,7 @@ use super::engine::{
 };
 use super::game_object::RoomDoor;
 use super::merge::MergeSide;
-use super::{turn_control, visibility};
+use super::{mana_sources, turn_control, visibility};
 
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
@@ -3354,6 +3363,47 @@ fn interaction_choice_id(
     InteractionChoiceId(format!("{}.{}{}", interaction_id.0, namespace, index))
 }
 
+/// Stable, opaque identity for an exact serialized action. The interaction
+/// projection and per-object action payload both use this, so consumers never
+/// need to correlate semantic rows by array position.
+pub fn interaction_action_id(action: &GameAction) -> InteractionActionId {
+    let encoded = serde_json::to_vec(action).expect("GameAction serialization must succeed");
+    let digest = Sha256::digest(encoded);
+    InteractionActionId(format!("a{:x}", digest))
+}
+
+/// A per-object legal action with an engine-authored identity that can be
+/// joined to an [`InteractionPresentationSurface::Action`] without depending
+/// on either transport's row ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectActionPayload {
+    #[serde(flatten)]
+    pub action: GameAction,
+    pub interaction_action_id: InteractionActionId,
+}
+
+pub fn object_action_payloads(
+    actions: &HashMap<ObjectId, Vec<GameAction>>,
+) -> HashMap<ObjectId, Vec<ObjectActionPayload>> {
+    actions
+        .iter()
+        .map(|(object_id, object_actions)| {
+            (
+                *object_id,
+                object_actions
+                    .iter()
+                    .cloned()
+                    .map(|action| ObjectActionPayload {
+                        interaction_action_id: interaction_action_id(&action),
+                        action,
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn zone_code(zone: Zone) -> InteractionZoneCode {
     match zone {
         Zone::Battlefield => InteractionZoneCode::Battlefield,
@@ -3474,6 +3524,135 @@ fn mana_color_symbol(color: ManaColor) -> &'static str {
         ManaColor::Black => "B",
         ManaColor::Red => "R",
         ManaColor::Green => "G",
+    }
+}
+
+fn interaction_mana_comparator(comparator: Comparator) -> InteractionManaComparator {
+    match comparator {
+        Comparator::GT => InteractionManaComparator::GreaterThan,
+        Comparator::LT => InteractionManaComparator::LessThan,
+        Comparator::GE => InteractionManaComparator::AtLeast,
+        Comparator::LE => InteractionManaComparator::AtMost,
+        Comparator::EQ => InteractionManaComparator::Equal,
+        Comparator::NE => InteractionManaComparator::NotEqual,
+    }
+}
+
+fn interaction_mana_ability_activation_scope(
+    scope: AbilityActivationScope,
+) -> InteractionManaAbilityActivationScope {
+    match scope {
+        AbilityActivationScope::OfSpellType => InteractionManaAbilityActivationScope::OfSpellType,
+        AbilityActivationScope::Any => InteractionManaAbilityActivationScope::Any,
+    }
+}
+
+fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpecialAction {
+    match action {
+        SpecialAction::CompanionToHand => InteractionManaSpecialAction::CompanionToHand,
+        SpecialAction::UnlockDoor => InteractionManaSpecialAction::UnlockDoor,
+        SpecialAction::Plot => InteractionManaSpecialAction::Plot,
+        SpecialAction::TurnFaceUp => InteractionManaSpecialAction::TurnFaceUp,
+        SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
+    }
+}
+
+fn interaction_mana_spell_cost_criterion(
+    criterion: &SpellCostCriterion,
+) -> InteractionManaSpellCostCriterion {
+    match criterion {
+        SpellCostCriterion::ManaValue { comparator, value } => {
+            InteractionManaSpellCostCriterion::ManaValue {
+                comparator: interaction_mana_comparator(*comparator),
+                value: *value,
+            }
+        }
+        SpellCostCriterion::HasXInCost => InteractionManaSpellCostCriterion::HasXInCost,
+    }
+}
+
+fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionManaRestriction {
+    match restriction {
+        ManaRestriction::OnlyForSpell => InteractionManaRestriction::OnlyForSpell,
+        ManaRestriction::OnlyForSpellType(spell_type) => {
+            InteractionManaRestriction::OnlyForSpellType {
+                spell_type: spell_type.clone(),
+            }
+        }
+        ManaRestriction::OnlyForCreatureType(creature_type) => {
+            InteractionManaRestriction::OnlyForCreatureType {
+                creature_type: creature_type.clone(),
+            }
+        }
+        ManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type,
+            ability,
+        } => InteractionManaRestriction::OnlyForTypeSpellsOrAbilities {
+            spell_type: spell_type.clone(),
+            ability: interaction_mana_ability_activation_scope(*ability),
+        },
+        ManaRestriction::OnlyForActivation => InteractionManaRestriction::OnlyForActivation,
+        ManaRestriction::OnlyForTaggedActivation(tag) => {
+            InteractionManaRestriction::OnlyForTaggedActivation {
+                tag: tag.keyword_str().to_string(),
+            }
+        }
+        ManaRestriction::OnlyForXCosts => InteractionManaRestriction::OnlyForXCosts,
+        ManaRestriction::OnlyForSpellWithKeywordKind(keyword) => {
+            InteractionManaRestriction::OnlyForSpellWithKeywordKind {
+                keyword: format!("{keyword:?}"),
+            }
+        }
+        ManaRestriction::OnlyForSpellWithKeywordKindFromZone(keyword, zone) => {
+            InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone {
+                keyword: format!("{keyword:?}"),
+                zone: zone_code(*zone),
+            }
+        }
+        ManaRestriction::OnlyForSpellWithManaValue { comparator, value } => {
+            InteractionManaRestriction::OnlyForSpellWithManaValue {
+                comparator: interaction_mana_comparator(*comparator),
+                value: *value,
+            }
+        }
+        ManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        } => InteractionManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type: spell_type.clone(),
+            criteria: criteria
+                .iter()
+                .map(interaction_mana_spell_cost_criterion)
+                .collect(),
+        },
+        ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => {
+            InteractionManaRestriction::OnlyForSpellWithColorCount {
+                comparator: interaction_mana_comparator(*comparator),
+                count: *count,
+            }
+        }
+        ManaRestriction::OnlyForSpellFromZone(zone_spend) => {
+            InteractionManaRestriction::OnlyForSpellFromZone {
+                zone: zone_code(zone_spend.zone),
+                polarity: match zone_spend.polarity {
+                    ZoneSpendPolarity::From => InteractionManaZoneSpendPolarity::From,
+                    ZoneSpendPolarity::NotFrom => InteractionManaZoneSpendPolarity::NotFrom,
+                },
+            }
+        }
+        ManaRestriction::OnlyForFaceDownSpell => InteractionManaRestriction::OnlyForFaceDownSpell,
+        ManaRestriction::OnlyForAny(restrictions) => InteractionManaRestriction::OnlyForAny {
+            restrictions: restrictions
+                .iter()
+                .map(interaction_mana_restriction)
+                .collect(),
+        },
+        ManaRestriction::OnlyForSpecialAction(action) => {
+            InteractionManaRestriction::OnlyForSpecialAction {
+                action: interaction_mana_special_action(*action),
+            }
+        }
+        ManaRestriction::ConvokePayment => InteractionManaRestriction::ConvokePayment,
     }
 }
 
@@ -3793,9 +3972,37 @@ fn project_action_payload(
         GameAction::ChooseEntryAttackTarget { target } => {
             push_attack_target_surface(surfaces, state, target, InteractionRoleCode::AttackTarget)
         }
+        GameAction::TapLandForMana { selection } => {
+            let Some(player) = state
+                .objects
+                .get(&selection.source.object_id)
+                .map(|object| object.controller)
+            else {
+                return;
+            };
+            let Ok(option) =
+                mana_sources::live_land_mana_option_for_selection(state, player, selection)
+            else {
+                return;
+            };
+            for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
+                .into_iter()
+                .enumerate()
+            {
+                surfaces.push(InteractionPresentationSurface::Mana {
+                    role: InteractionRoleCode::ProducedMana,
+                    index: Some(index as u32),
+                    symbols: vec![mana_type_code(unit.mana_type).to_string()],
+                    restrictions: unit
+                        .restrictions
+                        .iter()
+                        .map(interaction_mana_restriction)
+                        .collect(),
+                });
+            }
+        }
         GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
-        | GameAction::TapLandForMana { .. }
         | GameAction::UntapLandForMana { .. }
         | GameAction::Transform { .. }
         | GameAction::PlayFaceDown { .. }
@@ -4173,6 +4380,7 @@ fn project_action_payload(
                 role: InteractionRoleCode::ConvokeMana,
                 index: None,
                 symbols: vec![mana_type_code(*mana_type).to_string()],
+                restrictions: Vec::new(),
             });
         }
         GameAction::HarmonizeTap { creature_id } => {
@@ -4405,6 +4613,7 @@ fn project_action_payload(
                 role: InteractionRoleCode::ManaChoice,
                 index: None,
                 symbols,
+                restrictions: Vec::new(),
             });
             push_value_surface(surfaces, InteractionRoleCode::Count, count);
         }
@@ -4416,6 +4625,7 @@ fn project_action_payload(
                     .iter()
                     .map(|mana_type| mana_type_code(*mana_type).to_string())
                     .collect(),
+                restrictions: Vec::new(),
             });
         }
         GameAction::ChooseSpecializeColor { color } => push_value_surface(
@@ -4483,6 +4693,7 @@ fn project_prompt_payload(
                         role: InteractionRoleCode::ModeCost,
                         index: None,
                         symbols: mana_cost_symbols(cost),
+                        restrictions: Vec::new(),
                     });
                 }
             }
@@ -4497,6 +4708,7 @@ fn project_prompt_payload(
                     role: InteractionRoleCode::CastingCost,
                     index: None,
                     symbols: mana_cost_symbols(&option.mana_cost),
+                    restrictions: Vec::new(),
                 });
             }
         }
@@ -4693,6 +4905,7 @@ fn action_surfaces(
         },
         InteractionPresentationSurface::Action {
             code: action_code(action),
+            action_id: Some(interaction_action_id(action)),
         },
     ];
     if let Some(source) = action.source_object() {
@@ -4877,6 +5090,7 @@ fn loop_shortcut_choices(
                             role: InteractionRoleCode::Color,
                             index: None,
                             symbols: vec![mana_color_symbol(*color).to_string()],
+                            restrictions: Vec::new(),
                         },
                     ),
                 }
@@ -5272,6 +5486,7 @@ fn mana_group_choices(
                         role: InteractionRoleCode::ManaChoice,
                         index: Some(candidate.group as u32),
                         symbols: vec![mana_type_code(mana_type).to_string()],
+                        restrictions: Vec::new(),
                     });
                 }
                 ManaGroupCandidateValue::Phyrexian { choice, color } => {
@@ -5279,6 +5494,7 @@ fn mana_group_choices(
                         role: InteractionRoleCode::PhyrexianPayment,
                         index: Some(candidate.group as u32),
                         symbols: vec![mana_color_code(color).to_string()],
+                        restrictions: Vec::new(),
                     });
                     push_value_surface(
                         &mut surfaces,
@@ -5306,6 +5522,7 @@ fn mana_group_choices(
                 },
                 InteractionPresentationSurface::Action {
                     code: InteractionActionCode::CancelCast,
+                    action_id: Some(interaction_action_id(&GameAction::CancelCast)),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -5357,6 +5574,7 @@ fn mode_sequence_choices(
                 },
                 InteractionPresentationSurface::Action {
                     code: InteractionActionCode::CancelCast,
+                    action_id: Some(interaction_action_id(&GameAction::CancelCast)),
                 },
             ],
             status: InteractionChoiceStatus::Available,
@@ -6940,10 +7158,18 @@ fn bound_outbound_surface(
             counter_type: value,
             ..
         } => budget.string(value)?,
-        InteractionPresentationSurface::Mana { symbols, .. } => {
+        InteractionPresentationSurface::Mana {
+            symbols,
+            restrictions,
+            ..
+        } => {
             budget.list(symbols.len())?;
             for symbol in symbols {
                 budget.string(symbol)?;
+            }
+            budget.list(restrictions.len())?;
+            for restriction in restrictions {
+                bound_outbound_mana_restriction(restriction, budget)?;
             }
         }
         InteractionPresentationSurface::Summary { .. }
@@ -6953,6 +7179,55 @@ fn bound_outbound_surface(
         | InteractionPresentationSurface::Selection { .. }
         | InteractionPresentationSurface::Amount { .. }
         | InteractionPresentationSurface::ShortcutResponse { .. } => {}
+    }
+    Ok(())
+}
+
+fn bound_outbound_mana_restriction(
+    restriction: &InteractionManaRestriction,
+    budget: &mut OutboundBudget,
+) -> Result<(), InteractionReasonCode> {
+    match restriction {
+        InteractionManaRestriction::OnlyForSpell
+        | InteractionManaRestriction::OnlyForActivation
+        | InteractionManaRestriction::OnlyForXCosts
+        | InteractionManaRestriction::OnlyForFaceDownSpell
+        | InteractionManaRestriction::ConvokePayment => {}
+        InteractionManaRestriction::OnlyForSpellType { spell_type }
+        | InteractionManaRestriction::OnlyForCreatureType {
+            creature_type: spell_type,
+        }
+        | InteractionManaRestriction::OnlyForTaggedActivation { tag: spell_type }
+        | InteractionManaRestriction::OnlyForSpellWithKeywordKind {
+            keyword: spell_type,
+        } => {
+            budget.string(spell_type)?;
+        }
+        InteractionManaRestriction::OnlyForTypeSpellsOrAbilities { spell_type, .. } => {
+            budget.string(spell_type)?;
+        }
+        InteractionManaRestriction::OnlyForSpellWithKeywordKindFromZone { keyword, .. } => {
+            budget.string(keyword)?;
+        }
+        InteractionManaRestriction::OnlyForSpellMatchingCostCriteria {
+            spell_type,
+            criteria,
+        } => {
+            if let Some(spell_type) = spell_type {
+                budget.string(spell_type)?;
+            }
+            budget.list(criteria.len())?;
+        }
+        InteractionManaRestriction::OnlyForSpellWithManaValue { .. }
+        | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
+        | InteractionManaRestriction::OnlyForSpellFromZone { .. }
+        | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
+        InteractionManaRestriction::OnlyForAny { restrictions } => {
+            budget.list(restrictions.len())?;
+            for restriction in restrictions {
+                bound_outbound_mana_restriction(restriction, budget)?;
+            }
+        }
     }
     Ok(())
 }

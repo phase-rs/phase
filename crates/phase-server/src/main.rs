@@ -25,6 +25,7 @@ use engine::ai_support::{
 };
 use engine::database::CardDatabase;
 use engine::game::derived_views::derive_filtered_views;
+use engine::game::interaction::{derive_viewer_interaction, object_action_payloads};
 use engine::game::validate_name_deck_for_format_full;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
@@ -299,6 +300,7 @@ fn build_game_started_message(
             }
         });
     let derived = derive_transport_views(&session.state, &filtered, Some(player));
+    let viewer_interaction = derive_viewer_interaction(&session.state, &filtered, player);
 
     ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -315,11 +317,12 @@ fn build_game_started_message(
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            by_object_all
+            object_action_payloads(&by_object_all)
         } else {
             HashMap::new()
         },
         derived,
+        viewer_interaction,
         player_token,
         events: server_core::filter_events_for_player(&events, &session.state, player),
     }
@@ -368,6 +371,7 @@ fn build_state_update_message(
     let is_actor = server_core::is_acting(raw_state, player);
     let filtered = server_core::filter_state_for_player(raw_state, player);
     let derived = derive_transport_views(raw_state, &filtered, Some(player));
+    let viewer_interaction = derive_viewer_interaction(raw_state, &filtered, player);
     let mana_payment_shortcut_actions = if is_actor {
         engine_mana_payment_shortcut_actions(raw_state, legal_actions_by_object)
     } else {
@@ -393,11 +397,12 @@ fn build_state_update_message(
             HashMap::new()
         },
         legal_actions_by_object: if is_actor {
-            legal_actions_by_object.clone()
+            object_action_payloads(legal_actions_by_object)
         } else {
             HashMap::new()
         },
         derived,
+        viewer_interaction,
     })
 }
 
@@ -409,6 +414,8 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
     guard_game_state_for_broadcast(&session.state)?;
     let filtered = server_core::filter_state_for_player(&session.state, SPECTATOR_PLAYER_ID);
     let derived = derive_transport_views(&session.state, &filtered, None);
+    let viewer_interaction =
+        derive_viewer_interaction(&session.state, &filtered, SPECTATOR_PLAYER_ID);
 
     Ok(ServerMessage::GameStarted {
         state_revision: session.state_revision,
@@ -422,6 +429,7 @@ fn build_spectator_game_started_message(session: &GameSession) -> Result<ServerM
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
+        viewer_interaction,
         player_token: None,
         events: Vec::new(),
     })
@@ -443,6 +451,7 @@ fn build_spectator_state_update_message(
     })?;
     let filtered = server_core::filter_state_for_player(raw_state, SPECTATOR_PLAYER_ID);
     let derived = derive_transport_views(raw_state, &filtered, None);
+    let viewer_interaction = derive_viewer_interaction(raw_state, &filtered, SPECTATOR_PLAYER_ID);
     let eliminated_players = raw_state.eliminated_players.clone();
 
     Ok(ServerMessage::StateUpdate {
@@ -457,6 +466,7 @@ fn build_spectator_state_update_message(
         spell_costs: HashMap::new(),
         legal_actions_by_object: HashMap::new(),
         derived,
+        viewer_interaction,
     })
 }
 
@@ -3153,8 +3163,9 @@ async fn broadcast_takeback_approved(
                     eliminated_players: raw_state.eliminated_players.clone(),
                     log_entries: vec![],
                     spell_costs: p_spell_costs,
-                    legal_actions_by_object: p_by_object,
+                    legal_actions_by_object: object_action_payloads(&p_by_object),
                     derived: derive_transport_views(&raw_state, pstate, Some(*pid)),
+                    viewer_interaction: derive_viewer_interaction(&raw_state, pstate, *pid),
                 });
             }
         }
@@ -3688,11 +3699,16 @@ async fn handle_client_message(
                                         eliminated_players: eliminated.clone(),
                                         log_entries: log_entries.clone(),
                                         spell_costs: p_spell_costs,
-                                        legal_actions_by_object: p_by_object,
+                                        legal_actions_by_object: object_action_payloads(
+                                            &p_by_object,
+                                        ),
                                         derived: derive_transport_views(
                                             &raw_state,
                                             pstate,
                                             Some(*pid),
+                                        ),
+                                        viewer_interaction: derive_viewer_interaction(
+                                            &raw_state, pstate, *pid,
                                         ),
                                     });
                                 }
@@ -3743,7 +3759,7 @@ async fn handle_client_message(
                             events: ai_events,
                             log_entries: ai_log_entries,
                             legal_actions: ai_legal,
-                            legal_actions_by_object: ai_by_object,
+                            legal_actions_by_object: object_action_payloads(&ai_by_object),
                             spell_costs: ai_spell_costs,
                         })
                         .is_err()
@@ -3808,11 +3824,18 @@ async fn handle_client_message(
                                         eliminated_players: eliminated.clone(),
                                         log_entries: ai_log_entries.clone(),
                                         spell_costs: p_spell_costs,
-                                        legal_actions_by_object: p_by_object,
+                                        legal_actions_by_object: object_action_payloads(
+                                            &p_by_object,
+                                        ),
                                         derived: derive_transport_views(
                                             ai_raw_state,
                                             pstate,
                                             Some(*pid),
+                                        ),
+                                        viewer_interaction: derive_viewer_interaction(
+                                            ai_raw_state,
+                                            pstate,
+                                            *pid,
                                         ),
                                     });
                                 }
@@ -5111,6 +5134,11 @@ async fn handle_client_message(
                         spell_costs: HashMap::new(),
                         legal_actions_by_object: HashMap::new(),
                         derived,
+                        viewer_interaction: derive_viewer_interaction(
+                            &raw_state,
+                            &filtered_state,
+                            joiner,
+                        ),
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
