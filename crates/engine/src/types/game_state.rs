@@ -6205,14 +6205,16 @@ impl PublicStateDirty {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TargetSelectionConstraint {
+    /// CR 601.2c + CR 115.3: every chosen player target must be a different
+    /// player. Attached by the modal path ("each mode must target a different
+    /// player"), where distinctness spans the ability's modes rather than one
+    /// instance of the word "target".
     DifferentTargetPlayers,
     /// CR 115.1 + CR 601.2c: Object targets must be controlled by different players.
     DifferentObjectControllers,
     /// CR 115.1 + CR 601.2c + CR 400.1: Object targets must come from the same
     /// player-owned zone of the given kind, e.g. "from a single graveyard".
-    SameZoneOwner {
-        zone: Zone,
-    },
+    SameZoneOwner { zone: Zone },
     /// CR 202.3 + CR 601.2c: the chosen target set's combined mana value must
     /// satisfy `comparator` against `value`. `value` is a `QuantityExpr` (not
     /// `i32` like `SearchSelectionConstraint::TotalManaValue`) because the bound

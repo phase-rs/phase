@@ -1002,8 +1002,9 @@ pub enum TargetSelectionAdvance {
 /// CR 601.2c + CR 115.3: Identifies one instance of the word "target" on an
 /// ability. Slots sharing a `TargetInstanceId` are the SAME "target" (all slots
 /// of one `multi_target` "up to N target creatures" run) and must be mutually
-/// distinct objects; slots with DIFFERENT ids are separate instances that may
-/// reuse the same object ("Destroy target artifact and target land").
+/// distinct objects or players; slots with DIFFERENT ids are separate instances
+/// that may reuse the same object or player ("Destroy target artifact and
+/// target land").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TargetInstanceId(usize);
 
@@ -5080,21 +5081,22 @@ fn legal_targets_for_selected_slot(
         });
     }
 
-    // CR 601.2c + CR 115.3: within one instance of "target", the same object
-    // can't be chosen twice. Remove objects already chosen in prior slots of
-    // THIS instance. Prior slots of a DIFFERENT instance (separate "target") do
-    // not constrain this slot — they may legally reuse the same object
-    // (CR 601.2c "Destroy target artifact and target land" Example).
-    let already_in_instance: std::collections::HashSet<ObjectId> = prior_specs
+    // CR 601.2c + CR 115.3: within one instance of "target", the same target —
+    // object OR player — can't be chosen twice. Remove targets already chosen
+    // in prior slots of THIS instance (issue #6459: Scheming Symmetry's
+    // "Choose two target players." accepted the same player for both slots
+    // because this set was narrowed to `ObjectId` and dropped
+    // `TargetRef::Player`). Prior slots of a DIFFERENT instance (separate
+    // "target") do not constrain this slot — they may legally reuse the same
+    // object or player (CR 601.2c "Destroy target artifact and target land"
+    // Example).
+    let already_in_instance: std::collections::HashSet<TargetRef> = prior_specs
         .iter()
         .zip(selected_slots)
         .filter(|(prior, _)| prior.instance == spec.instance)
-        .filter_map(|(_, sel)| match sel {
-            Some(TargetRef::Object(id)) => Some(*id),
-            _ => None,
-        })
+        .filter_map(|(_, sel)| sel.clone())
         .collect();
-    legal.retain(|t| !matches!(t, TargetRef::Object(id) if already_in_instance.contains(id)));
+    legal.retain(|t| !already_in_instance.contains(t));
 
     // CR 115.4: "other target" / "another target" is a separate instance of
     // "target" but must differ from every target already chosen for this

@@ -1,18 +1,17 @@
 //! Scheming Symmetry — "Choose two target players." must require TWO DIFFERENT
-//! players (CR 115.1b + CR 601.2c: the same player can't be chosen to fill more
-//! than one of a single instruction's target slots).
+//! players (CR 601.2c + CR 115.3: the same target — object or player — can't be
+//! chosen multiple times for any one instance of the word "target").
 //!
 //! Regression for issue #6459: in a multiplayer game the same player could be
-//! chosen for both slots. A modal "each mode must target a different player"
-//! card already carries `DifferentTargetPlayers`, but a plain multi-target
-//! player requirement had no constraint attached, so the runtime distinctness
-//! authority never saw one to enforce.
+//! chosen for both slots. The per-instance distinctness filter in
+//! `legal_targets_for_selected_slot` (`game/ability_utils.rs`) excluded
+//! already-chosen OBJECTS but dropped `TargetRef::Player`, so player targets
+//! within one instance of "target" were never kept distinct. The fix widens
+//! that set from `HashSet<ObjectId>` to `HashSet<TargetRef>`.
 //!
-//! Two layers of proof:
-//!  * parser — the parsed ability carries `DifferentTargetPlayers`;
-//!  * runtime — after the first player is chosen, choosing that SAME player for
-//!    the second slot is rejected, while a DIFFERENT player is accepted (the
-//!    discriminating end-to-end behaviour).
+//! Proof is end-to-end at runtime: after the first player is chosen, choosing
+//! that SAME player for the second slot is rejected (and the slot stays open),
+//! while a DIFFERENT player is accepted (the discriminating behaviour).
 
 use engine::game::scenario::GameScenario;
 use engine::types::ability::TargetRef;
@@ -29,32 +28,6 @@ const P2: PlayerId = PlayerId(2);
 const SCHEMING: &str =
     "Choose two target players. Each of them searches their library for a card, \
 then shuffles and puts that card on top.";
-
-#[test]
-fn scheming_symmetry_parses_distinct_player_constraint() {
-    use engine::types::game_state::TargetSelectionConstraint;
-
-    let parsed = engine::parser::parse_oracle_text(
-        SCHEMING,
-        "Scheming Symmetry",
-        &[],
-        &["Sorcery".to_string()],
-        &[],
-    );
-    let ability = parsed
-        .abilities
-        .first()
-        .expect("Scheming Symmetry lowers to a spell ability");
-    assert!(
-        ability
-            .target_constraints
-            .iter()
-            .any(|c| matches!(c, TargetSelectionConstraint::DifferentTargetPlayers)),
-        "a \"choose two target players\" requirement must carry \
-         DifferentTargetPlayers (issue #6459); got {:?}",
-        ability.target_constraints
-    );
-}
 
 #[test]
 fn scheming_symmetry_rejects_choosing_the_same_player_twice() {
@@ -105,7 +78,7 @@ fn scheming_symmetry_rejects_choosing_the_same_player_twice() {
         .expect("choosing P1 for the first slot must succeed");
 
     // Second slot: choosing the ALREADY-CHOSEN player P1 must be rejected
-    // (CR 115.1b), while the state stays on the same target slot.
+    // (CR 601.2c + CR 115.3), while the state stays on the same target slot.
     assert!(
         matches!(
             runner.state().waiting_for,
@@ -119,8 +92,8 @@ fn scheming_symmetry_rejects_choosing_the_same_player_twice() {
     });
     assert!(
         reselect_same.is_err(),
-        "CR 115.1b (issue #6459): choosing the already-chosen player P1 for the \
-         second slot must be rejected"
+        "CR 601.2c + CR 115.3 (issue #6459): choosing the already-chosen player \
+         P1 for the second slot must be rejected"
     );
     assert!(
         matches!(
