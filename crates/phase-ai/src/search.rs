@@ -612,7 +612,7 @@ fn large_board_main_phase_fast_action_from_actions(
             let penalty = candidate.penalty;
             let candidate = candidate.candidate;
             let baseline = match &candidate.action {
-                GameAction::CastSpell { object_id, .. } => evaluate_card_value(state, object_id),
+                GameAction::CastSpell { object_id, .. } => evaluate_card_value(state, *object_id),
                 _ => 0.0,
             };
             let tactical = policies.score(&PolicyContext {

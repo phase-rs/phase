@@ -197,7 +197,7 @@ fn playable_lands_after_stack_clears(state: &GameState, player: PlayerId) -> Vec
     if next_priority.stack.len() > 1
         || next_priority
             .stack
-            .first()
+            .get(0)
             .is_some_and(|entry| entry.controller != player)
     {
         return Vec::new();
