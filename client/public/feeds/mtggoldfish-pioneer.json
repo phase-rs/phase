@@ -5,131 +5,9 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-07-24T00:00:00Z",
+  "updated": "2026-07-25T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
-    {
-      "name": "Mono-Red Prowess",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 3,
-          "name": "Ramunap Ruins"
-        },
-        {
-          "count": 3,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 4,
-          "name": "Bonecrusher Giant"
-        },
-        {
-          "count": 2,
-          "name": "Den of the Bugbear"
-        },
-        {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 2,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 4,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 1,
-          "name": "Rockface Village"
-        },
-        {
-          "count": 1,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 4,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Mutavault"
-        },
-        {
-          "count": 4,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 4,
-          "name": "Sunspine Lynx"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 2,
-          "name": "Pyroclasm"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 2,
-          "name": "Weathered Runestone"
-        },
-        {
-          "count": 3,
-          "name": "Flowstone Infusion"
-        },
-        {
-          "count": 4,
-          "name": "Magebane Lizard"
-        },
-        {
-          "count": 2,
-          "name": "Scorching Shot"
-        }
-      ]
-    },
     {
       "name": "Izzet Prowess",
       "author": "MTGGoldfish",
@@ -262,6 +140,128 @@
         {
           "count": 2,
           "name": "Quantum Riddler"
+        }
+      ]
+    },
+    {
+      "name": "Mono-Red Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Scar Mage"
+        },
+        {
+          "count": 3,
+          "name": "Ramunap Ruins"
+        },
+        {
+          "count": 3,
+          "name": "Reckless Rage"
+        },
+        {
+          "count": 4,
+          "name": "Bonecrusher Giant"
+        },
+        {
+          "count": 2,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Kumano Faces Kakkazan"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 2,
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 1,
+          "name": "Rockface Village"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 4,
+          "name": "Mountain"
+        },
+        {
+          "count": 4,
+          "name": "Mutavault"
+        },
+        {
+          "count": 4,
+          "name": "Burst Lightning"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 4,
+          "name": "Sunspine Lynx"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Pyroclasm"
+        },
+        {
+          "count": 2,
+          "name": "Redcap Melee"
+        },
+        {
+          "count": 2,
+          "name": "Weathered Runestone"
+        },
+        {
+          "count": 3,
+          "name": "Flowstone Infusion"
+        },
+        {
+          "count": 4,
+          "name": "Magebane Lizard"
+        },
+        {
+          "count": 2,
+          "name": "Scorching Shot"
         }
       ]
     },
@@ -440,9 +440,9 @@
       "name": "Abzan Greasefang",
       "author": "MTGGoldfish",
       "colors": [
-        "G",
+        "W",
         "B",
-        "W"
+        "G"
       ],
       "tags": [
         "metagame"
@@ -457,16 +457,16 @@
           "name": "Concealed Courtyard"
         },
         {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
+          "count": 4,
+          "name": "Fatal Push"
         },
         {
           "count": 4,
           "name": "Cache Grab"
         },
         {
-          "count": 4,
-          "name": "Multiversal Passage"
+          "count": 1,
+          "name": "Emptiness"
         },
         {
           "count": 4,
@@ -474,11 +474,11 @@
         },
         {
           "count": 4,
-          "name": "Formidable Speaker"
+          "name": "Blooming Marsh"
         },
         {
-          "count": 1,
-          "name": "Caves of Koilos"
+          "count": 4,
+          "name": "Formidable Speaker"
         },
         {
           "count": 4,
@@ -486,7 +486,11 @@
         },
         {
           "count": 1,
-          "name": "Forest"
+          "name": "Plains"
+        },
+        {
+          "count": 1,
+          "name": "Swamp"
         },
         {
           "count": 1,
@@ -497,20 +501,24 @@
           "name": "Parhelion II"
         },
         {
-          "count": 1,
-          "name": "Swamp"
+          "count": 4,
+          "name": "Multiversal Passage"
         },
         {
-          "count": 3,
+          "count": 4,
           "name": "Professor of Symbology"
         },
         {
           "count": 1,
-          "name": "Jennifer Walters"
+          "name": "Takenuma, Abandoned Mire"
         },
         {
           "count": 1,
-          "name": "Takenuma, Abandoned Mire"
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
         },
         {
           "count": 3,
@@ -518,37 +526,25 @@
         },
         {
           "count": 1,
-          "name": "Emptiness"
-        },
-        {
-          "count": 4,
-          "name": "Blooming Marsh"
+          "name": "Yathan Roadwatcher"
         },
         {
           "count": 1,
-          "name": "Selfless Savior"
+          "name": "Jennifer Walters"
         },
         {
           "count": 1,
-          "name": "Plains"
+          "name": "Caves of Koilos"
         },
         {
           "count": 4,
           "name": "Temple Garden"
-        },
-        {
-          "count": 1,
-          "name": "Yathan Roadwatcher"
-        },
-        {
-          "count": 4,
-          "name": "Thoughtseize"
         }
       ],
       "sideboard": [
         {
-          "count": 2,
-          "name": "Duress"
+          "count": 1,
+          "name": "Ral Zarek, Guest Lecturer"
         },
         {
           "count": 1,
@@ -563,16 +559,12 @@
           "name": "Origin of Metalbending"
         },
         {
-          "count": 1,
-          "name": "Beza, the Bounding Spring"
-        },
-        {
-          "count": 1,
-          "name": "Remorseful Cleric"
-        },
-        {
           "count": 3,
           "name": "Abrupt Decay"
+        },
+        {
+          "count": 4,
+          "name": "Thoughtseize"
         },
         {
           "count": 1,
@@ -580,15 +572,11 @@
         },
         {
           "count": 1,
-          "name": "Ruinous Waterbending"
-        },
-        {
-          "count": 1,
-          "name": "Grand Abolisher"
+          "name": "Professor Dellian Fel"
         },
         {
           "count": 2,
-          "name": "Ral Zarek, Guest Lecturer"
+          "name": "Pest Control"
         }
       ]
     },
