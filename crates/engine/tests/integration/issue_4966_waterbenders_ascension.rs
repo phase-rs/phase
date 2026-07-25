@@ -3,8 +3,13 @@
 //! actually made the targeted creature unblockable, because the engine
 //! wrongly refused to let the player activate it in the first place.
 //!
-//! Oracle text (verified against `data/mtgish-cards.json`, card
-//! "Waterbender Ascension"):
+//! Oracle text (reconstructed prose — `data/mtgish-cards.json` stores typed
+//! rule trees, not prose; the "Waterbender Ascension" entry there was
+//! checked instead: an activated ability with cost
+//! `{"_Cost":"Waterbend","args":[{"_ManaSymbol":"ManaCostGeneric","args":4}]}`
+//! and a `CreatePermanentRuleEffectUntil` / `CantBeBlocked` /
+//! `UntilEndOfTurn` action on a target creature; the reminder text below is
+//! the CR 701.67a wording from `docs/MagicCompRules.txt`):
 //! "Whenever a creature you control deals combat damage to a player, put a
 //! quest counter on this enchantment. Then if it has four or more quest
 //! counters on it, draw a card.
@@ -39,8 +44,11 @@
 //! effect: the targeted creature must actually become unblockable, both
 //! when the cost is pool-funded and when it's paid via real tap-to-help.
 
+use engine::ai_support::legal_actions;
+use engine::game::casting::can_activate_ability_now;
 use engine::game::combat::{can_block_pair, AttackTarget};
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::ability::AbilityTag;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -317,5 +325,98 @@ fn waterbend_spell_only_mana_does_not_make_ability_available() {
         "spell-only mana must not satisfy the activation affordability gate — \
          offering this activation would strand the player in an unpayable \
          ManaPayment window; got {result:?}"
+    );
+}
+
+/// Tag-scoped sibling of direction (a), at the OFFER gate — maintainer review
+/// on PR #6097, round 2.
+///
+/// CR 106.6: `ManaRestriction::OnlyForTaggedActivation(tag)` mana is spendable
+/// only when the activated ability's `ability_tag` matches. There are TWO
+/// activation affordability authorities:
+///   - the submit gate (`handle_activate_ability` →
+///     `activation_cost_passes_early_affordability_gate` →
+///     `is_payable_for_activation`), and
+///   - the offer gate (`can_activate_ability_now` → `can_pay_ability_cost_now`
+///     → `costs::can_pay`'s `PaymentScope::Activation` arm).
+/// If the offer gate drops the tag (probing `is_payable` with `None`),
+/// tag-scoped mana is invisible to it: the ability is never generated as a
+/// legal action for the UI/AI even though submitting `ActivateAbility`
+/// directly would succeed — the same false-unactivatable symptom class as
+/// issue #4966, one gate upstream. This test therefore asserts the activation
+/// is OFFERED (via `legal_actions` and `can_activate_ability_now`), not
+/// merely accepted on submit, then drives it end to end.
+#[test]
+fn tagged_waterbend_with_tag_scoped_mana_is_offered_as_legal_action() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // A PowerUp-tagged Waterbend ability, built through the real parser
+    // ("Power-up — <cost>: <effect>" sets `ability_tag = Some(PowerUp)` and
+    // parses the cost text as `AbilityCost::Waterbend`).
+    let ascension = scenario
+        .add_creature(P0, "Waterbender Ascension", 0, 0)
+        .as_enchantment()
+        .from_oracle_text(
+            "Power-up \u{2014} Waterbend {4}: Target creature can't be blocked this turn.",
+        )
+        .with_mana_cost(ManaCost::NoCost)
+        .id();
+
+    let attacker = scenario.add_creature(P0, "Swift Raider", 2, 2).id();
+    let blocker = scenario.add_creature(P1, "Guard", 2, 2).id();
+
+    // The ONLY funding: 4 colorless restricted to PowerUp-tagged activations.
+    // No helpers to tap (the two creatures are needed as target/blocker, and
+    // tap-to-help is not what is under test), no other mana sources.
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(9_999),
+                false,
+                vec![ManaRestriction::OnlyForTaggedActivation(
+                    AbilityTag::PowerUp
+                )],
+            );
+            4
+        ],
+    );
+
+    let mut runner = scenario.build();
+
+    let ability_index = runner.state().objects[&ascension]
+        .abilities
+        .iter()
+        .position(|a| a.ability_tag == Some(AbilityTag::PowerUp))
+        .expect("parser must produce a PowerUp-tagged activated ability");
+
+    assert!(
+        can_activate_ability_now(runner.state(), P0, ascension, ability_index),
+        "offer gate: can_activate_ability_now must see PowerUp-tag-scoped mana \
+         as funding for a PowerUp-tagged Waterbend activation (costs::can_pay's \
+         activation arm must thread ability_tag into is_payable_for_activation)"
+    );
+    assert!(
+        legal_actions(runner.state()).iter().any(|action| matches!(
+            action,
+            GameAction::ActivateAbility { source_id, ability_index: idx }
+                if *source_id == ascension && *idx == ability_index
+        )),
+        "legal-action generation must OFFER the tagged Waterbend activation \
+         when its only funding is OnlyForTaggedActivation(PowerUp) mana"
+    );
+
+    // And the offered action is genuinely playable end to end.
+    runner
+        .activate(ascension, ability_index)
+        .target_object(attacker)
+        .resolve();
+
+    assert!(
+        !can_block_pair(runner.state(), blocker, attacker),
+        "the offered tagged Waterbend activation must resolve: tag-scoped mana \
+         funds it and the targeted creature becomes unblockable"
     );
 }
