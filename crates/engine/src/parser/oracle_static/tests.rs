@@ -1801,6 +1801,16 @@ fn cost_mod_power_gate_bare_eq() {
     );
 }
 
+/// A cost-modifier power qualifier is all-consuming: an unmodeled trailing rider
+/// must remain unsupported rather than silently broadening the reducer.
+#[test]
+fn cost_mod_power_gate_rejects_unparsed_trailing_rider() {
+    assert!(parse_static_line(
+        "Creature spells you cast with power 4 or greater and with flying cost {1} less to cast."
+    )
+    .is_none());
+}
+
 /// CONTROL (#6375): the fix only touches the cost-modifier subject parser — the
 /// attack-trigger parser is untouched. Goreclaw's whole Oracle text still parses
 /// its ATTACK trigger's affected filter to the same `PtComparison{ Power, GE, 4 }`

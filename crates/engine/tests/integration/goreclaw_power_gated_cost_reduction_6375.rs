@@ -41,10 +41,8 @@ const GORECLAW_COST_LINE: &str =
 /// put each named REAL card into P0's hand (printed power comes from the card face),
 /// and return the generic mana component the production cost path reports for each.
 ///
-/// Returns `None` when the shared card database is unavailable (keeps the test
-/// inert in environments without the fixture, mirroring the repo convention).
-fn goreclaw_generics(spell_names: &[&str]) -> Option<Vec<u32>> {
-    let db = shared_card_db()?;
+fn goreclaw_generics(spell_names: &[&str]) -> Vec<u32> {
+    let db = shared_card_db().expect("Goreclaw regression requires the integration card fixture");
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -83,7 +81,7 @@ fn goreclaw_generics(spell_names: &[&str]) -> Option<Vec<u32>> {
             }
         })
         .collect();
-    Some(generics)
+    generics
 }
 
 /// CR 208.1 + CR 601.2f (#6375): a creature spell with power CLEARLY greater than 4
@@ -95,9 +93,7 @@ fn goreclaw_generics(spell_names: &[&str]) -> Option<Vec<u32>> {
 /// reduces everything) — the sibling NOT-reduced tests are the revert-guards.
 #[test]
 fn power_five_creature_spell_is_reduced_by_two() {
-    let Some(generics) = goreclaw_generics(&["Fire Elemental"]) else {
-        return;
-    };
+    let generics = goreclaw_generics(&["Fire Elemental"]);
     assert_eq!(
         generics[0], 1,
         "a power-5 creature spell must be reduced by {{2}} (generic 3 → 1)"
@@ -115,9 +111,7 @@ fn power_five_creature_spell_is_reduced_by_two() {
 /// static.
 #[test]
 fn power_three_creature_spell_is_not_reduced() {
-    let Some(generics) = goreclaw_generics(&["Hill Giant", "Fire Elemental"]) else {
-        return;
-    };
+    let generics = goreclaw_generics(&["Hill Giant", "Fire Elemental"]);
     assert_eq!(
         generics[0], 3,
         "a power-3 creature spell must NOT be reduced (power 3 < 4); reverting the \
@@ -139,9 +133,7 @@ fn power_three_creature_spell_is_not_reduced() {
 /// creature spell) is reduced 3→1 on the same board.
 #[test]
 fn noncreature_spell_is_not_reduced() {
-    let Some(generics) = goreclaw_generics(&["Arc Lightning", "Fire Elemental"]) else {
-        return;
-    };
+    let generics = goreclaw_generics(&["Arc Lightning", "Fire Elemental"]);
     assert_eq!(
         generics[0], 2,
         "a noncreature spell must NOT be reduced (type gate); reverting the filter \
@@ -161,9 +153,7 @@ fn noncreature_spell_is_not_reduced() {
 /// value against a real printed-power (exactly 4) creature face.
 #[test]
 fn power_exactly_four_creature_spell_is_reduced_boundary() {
-    let Some(generics) = goreclaw_generics(&["Onakke Ogre"]) else {
-        return;
-    };
+    let generics = goreclaw_generics(&["Onakke Ogre"]);
     assert_eq!(
         generics[0], 0,
         "a power-4 creature spell must be reduced by {{2}} (GE boundary; generic 2 → 0)"

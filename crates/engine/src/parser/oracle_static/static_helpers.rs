@@ -141,11 +141,16 @@ fn parse_cost_mod_power_qualifier(prefix: &str) -> OracleResult<'_, (&str, Filte
     let (rest, prop) = nom_filter::parse_pt_comparison(rest.trim_start())?;
     Ok((rest, (before, prop)))
 }
-fn strip_cost_mod_power_qualifier(prefix: &str) -> (&str, Option<FilterProp>) {
-    match parse_cost_mod_power_qualifier(prefix) {
-        Ok((_, (before, prop))) => (before, Some(prop)),
-        Err(_) => (prefix, None),
+fn strip_cost_mod_power_qualifier(prefix: &str) -> Option<(&str, Option<FilterProp>)> {
+    if take_until::<_, _, OracleError<'_>>(" with power ")
+        .parse(prefix)
+        .is_err()
+    {
+        return Some((prefix, None));
     }
+
+    let (rest, (before, prop)) = parse_cost_mod_power_qualifier(prefix).ok()?;
+    rest.trim().is_empty().then_some((before, Some(prop)))
 }
 
 /// Compose an optional qualifier `FilterProp` — a mana-value `Cmc` (from
@@ -704,7 +709,7 @@ pub(crate) fn try_parse_cost_modification(
         // the same way. Without peeling, the gate sits after the "spells you cast"
         // infix and blocks the type trims, dropping the whole type+power restriction
         // (spell_filter came out null and EVERY spell was reduced — #6375).
-        let (without_chosen, power_prop) = strip_cost_mod_power_qualifier(without_chosen);
+        let (without_chosen, power_prop) = strip_cost_mod_power_qualifier(without_chosen)?;
         let type_desc = without_chosen
             .trim_end_matches(" you cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
             .trim_end_matches(" your opponents cast") // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
