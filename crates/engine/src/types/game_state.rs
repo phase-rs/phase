@@ -9901,8 +9901,8 @@ impl WaitingFor {
     ///   response, so the guard checks `pending` for at least one such entry
     ///   rather than gating on the whole variant unconditionally (a mixed
     ///   pending set can have some players still in `Declare`).
-    ///   `OpeningHandBottomCards` (TL:R 906.6a/e forced pregame bottoming) has
-    ///   no `Declare` sub-state — every pending entry is unconditionally a
+    ///   The Tiny Leaders format extension's forced pregame bottoming has no
+    ///   `Declare` sub-state — every pending entry is unconditionally a
     ///   bottom-cards obligation — so that variant is freeform unconditionally.
     ///   Both resolve through the same order-insensitive `validate_bottom_selection`
     ///   (count + hand-membership only; see `game/mulligan.rs`).
@@ -20286,8 +20286,9 @@ mod tests {
             free_first_mulligan: false,
         }
         .accepts_freeform_card_selection());
-        // TL:R 906.6a/e: opening-hand forced bottoming is unconditionally
-        // freeform — every pending entry is a bottom-cards obligation.
+        // The Tiny Leaders format extension's opening-hand forced bottoming is
+        // unconditionally freeform — every pending entry is a bottom-cards
+        // obligation.
         assert!(WaitingFor::OpeningHandBottomCards {
             pending: vec![MulliganBottomEntry {
                 player: PlayerId(0),

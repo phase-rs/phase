@@ -3316,16 +3316,15 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert!(library_after.contains(&a));
-        assert!(library_after.contains(&b));
+        assert_eq!(&library_after[library_after.len() - 2..], &[b, a]);
     }
 
-    /// TL:R 906.6a/e: forced opening-hand bottoming (e.g. Tiny Leaders extra
-    /// commanders) is likewise a freeform, order-insensitive selection. Before
-    /// the freeform-skip fix (GH #6342) a reordered selection was rejected as
-    /// "Illegal action". The server must bypass the candidate gate for
-    /// `OpeningHandBottomCards` and let `handle_opening_hand_bottom` validate
-    /// it structurally.
+    /// The Tiny Leaders format extension's forced opening-hand bottoming (for
+    /// example, extra commanders) is likewise a freeform, order-preserving
+    /// selection. Before the freeform-skip fix (GH #6342) a reordered selection
+    /// was rejected as "Illegal action". The server must bypass the candidate
+    /// gate for `OpeningHandBottomCards` and let `handle_opening_hand_bottom`
+    /// validate it structurally.
     #[test]
     fn reordered_opening_hand_bottom_selection_is_accepted_not_rejected_as_illegal() {
         use engine::game::zones::create_object;
@@ -3391,8 +3390,7 @@ mod tests {
             .iter()
             .copied()
             .collect();
-        assert!(library_after.contains(&a));
-        assert!(library_after.contains(&b));
+        assert_eq!(&library_after[library_after.len() - 2..], &[b, a]);
     }
 
     /// CR 702.19b: a single-blocker trample attacker's controller may keep all
