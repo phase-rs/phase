@@ -91,7 +91,11 @@ const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
 // A token-heavy battlefield is already expensive well before a thousand objects,
 // so keep normal search for ordinary games while routing pathological boards
 // through the bounded, policy-scored priority path.
-const LARGE_BOARD_FAST_PRIORITY_OBJECTS: usize = 128;
+const LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS: usize = 128;
+
+fn has_large_battlefield(state: &GameState) -> bool {
+    state.battlefield.len() >= LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS
+}
 
 fn pick_lowest_value_sacrifices(
     state: &GameState,
@@ -302,7 +306,7 @@ fn large_board_main_phase_has_no_development_sources(
     state: &GameState,
     ai_player: PlayerId,
 ) -> bool {
-    if state.objects.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+    if !has_large_battlefield(state)
         || state.active_player != ai_player
         || !state.stack.is_empty()
         || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
@@ -571,7 +575,7 @@ fn large_board_main_phase_fast_action_from_actions(
         return None;
     };
     if player != ai_player
-        || state.objects.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+        || !has_large_battlefield(state)
         || state.active_player != ai_player
         || !state.stack.is_empty()
         || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
@@ -588,26 +592,40 @@ fn large_board_main_phase_fast_action_from_actions(
     let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
     let policies = PolicyRegistry::shared();
 
-    decision
+    let candidates = decision
         .candidates
         .iter()
+        // `flat_priority_actions` is the engine's complete legal-action set;
+        // retain only those candidates before applying the same tactical and
+        // loop-safety gates that the normal scoring path uses.
         .filter(|candidate| actions.contains(&candidate.action))
+        .cloned()
+        .collect();
+    let candidates = gate_candidates(state, &decision, candidates, ai_player, config, &context);
+
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            priority_action_is_allowed_by_loop_guards(state, ai_player, &candidate.candidate.action)
+        })
         .map(|candidate| {
-            let baseline = match candidate.action {
+            let penalty = candidate.penalty;
+            let candidate = candidate.candidate;
+            let baseline = match &candidate.action {
                 GameAction::CastSpell { object_id, .. } => evaluate_card_value(state, object_id),
                 _ => 0.0,
             };
             let tactical = policies.score(&PolicyContext {
                 state,
                 decision: &decision,
-                candidate,
+                candidate: &candidate,
                 ai_player,
                 config,
                 context: &context,
                 cast_facts: cast_facts_for_action(state, &candidate.action, ai_player),
                 search_depth: SearchDepth::Root,
             });
-            (candidate.action.clone(), baseline + tactical)
+            (candidate.action, baseline + tactical + penalty)
         })
         .filter(|(_, score)| score.is_finite())
         .max_by(|(left_action, left_score), (right_action, right_score)| {
@@ -1881,6 +1899,61 @@ pub fn score_candidates_with_session(
     out
 }
 
+/// Reject repeatable priority actions that would re-enter known AI loops.
+///
+/// `cancelled_casts` and `pending_activations` clear on PassPriority;
+/// `activated_abilities_this_turn` clears on turn change. CR 117.1b permits
+/// unbounded activation at priority, so the activation and same-card cast caps
+/// are AI-pathology safeguards rather than game rules.
+fn priority_action_is_allowed_by_loop_guards(
+    state: &GameState,
+    ai_player: PlayerId,
+    action: &GameAction,
+) -> bool {
+    match action {
+        GameAction::CastSpell { object_id, .. } => {
+            if state.cancelled_casts.contains(object_id) {
+                return false;
+            }
+            // CR 117.1 + #563: `SpellCastRecord.name` preserves the card name
+            // after its object left the stack, so identical cards share the cap.
+            let candidate_name = state
+                .objects
+                .get(object_id)
+                .map(|object| object.name.as_str())
+                .unwrap_or("");
+            candidate_name.is_empty()
+                || state
+                    .spells_cast_this_turn_by_player
+                    .get(&ai_player)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .filter(|record| record.name == candidate_name)
+                            .count()
+                    })
+                    .unwrap_or(0)
+                    < MAX_CASTS_OF_SAME_CARD_PER_TURN
+        }
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => {
+            !state.cancelled_casts.contains(source_id)
+                && !state
+                    .pending_activations
+                    .contains(&(*source_id, *ability_index))
+                && state
+                    .activated_abilities_this_turn
+                    .get(&(*source_id, *ability_index))
+                    .copied()
+                    .unwrap_or(0)
+                    < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
+        }
+        _ => true,
+    }
+}
+
 /// Core scoring for a single (possibly determinized) state. Byte-identical to
 /// the pre-feature `score_candidates_with_session` except it threads a shared
 /// `deadline_override` into `PlannerServices` — `None` reproduces the old
@@ -1932,75 +2005,10 @@ fn score_candidates_core(
         &services.context,
     );
 
-    // Filter out (a) spells/abilities that were cast then cancelled this
-    // priority window (prevents cast→cancel→recast loops), (b) activated
-    // abilities whose prior activation is still pending on the stack
-    // (prevents re-picking the same ability before it resolves — a
-    // pathological softmax outcome when the effect is redundant or
-    // self-undoing), and (c) activated abilities that have been activated
-    // more than `MAX_ACTIVATIONS_PER_SOURCE_PER_TURN` times this turn on the
-    // same source (AI safety cap against loops where the effect is
-    // card-neutral — e.g. "Discard a card: gain indestructible UEOT" when
-    // the buff is already active and a discard-triggered draw replaces the
-    // discarded card). CR 117.1b permits unbounded activation at priority,
-    // and absent a CR 602.5b restriction there is no per-turn cap, so this
-    // cap is a pure AI-pathology mitigation — legitimate patterns of
-    // repeated same-source activation are extremely rare (tokens and
-    // mana-abilities have distinct per-activation identities or bypass
-    // this filter entirely).
-    //
-    // `cancelled_casts` and `pending_activations` clear on PassPriority;
-    // `activated_abilities_this_turn` clears on turn change.
     let mut gated: Vec<_> = gated
         .into_iter()
-        .filter(|g| match &g.candidate.action {
-            GameAction::CastSpell { object_id, .. } => {
-                if state.cancelled_casts.contains(object_id) {
-                    return false;
-                }
-                // CR 117.1 + #563: Cap repeated casts of the same card by name
-                // within a single turn. The AI player's
-                // `spells_cast_this_turn_by_player` record carries each cast's
-                // captured name (`SpellCastRecord.name`) so the cap survives
-                // the spell having left the stack. Lookups are case-sensitive
-                // matches against the candidate object's current name (set at
-                // creation from the card name).
-                let candidate_name = state
-                    .objects
-                    .get(object_id)
-                    .map(|o| o.name.as_str())
-                    .unwrap_or("");
-                if candidate_name.is_empty() {
-                    return true;
-                }
-                let cast_count = state
-                    .spells_cast_this_turn_by_player
-                    .get(&ai_player)
-                    .map(|history| {
-                        history
-                            .iter()
-                            .filter(|rec| rec.name == candidate_name)
-                            .count()
-                    })
-                    .unwrap_or(0);
-                cast_count < MAX_CASTS_OF_SAME_CARD_PER_TURN
-            }
-            GameAction::ActivateAbility {
-                source_id,
-                ability_index,
-            } => {
-                !state.cancelled_casts.contains(source_id)
-                    && !state
-                        .pending_activations
-                        .contains(&(*source_id, *ability_index))
-                    && state
-                        .activated_abilities_this_turn
-                        .get(&(*source_id, *ability_index))
-                        .copied()
-                        .unwrap_or(0)
-                        < MAX_ACTIVATIONS_PER_SOURCE_PER_TURN
-            }
-            _ => true,
+        .filter(|candidate| {
+            priority_action_is_allowed_by_loop_guards(state, ai_player, &candidate.candidate.action)
         })
         .collect();
     // Issue #4878: deterministic candidate order before scoring / search.
@@ -4240,9 +4248,15 @@ mod tests {
     #[test]
     fn large_board_main_phase_fast_action_uses_bounded_policy_scoring() {
         let mut state = make_state();
-        for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS {
             add_creature(&mut state, PlayerId(1), 1, 1);
         }
+        assert_eq!(
+            state.battlefield.len(),
+            LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS,
+            "the fixture must cross the fast-path battlefield threshold explicitly"
+        );
+        assert!(has_large_battlefield(&state));
         let cheap = add_spell_to_hand(&mut state, PlayerId(0), "Cheap Spell", 1);
         let expensive = add_spell_to_hand(&mut state, PlayerId(0), "Expensive Spell", 6);
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
@@ -4283,10 +4297,99 @@ mod tests {
     }
 
     #[test]
+    fn large_board_main_phase_fast_action_requires_battlefield_threshold() {
+        let mut state = make_state();
+        for _ in 0..(LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS - 1) {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        assert_eq!(
+            state.battlefield.len(),
+            LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS - 1,
+            "the fixture must remain below the fast-path battlefield threshold"
+        );
+        assert!(!has_large_battlefield(&state));
+        let spell = add_spell_to_hand(&mut state, PlayerId(0), "Spell", 1);
+        add_spell_to_hand(&mut state, PlayerId(0), "Filler", 1);
+        assert!(
+            state.objects.len() >= LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS,
+            "the object count alone must not admit the bounded path"
+        );
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(spell.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+        let config = AiConfig::default();
+        let session = AiSession::arc_from_game(&state);
+
+        assert_eq!(
+            large_board_main_phase_fast_action_from_actions(
+                &state,
+                PlayerId(0),
+                &actions,
+                &config,
+                &session,
+            ),
+            None,
+            "ordinary boards must continue through normal candidate scoring"
+        );
+    }
+
+    #[test]
+    fn large_board_main_phase_fast_action_honors_loop_guards() {
+        let mut state = make_state();
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS {
+            add_creature(&mut state, PlayerId(1), 1, 1);
+        }
+        let cheap = add_spell_to_hand(&mut state, PlayerId(0), "Cheap Spell", 1);
+        let cancelled = add_spell_to_hand(&mut state, PlayerId(0), "Cancelled Spell", 6);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
+        state.cancelled_casts.push(cancelled);
+        let actions = vec![
+            GameAction::PassPriority,
+            GameAction::CastSpell {
+                object_id: cheap,
+                card_id: CardId(cheap.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            GameAction::CastSpell {
+                object_id: cancelled,
+                card_id: CardId(cancelled.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+        ];
+        let config = AiConfig::default();
+        let session = AiSession::arc_from_game(&state);
+
+        assert_eq!(
+            large_board_main_phase_fast_action_from_actions(
+                &state,
+                PlayerId(0),
+                &actions,
+                &config,
+                &session,
+            ),
+            Some(GameAction::CastSpell {
+                object_id: cheap,
+                card_id: CardId(cheap.0),
+                targets: Vec::new(),
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            }),
+            "the bounded path must not re-cast a cancelled spell"
+        );
+    }
+
+    #[test]
     fn large_board_main_phase_fast_action_does_not_fire_off_turn() {
         let mut state = make_state();
         state.active_player = PlayerId(1);
-        for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
+        for _ in 0..LARGE_BOARD_FAST_PRIORITY_BATTLEFIELD_OBJECTS {
             add_creature(&mut state, PlayerId(1), 1, 1);
         }
         let spell = add_spell_to_hand(&mut state, PlayerId(0), "Spell", 1);
