@@ -472,7 +472,10 @@ const MAX_GAMES: usize = 100;
 // `lobby_broker::broker` — the broker enforces it inside `handle`.
 const RATE_LIMIT_MESSAGES: u32 = 30;
 const RATE_LIMIT_WINDOW_SECS: u64 = 1;
-const MAX_WS_MESSAGE_BYTES: usize = 8 * 1024; // 8 KB
+// A native Play-vs-AI setup carries the host deck and every AI deck in one
+// CreateGameWithSettings frame. Keep a bounded transport limit while allowing
+// a full multiplayer table's ordinary deck lists to reach the input guards.
+const MAX_WS_MESSAGE_BYTES: usize = 64 * 1024; // 64 KB
 
 /// Native [`BrokerEnv`] implementation: wall clock via `SystemTime`, tokens /
 /// codes via the `server_core` generators (which stay in `server-core` — they
@@ -6925,13 +6928,23 @@ mod full_create_guard_tests {
 mod issue_4548_full_create_tests {
     use super::*;
     use futures_util::{SinkExt, StreamExt};
-    use server_core::protocol::{ClientMessage, DeckData, ServerErrorCode, ServerMessage};
+    use phase_ai::config::AiDifficulty;
+    use server_core::protocol::{
+        AiSeatRequest, ClientMessage, DeckChoice, DeckData, ServerErrorCode, ServerMessage,
+    };
     use tokio::io::{AsyncRead, AsyncWrite};
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use tokio_tungstenite::WebSocketStream;
 
     fn empty_deck() -> DeckData {
         DeckData::default()
+    }
+
+    fn deck_with_main_entries(entries: usize) -> DeckData {
+        DeckData {
+            main_deck: vec!["Forest".to_string(); entries],
+            ..Default::default()
+        }
     }
 
     async fn spawn_full_mode_server() -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
@@ -7124,6 +7137,85 @@ mod issue_4548_full_create_tests {
         assert!(
             result.is_ok(),
             "full-mode create did not reject the invalid format deck"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_mode_accepts_native_multi_ai_setup_larger_than_eight_kib() {
+        let (url, server, _temp_dir) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: deck_with_main_entries(300),
+                display_name: "Alice".to_string(),
+                public: false,
+                password: None,
+                timer_seconds: None,
+                player_count: 3,
+                match_config: Default::default(),
+                ai_seats: vec![
+                    AiSeatRequest {
+                        seat_index: 1,
+                        difficulty: AiDifficulty::Medium,
+                        deck_name: None,
+                        deck: Some(DeckChoice::DeckList(Box::new(deck_with_main_entries(300)))),
+                    },
+                    AiSeatRequest {
+                        seat_index: 2,
+                        difficulty: AiDifficulty::Medium,
+                        deck_name: None,
+                        deck: Some(DeckChoice::DeckList(Box::new(deck_with_main_entries(300)))),
+                    },
+                ],
+                format_config: None,
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+            };
+            let create_json = serde_json::to_string(&create).expect("create json");
+            assert!(create_json.len() > 8 * 1024);
+            assert!(create_json.len() <= MAX_WS_MESSAGE_BYTES);
+            socket
+                .send(WsMessage::Text(create_json.into()))
+                .await
+                .expect("send create");
+
+            // The empty test card database rejects the deck, which proves the
+            // complete multi-AI frame passed WebSocket framing and reached the
+            // normal create-game validation path.
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::Error { .. }
+            ));
+        })
+        .await;
+        server.abort();
+
+        assert!(
+            result.is_ok(),
+            "native multi-AI setup frame did not reach server validation"
         );
     }
 }
