@@ -17,9 +17,13 @@ use crate::types::game_state::{
     PendingCounterMoveQueue, PendingCounterPostAction, PendingCounterRemovalQueue,
     PendingEffectResolutionEvent, PendingEffectResolved, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
+use crate::types::resolved_commands::{
+    ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
+    ResolvedObjectCounterReplayInvariantError,
+};
 
 /// CR 306.5c + CR 310.4c: After mutating the counter map, re-derive the
 /// `obj.loyalty` / `obj.defense` field so the counter count and the cached
@@ -89,6 +93,90 @@ pub(crate) fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
                 | CounterType::Keyword(_)
                 | CounterType::Generic(_)
         )
+}
+
+/// The replacement-aware result of previewing a counter addition.
+///
+/// This is intentionally an engine-internal decision fact rather than wire
+/// state: callers use it while evaluating a currently-bound action, so it must
+/// not be serialized or retained across object-incarnation changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterAdditionPreview {
+    /// The proposed count reaches the object unchanged.
+    Applied { count: u32 },
+    /// A replacement effect prevents the counter addition.
+    Prevented,
+    /// Replacement ordering or an optional replacement needs this player's choice.
+    ChoiceRequired { player: PlayerId },
+    /// Replacement effects change the proposed counter count.
+    Transformed { count: u32 },
+    /// A replacement rewrites the counter event into a different event class.
+    ///
+    /// The tactical preview cannot claim that the requested counter was added,
+    /// so consumers must handle this explicitly rather than treating it as an
+    /// absent preview.
+    Unsupported,
+}
+
+/// Preview an object-counter addition through the real replacement pipeline.
+///
+/// Returns `None` when `target` no longer identifies the same object
+/// incarnation. The replacement pipeline operates only on an isolated clone,
+/// so a tactical caller cannot add pending choices, events, or counters to the
+/// live game state.
+///
+/// CR 122.1 + CR 614.1: Counter placement is subject to applicable
+/// replacement effects before the event happens.
+pub fn preview_counter_addition(
+    state: &GameState,
+    actor: PlayerId,
+    target: ObjectIncarnationRef,
+    counter_type: CounterType,
+    count: u32,
+) -> Option<CounterAdditionPreview> {
+    let object = state.objects.get(&target.object_id)?;
+    if ObjectIncarnationRef::from_object(object) != target {
+        return None;
+    }
+    if count == 0 {
+        return Some(CounterAdditionPreview::Applied { count });
+    }
+
+    let proposed = ProposedEvent::AddCounter {
+        placement: CounterPlacement::Object {
+            actor,
+            object_id: target.object_id,
+            counter_type,
+        },
+        count,
+        applied: HashSet::new(),
+    };
+    let mut preview_state = state.clone();
+    let mut events = Vec::new();
+
+    match replacement::replace_event(&mut preview_state, proposed, &mut events) {
+        ReplacementResult::Execute(ProposedEvent::AddCounter {
+            count: resulting_count,
+            ..
+        }) if resulting_count == count => Some(CounterAdditionPreview::Applied {
+            count: resulting_count,
+        }),
+        ReplacementResult::Execute(ProposedEvent::AddCounter {
+            count: resulting_count,
+            ..
+        }) => Some(CounterAdditionPreview::Transformed {
+            count: resulting_count,
+        }),
+        // A replacement may redirect the event into a different event class.
+        // The counter-placement fact is explicitly unsupported rather than
+        // absent, so conservative tactical consumers cannot mistake it for a
+        // non-matching ability shape or stale object reference.
+        ReplacementResult::Execute(_) => Some(CounterAdditionPreview::Unsupported),
+        ReplacementResult::Prevented => Some(CounterAdditionPreview::Prevented),
+        ReplacementResult::NeedsChoice(player) => {
+            Some(CounterAdditionPreview::ChoiceRequired { player })
+        }
+    }
 }
 
 /// CR 614.1: Add a counter to an object through the replacement pipeline.
@@ -755,56 +843,150 @@ pub(crate) fn apply_counter_addition(
         return;
     }
 
-    let Some(obj) = state.objects.get_mut(&object_id) else {
-        return;
+    let (object, expected_old) = {
+        let Some(object) = state.objects.get(&object_id) else {
+            return;
+        };
+        (
+            ObjectIncarnationRef::from_object(object),
+            object.counters.get(&counter_type).copied().unwrap_or(0),
+        )
     };
-
-    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-    *entry += count;
-
-    // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
-    // sync with the counter map — the field IS the counter count.
-    sync_derived_from_counters(obj, &counter_type);
-
-    // CR 122.1: Drop stale zero-count keys left over from prior removals before
-    // recording the object snapshot so counter history never exposes absent
-    // markers as present entries.
-    crate::types::counter::prune_zero_counters(&mut obj.counters);
-
-    if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty.mark_full();
-    }
-
-    state.counter_added_this_turn.push(CounterAddedRecord {
-        actor,
-        object_id,
+    let command = ResolvedObjectCounterCommand {
+        object,
         counter_type: counter_type.clone(),
-        count,
-        name: obj.name.clone(),
-        core_types: obj.card_types.core_types.clone(),
-        subtypes: obj.card_types.subtypes.clone(),
-        supertypes: obj.card_types.supertypes.clone(),
-        keywords: obj.keywords.clone(),
-        power: obj.power,
-        toughness: obj.toughness,
-        // CR 709.4b + CR 202.3d: combined colors / mana value for a split card off
-        // the stack (no-op for single-face and battlefield Rooms, which gate out).
-        colors: obj.effective_colors(),
-        mana_value: obj.effective_mana_value(),
-        controller: obj.controller,
-        owner: obj.owner,
-        counters: obj
-            .counters
-            .iter()
-            .map(|(ct, n)| (ct.clone(), *n))
-            .collect(),
-    });
+        expected_old,
+        edit: ResolvedObjectCounterEdit::Add { actor, count },
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    if apply_resolved_counter_edit(state, &command).is_err() {
+        return;
+    }
+    state
+        .resolved_rules_journal
+        .record_object_counter(command)
+        .expect("resolved counter addition must have a live journal cause");
 
     events.push(GameEvent::CounterAdded {
         object_id,
         counter_type,
         count,
     });
+}
+
+/// CR 122.1 + CR 122.6: Apply one exact post-replacement counter delivery.
+///
+/// The command carries the recipient occurrence, prior count, final delivered
+/// count, and causal node. This applier never re-enters CR 614's replacement
+/// pipeline, so a retained-prefix replay cannot apply Vorinclex/Hardened
+/// Scales class replacements twice.
+pub fn apply_resolved_counter_edit(
+    state: &mut GameState,
+    command: &ResolvedObjectCounterCommand,
+) -> Result<(), ResolvedObjectCounterReplayInvariantError> {
+    let object = state.objects.get(&command.object.object_id).ok_or(
+        ResolvedObjectCounterReplayInvariantError::MissingObject(command.object),
+    )?;
+    let found_reference = ObjectIncarnationRef::from_object(object);
+    if found_reference != command.object {
+        return Err(ResolvedObjectCounterReplayInvariantError::StaleObject {
+            expected: command.object,
+            found: found_reference,
+        });
+    }
+    let found_count = object
+        .counters
+        .get(&command.counter_type)
+        .copied()
+        .unwrap_or(0);
+    if found_count != command.expected_old {
+        return Err(
+            ResolvedObjectCounterReplayInvariantError::CounterPreconditionMismatch {
+                counter_type: command.counter_type.clone(),
+                expected: command.expected_old,
+                found: found_count,
+            },
+        );
+    }
+
+    let affects_layers = counter_type_affects_layers(&command.counter_type);
+    let added_record = {
+        let object = state.objects.get_mut(&command.object.object_id).ok_or(
+            ResolvedObjectCounterReplayInvariantError::MissingObject(command.object),
+        )?;
+        match &command.edit {
+            ResolvedObjectCounterEdit::Add { actor, count } => {
+                if *count == 0 {
+                    return Err(ResolvedObjectCounterReplayInvariantError::ZeroCount);
+                }
+                let next = command.expected_old.checked_add(*count).ok_or(
+                    ResolvedObjectCounterReplayInvariantError::CounterOverflow {
+                        counter_type: command.counter_type.clone(),
+                        previous: command.expected_old,
+                        added: *count,
+                    },
+                )?;
+                object.counters.insert(command.counter_type.clone(), next);
+                sync_derived_from_counters(object, &command.counter_type);
+                crate::types::counter::prune_zero_counters(&mut object.counters);
+                Some(CounterAddedRecord {
+                    actor: *actor,
+                    object_id: object.id,
+                    counter_type: command.counter_type.clone(),
+                    count: *count,
+                    name: object.name.clone(),
+                    core_types: object.card_types.core_types.clone(),
+                    subtypes: object.card_types.subtypes.clone(),
+                    supertypes: object.card_types.supertypes.clone(),
+                    keywords: object.keywords.clone(),
+                    power: object.power,
+                    toughness: object.toughness,
+                    // CR 709.4b + CR 202.3d: combined colors / mana value for a
+                    // split card off the stack remain part of the event-time fact.
+                    colors: object.effective_colors(),
+                    mana_value: object.effective_mana_value(),
+                    controller: object.controller,
+                    owner: object.owner,
+                    counters: object
+                        .counters
+                        .iter()
+                        .map(|(counter_type, count)| (counter_type.clone(), *count))
+                        .collect(),
+                })
+            }
+            ResolvedObjectCounterEdit::Remove { count } => {
+                if *count == 0 {
+                    return Err(ResolvedObjectCounterReplayInvariantError::ZeroCount);
+                }
+                let next = command.expected_old.checked_sub(*count).ok_or(
+                    ResolvedObjectCounterReplayInvariantError::CounterPreconditionMismatch {
+                        counter_type: command.counter_type.clone(),
+                        expected: command.expected_old,
+                        found: *count,
+                    },
+                )?;
+                object.counters.insert(command.counter_type.clone(), next);
+                sync_derived_from_counters(object, &command.counter_type);
+
+                // CR 122.1 + CR 306.5c: A drained tracked planeswalker keeps a
+                // present zero loyalty key so layer re-derivation preserves 0.
+                let keep_zero = command.counter_type == CounterType::Loyalty && next == 0;
+                crate::types::counter::prune_zero_counters(&mut object.counters);
+                if keep_zero {
+                    object.counters.insert(command.counter_type.clone(), 0);
+                }
+                None
+            }
+        }
+    };
+
+    if affects_layers {
+        state.layers_dirty.mark_full();
+    }
+    if let Some(record) = added_record {
+        state.counter_added_this_turn.push(record);
+    }
+    Ok(())
 }
 
 /// CR 122.1: Apply an already-accepted counter removal, clamping to the number
@@ -816,54 +998,42 @@ pub(crate) fn apply_counter_removal(
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
-    let Some(obj) = state.objects.get_mut(&object_id) else {
+    if count == 0 {
         return;
+    }
+    let (object, expected_old) = {
+        let Some(object) = state.objects.get(&object_id) else {
+            return;
+        };
+        (
+            ObjectIncarnationRef::from_object(object),
+            object.counters.get(&counter_type).copied().unwrap_or(0),
+        )
     };
-
-    let was_present = obj.counters.contains_key(&counter_type);
-    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-    let removed = (*entry).min(count);
-    *entry = entry.saturating_sub(count);
-    let is_zero = *entry == 0;
-
-    // CR 306.5c / CR 310.4c: Keep obj.loyalty / obj.defense in
-    // sync with the counter map — the field IS the counter count.
-    sync_derived_from_counters(obj, &counter_type);
-
-    // CR 122.1: Zero-count entries are normally absent — prune so proliferate
-    // and other "has a counter" checks cannot resurrect removed counter types.
-    //
-    // EXCEPTION (CR 306.5c): loyalty is a characteristic-defining counter whose
-    // field IS the counter count, and the layer system RESETS obj.loyalty to
-    // base each evaluation then re-derives it from the counter map. Once the
-    // last loyalty counter is pruned, that re-derive can no longer tell "drained
-    // to 0" (must die, CR 704.5i) from "not counter-tracked, use the field"
-    // (a clone whose loyalty comes from the Copy layer). So a genuinely-tracked
-    // planeswalker drained to exactly 0 must KEEP its 0 entry — the present 0 is
-    // the signal the layer re-derive needs. A phantom 0 created by `or_insert`
-    // on a counter that was never present is still pruned, so un-counter-tracked
-    // objects correctly fall back to their field value. (Defense needs no such
-    // exception: the layer system never resets obj.defense, so a battle drained
-    // to 0 keeps defense 0 without help and the CR 704.5v SBA fires normally.)
-    let keep_zero = was_present && counter_type == CounterType::Loyalty && is_zero;
-    crate::types::counter::prune_zero_counters(&mut obj.counters);
-    if keep_zero {
-        obj.counters.insert(counter_type.clone(), 0);
+    let removed = expected_old.min(count);
+    if removed == 0 {
+        return;
     }
-
-    if counter_type_affects_layers(&counter_type) {
-        state.layers_dirty.mark_full();
+    let command = ResolvedObjectCounterCommand {
+        object,
+        counter_type: counter_type.clone(),
+        expected_old,
+        edit: ResolvedObjectCounterEdit::Remove { count: removed },
+        cause: state.current_or_begin_rules_execution_node(),
+    };
+    if apply_resolved_counter_edit(state, &command).is_err() {
+        return;
     }
+    state
+        .resolved_rules_journal
+        .record_object_counter(command)
+        .expect("resolved counter removal must have a live journal cause");
 
-    // CR 122.1: Only emit when counters were actually removed,
-    // matching the semantics of the legacy in-line path.
-    if removed > 0 {
-        events.push(GameEvent::CounterRemoved {
-            object_id,
-            counter_type,
-            count: removed,
-        });
-    }
+    events.push(GameEvent::CounterRemoved {
+        object_id,
+        counter_type,
+        count: removed,
+    });
 }
 
 /// CR 601.2h: Resolve a `CounterMatch` cost intent against the counters
@@ -2481,7 +2651,7 @@ mod tests {
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
@@ -2639,6 +2809,147 @@ mod tests {
                 ReplacementDefinition::new(ReplacementEvent::AddCounter)
                     .quantity_modification(QuantityModification::Plus { value: 1 }),
             );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_applied_without_mutating_live_state() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+        let before = state.clone();
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 2,),
+            Some(CounterAdditionPreview::Applied { count: 2 })
+        );
+        assert_eq!(
+            state, before,
+            "preview must not add counters, events, or replacement-choice state to the live game"
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_transformed_replacement_without_mutation() {
+        let mut state = GameState::new_two_player(42);
+        let doubler_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&doubler_id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::DOUBLE),
+            );
+        let target_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+        let before = state.clone();
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 2,),
+            Some(CounterAdditionPreview::Transformed { count: 4 })
+        );
+        assert_eq!(
+            state, before,
+            "replacement processing must remain clone-confined"
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_prevented_replacement() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Counter-Proof Target".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .valid_card(TargetFilter::SelfRef)
+                    .quantity_modification(QuantityModification::Prevent),
+            );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 1,),
+            Some(CounterAdditionPreview::Prevented)
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_reports_replacement_choice_required() {
+        let mut state = GameState::new_two_player(42);
+        install_noncommuting_counter_replacements(&mut state);
+        let target_id = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+
+        assert_eq!(
+            preview_counter_addition(&state, PlayerId(0), target, CounterType::Plus1Plus1, 1,),
+            Some(CounterAdditionPreview::ChoiceRequired {
+                player: PlayerId(0)
+            })
+        );
+    }
+
+    #[test]
+    fn preview_counter_addition_rejects_stale_object_incarnation() {
+        let mut state = GameState::new_two_player(42);
+        let target_id = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(0),
+            "Counter Preview Target".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_target = ObjectIncarnationRef::from_object(&state.objects[&target_id]);
+        state
+            .objects
+            .get_mut(&target_id)
+            .unwrap()
+            .bump_incarnation();
+
+        assert_eq!(
+            preview_counter_addition(
+                &state,
+                PlayerId(0),
+                stale_target,
+                CounterType::Plus1Plus1,
+                1,
+            ),
+            None,
+            "a tactical fact must not apply to a new object that reused the same id"
+        );
     }
 
     fn install_counter_removal_optional_replacement(state: &mut GameState) {
@@ -2924,6 +3235,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 2);
+    }
+
+    #[test]
+    fn zero_counter_delivery_is_an_ordinary_noop_without_a_command() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+
+        apply_counter_addition(
+            &mut state,
+            PlayerId(0),
+            obj_id,
+            CounterType::Plus1Plus1,
+            0,
+            &mut events,
+        );
+        apply_counter_removal(&mut state, obj_id, CounterType::Plus1Plus1, 0, &mut events);
+
+        assert!(state.objects[&obj_id].counters.is_empty());
+        assert!(events.is_empty());
+        assert!(state.resolved_rules_journal.entries().is_empty());
     }
 
     #[test]

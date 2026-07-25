@@ -835,6 +835,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
@@ -993,6 +994,11 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::Saddled { .. }
         | GameEvent::ReplacementApplied { .. }
         | GameEvent::Transformed { .. }
+        // No printed flip card has a trigger that fires on flipping (a design
+        // fact about the card pool, not a CR statement), so — like `Transformed`
+        // above — this event carries no per-object trigger subject in this
+        // generic helper.
+        | GameEvent::Flipped { .. }
         | GameEvent::Specialized { .. }
         | GameEvent::DayNightChanged { .. }
         | GameEvent::TurnedFaceUp { .. }

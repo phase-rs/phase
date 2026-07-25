@@ -127,6 +127,7 @@ export const HANDLED_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> =
     // choosing opponent (ZoneOpponentChooserModal).
     "ChooseFromZoneOpponentChooser",
     "ChooseAnnouncingOpponent",
+    "ChooseGiftRecipient",
     "ClashCardPlacement",
     // CR 702.132a: Assist — caster picks a helper (AssistChoosePlayerModal),
     // then the helper commits generic mana (AssistPaymentUI).

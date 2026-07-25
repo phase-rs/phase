@@ -2472,6 +2472,13 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
     parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
+/// CR 611.3a: The provenance-preserving entry, for the one caller that CAN bind
+/// the anaphor — `oracle_static`, whose `lower_static_ir` knows the affected set
+/// and so knows whether "it" names the source or each affected object.
+pub(crate) fn parse_for_each_clause_expr_deferred(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_clause_expr_with_parser(clause, parse_for_each_clause_deferred)
+}
+
 /// "Other spell(s) cast this turn" (Storm Entity class): all spells cast this
 /// turn by any player, excluding the resolving spell. Composes
 /// `SpellsCastThisTurn { scope: All }` with offset −1, clamped at zero.
@@ -2912,11 +2919,34 @@ fn parse_filtered_tracked_set_this_way(clause: &str) -> Option<QuantityRef> {
 }
 
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
+    let mut qty = parse_for_each_clause_deferred(clause)?;
+    // CR 608.2k: settle a deferred counter anaphor for every caller that has no
+    // antecedent to bind it to. Only `oracle_static`'s lowering knows the
+    // affected set, so it takes the `_deferred` entry below; for everyone else
+    // the pronoun names the ability's own object — exactly what `Source` meant
+    // before the scope started carrying provenance, so the AST is unchanged.
+    settle_deferred_counter_anaphor_ref(&mut qty);
+    Some(qty)
+}
+
+/// CR 611.3a: The provenance-preserving entry, for the one caller that CAN bind
+/// the anaphor — `oracle_static`, whose `lower_static_ir` knows the affected set
+/// and so knows whether "it" names the source or each affected object.
+pub(crate) fn parse_for_each_clause_deferred(clause: &str) -> Option<QuantityRef> {
     parse_for_each_clause_with_they_controller(
         clause,
         ControllerRef::ScopedPlayer,
         &ParseContext::default(),
     )
+}
+
+/// CR 608.2k: Collapse an unbound deferred counter anaphor back to `Source`.
+fn settle_deferred_counter_anaphor_ref(qty: &mut QuantityRef) {
+    if let QuantityRef::CountersOn { scope, .. } = qty {
+        if *scope == ObjectScope::Anaphoric {
+            *scope = ObjectScope::Source;
+        }
+    }
 }
 
 pub(crate) fn parse_for_each_clause_with_context(
@@ -2926,7 +2956,12 @@ pub(crate) fn parse_for_each_clause_with_context(
     let they_controller = ctx
         .third_person_player_controller_ref()
         .unwrap_or(ControllerRef::ScopedPlayer);
-    parse_for_each_clause_with_they_controller(clause, they_controller, ctx)
+    let mut qty = parse_for_each_clause_with_they_controller(clause, they_controller, ctx)?;
+    // CR 608.2k: same settle as `parse_for_each_clause` — this context-carrying
+    // entry has no antecedent for the pronoun either, so an unbound anaphor
+    // names the ability's own object.
+    settle_deferred_counter_anaphor_ref(&mut qty);
+    Some(qty)
 }
 
 fn parse_for_each_clause_with_they_controller(
@@ -3182,7 +3217,6 @@ fn parse_for_each_clause_with_they_controller(
         }
     }
 
-    // "[counter type] counter on ~" / "[counter type] counter on it"
     if clause.contains("counter on") {
         let raw_type = clause.split("counter").next().unwrap_or("").trim();
         if !raw_type.is_empty() {
@@ -3908,14 +3942,14 @@ mod tests {
 
     #[test]
     fn for_each_any_counter_on_self_type_phrase() {
-        // CR 122.1: "counter on this [type]" — untyped, source-scoped.
+        // CR 122.1: "counter on this [type]" / "counter on ~" — an EXPLICIT
+        // self-reference binds to the source at parse time.
         // Gavel of the Righteous: "gets +1/+1 for each counter on this Equipment."
         for phrase in [
             "counter on this equipment",
             "counter on this artifact",
             "counter on this permanent",
             "counter on ~",
-            "counter on it",
             "counters on this equipment",
         ] {
             let qty = parse_for_each_clause(phrase);
@@ -3932,13 +3966,48 @@ mod tests {
         }
     }
 
+    /// CR 608.2k: the bare pronoun defers instead — `lower_static_ir` binds it
+    /// to the recipient for a per-recipient anthem (Luxior, Giada's Gift:
+    /// "Equipped creature gets +1/+1 for each counter on it") and to the source
+    /// when the static modifies only the object printing it.
+    #[test]
+    fn for_each_any_counter_on_pronoun_defers() {
+        let qty = parse_for_each_clause_deferred("counter on it");
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityRef::CountersOn {
+                    scope: ObjectScope::Anaphoric,
+                    counter_type: None,
+                })
+            ),
+            "expected CountersOn{{Anaphoric, None}}, got {qty:?}"
+        );
+    }
+
+    #[test]
+    fn plain_for_each_counter_pronoun_settles_to_source() {
+        let qty = parse_for_each_clause("counter on it");
+        assert!(
+            matches!(
+                qty,
+                Some(QuantityRef::CountersOn {
+                    scope: ObjectScope::Source,
+                    counter_type: None,
+                })
+            ),
+            "plain entry must settle the pronoun to Source, got {qty:?}"
+        );
+    }
+
     #[test]
     fn for_each_singular_counter_on_self() {
-        // Singular "counter on ~" (not "counters on ~")
-        let qty = parse_for_each_clause("blight counter on it").unwrap();
+        // Singular "counter on it" (not "counters on it") — same deferred
+        // referent, exercising the singular arm of the counter-word axis.
+        let qty = parse_for_each_clause_deferred("blight counter on it").unwrap();
         assert!(
-            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Source, counter_type: Some(ref counter_type) } if *counter_type == CounterType::Generic("blight".to_string())),
-            "singular counter form should produce CountersOnSelf"
+            matches!(qty, QuantityRef::CountersOn { scope: ObjectScope::Anaphoric, counter_type: Some(ref counter_type) } if *counter_type == CounterType::Generic("blight".to_string())),
+            "singular counter form should defer the pronoun, got {qty:?}"
         );
     }
 

@@ -293,6 +293,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -520,6 +521,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -823,6 +825,9 @@ pub(crate) fn rebind_interaction_slots_after_action(
 }
 
 pub(crate) fn debug_assert_interaction_consistency(state: &GameState) {
+    #[cfg(not(debug_assertions))]
+    let _ = state;
+
     #[cfg(debug_assertions)]
     {
         if state
@@ -3239,6 +3244,7 @@ fn selection_projection(
         | WaitingFor::ClashChooseOpponent { .. }
         | WaitingFor::ChooseFromZoneOpponentChooser { .. }
         | WaitingFor::ChooseAnnouncingOpponent { .. }
+        | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
@@ -3859,7 +3865,8 @@ fn project_action_payload(
         GameAction::ChooseClashOpponent { opponent }
         | GameAction::ChooseZoneOpponentChooser { opponent }
         | GameAction::ChoosePileOpponent { opponent }
-        | GameAction::ChooseAnnouncingOpponent { opponent } => {
+        | GameAction::ChooseAnnouncingOpponent { opponent }
+        | GameAction::ChooseGiftRecipient { opponent } => {
             push_player_surface(surfaces, *opponent, InteractionRoleCode::Opponent)
         }
         GameAction::ChooseAssistPlayer { player } => {
@@ -4542,6 +4549,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::ChooseAnnouncingOpponent { .. } => {
             InteractionActionCode::ChooseAnnouncingOpponent
         }
+        GameAction::ChooseGiftRecipient { .. } => InteractionActionCode::ChooseGiftRecipient,
         GameAction::ChooseAssistPlayer { .. } => InteractionActionCode::ChooseAssistPlayer,
         GameAction::CommitAssistPayment { .. } => InteractionActionCode::CommitAssistPayment,
         GameAction::MulliganDecision { .. } => InteractionActionCode::MulliganDecision,

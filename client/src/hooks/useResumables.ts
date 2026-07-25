@@ -5,6 +5,11 @@ import { persistedGameStateView } from "../adapter/types";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadWsSession } from "../services/multiplayerSession";
 import {
+  canAttemptNativeEngine,
+  nativeEngineKeyForCurrentOrigin,
+} from "../services/nativeEngine";
+import { usePreferencesStore } from "../stores/preferencesStore";
+import {
   loadActiveQuickDraft,
   type ActiveQuickDraftMeta,
 } from "../services/quickDraftPersistence";
@@ -79,6 +84,22 @@ export function useResumables(): Resumables {
         if (session) setMatch(saved);
         else clearActiveGame();
       });
+    } else if (saved.nativeSession) {
+      // Native solo (AI) games are server-authoritative: their state lives in
+      // the local phase-server, not IndexedDB, so there is no snapshot to
+      // validate against here. The reconnect on resume is the real validation.
+      // No matchSummary — turn/life aren't available client-side until we
+      // reconnect, so the resume hero shows the match without a board snapshot.
+      //
+      // Only offer it when the native engine can actually be attached
+      // (enabled + available for this origin). Resuming routes back through the
+      // native path, which needs the engine; if it is unavailable the resume
+      // would dead-end at a fresh in-browser game. Keep the pointer silently so
+      // the resume reappears once native is available again — don't clear it.
+      const nativeAvailable =
+        canAttemptNativeEngine(usePreferencesStore.getState().nativeEngineEnabled)
+        && nativeEngineKeyForCurrentOrigin() !== null;
+      if (nativeAvailable) setMatch(saved);
     } else {
       loadGame(saved.id).then((state) => {
         if (cancelled) return;

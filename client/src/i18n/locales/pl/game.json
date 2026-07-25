@@ -248,6 +248,7 @@
     "target": "Cel",
     "copy": "Kopia",
     "copyTooltip": "Kopia tokenowa prawdziwej karty",
+    "cantBeBlocked": "Nie może zostać zablokowana",
     "ringBearer": "Pierścień",
     "ringBearerTooltip": "Powiernik Pierścienia",
     "hiddenAttachments": "+{{count}} more attached",
@@ -662,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Musi zablokować {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1709,6 +1711,23 @@
     "targetLand": "cel lądu",
     "targetCreature": "cel stwora",
     "targetChoice": "ten wybór celu"
+  },
+  "giftRecipient": {
+    "title": "Wybierz odbiorcę prezentu",
+    "subtitle": "Wybierz przeciwnika, który otrzyma obiecany prezent."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Obiecać prezent?",
+      "pay": "Obiecaj {{gift}}",
+      "decline": "Rzuć bez obietnicy",
+      "kind": {
+        "card": "kartę",
+        "treasure": "Skarb",
+        "food": "Pożywienie",
+        "tappedFish": "zakręconą Rybę"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Wybierz przeciwnika do starcia",

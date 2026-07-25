@@ -1,5 +1,5 @@
 use rand::Rng;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::types::ability::{EffectKind, KeywordAction, TargetRef};
@@ -21,6 +21,10 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 #[cfg(debug_assertions)]
 use crate::types::resolution::debug_assert_runtime_resolution_invariants;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+    ResolvedRulesCommand,
+};
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -292,6 +296,8 @@ pub(super) fn apply_action_boundary_with_stack_limit(
 ) -> Result<ActionResult, EngineError> {
     mana_sources::preflight_tap_land_action(state, semantic_owner, &action)?;
     let boundary_snapshot = state.clone();
+    let journal_start = state.resolved_rules_journal.entries().len();
+    let is_actor_scoped_preference = action.is_actor_scoped_preference();
     interaction::ensure_interaction_authority(state);
     let previous_interaction_waiting = state.waiting_for.clone();
     let previous_interaction_slots = state.active_interaction_slots.clone();
@@ -309,11 +315,14 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     state.exiled_from_hand_this_resolution = 0;
     state.die_result_this_resolution = None;
     state.consumed_before_priority_trigger_events.clear();
-    check_actor_authorization(state, authenticated_actor, &action)?;
+    if let Err(err) = check_actor_authorization(state, authenticated_actor, &action) {
+        *state = boundary_snapshot;
+        return Err(err);
+    }
     let mut result = match apply_action(state, semantic_owner, action, stack_resolution_limit) {
         Ok(result) => result,
         Err(err) => {
-            state.consumed_before_priority_trigger_events.clear();
+            *state = boundary_snapshot;
             return Err(err);
         }
     };
@@ -321,13 +330,17 @@ pub(super) fn apply_action_boundary_with_stack_limit(
     reconcile_terminal_result(state, &mut result);
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
-    let auto_pass_advanced = run_auto_pass_loop(state, &mut result);
+    let auto_pass_advanced = if is_actor_scoped_preference {
+        false
+    } else {
+        run_auto_pass_loop(state, &mut result)
+    };
     reconcile_terminal_result(state, &mut result);
     // Debug "infinite mana" (CR 500.5 suppressed for flagged players): restore any
     // pool that a spend during this action depleted, before public state is
     // finalized and the next affordability probe runs. No-op when none flagged.
     super::mana_payment::refill_infinite_mana(state);
-    remember_public_reveals(state, &result.events);
+    remember_public_reveals(state, &result.events, journal_start);
     // Targeted public-state dirty marking over the full accumulated event set
     // (the auto-pass loop appends events). `finalize_public_state` is the only
     // consumer of `public_state_dirty`, so marking once here over the complete
@@ -2963,10 +2976,48 @@ fn handle_respond_to_shortcut(
     Ok(result)
 }
 
-fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
+fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_start: usize) {
+    // The journal is truncated at turn boundaries, so an action that
+    // auto-advances across a turn leaves `journal_start` past the current end.
+    // Clamp with `get(..)` so a truncated journal yields no this-action
+    // controller reveals rather than panicking on an out-of-bounds slice.
+    let controller_reveals = state
+        .resolved_rules_journal
+        .entries()
+        .get(journal_start..)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|entry| entry.command.as_ref())
+        .filter_map(|command| match command {
+            ResolvedRulesCommand::Information(information)
+                if matches!(
+                    information.audience,
+                    ResolvedInformationAudience::Controller(_)
+                ) && matches!(information.edit, ResolvedInformationEdit::Reveal) =>
+            {
+                Some(&information.occurrences)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|occurrence| occurrence.object_id)
+        .collect::<HashSet<_>>();
+
     for event in events {
         if let GameEvent::CardsRevealed { card_ids, .. } = event {
-            state.public_revealed_cards.extend(card_ids.iter().copied());
+            let unpublished = card_ids
+                .iter()
+                .copied()
+                .filter(|card_id| !controller_reveals.contains(card_id))
+                .collect::<Vec<_>>();
+            state
+                .resolve_and_apply_information(
+                    &unpublished,
+                    ResolvedInformationAudience::Public,
+                    ResolvedInformationLifetime::UntilZoneChange,
+                    ResolvedInformationEdit::Reveal,
+                )
+                .expect("published reveal occurrences must be live and distinct");
         }
     }
 }
@@ -2977,9 +3028,10 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent]) {
 ///
 /// - `Concede` self-authenticates via its own `player_id` field — but we still
 ///   require it to match `actor` so a player cannot concede someone else on
-///   their behalf (CR 104.3a).
+///   their behalf (CR 104.3a). It is no longer an action after the game has
+///   ended, when there is no authorized submitter.
 /// - **Preference actions** (SetPhaseStops, SetPriorityPassingMode,
-///   CancelAutoPass) are per-player UI
+///   CancelAutoPass, ReorderHand) are per-player UI
 ///   settings. They have no CR semantics, mutate only the submitter's own
 ///   preference slot, and may legitimately fire at any time — e.g. the human
 ///   toggles a phase stop while the AI holds priority. The downstream handlers
@@ -2992,26 +3044,14 @@ fn check_actor_authorization(
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<(), EngineError> {
-    if let GameAction::Concede { player_id } = action {
-        // CR 104.3a: A player may concede at any time — but only themselves.
-        if *player_id != actor {
-            return Err(EngineError::WrongPlayer);
-        }
-        return Ok(());
-    }
-    if matches!(
-        action,
-        GameAction::SetPhaseStops { .. }
-            | GameAction::SetPriorityPassingMode { .. }
-            | GameAction::SetPriorityYield { .. }
-            | GameAction::SetMayTriggerAutoChoice { .. }
-            | GameAction::SetTriggerOrderTemplate { .. }
-            | GameAction::CancelAutoPass
-            | GameAction::Debug(_)
-            | GameAction::GrantDebugPermission { .. }
-            | GameAction::RevokeDebugPermission { .. }
-            | GameAction::ReorderHand { .. }
-    ) {
+    if action.is_actor_scoped_preference()
+        || matches!(
+            action,
+            GameAction::Debug(_)
+                | GameAction::GrantDebugPermission { .. }
+                | GameAction::RevokeDebugPermission { .. }
+        )
+    {
         return Ok(());
     }
     // CR 103.5: For simultaneous-decision states (MulliganDecision,
@@ -3019,7 +3059,19 @@ fn check_actor_authorization(
     // pending player may submit in any order. Falls back to single-player
     // semantics for every other variant.
     let authorized = turn_control::authorized_submitters(state);
-    if !authorized.is_empty() && !authorized.contains(&actor) {
+    if authorized.is_empty() {
+        return Err(EngineError::WrongPlayer);
+    }
+    if let GameAction::Concede { player_id } = action {
+        // CR 104.3a: A player may concede at any time in an unfinished game —
+        // but only themselves. `GameOver` has no authorized submitter, so it
+        // cannot admit a second concession.
+        if *player_id != actor {
+            return Err(EngineError::WrongPlayer);
+        }
+        return Ok(());
+    }
+    if !authorized.contains(&actor) {
         return Err(EngineError::WrongPlayer);
     }
     Ok(())
@@ -4879,6 +4931,14 @@ fn apply_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        (
+            WaitingFor::ChooseGiftRecipient {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         // CR 702.47a–e: Splice — caster reveals a card to splice onto the spell
         // (re-offering for the rest), or declines to finish and proceed to targets.
         (
@@ -5957,6 +6017,26 @@ fn apply_action(
                 ));
             }
             casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
+        }
+        // CR 702.174a: Caster chose which opponent receives the promised Gift.
+        (
+            WaitingFor::ChooseGiftRecipient {
+                player,
+                candidates,
+                pending_cast,
+                ..
+            },
+            GameAction::ChooseGiftRecipient { opponent },
+        ) => {
+            let caster = *player;
+            casting_costs::handle_choose_gift_recipient(
+                state,
+                caster,
+                (**pending_cast).clone(),
+                opponent,
+                candidates,
+                &mut events,
+            )?
         }
         // CR 702.132a: Assist — caster chooses another player to help pay generic,
         // or declines. `assist_state` was set to `Offered` when the offer was made,
@@ -8804,7 +8884,12 @@ fn record_graveyard_play_permission(
         });
     match frequency {
         Some(crate::types::statics::CastFrequency::OncePerTurn) => {
-            state.graveyard_cast_permissions_used.insert(source_id);
+            crate::game::ledger::consume_once_per_turn_permission(
+                state,
+                source_id,
+                crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCast,
+            )
+            .expect("graveyard play permission must have an unused ledger slot");
         }
         Some(crate::types::statics::CastFrequency::OncePerTurnPerPermanentType) => {
             // CR 110.4: Use the player-chosen slot if one was stashed by the
@@ -8819,9 +8904,14 @@ fn record_graveyard_play_permission(
                     super::casting::pick_per_permanent_type_slot(state, source_id, played_object)
                 });
             if let Some(slot) = slot {
-                state
-                    .graveyard_cast_permissions_used_per_type
-                    .insert((source_id, slot));
+                crate::game::ledger::consume_once_per_turn_permission(
+                    state,
+                    source_id,
+                    crate::types::resolved_commands::ResolvedOncePerTurnPermission::GraveyardCastPermanentType {
+                        permanent_type: slot,
+                    },
+                )
+                .expect("graveyard permanent-type play slot must be unused");
             }
         }
         Some(crate::types::statics::CastFrequency::Unlimited) | None => {
@@ -8834,7 +8924,12 @@ fn record_exile_play_permission(state: &mut GameState, source: Option<ObjectId>)
     let Some(source_id) = source else {
         return;
     };
-    state.exile_play_permissions_used.insert(source_id);
+    crate::game::ledger::consume_once_per_turn_permission(
+        state,
+        source_id,
+        crate::types::resolved_commands::ResolvedOncePerTurnPermission::ExilePlay,
+    )
+    .expect("exile play permission must have an unused ledger slot");
 }
 
 /// CR 305.1 + CR 116.2a + CR 401.5: Consume the per-turn slot when a
@@ -8853,7 +8948,12 @@ fn record_top_of_library_land_permission(
     frequency: crate::types::statics::CastFrequency,
 ) {
     if matches!(frequency, crate::types::statics::CastFrequency::OncePerTurn) {
-        state.top_of_library_cast_permissions_used.insert(src_id);
+        crate::game::ledger::consume_once_per_turn_permission(
+            state,
+            src_id,
+            crate::types::resolved_commands::ResolvedOncePerTurnPermission::TopOfLibraryCast,
+        )
+        .expect("top-of-library play permission must have an unused ledger slot");
     }
 }
 
@@ -9172,7 +9272,7 @@ fn handle_play_land(
     // counters" replacement for planeswalkers and battles entering the
     // battlefield via a play-from-zone action.
     if let Some(obj) = state.objects.get(&object_id) {
-        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj);
+        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj, None);
         if !intrinsic.is_empty() {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                 enter_with_counters,

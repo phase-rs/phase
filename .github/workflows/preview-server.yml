@@ -1,6 +1,33 @@
 name: Preview Server Artifacts
 
 on:
+  workflow_call:
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      SERVER_ARTIFACT_MINISIGN_PRIVATE_KEY:
+        required: true
+    inputs:
+      fingerprint:
+        required: true
+        type: string
+      commit:
+        required: true
+        type: string
+      card_data_sha256:
+        required: true
+        type: string
+      card_data_hash16:
+        required: true
+        type: string
+      draft_pools_sha256:
+        required: true
+        type: string
+      draft_pools_hash16:
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       fingerprint:

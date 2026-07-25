@@ -21,6 +21,13 @@ use engine::types::format::{FormatConfig, GameFormat};
 use engine::types::match_config::MatchConfig;
 use serde::{Deserialize, Serialize};
 
+/// Machine-readable reasons for server error replies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerErrorCode {
+    DeckRejected,
+}
+
 /// Wire-protocol version shared by the native server, client, and Cloudflare
 /// lobby Worker. Bump when any `ClientMessage` or `ServerMessage` variant is
 /// added, removed, renamed, or has a field type changed. Adding a new optional
@@ -45,7 +52,7 @@ use serde::{Deserialize, Serialize};
 ///      payload; mulligan bottoming folded into a
 ///      `MulliganDecisionPhase::BottomCards` sub-phase on
 ///      `WaitingFor::MulliganDecision`.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Minimum protocol version accepted by lobby-only brokers at the hello
 /// handshake. Lobby traffic has a one-version rollout window; full game servers
@@ -224,6 +231,8 @@ pub enum LobbyServerMessage {
     },
     Error {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<ServerErrorCode>,
     },
     LobbyUpdate {
         games: Vec<LobbyGame>,
@@ -272,6 +281,15 @@ pub enum LobbyServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reservation_token: Option<String>,
     },
+}
+
+impl LobbyServerMessage {
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error {
+            message: message.into(),
+            code: None,
+        }
+    }
 }
 
 /// Advertised role of the server. Mirrors `server_core::protocol::ServerMode`
@@ -371,8 +389,8 @@ mod tests {
 
     #[test]
     fn protocol_version_tracks_priority_passing_wire_additions() {
-        assert_eq!(PROTOCOL_VERSION, 20);
-        assert_eq!(MIN_SUPPORTED_PROTOCOL, 19);
+        assert_eq!(PROTOCOL_VERSION, 21);
+        assert_eq!(MIN_SUPPORTED_PROTOCOL, 20);
     }
 
     #[test]

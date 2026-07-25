@@ -8,6 +8,7 @@ use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition,
     TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
 };
+use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::SubtypeSet;
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
@@ -473,7 +474,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     events: &mut Vec<GameEvent>,
 ) -> CopyTokenApplyStatus {
     let CopyTokenSpec {
-        values,
+        mut values,
         display_source,
         printed_ref,
         token_image_ref,
@@ -488,8 +489,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     let name = values.name.clone();
     let mut created_ids = initial_created_ids;
     created_ids.reserve(final_count as usize);
-    let copied_loyalty =
-        copy_starting_loyalty_override(&additional_modifications).or(values.loyalty);
+    if let Some(loyalty) = copy_starting_loyalty_override(&additional_modifications) {
+        values.loyalty = Some(loyalty);
+        values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
+    }
+    let copied_loyalty = values.loyalty;
 
     // CR 306.5b + CR 707.2 + CR 707.9b: A token that's a copy of a planeswalker
     // enters with loyalty counters equal to the copied loyalty, except a copy
@@ -1302,6 +1306,8 @@ fn apply_token_modifications(
                 if let Some(token) = state.objects.get_mut(&token_id) {
                     token.base_loyalty = Some(*value);
                     token.loyalty = Some(*value);
+                    token.base_printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
+                    token.printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
                 }
             }
             // CR 707.9a + CR 603.1: "except it has \"<triggered ability>\""
@@ -1489,6 +1495,8 @@ pub(crate) fn apply_immediate_copy_token_modifications_to_object(
             ContinuousModification::SetStartingLoyalty { value } => {
                 token.base_loyalty = Some(*value);
                 token.loyalty = Some(*value);
+                token.base_printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
+                token.printed_loyalty = Some(PrintedLoyalty::Fixed(*value));
             }
             ContinuousModification::GrantTrigger { trigger } => {
                 token.push_printed_trigger((**trigger).clone());
@@ -4208,6 +4216,8 @@ mod tests {
         let token_id = ObjectId(state.next_object_id - 1);
         let token = &state.objects[&token_id];
         assert_eq!(token.base_loyalty, Some(1));
+        assert_eq!(token.printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
+        assert_eq!(token.base_printed_loyalty, Some(PrintedLoyalty::Fixed(1)));
         assert_eq!(
             token.counters.get(&CounterType::Loyalty).copied(),
             Some(1),

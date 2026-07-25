@@ -197,6 +197,7 @@ pub fn resolve(
             TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::LastRevealed
+                | TargetFilter::LastZoneChanged
                 | TargetFilter::SelfRef
                 | TargetFilter::TriggeringSource
                 | TargetFilter::LastCreated

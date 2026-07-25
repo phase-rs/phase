@@ -248,6 +248,7 @@
     "target": "Bersaglio",
     "copy": "Copia",
     "copyTooltip": "Copia pedina di una carta reale",
+    "cantBeBlocked": "Non può essere bloccata",
     "ringBearer": "Anello",
     "ringBearerTooltip": "Portatore dell'Anello",
     "hiddenAttachments": "+{{count}} more attached",
@@ -662,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Deve bloccare {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1709,6 +1711,23 @@
     "targetLand": "il bersaglio terra",
     "targetCreature": "il bersaglio creatura",
     "targetChoice": "questa scelta del bersaglio"
+  },
+  "giftRecipient": {
+    "title": "Scegli il destinatario del dono",
+    "subtitle": "Scegli quale avversario riceve il dono promesso."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promettere un dono?",
+      "pay": "Prometti {{gift}}",
+      "decline": "Lancia senza promettere",
+      "kind": {
+        "card": "una carta",
+        "treasure": "un Tesoro",
+        "food": "un Cibo",
+        "tappedFish": "un Pesce TAPpato"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Scegli l'avversario per lo scontro",

@@ -5,6 +5,7 @@ import {
   collectObjectActions,
   isManaObjectAction,
   requiresConfirmation,
+  resolveDirectPlayOrCastAction,
   resolveSingleActionDispatch,
 } from "../cardActionChoice.ts";
 import { abilityChoiceLabel } from "../costLabel.ts";
@@ -57,7 +58,7 @@ function makeGameObject(overrides: Partial<GameObject> = {}): GameObject {
   };
 }
 
-function tapLandAction(objectId: number): GameAction {
+function tapLandAction(objectId: number): Extract<GameAction, { type: "TapLandForMana" }> {
   return {
     type: "TapLandForMana",
     data: {
@@ -286,6 +287,41 @@ describe("resolveSingleActionDispatch", () => {
   });
 });
 
+describe("resolveDirectPlayOrCastAction", () => {
+  const playLandAction: GameAction = {
+    type: "PlayLand",
+    data: { object_id: 1, card_id: 100 },
+  };
+  const cyclingAction: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 1, ability_index: 0 },
+  };
+
+  it("returns the one unambiguous engine-provided play action", () => {
+    expect(
+      resolveDirectPlayOrCastAction({ "1": [playLandAction] }, makeGameObject()),
+    ).toBe(playLandAction);
+  });
+
+  it("does not promise release-to-cast when another action requires a choice", () => {
+    expect(
+      resolveDirectPlayOrCastAction(
+        { "1": [playLandAction, cyclingAction] },
+        makeGameObject(),
+      ),
+    ).toBeNull();
+  });
+
+  it("does not classify a lone non-cast ability as release-to-cast", () => {
+    expect(
+      resolveDirectPlayOrCastAction(
+        { "1": [cyclingAction] },
+        makeGameObject({ abilities: [{ consumes_source: false }] }),
+      ),
+    ).toBeNull();
+  });
+});
+
 describe("abilityChoiceLabel", () => {
   it("labels convoke tap actions by the mana they pay for", () => {
     const object = makeGameObject({
@@ -309,7 +345,7 @@ describe("abilityChoiceLabel", () => {
     ).toBe("Tap for {1}");
   });
 
-  it("labels TapLandForMana as Tap for Mana", () => {
+  it("labels TapLandForMana with the engine-selected mana", () => {
     const object = makeGameObject({
       name: "Emergence Zone",
       card_types: {
@@ -324,7 +360,14 @@ describe("abilityChoiceLabel", () => {
         tapLandAction(1),
         object,
       ).label,
-    ).toBe("Tap for Mana");
+    ).toBe("Tap for {G}");
+  });
+
+  it("labels an atomic mana combination with every mana it produces", () => {
+    const action = tapLandAction(1);
+    action.data.selection.atomic_combination = ["White", "Blue"];
+
+    expect(abilityChoiceLabel(action, makeGameObject()).label).toBe("Tap for {W}{U}");
   });
 
   it("labels the spell face cast action with the front-face name", () => {

@@ -17,7 +17,10 @@
 //! 3. an `Effect::CreateDelayedTrigger` that exiles the card at the next end
 //!    step (CR 702.84a), and
 //! 4. an `Effect::AddTargetReplacement` installing the "if it would leave the
-//!    battlefield, exile it instead" replacement (CR 702.84a / CR 614.1a).
+//!    battlefield, exile it instead" replacement (CR 702.84a / CR 614.1a /
+//!    CR 400.7), stamped `RestrictionExpiry::UntilHostLeavesPlay` so it is
+//!    base-installed (surviving CR 613.1 layer reseeds), non-copiable
+//!    (CR 707.2), and pruned when the host leaves the battlefield.
 //!
 //! Steps 2–4 are chained as `sub_ability` continuation steps (CR 608.2c) of the
 //! primary `ChangeZone`, so they resolve as one action.
@@ -35,13 +38,12 @@
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
-    Duration, Effect, ReplacementDefinition, StaticDefinition, TargetFilter,
+    Duration, Effect, RestrictionExpiry, StaticDefinition, TargetFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
-use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
 /// CR 702.84a: Synthesize the graveyard-activated reanimation ability for every
@@ -149,18 +151,23 @@ fn delayed_exile_step() -> AbilityDefinition {
     .description("Exile it at the beginning of the next end step.".to_string())
 }
 
-/// CR 702.84a / CR 614.1a: "If it would leave the battlefield, exile it instead
-/// of putting it anywhere else." Installs a `Moved` replacement on the returned
-/// permanent (`target: SelfRef`); `valid_card: SelfRef` binds the replacement to
-/// its own host so it fires only for that object, redirecting any
-/// battlefield-exit to exile.
+/// CR 702.84a / CR 614.1a / CR 400.7: "If it would leave the battlefield, exile
+/// it instead of putting it anywhere else." Installs a `Moved` replacement on
+/// the returned permanent (`target: SelfRef`); `valid_card: SelfRef` binds the
+/// replacement to its own host so it fires only for that object, redirecting any
+/// battlefield-exit to exile. The rider is stamped
+/// `RestrictionExpiry::UntilHostLeavesPlay`: it is a runtime effect bound to the
+/// host object's lifetime, so it is base-installed to survive CR 613.1 layer
+/// reseeds, kept non-copiable (CR 707.2), and pruned on the host's battlefield
+/// exit (CR 400.7) — see the variant doc in `types/ability.rs`.
 fn leaves_battlefield_exile_step() -> AbilityDefinition {
-    let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
-        .execute(AbilityDefinition::new(
-            AbilityKind::Spell,
-            exile_self_from_battlefield_effect(),
-        ));
+    // Shares the single unstamped `leave_battlefield_exile_replacement` authority
+    // (#6538 / #6566); this site keeps its own `target: SelfRef` wrapper +
+    // description and composes the #6538 host-lifetime stamp itself. The stamp is
+    // applied per-consumer, not baked into the constructor, because the granted
+    // path (#6566) must NOT carry it — see the constructor doc.
+    let replacement = crate::parser::oracle_effect::leave_battlefield_exile_replacement()
+        .expiry(RestrictionExpiry::UntilHostLeavesPlay);
 
     AbilityDefinition::new(
         AbilityKind::Spell,

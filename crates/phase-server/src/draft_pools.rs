@@ -11,8 +11,15 @@ pub struct DraftPools {
 
 impl DraftPools {
     pub fn from_path(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let file = std::fs::File::open(path)?;
-        let pools: BTreeMap<String, LimitedSetPool> = serde_json::from_reader(file)?;
+        // Read the whole file, then parse from the in-memory slice. serde_json's
+        // `from_reader` over an unbuffered `File` issues a read syscall per token
+        // and is pathologically slow on Windows, where per-syscall cost is high:
+        // parsing this multi-megabyte pool file that way stalled the native-engine
+        // server past the desktop shell's 20s health-check budget, so games fell
+        // back to the in-browser engine. `from_slice` parses contiguous memory with
+        // no per-read overhead (mirrors the `BufReader` already used in card_db.rs).
+        let bytes = std::fs::read(path)?;
+        let pools: BTreeMap<String, LimitedSetPool> = serde_json::from_slice(&bytes)?;
         let pools = pools
             .into_iter()
             .map(|(code, pool)| (code.to_lowercase(), pool))

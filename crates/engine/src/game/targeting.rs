@@ -599,6 +599,11 @@ pub fn resolve_event_context_target(
             .first()
             .copied()
             .map(TargetRef::Object),
+        TargetFilter::LastZoneChanged => state
+            .last_zone_changed_ids
+            .first()
+            .copied()
+            .map(TargetRef::Object),
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
         | TargetFilter::PostReplacementSourceController
@@ -643,6 +648,13 @@ pub fn resolve_event_context_targets(
         TargetFilter::LastRevealed => {
             return state
                 .last_revealed_ids
+                .iter()
+                .map(|id| TargetRef::Object(*id))
+                .collect();
+        }
+        TargetFilter::LastZoneChanged => {
+            return state
+                .last_zone_changed_ids
                 .iter()
                 .map(|id| TargetRef::Object(*id))
                 .collect();
@@ -773,6 +785,14 @@ pub fn resolved_targets(
             .map(TargetRef::Object)
             .collect();
     }
+    if matches!(target_filter, TargetFilter::LastZoneChanged) {
+        return state
+            .last_zone_changed_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect();
+    }
     if matches!(target_filter, TargetFilter::ParentTarget) && ability.targets.is_empty() {
         if let Some(targets) = parent_target_refs_from_attack_trigger_context(state) {
             return targets;
@@ -850,7 +870,20 @@ pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    let root = state
+    super::ability_utils::flatten_targets_in_chain(resolving_root_ability(state, ability))
+}
+
+/// CR 608.2c: The root `ResolvedAbility` of the currently-resolving stack
+/// entry that `ability` belongs to (falling back to `ability` itself when no
+/// matching entry is found — e.g. hand-built test abilities resolved outside
+/// the stack). Single authority for the root-entry lookup shared by
+/// [`parent_chain_targets_from_root`] and the delayed-trigger creation
+/// snapshot (`effects::delayed_trigger`).
+pub(crate) fn resolving_root_ability<'a>(
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+) -> &'a ResolvedAbility {
+    state
         .resolving_stack_entry
         .as_ref()
         .filter(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
@@ -861,8 +894,7 @@ pub(crate) fn parent_chain_targets_from_root(
                 .find(|entry| entry.id == ability.source_id || entry.source_id == ability.source_id)
         })
         .and_then(|entry| entry.ability())
-        .unwrap_or(ability);
-    super::ability_utils::flatten_targets_in_chain(root)
+        .unwrap_or(ability)
 }
 
 /// CR 608.2c: Resolve a single earlier target slot by its declared `index` from
@@ -975,6 +1007,7 @@ pub(crate) fn resolved_object_ids_for_filter(
             .collect(),
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
         TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
+        TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
         TargetFilter::TriggeringSource | TargetFilter::EventTarget | TargetFilter::AttachedTo => {
             resolve_event_context_target(state, filter, ability.source_id)
                 .and_then(|target| target_ref_object(&target))
@@ -1450,6 +1483,8 @@ pub(crate) fn extract_source_from_event(
         } => Some(*object_id),
         GameEvent::Discarded { object_id, .. } => Some(*object_id),
         GameEvent::Transformed { object_id } => Some(*object_id),
+        // CR 710.4: the flipped permanent is the event's subject.
+        GameEvent::Flipped { object_id } => Some(*object_id),
         GameEvent::TurnedFaceUp { object_id } => Some(*object_id),
         GameEvent::TurnedFaceDown { object_id } => Some(*object_id),
         GameEvent::Cycled { object_id, .. } => Some(*object_id),

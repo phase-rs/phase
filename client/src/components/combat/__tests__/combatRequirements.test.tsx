@@ -8,6 +8,7 @@ import { AttackRequirementBadges } from "../AttackRequirementBadges.tsx";
 import { BlockerConstraintBadges } from "../BlockerConstraintBadges.tsx";
 import { useAttackRequirements } from "../useAttackRequirements.ts";
 import { useBlockerConstraints } from "../useBlockerConstraints.ts";
+import { useBlockRequirements } from "../useBlockRequirements.ts";
 
 function setWaitingFor(waitingFor: WaitingFor | undefined) {
   useGameStore.setState({ waitingFor });
@@ -113,10 +114,10 @@ describe("useBlockerConstraints", () => {
 
   it("does not throw on an empty or undefined constraint map", () => {
     setWaitingFor(undefined);
-    expect(renderHook(() => useBlockerConstraints()).result.current.unsatisfiedMustBlockCount).toBe(0);
+    expect(renderHook(() => useBlockerConstraints()).result.current.byObject.size).toBe(0);
   });
 
-  it("satisfies the must-block gate when the creature is assigned (1 -> 0)", () => {
+  it("keeps must-block as an engine-validated display state without exposing a gate", () => {
     setWaitingFor({
       type: "DeclareBlockers",
       data: {
@@ -129,13 +130,33 @@ describe("useBlockerConstraints", () => {
 
     useUiStore.setState({ blockerAssignments: new Map() });
     let r = renderHook(() => useBlockerConstraints());
-    expect(r.result.current.unsatisfiedMustBlockCount).toBe(1);
     expect(r.result.current.byObject.get(100)?.status).toBe("pending");
+    expect("unsatisfiedMustBlockCount" in r.result.current).toBe(false);
 
-    useUiStore.setState({ blockerAssignments: new Map([[100, 200]]) });
+    useUiStore.setState({ blockerAssignments: new Map([[100, new Set([200])]]) });
     r = renderHook(() => useBlockerConstraints());
-    expect(r.result.current.unsatisfiedMustBlockCount).toBe(0);
-    expect(r.result.current.byObject.get(100)?.status).toBe("satisfied");
+    expect(r.result.current.byObject.get(100)?.status).toBe("pending");
+  });
+
+  it("retains engine-provided exact must-block attackers without locally validating pairs", () => {
+    setWaitingFor({
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200, 201] },
+        blocker_constraints: { "100": { kind: "MustBlock", attackers: [200] } },
+      },
+    });
+
+    useUiStore.setState({ blockerAssignments: new Map([[100, new Set([201])]]) });
+    let r = renderHook(() => useBlockerConstraints());
+    expect(r.result.current.byObject.get(100)?.status).toBe("pending");
+    expect(r.result.current.byObject.get(100)?.attackers).toEqual([200]);
+
+    useUiStore.setState({ blockerAssignments: new Map([[100, new Set([200, 201])]]) });
+    r = renderHook(() => useBlockerConstraints());
+    expect(r.result.current.byObject.get(100)?.status).toBe("pending");
   });
 
   it("passes engine-provided sources through unchanged (display-only)", () => {
@@ -150,6 +171,30 @@ describe("useBlockerConstraints", () => {
     });
     const r = renderHook(() => useBlockerConstraints());
     expect(r.result.current.byObject.get(100)?.sources).toEqual([300]);
+  });
+});
+
+describe("useBlockRequirements", () => {
+  beforeEach(() => {
+    useUiStore.setState({ selectedAttackers: [], blockerAssignments: new Map() });
+  });
+  afterEach(() => setWaitingFor(undefined));
+
+  it("does not infer a minimum-blocker requirement's satisfaction from local pairs", () => {
+    setWaitingFor({
+      type: "DeclareBlockers",
+      data: {
+        player: 0,
+        valid_blocker_ids: [100],
+        valid_block_targets: { "100": [200] },
+        block_requirements: { "200": { count: 2, sources: [300] } },
+      },
+    });
+
+    useUiStore.setState({ blockerAssignments: new Map([[100, new Set([200])]]) });
+    const requirement = renderHook(() => useBlockRequirements()).result.current.byAttacker.get(200);
+    expect(requirement).toMatchObject({ attackerId: 200, required: 2, sources: [300] });
+    expect("status" in (requirement ?? {})).toBe(false);
   });
 });
 

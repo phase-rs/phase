@@ -18,6 +18,7 @@ import { MemoryRouter, Route, Routes } from "react-router";
 import { GamePage } from "../GamePage";
 import type { FormatConfig } from "../../adapter/types";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
+import type { P2PAdapterEvent } from "../../adapter/p2p-adapter";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
@@ -25,8 +26,14 @@ import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 let capturedOnNoDeck: ((reason?: string, bracketViolation?: boolean) => void) | undefined;
 let capturedFormatConfig: FormatConfig | undefined;
 let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
+let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 
-const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
+const { mockClearPromptOverlayState, mockSetGameState } = vi.hoisted(() => ({
+  mockClearPromptOverlayState: vi.fn(),
+  mockSetGameState: vi.fn(),
+}));
+
+const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
     serverInfo: null,
     activePlayerId: null,
@@ -34,7 +41,8 @@ const { mockMultiplayerState: _mockMultiplayerState, mockUseMultiplayerStore } =
     playerAvatars: new Map<string, string>(),
     connectionStatus: "disconnected",
     isSpectator: false,
-    toasts: [] as unknown[],
+    // Keyed Map, matching the real store — ConnectionToast reads `.size`.
+    toasts: new Map<string, { message: string; expiresAt: number; showCountdown: boolean }>(),
     hostGameCode: null,
     hostingStatus: "idle",
     playerSlots: [] as unknown[],
@@ -64,18 +72,25 @@ vi.mock("../../providers/GameProvider", () => ({
     children,
     onNoDeck,
     onWsEvent,
+    onP2PEvent,
     formatConfig,
   }: {
     children: React.ReactNode;
     onNoDeck?: (reason?: string, bracketViolation?: boolean) => void;
     onWsEvent?: (event: WsAdapterEvent) => void;
+    onP2PEvent?: (event: P2PAdapterEvent) => void;
     formatConfig?: FormatConfig;
   }) => {
     capturedOnNoDeck = onNoDeck;
     capturedOnWsEvent = onWsEvent;
+    capturedOnP2PEvent = onP2PEvent;
     capturedFormatConfig = formatConfig;
     return <>{children}</>;
   },
+}));
+
+vi.mock("../../game/sessionCleanup.ts", () => ({
+  clearPromptOverlayState: mockClearPromptOverlayState,
 }));
 
 // useGameDispatch moved out of GameProvider into its own hook module; mock it
@@ -99,20 +114,23 @@ vi.mock("../../game/dispatch.ts", () => ({
 }));
 
 vi.mock("../../stores/gameStore", () => ({
-  useGameStore: vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
-    selector({
-      gameState: null,
-      waitingFor: null,
-      legalActions: [],
-      autoPassRecommended: false,
-      spellCosts: {},
-      legalActionsByObject: {},
-      events: [],
-      eventHistory: [],
-      logHistory: [],
-      adapter: null,
-      lobbyProgress: null,
-    }),
+  useGameStore: Object.assign(
+    vi.fn((selector: (s: Record<string, unknown>) => unknown) =>
+      selector({
+        gameState: null,
+        waitingFor: null,
+        legalActions: [],
+        autoPassRecommended: false,
+        spellCosts: {},
+        legalActionsByObject: {},
+        events: [],
+        eventHistory: [],
+        logHistory: [],
+        adapter: null,
+        lobbyProgress: null,
+      }),
+    ),
+    { setState: mockSetGameState },
   ),
   clearGame: vi.fn(),
   loadActiveGame: vi.fn(() => null),
@@ -238,6 +256,7 @@ beforeEach(() => {
   capturedOnNoDeck = undefined;
   capturedFormatConfig = undefined;
   capturedOnWsEvent = undefined;
+  capturedOnP2PEvent = undefined;
   vi.clearAllMocks();
 });
 
@@ -246,6 +265,29 @@ afterEach(() => {
 });
 
 describe("GamePage — cEDH bracket-violation blocking modal", () => {
+  it("clears prompt overlays before websocket and P2P game-over displays", () => {
+    renderGamePage("/game/test-game-123?mode=host");
+
+    act(() => {
+      capturedOnWsEvent?.({ type: "gameOver", winner: 0, reason: "conceded" });
+    });
+
+    cleanup();
+    renderGamePage("/game/test-game-123?mode=p2p-host");
+
+    act(() => {
+      capturedOnP2PEvent?.({ type: "gameOver", winner: 0, reason: "conceded" });
+    });
+
+    expect(mockClearPromptOverlayState).toHaveBeenCalledTimes(2);
+    expect(mockSetGameState).toHaveBeenNthCalledWith(1, {
+      waitingFor: { type: "GameOver", data: { winner: 0 } },
+    });
+    expect(mockSetGameState).toHaveBeenNthCalledWith(2, {
+      waitingFor: { type: "GameOver", data: { winner: 0 } },
+    });
+  });
+
   it("renders the connection-lost banner when a native engine error arrives before close", () => {
     renderGamePage();
 
@@ -361,5 +403,41 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     });
 
     expect(screen.queryByTestId("bracket-violation-modal")).toBeNull();
+  });
+});
+
+describe("GamePage — toast surface", () => {
+  const FALLBACK_NOTICE = "Native engine unavailable — this game is running in-browser.";
+
+  function seedToast(): void {
+    mockMultiplayerState.toasts = new Map([
+      ["generic", { message: FALLBACK_NOTICE, expiresAt: Date.now() + 5_000, showCountdown: false }],
+    ]);
+  }
+
+  afterEach(() => {
+    mockMultiplayerState.toasts = new Map();
+  });
+
+  it("shows a solo game's toast", () => {
+    // The native-engine fallback notice is raised in `ai` mode. This surface
+    // used to be gated on online mode, so the notice was written to the store
+    // and then rendered by nothing at all.
+    seedToast();
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    expect(screen.getByText(FALLBACK_NOTICE)).toBeInTheDocument();
+  });
+
+  it("offers a solo game no Retry, since there is no server to re-dial", () => {
+    seedToast();
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    // Settings is the reach guard: it proves the toast's button row rendered,
+    // so Retry's absence is the omitted prop rather than an unmounted toast.
+    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 });

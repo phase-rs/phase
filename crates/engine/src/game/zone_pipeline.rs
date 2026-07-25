@@ -191,6 +191,11 @@ pub struct ZoneMoveRequest {
     /// CR 614.5: replacement definitions already applied to the event or
     /// modified event from which this physical-card move was derived.
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// CR 406.3: Mark the object face down if this delivery actually settles in
+    /// exile. This is deliberately a delivery modifier, not an effect epilogue:
+    /// a later batch member may park on CR 616.1 while earlier members must
+    /// already be hidden.
+    pub face_down_in_exile: bool,
 }
 
 impl ZoneMoveRequest {
@@ -232,6 +237,7 @@ impl ZoneMoveRequest {
             exile_duration: self.exile_links.duration,
             exile_tracking: self.exile_links.tracking,
             replacement_applied: self.replacement_applied,
+            face_down_in_exile: self.face_down_in_exile,
         }
     }
 
@@ -277,6 +283,7 @@ impl ZoneMoveRequest {
                 tracking: pending.exile_tracking,
             },
             replacement_applied: pending.replacement_applied,
+            face_down_in_exile: pending.face_down_in_exile,
         }
     }
 
@@ -290,6 +297,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -303,6 +311,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -320,6 +329,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -333,6 +343,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -356,6 +367,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: seed_applied,
+            face_down_in_exile: false,
         }
     }
 
@@ -370,6 +382,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -386,6 +399,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -400,6 +414,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -416,6 +431,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -429,6 +445,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -475,6 +492,13 @@ impl ZoneMoveRequest {
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
         self.placement = Some(position);
+        self
+    }
+
+    /// CR 406.3: Conceal this card immediately if the replacement-aware move
+    /// delivers it to Exile.
+    pub fn face_down_in_exile(mut self) -> Self {
+        self.face_down_in_exile = true;
         self
     }
 
@@ -574,8 +598,9 @@ impl ApprovedZoneChange {
 /// was never destroyed (verified against `reset_for_battlefield_entry` and the
 /// field's writer set; the capture/restore was a defensive no-op since PR
 /// #1119 introduced it). The cast-link family that IS cleared on entry
-/// (CR 400.7d: kicker / additional-cost / convoke / cast-timing memory) is
-/// preserved structurally by the delivery itself — see [`CastLinkSnapshot`].
+/// (CR 400.7d: kicker / Gift recipient / additional-cost / convoke / cast-timing
+/// memory) is preserved structurally by the delivery itself — see
+/// [`CastLinkSnapshot`].
 pub(crate) struct DeliveryCtx {
     pub source_id: Option<ObjectId>,
     pub exile_links: ExileLinkSpec,
@@ -604,6 +629,8 @@ struct CastLinkSnapshot {
     cast_controller: Option<PlayerId>,
     cast_timing_permission: Option<CastTimingPermission>,
     kickers_paid: Vec<KickerVariant>,
+    /// CR 702.174a: Opponent promised the Gift when this spell was cast.
+    gift_recipient: Option<PlayerId>,
     additional_cost_payment_count: u32,
     additional_cost_payments: Vec<AdditionalCostInstancePayment>,
     convoked_creatures: Vec<ObjectId>,
@@ -1205,11 +1232,15 @@ fn deliver_batch(
     let mut queue = reqs.into_iter();
     while let Some(req) = queue.next() {
         let destination = req.to;
+        let face_down_in_exile = req.face_down_in_exile;
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
         let object_id = req.object_id;
         match move_object_with_terminal(state, req, events) {
             ZoneMoveTerminalResult::Completed(completion) => {
+                if face_down_in_exile {
+                    mark_face_down_if_exiled(state, object_id);
+                }
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
                     .expect("batch member records its exact terminal outcome");
@@ -1220,7 +1251,7 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                let paused_current = state
+                let mut paused_current = state
                     .pending_zone_change_delivery_from_replacement()
                     .or_else(|| {
                         anticipated_pause.map(|mut boundary| {
@@ -1229,6 +1260,7 @@ fn deliver_batch(
                         })
                     })
                     .expect("parked batch zone change must retain an exact boundary");
+                paused_current.face_down_in_exile = face_down_in_exile;
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
@@ -1267,6 +1299,7 @@ fn deliver_batch(
                 let paused_current = anticipated_pause.map(|mut boundary| {
                     boundary.append_delivery_events(&events[delivery_start..]);
                     boundary.mark_counted();
+                    boundary.face_down_in_exile = face_down_in_exile;
                     boundary
                 });
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
@@ -1288,6 +1321,16 @@ fn deliver_batch(
         }
     }
     BatchDeliveryResult::Done(Box::new(logical_zone_change_group))
+}
+
+fn mark_face_down_if_exiled(state: &mut GameState, object_id: ObjectId) {
+    if let Some(object) = state
+        .objects
+        .get_mut(&object_id)
+        .filter(|object| object.zone == Zone::Exile)
+    {
+        object.face_down = true;
+    }
 }
 
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
@@ -2198,6 +2241,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     cast_controller: obj.cast_controller,
                     cast_timing_permission: obj.cast_timing_permission.map(|(p, _)| p),
                     kickers_paid: obj.kickers_paid.clone(),
+                    gift_recipient: obj.gift_recipient,
                     additional_cost_payment_count: obj.additional_cost_payment_count,
                     additional_cost_payments: obj.additional_cost_payments.clone(),
                     convoked_creatures: obj.convoked_creatures.clone(),
@@ -2339,6 +2383,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     obj.cast_timing_permission = Some((permission, state.turn_number));
                 }
                 obj.kickers_paid = link.kickers_paid;
+                obj.gift_recipient = link.gift_recipient;
                 obj.additional_cost_payment_count = link.additional_cost_payment_count;
                 obj.additional_cost_payments = link.additional_cost_payments;
                 obj.convoked_creatures = link.convoked_creatures;
@@ -2408,10 +2453,22 @@ pub(crate) fn deliver_replaced_zone_change(
             }
         }
         // CR 614.1: Apply enter-tapped if the effect or replacement set it.
-        if should_tap.resolve(false) && to == Zone::Battlefield {
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = true;
-            }
+        // CR 701.26a: Only an untapped permanent can be tapped, so route the
+        // entry tap through the single object-status authority — it captures
+        // the exact incarnation and prior state as a resolved command instead
+        // of writing `tapped` raw. The existence guard preserves the prior
+        // silent skip when the object is no longer present.
+        if should_tap.resolve(false)
+            && to == Zone::Battlefield
+            && state.objects.contains_key(&object_id)
+        {
+            crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                object_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                true,
+            )
+            .expect("an entering permanent must satisfy the resolved tap precondition");
         }
         // CR 603.6a + CR 400.7: Record which ability placed this permanent so
         // anti-recursion intervening-ifs ("if it wasn't put onto the battlefield
@@ -2787,12 +2844,14 @@ fn execute_zone_move_with_applied_terminal(
             let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
                 (true, Some(back)) => {
                     crate::game::printed_cards::intrinsic_entry_counters_for_face(
+                        back.printed_loyalty,
                         back.loyalty,
+                        None,
                         back.defense,
                         &back.card_types,
                     )
                 }
-                _ => crate::game::printed_cards::intrinsic_etb_counters(obj),
+                _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
             };
             if !intrinsic.is_empty() {
                 if let ProposedEvent::ZoneChange {

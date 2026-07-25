@@ -1,12 +1,12 @@
 use crate::types::ability::{
     is_variable_remove_counter_cost_count, AbilityBlockKind, AbilityBlockReason, AbilityCondition,
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AdditionalCost, CardPlayMode,
-    CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification, CostObjectCount,
-    CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp, GameRestriction,
-    ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope, ProhibitedActivity,
-    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope,
-    StaticCondition, StaticDefinition, SubAbilityLink, TapCreaturesRequirement, TargetFilter,
-    TargetRef,
+    CardSelectionMode, CastTimingPermission, CastingPermission, ChoiceType, ContinuousModification,
+    CostObjectCount, CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, FilterProp,
+    GameRestriction, ModalSelectionCondition, ObjectScope, PlayerFilter, PlayerScope,
+    ProhibitedActivity, QuantityExpr, QuantityRef, ResolvedAbility, RestrictionExpiry,
+    RestrictionPlayerScope, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef,
 };
 use crate::types::actions::AlternativeCastDecision;
 use crate::types::card::LayoutKind;
@@ -11897,17 +11897,16 @@ fn continue_with_prepared(
             prepared.payment_mode,
             events,
         );
-    } else if requires_additional_cost_declaration_before_targets(&resolved)
+    } else if (requires_additional_cost_declaration_before_targets(&resolved)
+        || ability_chain_has_gift_delivery(&resolved))
         && !casting_costs::build_effective_additional_cost_queue(state, player, prepared.object_id)
             .is_empty()
     {
-        // CR 601.2b + CR 702.194c: generalizes the kicker-only gate above to
-        // every OTHER target-dependent "instead" additional cost with a
-        // non-empty effective queue (currently Teamwork/Bargain; Too Evil to
-        // Stay Dead, Cruel Alliance). Bounded by the queue-emptiness check so
-        // non-kicker `AdditionalCostPaidInstead` cards with an empty queue
-        // (no queue-synthesized cost to declare pre-target) fall through to
-        // the ordinary target-slot path below, unchanged.
+        // CR 601.2b + CR 702.194c + CR 702.174a/m: generalizes the kicker-only
+        // gate above to every OTHER target-dependent "instead" additional cost
+        // with a non-empty effective queue (Teamwork/Bargain/Gift). Gift always
+        // announces before targets when queued (CR 601.2b), including when the
+        // only gift-gated effect is delivery rather than an Instead target set.
         return casting_costs::begin_target_dependent_additional_cost_declaration(
             state,
             player,
@@ -12228,13 +12227,35 @@ fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::Mod
 pub(crate) fn requires_additional_cost_declaration_before_targets(
     ability: &ResolvedAbility,
 ) -> bool {
-    let Some(sub_ability) = ability.sub_ability.as_deref() else {
-        return false;
-    };
-    matches!(
-        sub_ability.condition,
-        Some(AbilityCondition::AdditionalCostPaidInstead)
-    ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect).is_some()
+    // Walk the full sub_ability chain (GiftDelivery nesting) for
+    // AdditionalCostPaidInstead with a real target filter (CR 601.2c / 702.174m).
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        if let Some(sub_ability) = current.sub_ability.as_deref() {
+            if matches!(
+                sub_ability.condition,
+                Some(AbilityCondition::AdditionalCostPaidInstead)
+            ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect)
+                .is_some()
+            {
+                return true;
+            }
+        }
+        node = current.sub_ability.as_deref();
+    }
+    false
+}
+
+/// CR 702.174a / CR 601.2b: Gift is always announced before targets when present.
+pub(crate) fn ability_chain_has_gift_delivery(ability: &ResolvedAbility) -> bool {
+    let mut node = Some(ability);
+    while let Some(current) = node {
+        if matches!(current.effect, Effect::GiftDelivery { .. }) {
+            return true;
+        }
+        node = current.sub_ability.as_deref();
+    }
+    false
 }
 
 /// Fast path for permanent spells with no spell-level ability.
@@ -12512,23 +12533,14 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         .is_some_and(|additional| matches!(additional, AdditionalCost::Kicker { .. }));
     if has_kicker_cost && requires_additional_cost_declaration_before_targets(&resolved) {
         return Ok(Vec::new());
-    } else if requires_additional_cost_declaration_before_targets(&resolved)
+    } else if (requires_additional_cost_declaration_before_targets(&resolved)
+        || ability_chain_has_gift_delivery(&resolved))
         && !casting_costs::build_effective_additional_cost_queue(state, player, prepared.object_id)
             .is_empty()
     {
-        // CR 601.2c: parity with the live-cast gate above — the preview must
-        // defer EXACTLY the cards the live path defers. The queue-emptiness
-        // guard is load-bearing (NOT merely a Gift exclusion — Gift's
-        // `AdditionalCostPaidInstead` sits at sub_ability level 2 under
-        // `GiftDelivery`, so `requires_additional_cost_declaration_before_
-        // targets`, which inspects only the first level, already returns
-        // `false` for Gift and it never reaches this check either way). Its
-        // real protected class is non-kicker LEVEL-1 `AdditionalCostPaidInstead`
-        // cards with a PRINTED additional cost (empty effective queue, e.g.
-        // `obj.additional_cost = Optional`/`Required`/`Choice`): those have
-        // `requires_ == true` but must NOT defer here (there is no
-        // queue-synthesized cost to declare pre-target), so a bare `requires_`
-        // gate would wrongly return `Ok(Vec::new())` for them.
+        // CR 601.2c + CR 702.174a/m: parity with the live-cast gate — defer when
+        // Gift or Instead needs pre-target declaration and the effective queue
+        // is non-empty.
         return Ok(Vec::new());
     }
 
@@ -15240,19 +15252,68 @@ pub(super) fn find_battlefield_exile_cost(cost: &AbilityCost) -> Option<(u32, &T
     }
 }
 
+/// Sole detector for a non-self "discard from hand" cost leg. Returns the count
+/// expression, optional card filter, and the `CardSelectionMode` (player-chosen
+/// vs. game-selected) so a single authority drives both the casting/activation
+/// resolver and the mana-ability path. `SourceCard` "discard this card" is never
+/// matched (see [`resolve_non_self_discard_requirement`]); recurses `Composite`.
 pub(crate) fn find_non_self_discard(
     cost: &AbilityCost,
-) -> Option<(&QuantityExpr, Option<&TargetFilter>)> {
+) -> Option<(&QuantityExpr, Option<&TargetFilter>, CardSelectionMode)> {
     match cost {
         AbilityCost::Discard {
             count,
             filter,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
-            ..
-        } => Some((count, filter.as_ref())),
+            selection,
+        } => Some((count, filter.as_ref(), *selection)),
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_discard),
         _ => None,
     }
+}
+
+/// CR 601.2h + CR 701.9a: Resolve a non-self "discard" cost leg into its interactive requirement.
+///
+/// - `Ok(None)`  => there is no `FromHand` discard leg, OR the resolved count is 0. A zero-card
+///   discard — e.g. Lion's Eye Diamond's "Discard your hand" with an empty hand (its
+///   `HandSize` count resolves to 0) — is paid by doing nothing: nothing moves and no
+///   `Discarded`/`ZoneChanged` event fires (CR 701.9a moves cards hand→graveyard only when
+///   there are cards). Per CR 601.2h an unpayable cost can't be paid, but a zero-cost is not
+///   unpayable — it is trivially paid. The caller treats the leg as satisfied and proceeds to
+///   the next unpaid leg. Structural precedent: `mana_abilities::exile_cost_choice` (the
+///   interactive non-self cost sibling).
+/// - `Err(..)`   => there are fewer eligible cards than the required (nonzero) count, so
+///   CR 601.2h makes the cost unpayable.
+/// - `Ok(Some((count, eligible)))` => an interactive selection of `count` cards from `eligible`.
+///
+/// Detection is `FromHand`-only (via [`find_non_self_discard`]); a `SourceCard` "discard this
+/// card" cost is never matched here and its `count` resolves to 1, so it can never misfire
+/// through the zero-count auto-pay path.
+pub(crate) fn resolve_non_self_discard_requirement(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> Result<Option<(usize, Vec<ObjectId>)>, EngineError> {
+    // The activation/casting path handles ANY `FromHand` discard selection mode; the
+    // mana-ability path (see `mana_abilities::discard_cost_choice`) is the only caller
+    // that gates on `Chosen`. Keep this resolver selection-agnostic.
+    let Some((count, filter, _selection)) = find_non_self_discard(cost) else {
+        return Ok(None);
+    };
+    let count = super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
+    // CR 601.2h + CR 701.9a: A resolved zero-card discard is paid by doing nothing — never
+    // surface a dead selection prompt for it.
+    if count == 0 {
+        return Ok(None);
+    }
+    let eligible = find_eligible_discard_targets(state, player, source_id, filter);
+    if eligible.len() < count {
+        return Err(EngineError::ActionNotAllowed(
+            "Not enough cards in hand to discard".into(),
+        ));
+    }
+    Ok(Some((count, eligible)))
 }
 
 fn has_self_ref_discard_cost(cost: &AbilityCost) -> bool {
@@ -16971,15 +17032,13 @@ pub fn handle_activate_ability(
             });
         }
 
-        if let Some((count, filter)) = find_non_self_discard(cost) {
-            let count =
-                super::quantity::resolve_quantity(state, count, player, source_id).max(0) as usize;
-            let eligible = find_eligible_discard_targets(state, player, source_id, filter);
-            if eligible.len() < count {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough cards in hand to discard".into(),
-                ));
-            }
+        // CR 601.2h + CR 701.9a: A resolved zero-card FromHand discard leg (e.g. Bomat
+        // Courier's "Discard your hand" on an empty hand) is paid by doing nothing — the
+        // helper returns `Ok(None)` so we FALL THROUGH to the following cost detection
+        // rather than surfacing a dead `PayCost { count: 0 }`.
+        if let Some((count, eligible)) =
+            resolve_non_self_discard_requirement(state, player, source_id, cost)?
+        {
             let mut pending_discard =
                 PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending_discard.activation_cost = Some(cost.clone());
@@ -17930,8 +17989,9 @@ pub(crate) fn loyalty_ability_gains_mana_tax(
     !matches!(probe.cost, Some(AbilityCost::Loyalty { .. }))
 }
 
-/// CR 601.2f: Apply self-referential cost reduction to an ability definition's cost.
-/// Mutates `ability_def.cost` in place, reducing generic mana by `amount_per * count`.
+/// CR 601.2f: Apply self-referential cost reduction/increase to an ability definition's cost.
+/// Mutates `ability_def.cost` in place by `amount_per * count` in `cost_reduction.mode`'s
+/// direction (`Reduce` floors at {0}; `Raise` adds generic mana).
 fn apply_cost_reduction(
     state: &GameState,
     ability_def: &mut AbilityDefinition,
@@ -17939,7 +17999,7 @@ fn apply_cost_reduction(
     source_id: ObjectId,
 ) {
     if let Some(ref reduction) = ability_def.cost_reduction {
-        // CR 602.2b + CR 601.2f: A conditional flat reduction ("costs {N} less … if [cond]")
+        // CR 602.2b + CR 601.2f: A conditional flat modification ("costs {N} less/more … if [cond]")
         // applies only when its gate holds at cost-determination time. `None` =
         // unconditional (the "for each" scaling form and all legacy reductions).
         let condition_met = reduction.condition.as_ref().is_none_or(|cond| {
@@ -17948,10 +18008,17 @@ fn apply_cost_reduction(
         if condition_met {
             let count =
                 super::quantity::resolve_quantity(state, &reduction.count, player, source_id);
-            let reduce_by = (reduction.amount_per as i32 * count).max(0) as u32;
-            if reduce_by > 0 {
+            let delta = (reduction.amount_per as i32 * count).max(0) as u32;
+            if delta > 0 {
                 if let Some(ref mut cost) = ability_def.cost {
-                    reduce_generic_in_cost(cost, reduce_by);
+                    // CR 601.2f + CR 118.7: self-referential text uses the same
+                    // Reduce/Raise axis as external ability-cost statics.
+                    // `Minimum` is not emitted for self `CostReduction`.
+                    match reduction.mode {
+                        CostModifyMode::Reduce => reduce_generic_in_cost(cost, delta),
+                        CostModifyMode::Raise => increase_generic_in_cost(cost, delta),
+                        CostModifyMode::Minimum => {}
+                    }
                 }
             }
         }

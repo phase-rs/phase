@@ -249,6 +249,7 @@
     "sacrifice": "Sacrifice",
     "copy": "Copy",
     "copyTooltip": "Token copy of a real card",
+    "cantBeBlocked": "Can't be blocked",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ring-bearer",
     "hiddenAttachments": "+{{count}} more attached",
@@ -694,6 +695,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Must block {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1746,6 +1748,23 @@
     "targetLand": "the land target",
     "targetCreature": "the creature target",
     "targetChoice": "this target choice"
+  },
+  "giftRecipient": {
+    "title": "Choose Gift Recipient",
+    "subtitle": "Choose which opponent receives the promised gift."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promise a gift?",
+      "pay": "Promise {{gift}}",
+      "decline": "Cast without promising",
+      "kind": {
+        "card": "a card",
+        "treasure": "a Treasure",
+        "food": "a Food",
+        "tappedFish": "a tapped Fish"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Choose Clash Opponent",

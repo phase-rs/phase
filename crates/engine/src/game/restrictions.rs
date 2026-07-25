@@ -261,23 +261,10 @@ pub fn record_spell_cast_from_zone(
     from_zone: Zone,
     cast_variant: crate::types::game_state::CastingVariant,
 ) {
-    state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
-    *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
     // CR 117.1: Record spell characteristics for general-purpose filtered counting.
     let record = spell_cast_record_for(obj, from_zone, cast_variant, false);
-    state
-        .spells_cast_this_turn_by_player
-        .entry(player)
-        .or_default()
-        .push_back(record.clone());
-    // CR 117.1: Game-scope history mirror — not cleared between turns so
-    // "named {LITERAL} this game" conditions (Approach of the Second Sun)
-    // can see all prior casts.
-    state
-        .spells_cast_this_game_by_player
-        .entry(player)
-        .or_default()
-        .push_back(record);
+    crate::game::ledger::record_spell_cast(state, player, record)
+        .expect("finalized spell cast must have a valid ledger prefix");
 }
 
 /// CR 702.185c: True when any player cast a spell using `variant` this turn.
@@ -856,9 +843,8 @@ pub fn record_ability_activation(
     source_id: ObjectId,
     ability_index: usize,
 ) {
-    let key = (source_id, ability_index);
-    *state.activated_abilities_this_turn.entry(key).or_insert(0) += 1;
-    *state.activated_abilities_this_game.entry(key).or_insert(0) += 1;
+    crate::game::ledger::record_ability_activation(state, source_id, ability_index)
+        .expect("activated ability must have a valid ledger prefix");
 }
 
 /// CR 702.142b: Compute the effective per-turn activation limit for an ability.

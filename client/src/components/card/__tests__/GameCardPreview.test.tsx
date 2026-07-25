@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameObject } from "../../../adapter/types.ts";
@@ -64,6 +64,7 @@ afterEach(() => {
     inspectedObjectId: null,
     inspectedFaceIndex: 0,
     isDragging: false,
+    mobileHandGesture: null,
     shiftHeld: false,
     altHeld: false,
   });
@@ -141,6 +142,63 @@ describe("GameCardPreview", () => {
       expect(preview).toHaveStyle({ bottom: "0px" });
       expect(within(preview!).getByAltText("Hovered Card")).toBeInTheDocument();
     });
+  });
+
+  it("keeps the held card in the stable fan until direct dragging begins", () => {
+    const card = gameObjectFactory
+      .withId(203)
+      .inHand()
+      .named("Held Card")
+      .build();
+    const gameState = gameStateFactory
+      .withPlayers({ id: 0, hand: [card.id] }, 1)
+      .withObjects(card)
+      .build();
+    useGameStore.setState({ gameState, spellCosts: {} });
+
+    const { container } = render(<PlayerHand />);
+    const source = container.querySelector<HTMLElement>(
+      `[data-hand-card][data-object-id="${card.id}"]`,
+    );
+    expect(source).not.toBeNull();
+
+    const sourceOrigin = {
+      bottom: 700,
+      centerX: 450,
+      height: 140,
+      rotation: 0,
+      top: 560,
+      width: 100,
+    };
+    act(() => {
+      useUiStore.getState().setMobileHandGesture({
+        objectId: card.id,
+        phase: "preview",
+        sourceOrigin,
+        offsetX: 0,
+        offsetY: 0,
+        playable: true,
+        castReady: false,
+      });
+    });
+
+    expect(source).not.toHaveAttribute("data-hand-held-source");
+    expect(source).not.toHaveClass("w-0", "opacity-0");
+
+    act(() => {
+      useUiStore.getState().setMobileHandGesture({
+        objectId: card.id,
+        phase: "drag",
+        sourceOrigin,
+        offsetX: 0,
+        offsetY: -24,
+        playable: true,
+        castReady: false,
+      });
+    });
+
+    expect(source).toHaveAttribute("data-hand-held-source", "true");
+    expect(source).toHaveClass("w-0", "opacity-0");
   });
 
   it("renders no preview while a card is being dragged", () => {

@@ -13,6 +13,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
+use crate::types::resolved_commands::{
+    ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+};
 use crate::types::zones::Zone;
 
 use super::effects;
@@ -794,10 +797,8 @@ fn validate_exact_keep_on_top_selection(
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
 /// library "in any order", so a legal keep-on-top selection is any duplicate-free
-/// subset of the looked-at cards (order is the player's free choice). Because the
-/// multiplayer server bypasses its candidate-enumeration legality gate for these
-/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
-/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// subset of the looked-at cards (order is the player's free choice). `apply()` is
+/// the validation boundary: a foreign id or a duplicate would corrupt the
 /// library `retain`+`insert` (relocating or duplicating a card), so reject both
 /// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
 fn validate_keep_on_top_selection(
@@ -3310,9 +3311,14 @@ pub(super) fn handle_resolution_choice(
             // replacement's decline ability runs via `pending_continuation`, which the
             // effect's resolver populated with the decline branch before the prompt.
             if optional && chosen.is_empty() {
-                for &card_id in &cards {
-                    state.revealed_cards.remove(&card_id);
-                }
+                state
+                    .resolve_and_apply_information(
+                        &cards,
+                        ResolvedInformationAudience::Controller(player),
+                        ResolvedInformationLifetime::UntilActionBoundary,
+                        ResolvedInformationEdit::Hide,
+                    )
+                    .expect("reveal-choice cleanup must reference live card occurrences");
                 state.private_look_ids.clear();
                 state.private_look_player = None;
                 set_priority(state, player);
@@ -3353,9 +3359,14 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
-            for &card_id in &cards {
-                state.revealed_cards.remove(&card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &cards,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-choice cleanup must reference live card occurrences");
             state.private_look_ids.clear();
             state.private_look_player = None;
 
@@ -4640,6 +4651,13 @@ pub(super) fn handle_resolution_choice(
                             if state.active_ability_continuation().is_none() {
                                 state.finish_active_paused_post_replacement_dispatch();
                             }
+                            // CR 608.2c + CR 701.21a: Singular sacrificed referent
+                            // for a chained Demonstrative / CostPaidObject consumer
+                            // is stamped once at the sacrifice-completion seam
+                            // (`perform_player_scope_sacrifices` when
+                            // `propagate_parent_context` is set). Do not re-scan
+                            // here — a second authority drifts when the snapshot
+                            // ladder changes (issue #5925).
                             set_priority(state, player);
                             resume_with_error_propagation(state, events)?;
                             if let Some(outcome) = batch_or_drain_observer_triggers(
@@ -4950,6 +4968,14 @@ pub(super) fn handle_resolution_choice(
                             &library_position,
                             events,
                         );
+                        if let Some(next_owner) =
+                            effects::change_zone::resume_next_mass_library_order_choice(state)
+                        {
+                            state.priority_player = next_owner;
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
                     } else {
                         // The selected EffectZoneChoice is now consumed. Clear it
                         // before the pipeline may park a CR 616.1 prompt; otherwise
@@ -6804,6 +6830,10 @@ fn finish_effect_zone_put_at_library_position(
         &library_position,
         events,
     );
+    if let Some(next_owner) = effects::change_zone::resume_next_mass_library_order_choice(state) {
+        state.priority_player = next_owner;
+        return;
+    }
     if state.active_ability_continuation().is_some() {
         let tracked = if matches!(library_position, LibraryPosition::Bottom) {
             state
@@ -6881,6 +6911,22 @@ pub(crate) fn run_batch_completion(
             enters_under,
             events,
         ),
+        BatchCompletion::ExileFaceDownPileDeliveryComplete {
+            player,
+            source_id,
+            members,
+            required_member_count,
+        } => effects::exile_face_down_pile::complete_exile_face_down_pile_delivery(
+            state,
+            player,
+            source_id,
+            members,
+            required_member_count,
+            events,
+        ),
+        BatchCompletion::ExileFaceDownPileReturnComplete { source_id } => {
+            effects::exile_face_down_pile::complete_exile_face_down_pile_return(source_id, events)
+        }
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,
@@ -7223,9 +7269,14 @@ pub(crate) fn run_batch_completion(
                     events,
                 );
             }
-            for card_id in &clear_markers {
-                state.revealed_cards.remove(card_id);
-            }
+            state
+                .resolve_and_apply_information(
+                    &clear_markers,
+                    ResolvedInformationAudience::Controller(player),
+                    ResolvedInformationLifetime::UntilActionBoundary,
+                    ResolvedInformationEdit::Hide,
+                )
+                .expect("reveal-rest cleanup must reference live card occurrences");
             if let Some(kept) = publish_tracked_set {
                 effects::publish_fresh_tracked_set(state, kept.clone());
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {

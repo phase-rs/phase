@@ -3467,6 +3467,7 @@ fn granted_freerunning_static_surfaces_freerunning_variant() {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -9688,6 +9689,7 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
                 power: None,
                 toughness: None,
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types: Default::default(),
                 mana_cost: ManaCost::generic(1),
@@ -11960,6 +11962,7 @@ fn x_cost_max_accounts_for_granted_affinity_exceeding_fixed_generic() {
                 source_controller: None,
                 source_object: None,
                 bypass_beneficiary: None,
+                protection_does_not_remove: None,
             }]
             .into();
         }
@@ -14737,6 +14740,7 @@ fn witherbloom_grants_affinity_to_instant_and_sorcery_spells() {
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         };
         obj.static_definitions = vec![def].into();
     }
@@ -14854,6 +14858,7 @@ fn add_witherbloom_affinity_source(state: &mut GameState, player: PlayerId) -> O
             source_controller: None,
             source_object: None,
             bypass_beneficiary: None,
+            protection_does_not_remove: None,
         }]
         .into();
     }
@@ -25210,6 +25215,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25300,6 +25306,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25386,6 +25393,7 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -29007,6 +29015,7 @@ fn add_disturb_creature_to_graveyard(
         power: Some(1),
         toughness: Some(1),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut card_types = crate::types::card_type::CardType::default();
@@ -34905,6 +34914,7 @@ mod mtmte_cast_flow {
             power: Some(7),
             toughness: Some(7),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types,
             mana_cost: ManaCost::default(),
@@ -43521,6 +43531,7 @@ fn conditional_cost_reduction_applies_only_when_condition_met() {
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
 
     let condition = parse_restriction_condition("you control a legendary creature")
         .expect("test condition must parse");
@@ -43540,6 +43551,7 @@ fn conditional_cost_reduction_applies_only_when_condition_met() {
             },
         });
         def.cost_reduction = Some(CostReduction {
+            mode: CostModifyMode::Reduce,
             amount_per: 3,
             count: QuantityExpr::Fixed { value: 1 },
             condition: Some(condition.clone()),
@@ -43671,6 +43683,110 @@ fn hyldas_crown_cost_reduction_applies_only_during_your_turn() {
         generic_of(&def_off),
         1,
         "on an opponent's turn the reduction does not apply"
+    );
+}
+
+/// CR 602.2b + CR 601.2f: Loreseeker's Stone —
+/// "{3}, {T}: Draw three cards. This ability costs {1} more to activate
+/// for each card in your hand." The {3} generic component is {3} with an
+/// empty hand and {8} with five cards in hand. Parsed from the real Oracle
+/// clause and applied through production `apply_cost_reduction` (the same
+/// seam `can_activate_ability_now` / activation cost determination use).
+///
+/// Discriminating assertion: `generic_of(&def)` scales 3 → 8 with hand size.
+/// Reverting the Raise apply arm leaves generic at {3} for every hand size
+/// (the Discord report: activating for {3} with five cards in hand).
+#[test]
+fn loreseekers_stone_raise_cost_scales_with_hand_size() {
+    use crate::parser::oracle_cost::try_parse_cost_reduction;
+    use crate::types::ability::{Effect, QuantityExpr, QuantityRef, ZoneRef};
+
+    let reduction = try_parse_cost_reduction(
+        "this ability costs {1} more to activate for each card in your hand",
+    )
+    .expect("Loreseeker's Stone cost-increase clause must parse");
+    assert_eq!(reduction.mode, CostModifyMode::Raise);
+    assert_eq!(reduction.amount_per, 1);
+    match &reduction.count {
+        QuantityExpr::Ref {
+            qty:
+                QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Hand,
+                    ..
+                },
+        }
+        | QuantityExpr::Ref {
+            qty: QuantityRef::HandSize { .. },
+        } => {}
+        other => panic!("expected hand-size count, got {other:?}"),
+    }
+
+    let make_def = || {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Unimplemented {
+                name: "draw".to_string(),
+                description: None,
+            },
+        );
+        def.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 3,
+            },
+        });
+        def.cost_reduction = Some(reduction.clone());
+        def
+    };
+    let generic_of = |def: &AbilityDefinition| match def.cost.as_ref().unwrap() {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => *generic,
+        other => panic!("expected Mana cost, got {other:?}"),
+    };
+
+    let build_state = |hand_cards: usize| -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(6500);
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loreseeker's Stone".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let o = state.objects.get_mut(&src).unwrap();
+            o.card_types.core_types.push(CoreType::Artifact);
+        }
+        for i in 0..hand_cards {
+            create_object(
+                &mut state,
+                CardId(100 + i as u64),
+                PlayerId(0),
+                format!("Hand Card {i}"),
+                Zone::Hand,
+            );
+        }
+        (state, src)
+    };
+
+    let (state0, src0) = build_state(0);
+    let mut def0 = make_def();
+    apply_cost_reduction(&state0, &mut def0, PlayerId(0), src0);
+    assert_eq!(generic_of(&def0), 3, "empty hand: {{3}} + {{0}} = {{3}}");
+
+    let (state5, src5) = build_state(5);
+    let mut def5 = make_def();
+    apply_cost_reduction(&state5, &mut def5, PlayerId(0), src5);
+    assert_eq!(
+        generic_of(&def5),
+        8,
+        "five cards in hand: {{3}} + {{5}} = {{8}} (Discord report)"
+    );
+    assert_ne!(
+        generic_of(&def0),
+        generic_of(&def5),
+        "paid generic must differ across hand sizes (revert leaves both at {{3}})"
     );
 }
 
@@ -46000,8 +46116,8 @@ fn cancel_clears_pins() {
     );
 }
 
-/// TEST 7: MP-accepts — SpendPoolMana is classified as a mana ability so it
-/// rides session skip_legality.
+/// TEST 7: SpendPoolMana is classified as a mana ability so AI candidate
+/// enumeration omits mana-payment-window bookkeeping actions.
 #[test]
 fn spend_pool_mana_is_mana_ability() {
     assert!(
@@ -46009,14 +46125,14 @@ fn spend_pool_mana_is_mana_ability() {
             pip_id: ManaPipId(1)
         }
         .is_mana_ability(),
-        "SpendPoolMana must be a mana ability (MP skip_legality)"
+        "SpendPoolMana must be a mana ability"
     );
     assert!(
         GameAction::UnspendPoolMana {
             pip_id: ManaPipId(1)
         }
         .is_mana_ability(),
-        "UnspendPoolMana must be a mana ability (MP skip_legality)"
+        "UnspendPoolMana must be a mana ability"
     );
 }
 
@@ -47878,6 +47994,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: {
                 let mut types = crate::types::card_type::CardType::default();
@@ -49065,4 +49182,261 @@ fn path_of_ancestry_fires_for_a_commander_an_opponent_controls() {
         base + 1,
         "a stolen commander is still YOUR commander (CR 903.3) — the scry must still fire"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #6494 — resolve_non_self_discard_requirement class boundary
+//
+// The shared helper backing every non-self FromHand discard cost site
+// (activation begin_cost_payment, surface_next_unpaid_interactive_activation_cost,
+// and the spell additional-cost arm). A resolved-count-0 FromHand discard is
+// paid by doing nothing (CR 601.2h + CR 701.9a) → Ok(None); a nonzero count with
+// too few eligible cards is unpayable → Err; SourceCard "discard this card" is
+// FromHand-only-excluded → Ok(None) (its own count-1 path is untouched).
+// ---------------------------------------------------------------------------
+
+fn from_hand_discard_cost(count: QuantityExpr) -> AbilityCost {
+    AbilityCost::Discard {
+        count,
+        filter: None,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+    }
+}
+
+/// Issue #6494 (negative, class boundary): a fixed `Discard { count: 1 }` on an
+/// EMPTY hand is UNPAYABLE (CR 601.2h) — the helper returns `Err`, NOT `Ok(None)`.
+/// The zero-count auto-pay class is `resolved == 0` ONLY; `count >= 1` never
+/// auto-pays. Reach-guarded: the same cost with a card in hand returns
+/// `Ok(Some((1, [card])))`, proving the helper reaches its count/eligibility
+/// check rather than short-circuiting. `AbilityCost::is_payable` agrees (false
+/// on empty hand, true with the card).
+#[test]
+fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Source".to_string(),
+        Zone::Battlefield,
+    );
+    let cost = from_hand_discard_cost(QuantityExpr::Fixed { value: 1 });
+
+    // Empty hand: unpayable, so the helper errors rather than auto-paying.
+    assert!(state.players[0].hand.is_empty());
+    assert!(matches!(
+        resolve_non_self_discard_requirement(&state, PlayerId(0), source, &cost),
+        Err(EngineError::ActionNotAllowed(_))
+    ));
+    // CR 601.2h: the payability gate excludes it too.
+    assert!(!cost.is_payable(&state, PlayerId(0), source));
+
+    // Positive reach-guard: with one eligible card the helper resolves the real
+    // interactive requirement (not a vacuous early return).
+    let card = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "Card".to_string(),
+        Zone::Hand,
+    );
+    match resolve_non_self_discard_requirement(&state, PlayerId(0), source, &cost) {
+        Ok(Some((count, eligible))) => {
+            assert_eq!(count, 1);
+            assert_eq!(eligible, vec![card]);
+        }
+        other => panic!("expected Ok(Some((1, [card]))), got {other:?}"),
+    }
+    assert!(cost.is_payable(&state, PlayerId(0), source));
+}
+
+/// Issue #6494 (no over-fire, casting path): a `Discard { Fixed(2) }` with THREE
+/// eligible cards resolves to `Ok(Some((2, <all 3 choices>)))` — the count stays
+/// 2 (never widened or auto-paid) and every eligible card is offered as a choice.
+#[test]
+fn resolve_discard_requirement_fixed_two_with_three_eligible_offers_all() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Source".to_string(),
+        Zone::Battlefield,
+    );
+    let c1 = create_object(
+        &mut state,
+        CardId(2),
+        PlayerId(0),
+        "A".to_string(),
+        Zone::Hand,
+    );
+    let c2 = create_object(
+        &mut state,
+        CardId(3),
+        PlayerId(0),
+        "B".to_string(),
+        Zone::Hand,
+    );
+    let c3 = create_object(
+        &mut state,
+        CardId(4),
+        PlayerId(0),
+        "C".to_string(),
+        Zone::Hand,
+    );
+
+    let cost = from_hand_discard_cost(QuantityExpr::Fixed { value: 2 });
+    match resolve_non_self_discard_requirement(&state, PlayerId(0), source, &cost) {
+        Ok(Some((count, eligible))) => {
+            assert_eq!(count, 2);
+            assert_eq!(eligible.len(), 3);
+            for card in [c1, c2, c3] {
+                assert!(eligible.contains(&card));
+            }
+        }
+        other => panic!("expected Ok(Some((2, 3 choices))), got {other:?}"),
+    }
+}
+
+/// Issue #6494 (SourceCard/self-discard untouched): a `Discard { self_scope:
+/// SourceCard }` ("discard this card") is FromHand-only-excluded — both the
+/// detector `find_non_self_discard` and the helper return `None`, so the
+/// SourceCard discard path never routes through the zero-count auto-pay. Reach-
+/// guarded: an otherwise-identical FromHand discard IS detected, proving the
+/// `None` is scope-driven, not a failure to match the `Discard` shape at all.
+#[test]
+fn resolve_discard_requirement_source_card_scope_is_not_auto_paid() {
+    let mut state = setup_game_at_main_phase();
+    let source = create_object(
+        &mut state,
+        CardId(1),
+        PlayerId(0),
+        "Channel".to_string(),
+        Zone::Hand,
+    );
+
+    let source_card_cost = AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: 1 },
+        filter: None,
+        selection: crate::types::ability::CardSelectionMode::Chosen,
+        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+    };
+    // FromHand-only detection: SourceCard is invisible to both the detector and
+    // the helper, so it can never reach the zero-count auto-pay branch.
+    assert!(find_non_self_discard(&source_card_cost).is_none());
+    assert!(matches!(
+        resolve_non_self_discard_requirement(&state, PlayerId(0), source, &source_card_cost),
+        Ok(None)
+    ));
+
+    // Positive reach-guard: the same shape as FromHand IS detected (so the None
+    // above is the SourceCard scope, not a shape mismatch).
+    let from_hand_cost = from_hand_discard_cost(QuantityExpr::Fixed { value: 1 });
+    assert!(find_non_self_discard(&from_hand_cost).is_some());
+}
+
+/// Issue #6494 (site 3 — activation `begin_cost_payment` discard emitter, casting
+/// path class): Bomat Courier's activated ability
+/// "{R}, Discard your hand, Sacrifice this creature: Put all cards exiled with
+/// this creature into their owners' hands." must be activatable with an EMPTY
+/// hand — the "Discard your hand" leg is a zero-card discard paid by doing
+/// nothing (CR 601.2h + CR 701.9a).
+///
+/// Built from Bomat Courier's VERBATIM parsed cost
+/// (`Composite[Mana {R}, Discard { HandSize, FromHand }, Sacrifice(SelfRef, 1)]`),
+/// driven through the production `handle_activate_ability` entry. A stand-in
+/// `Draw 1` effect isolates the cost-payment path (the exiled-card return is the
+/// card's effect, not the cost under repair). Revert-sensitive: at base the
+/// discard leg surfaces `PayCost { Discard, count: 0 }`, so the activation never
+/// reaches the stack, the self-sacrifice never fires, and nothing is drawn.
+#[test]
+fn bomat_courier_activates_empty_handed_casting_path() {
+    let mut state = setup_game_at_main_phase();
+    add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+    let bomat = create_object(
+        &mut state,
+        CardId(6494),
+        PlayerId(0),
+        "Bomat Courier".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&bomat).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+    }
+    // A card in library so the stand-in Draw is observable.
+    let lib_card = create_object(
+        &mut state,
+        CardId(6495),
+        PlayerId(0),
+        "Library Card".to_string(),
+        Zone::Library,
+    );
+
+    // Bomat Courier's EXACT parsed activated-ability cost.
+    let bomat_cost = AbilityCost::Composite {
+        costs: vec![
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                },
+            },
+            AbilityCost::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+                filter: None,
+                selection: crate::types::ability::CardSelectionMode::Chosen,
+                self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+            },
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+        ],
+    };
+    Arc::make_mut(&mut state.objects.get_mut(&bomat).unwrap().abilities).push(
+        AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(bomat_cost),
+    );
+
+    assert!(state.players[0].hand.is_empty());
+
+    let mut events = Vec::new();
+    let waiting = handle_activate_ability(&mut state, PlayerId(0), bomat, 0, &mut events)
+        .expect("empty-hand Bomat Courier activation must not error");
+    state.waiting_for = waiting;
+
+    // Drive cost payment + resolution. The driver must NEVER see a discard prompt.
+    for _ in 0..10 {
+        if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        assert!(
+            !matches!(
+                state.waiting_for,
+                WaitingFor::PayCost {
+                    kind: PayCostKind::Discard,
+                    ..
+                }
+            ),
+            "a dead PayCost {{ Discard }} was surfaced on the casting path"
+        );
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    }
+
+    // The self-sacrifice cost leg fired (Bomat left the battlefield to graveyard).
+    assert_eq!(state.objects[&bomat].zone, Zone::Graveyard);
+    // Positive reach-guard: the ability resolved (the stand-in Draw drew the card).
+    assert!(state.stack.is_empty(), "the ability must fully resolve");
+    assert_eq!(state.objects[&lib_card].zone, Zone::Hand);
 }

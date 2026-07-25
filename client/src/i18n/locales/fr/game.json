@@ -248,6 +248,7 @@
     "target": "Cible",
     "copy": "Copie",
     "copyTooltip": "Jeton-copie d'une vraie carte",
+    "cantBeBlocked": "Ne peut pas être bloquée",
     "ringBearer": "Anneau",
     "ringBearerTooltip": "Porteur de l'Anneau",
     "hiddenAttachments": "+{{count}} more attached",
@@ -662,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Doit bloquer {{attacker}}",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1709,6 +1711,23 @@
     "targetLand": "la cible de terrain",
     "targetCreature": "la cible de créature",
     "targetChoice": "ce choix de cible"
+  },
+  "giftRecipient": {
+    "title": "Choisir le destinataire du cadeau",
+    "subtitle": "Choisissez quel adversaire reçoit le cadeau promis."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Promettre un cadeau ?",
+      "pay": "Promettre {{gift}}",
+      "decline": "Lancer sans promettre",
+      "kind": {
+        "card": "une carte",
+        "treasure": "un Trésor",
+        "food": "un Aliment",
+        "tappedFish": "un Poisson engagé"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Choisir l'adversaire pour la confrontation",

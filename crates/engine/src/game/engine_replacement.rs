@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
-    AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
-    TargetRef,
+    AbilityDefinition, CopyTargetPurpose, Effect, PostReplacementContinuation, ResolvedAbility,
+    TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1326,6 +1326,202 @@ pub(super) fn handle_replacement_choice(
     }
 }
 
+/// CR 707.2c + CR 614.12a + CR 613.1a: Answer path for Metamorphic Alteration's
+/// "As this Aura enters, choose a creature." Latches the chosen creature's
+/// copiable values (fixed here, per CR 707.2c, as the copy effect first starts
+/// to apply — later changes to the chosen creature never propagate, CR 707.2b)
+/// and installs them as a Layer-1 `CopyValues` transient continuous effect
+/// SOURCED FROM the Aura and applied to the Aura's enchanted host. The Aura
+/// itself is left untouched (it does not become a copy). The install reuses the
+/// single copy-values authority (`become_copy::apply_precomputed_copy_values`),
+/// which strips exceptions / flushes layers / emits `EffectResolved`.
+fn handle_persist_chosen_attribute_choice(
+    state: &mut GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    donor_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 707.2c: copiable values are determined at the moment the effect first
+    // starts to apply — snapshot the donor now.
+    let values = crate::game::layers::compute_current_copiable_values(state, donor_id).ok_or(
+        EngineError::InvalidAction("Chosen copy source no longer exists".to_string()),
+    )?;
+    // CR 111.1 + CR 707.2: art routing follows the copy (token vs printed
+    // source), captured alongside the values — NOT a copiable value itself.
+    let (display_source, printed_ref, token_image_ref) = state
+        .objects
+        .get(&donor_id)
+        .map(|o| {
+            (
+                o.display_source,
+                o.printed_ref.clone(),
+                o.token_image_ref.clone(),
+            )
+        })
+        .unwrap_or_default();
+
+    // CR 400.7: persist the frozen snapshot on the Aura so it is cleared
+    // automatically when the Aura changes zones (exactly the copy's lifetime).
+    let snapshot = crate::types::ability::LatchedCopiableSnapshot {
+        values: values.clone(),
+        display_source,
+        printed_ref: printed_ref.clone(),
+        token_image_ref: token_image_ref.clone(),
+    };
+    if let Some(aura) = state.objects.get_mut(&source_id) {
+        aura.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CopiableSnapshot(
+                Box::new(snapshot),
+            ));
+    }
+
+    // CR 608.3c + CR 614.12a: Spell-path mid-entry `CopyTargetChoice` is raised
+    // from the CallerEpilogue post-replacement drain AFTER CR 608.3c Aura
+    // attach — `attached_to` is already the cast host. The stash pushed there
+    // (`PendingSpellResolution`) still carries `spell_targets` so this answer
+    // path can apply cast-link stamps and prefer the CR 303.4a spell target as
+    // the copy recipient (re-attach via `apply_pending_spell_resolution` is
+    // idempotent).
+    //
+    // CR 303.4f: Non-spell Aura entry attaches during delivery (before this
+    // choice), so `attached_to` is already set and there is no spell-resolution
+    // frame — fall through to the attached host / enter-time attach consult.
+    let mut host_from_spell: Option<ObjectId> = None;
+    let mut took_spell_resolution = false;
+    if state
+        .active_spell_resolution()
+        .is_some_and(|ctx| ctx.object_id == source_id)
+    {
+        let ctx = state
+            .take_active_spell_resolution()
+            .expect("active spell-resolution frame checked above");
+        took_spell_resolution = true;
+        host_from_spell = ctx.spell_targets.first().and_then(|t| match t {
+            crate::types::ability::TargetRef::Object(id) => Some(*id),
+            _ => None,
+        });
+        apply_pending_spell_resolution(state, &ctx, events);
+    }
+
+    // CR 303.4f: Non-spell path may still be unattached if entry skipped the
+    // auto-attach consult (e.g. liminal copy → Aura). Resolve it now.
+    // Never use this Enchant-filter consult as a CR 608.3c spell-path fallback
+    // — a resolving Aura spell's host is the target chosen at cast (CR 303.4a),
+    // carried on `PendingSpellResolution.spell_targets`.
+    if !took_spell_resolution
+        && state
+            .objects
+            .get(&source_id)
+            .is_some_and(|aura| aura.attached_to.is_none())
+    {
+        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+            crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+            | crate::game::zone_pipeline::EnteringAuraAttachment::Resolved => {}
+            crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice { .. } => {
+                return Err(EngineError::InvalidAction(
+                    "PersistChosenAttribute requires a resolved Aura host before the copy installs"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    // CR 303.4 + CR 702.5: the Aura enchants a creature — its host is the
+    // recipient of the copy effect. Prefer the spell-target host established
+    // above (spell-cast path), then the live attachment (non-spell / after
+    // attach). Never silently no-op if the host is missing.
+    let host_id = host_from_spell
+        .or_else(|| {
+            state
+                .objects
+                .get(&source_id)
+                .and_then(|aura| aura.attached_to.as_ref())
+                .and_then(|attach| attach.as_object())
+        })
+        .ok_or_else(|| {
+            EngineError::InvalidAction(
+                "Metamorphic Alteration copy choice answered without a resolved Aura host \
+                 (CR 608.3c spell target / CR 303.4f attach)"
+                    .to_string(),
+            )
+        })?;
+
+    // CR 707.2c + CR 613.1a + CR 611.2a: install the copy as a transient
+    // continuous effect sourced from the Aura, applied to the host, ending
+    // when the Aura leaves the battlefield (`UntilHostLeavesPlay` prunes on
+    // `tce.source_id` leaving — the Aura). `duration_subject_id` tracks the
+    // host for any recipient-relative duration reads (harmless here).
+    let copy = super::effects::become_copy::PrecomputedCopyValues {
+        source_id,
+        controller,
+        duration_subject_id: host_id,
+        duration: crate::types::ability::Duration::UntilHostLeavesPlay,
+        values,
+        display_source,
+        printed_ref,
+        token_image_ref,
+        additional_modifications: Vec::new(),
+        effect_kind: crate::types::ability::EffectKind::ChoosePermanent,
+    };
+    super::effects::become_copy::apply_precomputed_copy_values(state, host_id, copy, events)
+        .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+
+    // CR 707.4: installing the host copy must not disturb the Aura's attachment.
+    debug_assert!(
+        state
+            .objects
+            .get(&source_id)
+            .is_some_and(|aura| aura.attached_to.is_some()),
+        "the Aura must remain attached after installing the host copy"
+    );
+
+    // CR 615.5 + CR 614.12a: PersistChosenAttribute's ChoosePermanent work is
+    // complete once the host copy is installed. Retire the paused post-
+    // replacement drain BEFORE replaying deferred entry events — otherwise a
+    // nested OrderTriggers / trigger-target pause can return while the same
+    // ChoosePermanent drain is still resident, and a later post-action pass
+    // re-drains it into a second `CopyTargetChoice`.
+    //
+    // Clear the prompt we just answered first: `state.waiting_for` is still the
+    // inbound `CopyTargetChoice`, and the completion tail below used to echo it
+    // via `if !Priority { return waiting_for }` — the cast driver then re-answered
+    // the same prompt until its 64-iteration cap, leaving sequential Metamorphic
+    // casts blocked (two_auras). Nested prompts raised during copy install /
+    // entry replay still overwrite `waiting_for` and propagate below.
+    //
+    // Divergence from the BecomeCopy completion tail (`:1878+`): that sibling
+    // retires the drain *after* replay and brackets replay with
+    // `capture_paused_zone_change_delivery_for_member` +
+    // `drain_pending_batch_deliveries`. Those steps are for liminal / multi-
+    // member batch deliveries (meld, ninjutsu copy tokens) that can park further
+    // co-arrivers behind the mid-entry choice. An Aura *spell* entry is a
+    // single-object `CallerEpilogue` delivery with no active batch frame — there
+    // is nothing for delivery-capture or batch-drain to preserve — so this path
+    // intentionally omits them. Retiring before replay is required here because
+    // `Effect::ChoosePermanent` (unlike `BecomeCopy`) is itself the post-
+    // replacement continuation being answered; leaving it paused through replay
+    // lets a nested prompt return and then re-surface the same ChoosePermanent.
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    state.finish_active_paused_post_replacement_dispatch();
+
+    // CR 614.12a + CR 603.2: replay the Aura's deferred battlefield-entry event
+    // now that the host copy is realized, so ETB observers see the final state
+    // (mirrors the BecomeCopy completion tail, but with the drain already
+    // retired — see above).
+    if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
+        return Ok(waiting_for);
+    }
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return Ok(state.waiting_for.clone());
+    }
+    Ok(WaitingFor::Priority {
+        player: state.active_player,
+    })
+}
+
 pub(super) fn handle_copy_target_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
@@ -1336,6 +1532,7 @@ pub(super) fn handle_copy_target_choice(
         player,
         source_id,
         valid_targets,
+        purpose,
         ..
     } = waiting_for
     else {
@@ -1352,6 +1549,15 @@ pub(super) fn handle_copy_target_choice(
             ))
         }
     };
+
+    // CR 707.2c + CR 614.12a: Metamorphic Alteration — the chosen creature's
+    // copiable values are latched onto the source Aura and installed as a
+    // Layer-1 copy effect on the Aura's enchanted host. The entering Aura is
+    // NEVER turned into a copy (never `BecomeCopy`), and this path never runs
+    // the enter-as-a-copy / copy-token completion tail below.
+    if matches!(purpose, CopyTargetPurpose::PersistChosenAttribute) {
+        return handle_persist_chosen_attribute_choice(state, source_id, player, target_id, events);
+    }
 
     if state.liminal_entries.contains_key(&source_id) {
         let Some(resume) = state.pending_liminal_entry_resume.take() else {
@@ -1938,8 +2144,31 @@ pub(super) fn apply_post_replacement_effect(
                 source_id,
                 valid_targets,
                 max_mana_value,
+                purpose: CopyTargetPurpose::BecomeCopy,
             });
         }
+    }
+
+    // CR 614.12a + CR 707.2c: "As this Aura enters, choose a creature." The
+    // chosen permanent's copiable values are latched onto the source Aura and
+    // installed as a copy effect on the Aura's enchanted host at the answer
+    // (`PersistChosenAttribute`) — never onto the entering Aura itself. This
+    // reuses the same `CopyTargetChoice` machinery as `BecomeCopy` (it is a
+    // choice, not targeting — hexproof/shroud don't apply, CR 115.10a) but is
+    // discriminated by `purpose`. Empty legal-choice set → no prompt (CR 609.3:
+    // an effect does only as much as possible).
+    if let Effect::ChoosePermanent { ref filter } = *real_work.effect {
+        let valid_targets = find_copy_targets(state, filter, source_id, controller, None);
+        if valid_targets.is_empty() {
+            return None;
+        }
+        return Some(WaitingFor::CopyTargetChoice {
+            player: controller,
+            source_id,
+            valid_targets,
+            max_mana_value: None,
+            purpose: CopyTargetPurpose::PersistChosenAttribute,
+        });
     }
 
     // CR 614.1c: The injected `Object(source)` target is the source-as-SelfRef

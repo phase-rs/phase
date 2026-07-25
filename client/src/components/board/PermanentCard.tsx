@@ -15,7 +15,9 @@ import { useCanHover } from "../../hooks/useCanHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useUnboundedCounterTypes } from "../../hooks/useUnboundedCounterTypes.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { renderDescription } from "../../utils/description.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { buildGrantedKeywordSources, buildPTSources } from "../../viewmodel/attribution.ts";
@@ -75,9 +77,6 @@ const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_CARD_Z_INDEX = 60;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
 const EMPTY_KEYWORD_BADGES: Keyword[] = [];
-// CR 732.2a / CR 701.34a: stable empty ref for the per-object ∞-counter selector so a
-// permanent with no unbounded counter (the dominant case) never re-renders on identity churn.
-const EMPTY_UNBOUNDED_COUNTERS: string[] = [];
 
 /**
  * CR 602.5: Maps an engine `AbilityBlockKind` to its i18n reason key. Pure
@@ -112,10 +111,15 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
       </span>
       <GameplayTooltip>
         {blocked.map((entry, i) => {
-          const abilityName =
+          // CR 201.5: `~` is the engine's self-reference token; bind it to the host
+          // object so the badge reads the card's name, not a raw tilde.
+          const rawAbilityName =
             entry.ability_index < obj.abilities.length
               ? obj.abilities[entry.ability_index]?.description
               : undefined;
+          const abilityName = rawAbilityName
+            ? renderDescription(rawAbilityName, obj.name)
+            : undefined;
           const names = (entry.sources ?? [])
             .map((id) => objects?.[String(id)]?.name)
             .filter((n): n is string => !!n);
@@ -129,6 +133,27 @@ function BlockedAbilitiesBadge({ obj }: { obj: GameObject }) {
             </span>
           );
         })}
+      </GameplayTooltip>
+    </span>
+  );
+}
+
+// CR 509.1b: compact display of the engine-authored temporary evasion marker.
+// The component only renders the derived map and resolves a supplied public
+// source object for its tooltip; it never determines whether blocking is legal.
+function CantBeBlockedBadge({ sourceName }: { sourceName?: string }) {
+  const { t } = useTranslation("game");
+  return (
+    <span className="group absolute bottom-1 left-1/2 z-30 inline-flex -translate-x-1/2">
+      <span
+        className="flex items-center rounded bg-cyan-600/90 px-1 py-0.5 text-[10px] font-bold text-cyan-50 shadow ring-1 ring-cyan-200/60"
+        aria-label={t("permanent.cantBeBlocked")}
+      >
+        <span aria-hidden>↯</span>
+      </span>
+      <GameplayTooltip>
+        {t("permanent.cantBeBlocked")}
+        {sourceName ? ` ${t("preview.fromSource", { source: sourceName })}` : ""}
       </GameplayTooltip>
     </span>
   );
@@ -261,6 +286,9 @@ export const PermanentCard = memo(function PermanentCard({
       s.gameState?.derived?.battlefield_keyword_badges?.[String(objectId)]
       ?? EMPTY_KEYWORD_BADGES,
   );
+  const temporaryCantBeBlockedSourceId = useGameStore(
+    (s) => s.gameState?.derived?.temporary_cant_be_blocked?.[String(objectId)],
+  );
   // CR 613.2a + CR 707.2: whether a live copy effect supplies this permanent's
   // copiable values. Engine-classified because a copy of a permanent lives in a
   // Layer 1a continuous effect, not on the object — and the copy overrides
@@ -268,14 +296,7 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopiedPermanent = useGameStore((s) =>
     (s.gameState?.derived?.copied_permanents ?? []).includes(objectId),
   );
-  // CR 732.2a / CR 701.34a: the counter-type keys the engine marks as ∞ (unbounded
-  // counter-growth loop) for this object. Values match the object's `counters` map keys
-  // (e.g. "charge"); the pill renders ∞ instead of ×N for any type in this set.
-  const unboundedCounterTypes = useGameStore(
-    (s) =>
-      s.gameState?.derived?.unbounded_counters?.[String(objectId)]
-      ?? EMPTY_UNBOUNDED_COUNTERS,
-  );
+  const unboundedCounterTypes = useUnboundedCounterTypes(objectId);
   const isManaPaymentPreviewSource = useGameStore((s) =>
     s.manaPaymentPreviewSourceIds.includes(objectId),
   );
@@ -571,6 +592,10 @@ export const PermanentCard = memo(function PermanentCard({
   const isCopy =
     !obj.face_down
     && ((obj.is_token === true && obj.display_source !== "Token") || isCopiedPermanent);
+  const temporaryCantBeBlockedSourceName =
+    temporaryCantBeBlockedSourceId == null
+      ? undefined
+      : gameObjects?.[String(temporaryCantBeBlockedSourceId)]?.name;
 
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
@@ -1049,6 +1074,10 @@ export const PermanentCard = memo(function PermanentCard({
         >
           {t("permanent.copy")}
         </div>
+      )}
+
+      {temporaryCantBeBlockedSourceId !== undefined && (
+        <CantBeBlockedBadge sourceName={temporaryCantBeBlockedSourceName} />
       )}
 
       {/* Debug-panel preview highlight — fuchsia neon ring + animated pulse.

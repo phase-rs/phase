@@ -62,6 +62,21 @@ pub fn resolve(
             .or(duration.clone())
             .unwrap_or(Duration::UntilEndOfTurn);
 
+        // CR 611.2a: The `UntilEndOfTurn` above is only a fallback for a
+        // stated-duration-less grant. A grant that states NO duration and grants
+        // ONLY an object-hosted replacement (the "it gains 'If ~ would leave the
+        // battlefield, exile it instead'" reanimation rider — Geth, Thane of
+        // Contracts; Llanowar Greenwidow; Realmbreaker; Spirit-Sister's Call)
+        // must last as long as the affected object exists, so promote that def to
+        // Duration::Permanent. It then survives its granting source leaving
+        // (`prune_host_left_effects` only prunes UntilHostLeavesPlay) and is
+        // cleaned up when the reanimated object itself leaves
+        // (`prune_affected_object_left_effects`). A STATED duration arrives on the
+        // wrapper (Elemental Expressionist's "Until end of turn" lives on the
+        // GenericEffect application, so `duration` is `Some` and the fallback is
+        // not taken) and is left EOT-confined, lapsing at cleanup (CR 514.2).
+        let duration_from_fallback = ability.duration.is_none() && duration.is_none();
+
         for static_def in static_abilities {
             // CR 611.2d: A continuous effect's variable (X) is determined once,
             // on resolution. Snapshot resolution-context quantity refs (e.g.
@@ -94,6 +109,21 @@ pub fn resolve(
                 }
             }
             let static_def = &static_def;
+            // CR 611.2a: promote a fallback-duration replacement-only grant to
+            // Permanent (see `duration_from_fallback` above); every other def
+            // keeps the resolved `dur`. Mixed defs (a replacement grant alongside
+            // any other modification) are NOT promoted.
+            let def_dur = if duration_from_fallback
+                && !static_def.modifications.is_empty()
+                && static_def
+                    .modifications
+                    .iter()
+                    .all(|m| matches!(m, ContinuousModification::GrantReplacement { .. }))
+            {
+                Duration::Permanent
+            } else {
+                dur.clone()
+            };
             // CR 603.4 + CR 608.2h + CR 611.2d: An in-effect "if <condition>"
             // carried by a `StaticDefinition` (Odric, Lunarch Marshal:
             // "creatures you control gain first strike ... if a creature you
@@ -112,9 +142,9 @@ pub fn resolve(
                 }
                 let mut snapshotted = static_def.clone();
                 snapshotted.condition = None;
-                register_transient_effect(state, ability, &snapshotted, target.as_ref(), &dur);
+                register_transient_effect(state, ability, &snapshotted, target.as_ref(), &def_dur);
             } else {
-                register_transient_effect(state, ability, static_def, target.as_ref(), &dur);
+                register_transient_effect(state, ability, static_def, target.as_ref(), &def_dur);
             }
         }
     }

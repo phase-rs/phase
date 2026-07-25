@@ -248,6 +248,7 @@
     "target": "Ziel",
     "copy": "Kopie",
     "copyTooltip": "Spielstein-Kopie einer echten Karte",
+    "cantBeBlocked": "Kann nicht geblockt werden",
     "ringBearer": "Ring",
     "ringBearerTooltip": "Ringträger",
     "hiddenAttachments": "+{{count}} more attached",
@@ -662,6 +663,7 @@
     "mustAttackBadge": "Must attack",
     "mustAttackSatisfiedBadge": "Attacking ✓",
     "mustBlockBadge": "Must block",
+    "mustBlockExactBadge": "Muss {{attacker}} blocken",
     "mustBlockSatisfiedBadge": "Blocking ✓",
     "cantAttackBadge": "Can't attack",
     "cantBlockBadge": "Can't block",
@@ -1709,6 +1711,23 @@
     "targetLand": "das Länderziel",
     "targetCreature": "das Kreaturenziel",
     "targetChoice": "diese Zielwahl"
+  },
+  "giftRecipient": {
+    "title": "Geschenk-Empfänger wählen",
+    "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
+  },
+  "optionalCost": {
+    "gift": {
+      "title": "Ein Geschenk versprechen?",
+      "pay": "{{gift}} versprechen",
+      "decline": "Wirken ohne zu versprechen",
+      "kind": {
+        "card": "eine Karte",
+        "treasure": "einen Schatz",
+        "food": "eine Nahrung",
+        "tappedFish": "einen getappten Fisch"
+      }
+    }
   },
   "clashOpponent": {
     "title": "Kampf-Gegner wählen",
