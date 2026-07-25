@@ -1950,6 +1950,7 @@ mod tests {
         scenario.at_phase(Phase::PreCombatMain);
         let spell = scenario
             .add_spell_to_hand_from_oracle(P0, "Gate Probe", false, "Draw a card.")
+            .with_mana_cost(ManaCost::generic(1))
             .id();
         let runner = scenario.build();
         let card_id = runner.state().objects[&spell].card_id;
