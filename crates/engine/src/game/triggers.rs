@@ -12205,19 +12205,21 @@ pub mod tests {
             4,
         );
         let inactive_wolf = make_creature(&mut no_tolsimir_attack, PlayerId(0), "Wolf", 2, 2);
-        no_tolsimir_attack
-            .objects
-            .get_mut(&inactive_wolf)
-            .expect("wolf exists")
-            .card_types
-            .subtypes
-            .push("Wolf".to_string());
+        {
+            let wolf = no_tolsimir_attack
+                .objects
+                .get_mut(&inactive_wolf)
+                .expect("wolf exists");
+            wolf.card_types.subtypes.push("Wolf".to_string());
+            wolf.base_card_types = wolf.card_types.clone();
+        }
         let inactive = no_tolsimir_attack
             .objects
             .get_mut(&inactive_tolsimir)
             .expect("Tolsimir exists");
         inactive.trigger_definitions.push(parsed.clone());
         std::sync::Arc::make_mut(&mut inactive.base_trigger_definitions).push(parsed.clone());
+        no_tolsimir_attack.layers_dirty.mark_full();
         no_tolsimir_attack.combat = Some(CombatState {
             attackers: vec![AttackerInfo::new(
                 inactive_wolf,
@@ -12243,17 +12245,14 @@ pub mod tests {
         let blocker = make_creature(&mut state, PlayerId(1), "Opponent Bear", 2, 2);
         let second_blocker = make_creature(&mut state, PlayerId(1), "Opponent Elk", 2, 2);
         for wolf_id in [wolf, second_wolf] {
-            state
-                .objects
-                .get_mut(&wolf_id)
-                .expect("wolf exists")
-                .card_types
-                .subtypes
-                .push("Wolf".to_string());
+            let wolf = state.objects.get_mut(&wolf_id).expect("wolf exists");
+            wolf.card_types.subtypes.push("Wolf".to_string());
+            wolf.base_card_types = wolf.card_types.clone();
         }
         let source = state.objects.get_mut(&tolsimir).expect("Tolsimir exists");
         source.trigger_definitions.push(parsed.clone());
         std::sync::Arc::make_mut(&mut source.base_trigger_definitions).push(parsed);
+        state.layers_dirty.mark_full();
         let attacking_incarnations_this_combat = [tolsimir, wolf, second_wolf]
             .into_iter()
             .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id]))

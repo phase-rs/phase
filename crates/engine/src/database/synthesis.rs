@@ -13831,7 +13831,7 @@ mod provoke_runtime_tests {
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::player::PlayerId;
     use crate::types::statics::StaticMode;
 
@@ -13882,6 +13882,11 @@ mod provoke_runtime_tests {
             vec![TargetRef::Object(defender)],
         );
         resolved.optional = false;
+        // Match the shared stack boundary: source-referential force-blocks
+        // bind the exact attacking incarnation before their continuation runs.
+        resolved.bind_force_block_source_recursive(Some(ObjectIncarnationRef::from_object(
+            &state.objects[&provoker],
+        )));
 
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
