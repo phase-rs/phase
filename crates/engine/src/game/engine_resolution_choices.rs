@@ -6913,6 +6913,22 @@ pub(crate) fn run_batch_completion(
             enters_under,
             events,
         ),
+        BatchCompletion::ExileFaceDownPileDeliveryComplete {
+            player,
+            source_id,
+            members,
+            required_member_count,
+        } => effects::exile_face_down_pile::complete_exile_face_down_pile_delivery(
+            state,
+            player,
+            source_id,
+            members,
+            required_member_count,
+            events,
+        ),
+        BatchCompletion::ExileFaceDownPileReturnComplete { source_id } => {
+            effects::exile_face_down_pile::complete_exile_face_down_pile_return(source_id, events)
+        }
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,

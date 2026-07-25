@@ -115,6 +115,7 @@ pub mod exchange_control;
 pub mod cloak;
 pub mod exchange_life;
 pub mod exchange_life_totals;
+pub mod exile_face_down_pile;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -4049,6 +4050,7 @@ pub fn resolve_effect(
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
+        Effect::ExileFaceDownPile { .. } => exile_face_down_pile::resolve(state, ability, events),
         // CR 608.2c: `TargetOnly` is the "choose <filter>" step — targeting is
         // established at selection time, so there is nothing to mutate here. But
         // inside a `player_scope` fan-out iteration ("starting with you, each

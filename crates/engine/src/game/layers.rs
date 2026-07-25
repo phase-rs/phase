@@ -17274,6 +17274,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17339,6 +17340,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );

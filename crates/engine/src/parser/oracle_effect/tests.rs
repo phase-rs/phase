@@ -47122,6 +47122,26 @@ fn exile_pile_shuffle_cloak_remains_with_context_only() {
     );
 }
 
+#[test]
+fn triumph_of_saint_katherine_lowers_to_atomic_face_down_pile() {
+    let parsed = parse_oracle_text(
+        "Praesidium Protectiva — When Triumph of Saint Katherine dies, exile it and the top six cards of your library in a face-down pile. If you do, shuffle that pile and put it back on top of your library.",
+        "Triumph of Saint Katherine",
+        &[],
+        &["Creature".to_string()],
+        &["Human".to_string(), "Warrior".to_string()],
+    );
+    let effect = &parsed.triggers[0].ability.effect;
+    assert!(matches!(
+        effect.as_ref(),
+        Effect::ExileFaceDownPile {
+            object: TargetFilter::TriggeringSource,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 6 },
+        }
+    ));
+}
+
 // ── S25 P3 W1 #2 — self-and-target reanimation (Sandman / Slimefoot) ──
 
 /// Recursively report whether any node in an ability tree is `Unimplemented`.

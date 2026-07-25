@@ -3237,6 +3237,11 @@ pub struct PendingZoneChangeDelivery {
     /// as-enters prompt is unresolved.
     pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
+    /// CR 406.3: A batch delivery requested concealment on an Exile landing.
+    /// It survives the replacement-choice pause so the settled member is hidden
+    /// before the next batch member is attempted.
+    #[serde(default)]
+    pub face_down_in_exile: bool,
 }
 
 impl PendingZoneChangeDelivery {
@@ -3247,6 +3252,7 @@ impl PendingZoneChangeDelivery {
             delivery_events: Vec::new(),
             terminal_completion: None,
             count: PausedZoneChangeDeliveryCount::NeedsCount,
+            face_down_in_exile: false,
         }
     }
 
@@ -4521,6 +4527,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub exile_tracking: ZoneDeliveryExileTracking,
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub face_down_in_exile: bool,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -4570,6 +4578,18 @@ pub enum BatchCompletion {
         #[serde(default)]
         enters_under: Option<PlayerId>,
     },
+    /// CR 406.3 + CR 608.2c + CR 701.24a: A face-down pile's proposed exile
+    /// delivery settled. The exact member list is retained so the "If you do"
+    /// completion can return precisely that full pile, and never a partial one.
+    ExileFaceDownPileDeliveryComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        members: Vec<ObjectId>,
+        required_member_count: usize,
+    },
+    /// CR 406.3 + CR 608.2c: The successful pile's replacement-aware return to
+    /// library settled; emit the original effect's completion exactly once.
+    ExileFaceDownPileReturnComplete { source_id: ObjectId },
     /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
     /// batch settled. Keep the resolved ability and its two target partitions
     /// so the permission is recorded only after the exile delivery, while
@@ -15178,16 +15198,33 @@ impl GameState {
         delivery_events: &[GameEvent],
         terminal_completion: ZoneMoveCompletion,
     ) -> bool {
+        let settled_in_exile = delivery_events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == member.object_id
+            )
+        });
         if let Some(paused) = self
             .active_change_zone_frame_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
+            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            if conceal {
+                self.objects
+                    .get_mut(&member.object_id)
+                    .expect("settled paused pile member exists")
+                    .face_down = true;
+            }
             return true;
         }
         if let Some(paused) = self
@@ -15196,10 +15233,17 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
+            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            if conceal {
+                self.objects
+                    .get_mut(&member.object_id)
+                    .expect("settled paused pile member exists")
+                    .face_down = true;
+            }
             return true;
         }
         false

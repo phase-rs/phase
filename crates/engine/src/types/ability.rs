@@ -11403,6 +11403,22 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         face_down: bool,
     },
+    /// CR 406.3 + CR 608.2c: Exile one explicit object and the top `count`
+    /// cards of `player`'s library face down as one pile. The resolver keeps the
+    /// exact proposed member list through replacement resolution: the pile is
+    /// shuffled and returned only when every member actually reached exile.
+    /// This models the Triumph of Saint Katherine class's "If you do" rider
+    /// without allowing a partial pile to be returned.
+    ExileFaceDownPile {
+        /// The non-library member of the pile (normally the triggering source
+        /// in its owner's graveyard).
+        object: TargetFilter,
+        /// The player whose library supplies the top cards and receives the
+        /// completed pile back on top.
+        player: TargetFilter,
+        /// Number of top-library cards required in addition to `object`.
+        count: QuantityExpr,
+    },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
     /// solely to designate a target referenced by subsequent sentences via "that creature".
@@ -14304,6 +14320,7 @@ impl Effect {
 
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
+            | Effect::ExileFaceDownPile { player, .. }
             | Effect::ExchangeLifeWithStat { player, .. }
             | Effect::ExileFromTopUntil { player, .. }
             // CR 119.3: `GainLife.player` is a TargetFilter. `extract_target_filter_from_effect`
@@ -15291,6 +15308,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Reveal { .. } => "Reveal",
         Effect::RevealTop { .. } => "RevealTop",
         Effect::ExileTop { .. } => "ExileTop",
+        Effect::ExileFaceDownPile { .. } => "ExileFaceDownPile",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::OpponentGuess { .. } => "OpponentGuess",
@@ -15610,6 +15628,7 @@ pub enum EffectKind {
     GivePlayerCounter,
     LoseAllPlayerCounters,
     ExileFromTopUntil,
+    ExileFaceDownPile,
     RevealUntil,
     Discover,
     Heist,
@@ -15888,6 +15907,7 @@ impl From<&Effect> for EffectKind {
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
             Effect::LoseAllPlayerCounters { .. } => EffectKind::LoseAllPlayerCounters,
             Effect::ExileFromTopUntil { .. } => EffectKind::ExileFromTopUntil,
+            Effect::ExileFaceDownPile { .. } => EffectKind::ExileFaceDownPile,
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Heist { .. } => EffectKind::Heist,

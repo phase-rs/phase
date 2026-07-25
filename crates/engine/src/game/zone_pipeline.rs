@@ -191,6 +191,11 @@ pub struct ZoneMoveRequest {
     /// CR 614.5: replacement definitions already applied to the event or
     /// modified event from which this physical-card move was derived.
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// CR 406.3: Mark the object face down if this delivery actually settles in
+    /// exile. This is deliberately a delivery modifier, not an effect epilogue:
+    /// a later batch member may park on CR 616.1 while earlier members must
+    /// already be hidden.
+    pub face_down_in_exile: bool,
 }
 
 impl ZoneMoveRequest {
@@ -232,6 +237,7 @@ impl ZoneMoveRequest {
             exile_duration: self.exile_links.duration,
             exile_tracking: self.exile_links.tracking,
             replacement_applied: self.replacement_applied,
+            face_down_in_exile: self.face_down_in_exile,
         }
     }
 
@@ -277,6 +283,7 @@ impl ZoneMoveRequest {
                 tracking: pending.exile_tracking,
             },
             replacement_applied: pending.replacement_applied,
+            face_down_in_exile: pending.face_down_in_exile,
         }
     }
 
@@ -290,6 +297,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -303,6 +311,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -320,6 +329,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -333,6 +343,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -356,6 +367,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: seed_applied,
+            face_down_in_exile: false,
         }
     }
 
@@ -370,6 +382,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -386,6 +399,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -400,6 +414,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -416,6 +431,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -429,6 +445,7 @@ impl ZoneMoveRequest {
             placement: None,
             exile_links: ExileLinkSpec::default(),
             replacement_applied: HashSet::new(),
+            face_down_in_exile: false,
         }
     }
 
@@ -475,6 +492,13 @@ impl ZoneMoveRequest {
     /// `NthFromTop`). Only meaningful when `to == Zone::Library`.
     pub fn at_library_position(mut self, position: LibraryPosition) -> Self {
         self.placement = Some(position);
+        self
+    }
+
+    /// CR 406.3: Conceal this card immediately if the replacement-aware move
+    /// delivers it to Exile.
+    pub fn face_down_in_exile(mut self) -> Self {
+        self.face_down_in_exile = true;
         self
     }
 
@@ -1208,11 +1232,15 @@ fn deliver_batch(
     let mut queue = reqs.into_iter();
     while let Some(req) = queue.next() {
         let destination = req.to;
+        let face_down_in_exile = req.face_down_in_exile;
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
         let delivery_start = events.len();
         let object_id = req.object_id;
         match move_object_with_terminal(state, req, events) {
             ZoneMoveTerminalResult::Completed(completion) => {
+                if face_down_in_exile {
+                    mark_face_down_if_exiled(state, object_id);
+                }
                 logical_zone_change_group
                     .record_delivery_completion(object_id, completion)
                     .expect("batch member records its exact terminal outcome");
@@ -1223,7 +1251,7 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                let paused_current = state
+                let mut paused_current = state
                     .pending_zone_change_delivery_from_replacement()
                     .or_else(|| {
                         anticipated_pause.map(|mut boundary| {
@@ -1232,6 +1260,7 @@ fn deliver_batch(
                         })
                     })
                     .expect("parked batch zone change must retain an exact boundary");
+                paused_current.face_down_in_exile = face_down_in_exile;
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
@@ -1270,6 +1299,7 @@ fn deliver_batch(
                 let paused_current = anticipated_pause.map(|mut boundary| {
                     boundary.append_delivery_events(&events[delivery_start..]);
                     boundary.mark_counted();
+                    boundary.face_down_in_exile = face_down_in_exile;
                     boundary
                 });
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
@@ -1291,6 +1321,16 @@ fn deliver_batch(
         }
     }
     BatchDeliveryResult::Done(Box::new(logical_zone_change_group))
+}
+
+fn mark_face_down_if_exiled(state: &mut GameState, object_id: ObjectId) {
+    if let Some(object) = state
+        .objects
+        .get_mut(&object_id)
+        .filter(|object| object.zone == Zone::Exile)
+    {
+        object.face_down = true;
+    }
 }
 
 /// CR 603.10a + CR 616.1: Park the undelivered batch tail so the resume path
@@ -2990,7 +3030,7 @@ mod w3_library_placement_tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, ReplacementDefinition, ReplacementMode, TargetFilter,
     };
     use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;

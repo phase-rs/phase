@@ -2301,6 +2301,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("face_down".into(), "true".into()));
             }
         }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            d.push(("object".into(), fmt_target(object)));
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), fmt_quantity(count)));
+        }
         Effect::Pump {
             power,
             toughness,
@@ -3592,6 +3601,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Manifest { .. }
         | Effect::ManifestDread
         | Effect::Cloak { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::ChangeTargets { .. }
         | Effect::ExchangeControl { .. }

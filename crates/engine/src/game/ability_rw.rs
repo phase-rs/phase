@@ -2948,6 +2948,15 @@ fn legacy_effect(x: &Effect) -> bool {
             player: target,
             ..
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            legacy_quantity_expr(count)
+                || legacy_target_filter(object)
+                || legacy_target_filter(player)
+        }
 
         // ---- `count`-only (QuantityExpr) ----
         Effect::Monstrosity { count }
@@ -4543,6 +4552,22 @@ fn rw_effect(
                 Zone::Exile,
             );
             p.merge(rw_quantity_expr(count));
+            (p, None)
+        }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_target_filter(object));
+            p.merge(rw_target_filter(player));
+            flag_legacy_write_target(&mut p, object);
+            flag_member_bound_write_target(&mut p, object);
             (p, None)
         }
         Effect::ExileFromTopUntil {

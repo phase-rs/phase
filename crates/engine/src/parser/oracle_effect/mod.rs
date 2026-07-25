@@ -26372,7 +26372,7 @@ fn rewrite_filter_prop_another_to_tracked_set(prop: &mut FilterProp) {
 /// | mode | whole-body recognizers | context |
 /// |---|---|---|
 /// | `Standalone` | U3-complete shared list (empty); cloak is unavailable | a fresh `default()`, discarded |
-/// | `WithContext` | the same shared list, plus `parse_exile_pile_shuffle_cloak_ir` in `parse_ability_ir` | the caller's real `ctx` |
+/// | `WithContext` | the same shared list, plus `parse_face_down_pile_ir` in `parse_ability_ir` | the caller's real `ctx` |
 ///
 /// Callers split cleanly: die-result branch bodies (`oracle_special.rs`) take
 /// `Standalone`; spell/activated dispatch takes `WithContext`.
@@ -26446,7 +26446,7 @@ fn parse_ability_ir(
         };
     }
     if let ChainLoweringMode::WithContext = mode {
-        if let Some(body) = parse_exile_pile_shuffle_cloak_ir(text, kind, ctx) {
+        if let Some(body) = parse_face_down_pile_ir(text, kind, ctx) {
             return AbilityIr {
                 source_text: text.to_string(),
                 body,
@@ -26517,6 +26517,15 @@ pub(crate) fn parse_effect_chain_with_context(
 ///
 /// The recognizer is deliberately narrow (the full pile/shuffle/cloak sentence
 /// is unique to this card) so it cannot swallow clauses on any other card.
+fn parse_face_down_pile_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    parse_exile_pile_shuffle_cloak_ir(text, kind, ctx)
+        .or_else(|| parse_exile_object_and_top_face_down_pile_ir(text, kind, ctx))
+}
+
 fn parse_exile_pile_shuffle_cloak_ir(
     text: &str,
     kind: AbilityKind,
@@ -26616,6 +26625,56 @@ fn parse_exile_pile_shuffle_cloak_ir(
                 // controls the returned face-down permanents even for pile
                 // members they don't own.
                 enters_under: Some(ControllerRef::You),
+            }),
+            None,
+            ClauseDisposition::Emit {
+                followup: None,
+                intrinsic: None,
+            },
+        )
+        .push();
+    Some(EffectChainIr {
+        clauses: builder.finish(),
+        kind,
+        continuation_kind: Some(kind),
+        player_scope_rewrite: PlayerScopeRewrite::Apply,
+        chain_rounding: None,
+        actor: ctx.actor.clone(),
+        in_trigger: ctx.in_trigger,
+        repeat_until: None,
+    })
+}
+
+/// CR 406.3 + CR 608.2c + CR 701.24a: "Exile it and the top N cards of your
+/// library in a face-down pile. If you do, shuffle that pile and put it back on
+/// top of your library." The entire sentence is one effect because the latter
+/// sentence is an all-members completion condition, not an independently valid
+/// chain step.
+fn parse_exile_object_and_top_face_down_pile_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> Option<EffectChainIr> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, _) = tag("exile it and the top ").parse(lower.as_str()).ok()?;
+    let (rest, count) = nom_primitives::parse_number(rest).ok()?;
+    let (_, _) = all_consuming(terminated(
+        tag(" cards of your library in a face-down pile. if you do, shuffle that pile and put it back on top of your library"),
+        opt(tag(".")),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let mut builder = ClauseIrBuilder::new(text);
+    builder
+        .clause(
+            text,
+            parsed_clause(Effect::ExileFaceDownPile {
+                object: TargetFilter::TriggeringSource,
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed {
+                    value: count as i32,
+                },
             }),
             None,
             ClauseDisposition::Emit {

@@ -1369,6 +1369,7 @@ mod tests {
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
+                    face_down_in_exile: false,
                 },
                 crate::types::game_state::PendingBatchZoneMoveRequest {
                     object_id: surviving,
@@ -1384,6 +1385,7 @@ mod tests {
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
                     replacement_applied: HashSet::new(),
+                    face_down_in_exile: false,
                 },
             ],
             attempted: vec![leaving, surviving],
