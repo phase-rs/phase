@@ -7550,6 +7550,40 @@ fn rebind_owned_scope(filter: &mut TargetFilter, to: ControllerRef) {
     }
 }
 
+/// Rewrite a moved-object filter's controller/owner scope `from` → `to`, recursing
+/// through `And`/`Or`/`Not` composites. The general building block for controller-
+/// scope rebinding; `rebind_owned_scope` above is the pre-existing
+/// `ScopedPlayer → <target>` specialization kept as-is per the #6505 review.
+///
+/// CR 109.4 + CR 115.10a (issue #6505): used to lift a battlefield resolution-pick
+/// leg's default `You` scope (the anaphoric "they control" lowered without a
+/// parse-time relative-scope pin) to `ScopedPlayer`, so the resolution-time
+/// `scoped_player` stamp binds the chooser to the target player, not the caster.
+fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: ControllerRef) {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(tf) => {
+            if tf.controller.as_ref() == Some(&from) {
+                tf.controller = Some(to.clone());
+            }
+            for prop in tf.properties.iter_mut() {
+                if let FilterProp::Owned { controller } = prop {
+                    if *controller == from {
+                        *controller = to.clone();
+                    }
+                }
+            }
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            for f in filters.iter_mut() {
+                rebind_controller_scope(f, from.clone(), to.clone());
+            }
+        }
+        TargetFilter::Not { filter } => rebind_controller_scope(filter, from, to),
+        _ => {}
+    }
+}
+
 fn try_parse_player_draws_and_gains_control(
     text: &str,
     ctx: &mut ParseContext,
@@ -18915,37 +18949,17 @@ fn lower_subject_predicate_ast(
                     enters_under: None,
                 });
             }
-            // CR 115.10a + CR 109.4 (issue #6505): lower the predicate with the
-            // relative player scope pinned to `ScopedPlayer` so an anaphoric
-            // "they control" on a moved-object leg ("target opponent exiles a
-            // creature they control …", Strategic Betrayal) resolves to the
-            // acting scoped player (oracle_target::parse_controller_suffix reads
-            // `relative_player_scope.unwrap_or(You)`), unifying with the already
-            // scope-agnostic "their graveyard" leg (`Owned{ScopedPlayer}`). The
-            // save/restore is tight around ONLY this lowering call — the scope is
-            // restored before any predicate-shape handling below runs, so it
-            // cannot leak into unrelated re-parsing. The runtime binds this
-            // scoped filter to the real target player at resolution (see the
-            // single-Player-target `scoped_player` stamp in `stack::resolve_top`).
-            //
-            // Guarded tightly to this arm: pin the scope ONLY when (a) no outer
-            // relative scope is already established — a trigger/vote/antecedent
-            // context sets its own ("that player", damage-all, chosen-player),
-            // and clobbering it mis-binds those — AND (b) the subject is an
-            // explicit player target (the same precondition as the moved-object
-            // wrapper below). Without these guards ScopedPlayer leaks into every
-            // subject-predicate imperative-fallback clause.
-            let pin_scoped_player = ctx.relative_player_scope.is_none()
-                && subject
-                    .target
-                    .as_ref()
-                    .is_some_and(target_filter_can_target_player);
-            let saved_relative_scope = ctx.relative_player_scope.clone();
-            if pin_scoped_player {
-                ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
-            }
+            // NOTE (issue #6505, review follow-up): the predicate is lowered with
+            // NO parse-time relative-scope pin. An earlier revision pinned
+            // `relative_player_scope = ScopedPlayer` around this whole call, which
+            // re-scoped EVERY "they control" predicate (Sacrifice / Bounce /
+            // PutCounter / UntapAll …) — including non-ChangeZone effects the
+            // runtime `scoped_player` stamp does not cover, leaving them latently
+            // broken. The `ScopedPlayer` rebind is now applied post-lowering to the
+            // moved-object ChangeZone/ChangeZoneAll leg ALONE (see the resolution-
+            // pick rewrite in the player-target wrapper below), so sibling
+            // predicates keep their original scope.
             let mut clause = lower_imperative_clause(&text, ctx);
-            ctx.relative_player_scope = saved_relative_scope;
             // CR 608.2c + CR 109.4 + CR 115.1: "target <filter>'s controller/owner
             // <verb>s it" (Arcum Dagsson, Mercy Killing). `parse_subject_application`
             // records this possessive shift as `affected = ParentTargetController/
@@ -19089,11 +19103,38 @@ fn lower_subject_predicate_ast(
                     // the resolution-time `scoped_player` stamp lands — so the
                     // filter must be rebound to the real declared target now, or
                     // it stays scoped to the activator instead of the targeted
-                    // player. A battlefield resolution pick (issue #6505) keeps
-                    // `ScopedPlayer` and is bound at resolution instead, so its
+                    // player. A battlefield resolution pick (issue #6505) is
+                    // instead bound to the scoped player at resolution, so its
                     // acting/choosing player is the target opponent, not the
                     // caster (CR 115.10a — being affected is not choosing).
-                    if !creature_leg_is_resolution_pick {
+                    //
+                    // CR 109.4 + CR 115.10a (issue #6505, review follow-up): the
+                    // battlefield resolution-pick leg's anaphoric "they control"
+                    // lowered to the default `ControllerRef::You`
+                    // (oracle_target::parse_controller_suffix, no scope pinned),
+                    // so rewrite ONLY this moved-object leg's `You` scope to
+                    // `ScopedPlayer` here — the narrow, targeted replacement for
+                    // the removed whole-clause parse-time pin. The runtime
+                    // `scoped_player` stamp (stack::resolve_top) then binds the
+                    // chooser to the target player. Gated on the "they control"
+                    // anaphor so a "you control" caster leg (also `You`) is never
+                    // mis-rebound; the "their graveyard" leg is already
+                    // `Owned{ScopedPlayer}` (scope-agnostic) and needs no rewrite.
+                    let creature_leg_is_they_control_pick = creature_leg_is_resolution_pick
+                        && scan_contains_phrase(&pred_lower, "they control");
+                    if creature_leg_is_they_control_pick {
+                        match &mut clause.effect {
+                            Effect::ChangeZone { target, .. }
+                            | Effect::ChangeZoneAll { target, .. } => {
+                                rebind_controller_scope(
+                                    target,
+                                    ControllerRef::You,
+                                    ControllerRef::ScopedPlayer,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if !creature_leg_is_resolution_pick {
                         match &mut clause.effect {
                             Effect::ChangeZone { target, .. }
                             | Effect::ChangeZoneAll { target, .. } => {
@@ -31761,16 +31802,20 @@ fn parse_put_rest_library_position(lower: &str) -> Option<LibraryPosition> {
 /// their graveyard", whose sibling graveyard leg must not leak `Zone::Graveyard`
 /// onto the primary battlefield leg. A non-"and" remainder legitimately QUALIFIES
 /// the primary leg ("exile it … instead of putting it into its owner's graveyard",
-/// No More Lies) and stays in scope. `rem` is a suffix of `base` (a
-/// `parse_target` remainder), so `base.len() - rem.len()` lands on a valid UTF-8
-/// boundary; scan the ORIGINAL-CASE base then lowercase.
+/// No More Lies) and stays in scope. `rem` is normally a suffix of `base` (a
+/// `parse_target` remainder); `strip_suffix` fails CLOSED (scan the whole base) if
+/// it is not — never a panicking mid-UTF-8 / out-of-bounds manual slice. Scan the
+/// ORIGINAL-CASE base then lowercase.
 pub(super) fn compound_exile_origin_scan(base: &str, rem: &str) -> String {
     let rem_head = rem.trim_start();
     let trailing_and_conjunct = tag::<_, _, OracleError<'_>>("and ").parse(rem_head).is_ok();
-    if trailing_and_conjunct {
-        base[..base.len() - rem.len()].to_ascii_lowercase()
-    } else {
-        base.to_ascii_lowercase()
+    // Structural fail-closed suffix strip of an ALREADY-parsed `parse_target`
+    // remainder (`rem`) off `base` — not parsing dispatch; the nom dispatch (the
+    // trailing-"and " conjunct test) is the `tag(...)` above.
+    // allow-noncombinator: strip a known parse remainder, not parser dispatch
+    match base.strip_suffix(rem).filter(|_| trailing_and_conjunct) {
+        Some(primary) => primary.to_ascii_lowercase(),
+        None => base.to_ascii_lowercase(),
     }
 }
 

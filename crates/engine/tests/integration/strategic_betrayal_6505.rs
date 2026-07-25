@@ -561,13 +561,15 @@ fn shape_explicit_target_creature_stays_stack_target() {
         !chain_has_unimplemented(root),
         "explicit-target compound exile parses cleanly; got {root:#?}"
     );
-    if let Some(creature) = find_change_zone(root) {
-        assert_eq!(
-            creature.target_choice_timing,
-            TargetChoiceTiming::Stack,
-            "an explicit 'target creature' stays a Stack target"
-        );
-    }
+    // REQUIRED (not `if let`): the creature leg MUST exist, or the assertion
+    // below would pass vacuously when no ChangeZone is found.
+    let creature = find_change_zone(root)
+        .expect("explicit-target compound exile has a creature ChangeZone leg");
+    assert_eq!(
+        creature.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "an explicit 'target creature' stays a Stack target"
+    );
 }
 
 /// Hostile fixture for Part A site 3 (mod.rs:15143): "Exile all creatures they
@@ -591,6 +593,186 @@ fn shape_exile_all_creatures_and_graveyard_stays_fail_closed() {
             if description.as_deref().is_some_and(|d| d.contains("their graveyard"))),
         "the unmodelled mass-creature + graveyard compound must stay a whole-clause \
          strict failure (fail-closed, no silent orphan); got {root:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. SIBLING (review follow-up) — the narrowed rewrite generalizes to a bare
+//     "target player exiles a creature they control" (no graveyard leg).
+// ---------------------------------------------------------------------------
+
+/// Doomfall / Debt to the Kami class: a bare "Target opponent exiles a creature
+/// they control." (the SB creature leg WITHOUT the graveyard conjunct). The
+/// narrowed post-lowering `You → ScopedPlayer` rewrite must still fire, so the
+/// target OPPONENT (not the caster) chooses from THEIR OWN creatures at
+/// resolution, no `BecomesTarget` fires, and Ward stays silent. Reverting the
+/// narrowing (dropping the ChangeZone-leg rewrite) flips the chooser/eligible set
+/// back to the caster.
+#[test]
+fn sibling_bare_target_player_exile_they_control_binds_chooser_no_ward() {
+    const SIBLING: &str = "Target opponent exiles a creature they control.";
+
+    // SHAPE: single ChangeZone leg is ScopedPlayer-scoped + Resolution-timed.
+    let parsed = parse_oracle_text(SIBLING, "Doomfall Mode", &[], &[], &[]);
+    assert_eq!(parsed.abilities.len(), 1);
+    let root = &parsed.abilities[0];
+    assert!(
+        !chain_has_unimplemented(root),
+        "the bare sibling parses cleanly; got {root:#?}"
+    );
+    let creature = find_change_zone(root).expect("sibling has a creature ChangeZone leg");
+    assert!(
+        filter_controller_is_scoped(match &*creature.effect {
+            Effect::ChangeZone { target, .. } => target,
+            other => panic!("expected ChangeZone; got {other:?}"),
+        }),
+        "the sibling creature leg is ScopedPlayer-scoped; got {:?}",
+        creature.effect
+    );
+    assert_eq!(
+        creature.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the sibling creature leg is resolution-chosen"
+    );
+
+    // Runtime: opponent controls a warded + a plain creature; the caster also
+    // controls a creature that must never be offered.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let plain = scenario.add_creature(P1, "Opp Plain", 2, 2).id();
+    let warded = ward2_creature(&mut scenario, P1, 3, 3, "Opp Warded");
+    let caster_own = scenario.add_creature(P0, "Caster Own", 4, 4).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doomfall Mode", false, SIBLING)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    match outcome.final_waiting_for() {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P1, "the target OPPONENT chooses, not the caster");
+            assert!(
+                cards.contains(&plain) && cards.contains(&warded),
+                "both of the opponent's creatures are offered; got {cards:?}"
+            );
+            assert!(
+                !cards.contains(&caster_own),
+                "the caster's own creature must never be offered; got {cards:?}"
+            );
+        }
+        WaitingFor::UnlessPayment { .. }
+        | WaitingFor::WardSacrificeChoice { .. }
+        | WaitingFor::WardDiscardChoice { .. } => panic!(
+            "Ward must NOT fire — the creature is chosen at resolution, not targeted; got {:?}",
+            outcome.final_waiting_for()
+        ),
+        other => panic!("expected the opponent's EffectZoneChoice; got {other:?}"),
+    }
+
+    // Reach-guard: the opponent exiles a chosen creature.
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![warded],
+        })
+        .expect("opponent selects a creature to exile");
+    assert_eq!(
+        runner.state().objects[&warded].zone,
+        Zone::Exile,
+        "the opponent's chosen (warded) creature is exiled without paying Ward"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. LEADERSHIP VACUUM (review follow-up) — the mass ChangeZoneAll sibling still
+//     binds ScopedPlayer under the narrowed rewrite (no whole-clause pin).
+// ---------------------------------------------------------------------------
+
+/// "Target player returns each commander they control from the battlefield to the
+/// command zone." The mass `ChangeZoneAll` moved-object leg must carry a
+/// `ScopedPlayer` controller (bound to the target player at resolution), proving
+/// the narrowed rewrite covers the mass leg exactly as the whole-clause pin did.
+#[test]
+fn leadership_vacuum_mass_leg_is_scopedplayer() {
+    const LV: &str =
+        "Target player returns each commander they control from the battlefield to the command zone.";
+    let parsed = parse_oracle_text(LV, "Leadership Vacuum", &[], &[], &[]);
+    assert_eq!(parsed.abilities.len(), 1);
+    let root = &parsed.abilities[0];
+    assert!(
+        !chain_has_unimplemented(root),
+        "Leadership Vacuum's mass return parses cleanly; got {root:#?}"
+    );
+    // Root wraps the lone player target; the mass leg is the sub-ability.
+    assert!(
+        matches!(&*root.effect, Effect::TargetOnly { target } if target_is_opponent_like(target)
+            || matches!(target, TargetFilter::Player)),
+        "root targets only the player; got {:?}",
+        root.effect
+    );
+    let mass = find_change_zone_all(root).expect("Leadership Vacuum has a mass ChangeZoneAll leg");
+    let Effect::ChangeZoneAll { target, .. } = &*mass.effect else {
+        unreachable!("find_change_zone_all guarantees the variant");
+    };
+    assert!(
+        filter_controller_is_scoped(target),
+        "the mass 'each commander they control' leg is ScopedPlayer-scoped; got {target:?}"
+    );
+    assert_eq!(
+        mass.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the mass leg is resolution-bound (scoped_player stamp lands there)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. ORIGIN-LEAK CLASS (review follow-up) — a compound "exile X and <graveyard
+//     conjunct>" whose primary leg is a BATTLEFIELD/self object (Silent
+//     Gravestone) must not inherit the trailing conjunct's Graveyard origin.
+// ---------------------------------------------------------------------------
+
+/// Silent Gravestone's activated body: "Exile this artifact and all cards from all
+/// graveyards." The primary self/battlefield leg must NOT leak `Zone::Graveyard`
+/// from the trailing "and all cards from all graveyards" conjunct — its origin
+/// stays battlefield/default — while the trailing ChangeZoneAll leg keeps its own
+/// `Zone::Graveyard` origin. Reverting `compound_exile_origin_scan` leaks Graveyard
+/// onto the primary leg (the Part A defect), a different affected card than SB's
+/// "and their graveyard".
+#[test]
+fn origin_leak_compound_exile_primary_leg_stays_battlefield() {
+    const CLAUSE: &str = "Exile this artifact and all cards from all graveyards.";
+    let parsed = parse_oracle_text(
+        CLAUSE,
+        "Silent Gravestone",
+        &["Artifact".to_string()],
+        &[],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let root = &parsed.abilities[0];
+    assert!(
+        !chain_has_unimplemented(root),
+        "the compound self-exile parses cleanly; got {root:#?}"
+    );
+
+    let primary = find_change_zone(root).expect("primary self/battlefield exile leg");
+    let Effect::ChangeZone { origin, .. } = &*primary.effect else {
+        unreachable!("find_change_zone guarantees the variant");
+    };
+    assert!(
+        origin.is_none() || *origin == Some(Zone::Battlefield),
+        "the primary leg's origin must NOT leak Graveyard from the trailing conjunct; got {origin:?}"
+    );
+
+    let graveyard =
+        find_change_zone_all(root).expect("trailing 'all cards from all graveyards' leg");
+    let Effect::ChangeZoneAll { origin, .. } = &*graveyard.effect else {
+        unreachable!("find_change_zone_all guarantees the variant");
+    };
+    assert_eq!(
+        *origin,
+        Some(Zone::Graveyard),
+        "the trailing conjunct keeps its own Graveyard origin; got {origin:?}"
     );
 }
 
