@@ -330,7 +330,7 @@ describe("ActionButton", () => {
     render(<ActionButton />);
 
     act(() => useUiStore.getState().combatClickHandler?.(100));
-    expect(screen.getByText("Select attacker for blocker")).toBeInTheDocument();
+    expect(screen.getByText("Select the attacker this blocker should defend against")).toBeInTheDocument();
 
     const nextPrompt = blockerPrompt();
     act(() => {
@@ -340,7 +340,7 @@ describe("ActionButton", () => {
       });
     });
 
-    expect(screen.queryByText("Select attacker for blocker")).not.toBeInTheDocument();
+    expect(screen.queryByText("Select the attacker this blocker should defend against")).not.toBeInTheDocument();
   });
 
   it("shows blocker controls when turn decision controller differs from blocking player (issue #1199)", () => {
