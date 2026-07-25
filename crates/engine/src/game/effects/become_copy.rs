@@ -5,7 +5,7 @@ use crate::types::ability::{
     ContinuousModification, CopiableValues, Duration, Effect, EffectError, EffectKind,
     ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::card::{PrintedCardRef, TokenImageRef};
+use crate::types::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::identifiers::ObjectId;
@@ -146,6 +146,7 @@ pub(crate) fn apply_precomputed_copy_values(
         super::token_copy::copy_starting_loyalty_override(&additional_modifications)
     {
         values.loyalty = Some(loyalty);
+        values.printed_loyalty = Some(PrintedLoyalty::Fixed(loyalty));
     }
 
     // CR 122.1 + CR 614.1c + CR 202.1b + CR 707.9b: `AddCounterOnEnter`
@@ -1095,6 +1096,7 @@ mod tests {
                 power: Some(5),
                 toughness: Some(4),
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],

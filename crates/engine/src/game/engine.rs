@@ -9263,7 +9263,7 @@ fn handle_play_land(
     // counters" replacement for planeswalkers and battles entering the
     // battlefield via a play-from-zone action.
     if let Some(obj) = state.objects.get(&object_id) {
-        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj);
+        let intrinsic = super::printed_cards::intrinsic_etb_counters(obj, None);
         if !intrinsic.is_empty() {
             if let crate::types::proposed_event::ProposedEvent::ZoneChange {
                 enter_with_counters,

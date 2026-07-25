@@ -8,8 +8,8 @@
 //! otherwise unscored. This policy fills that gap for the bounce-land case.
 //!
 //! Scope (#4a): when the land being played is a self-bouncing Ravnica/MOM
-//! bounce-land AND a non-bouncing land is also in hand, deprioritize the
-//! bounce-land so the non-bounce land is played first. Deferred (#4b, a
+//! bounce-land AND another non-bouncing land is currently playable,
+//! deprioritize the bounce-land so the non-bounce land is played first. Deferred (#4b, a
 //! separate `SelectTarget` decision): when the bounce-land's ETB returns "a
 //! land you control," the AI should return the least-useful land, never the
 //! just-played bounce-land — that needs its own target-selection policy.
@@ -34,8 +34,9 @@ use crate::ability_chain::collect_chain_effects;
 use crate::features::DeckFeatures;
 
 /// Penalty for playing a self-bouncing land while a non-bouncing land is also
-/// in hand. The non-bounce land's `PlayLand` scores `0.0` here, so it wins the
-/// argmax and is played first; the bounce-land is only deferred within the turn.
+/// currently playable. The non-bounce land's `PlayLand` scores `0.0` here, so
+/// it wins the argmax and is played first; the bounce-land is only deferred
+/// within the turn.
 const BOUNCE_DEPRIORITIZE: f64 = 1.5;
 
 pub struct LandSequencingPolicy;
@@ -78,13 +79,17 @@ impl TacticalPolicy for LandSequencingPolicy {
             return score(0.0, "land_sequencing_na");
         }
 
-        // Is there another, non-bouncing land in hand to play first?
-        let hand = &ctx.state.players[ctx.ai_player.0 as usize].hand;
-        let has_non_bounce_alternative = hand.iter().any(|&id| {
-            id != object_id
-                && ctx.state.objects.get(&id).is_some_and(|o| {
-                    o.card_types.core_types.contains(&CoreType::Land) && !is_self_bounce_land(o)
-                })
+        // The decision candidates are the engine's current legal actions. A
+        // land merely present in hand can be unavailable due to a play
+        // restriction, so it must not cause the only legal bounce-land to be
+        // deferred.
+        let has_non_bounce_alternative = ctx.decision.candidates.iter().any(|candidate| {
+            matches!(&candidate.action, GameAction::PlayLand { object_id: alternative_id, .. }
+            if *alternative_id != object_id
+                && ctx.state.objects.get(alternative_id).is_some_and(|alternative| {
+                    alternative.card_types.core_types.contains(&CoreType::Land)
+                        && !is_self_bounce_land(alternative)
+                }))
         });
 
         if has_non_bounce_alternative {
@@ -136,6 +141,8 @@ fn type_filter_is_land(tf: &TypeFilter) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AiConfig;
+    use crate::context::AiContext;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::zones::create_object;
     use engine::types::ability::{
@@ -145,9 +152,6 @@ mod tests {
     use engine::types::game_state::{GameState, WaitingFor};
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::zones::Zone;
-
-    use crate::config::AiConfig;
-    use crate::context::AiContext;
 
     const AI: PlayerId = PlayerId(0);
 
@@ -198,17 +202,25 @@ mod tests {
         id
     }
 
-    fn play_verdict(state: &GameState, object_id: ObjectId) -> PolicyVerdict {
-        let candidate = CandidateAction {
+    fn play_candidate(object_id: ObjectId) -> CandidateAction {
+        CandidateAction {
             action: GameAction::PlayLand {
                 object_id,
                 card_id: CardId(0),
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Land),
-        };
+        }
+    }
+
+    fn play_verdict(
+        state: &GameState,
+        object_id: ObjectId,
+        candidates: Vec<CandidateAction>,
+    ) -> PolicyVerdict {
+        let candidate = play_candidate(object_id);
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
-            candidates: Vec::new(),
+            candidates,
         };
         let config = AiConfig::default();
         let context = AiContext::empty(&config.weights);
@@ -242,7 +254,11 @@ mod tests {
         let basic = plain_land(&mut state, "Forest");
         state.players[0].hand = [karoo, basic].into_iter().collect();
         assert_score(
-            play_verdict(&state, karoo),
+            play_verdict(
+                &state,
+                karoo,
+                vec![play_candidate(karoo), play_candidate(basic)],
+            ),
             "land_sequencing_play_other_first",
             -BOUNCE_DEPRIORITIZE,
         );
@@ -254,7 +270,7 @@ mod tests {
         let karoo = bounce_land(&mut state);
         state.players[0].hand = [karoo].into_iter().collect();
         assert_score(
-            play_verdict(&state, karoo),
+            play_verdict(&state, karoo, vec![play_candidate(karoo)]),
             "land_sequencing_no_alternative",
             0.0,
         );
@@ -266,7 +282,15 @@ mod tests {
         let karoo = bounce_land(&mut state);
         let basic = plain_land(&mut state, "Forest");
         state.players[0].hand = [karoo, basic].into_iter().collect();
-        assert_score(play_verdict(&state, basic), "land_sequencing_na", 0.0);
+        assert_score(
+            play_verdict(
+                &state,
+                basic,
+                vec![play_candidate(karoo), play_candidate(basic)],
+            ),
+            "land_sequencing_na",
+            0.0,
+        );
     }
 
     /// A land with a non-bounce ETB (e.g. a scry/tap land) must NOT be detected
@@ -288,6 +312,57 @@ mod tests {
         );
         let basic = plain_land(&mut state, "Forest");
         state.players[0].hand = [id, basic].into_iter().collect();
-        assert_score(play_verdict(&state, id), "land_sequencing_na", 0.0);
+        assert_score(
+            play_verdict(&state, id, vec![play_candidate(id), play_candidate(basic)]),
+            "land_sequencing_na",
+            0.0,
+        );
+    }
+
+    #[test]
+    fn unavailable_non_bounce_land_in_hand_is_not_an_alternative() {
+        let mut state = GameState::new_two_player(42);
+        let bounce = bounce_land(&mut state);
+        let restricted = plain_land(&mut state, "Restricted Forest");
+        state.players[0].hand = [bounce, restricted].into_iter().collect();
+
+        // The engine omitted `restricted` from this decision's legal actions,
+        // as it does for a land unavailable under a current play restriction.
+        assert_score(
+            play_verdict(&state, bounce, vec![play_candidate(bounce)]),
+            "land_sequencing_no_alternative",
+            0.0,
+        );
+    }
+
+    #[test]
+    fn preferred_basic_land_is_engine_legal_before_self_bounce_land() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = AI;
+        state.phase = engine::types::phase::Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player: AI };
+        let bounce = bounce_land(&mut state);
+        let basic = plain_land(&mut state, "Forest");
+        state.players[0].hand = [bounce, basic].into_iter().collect();
+
+        assert_score(
+            play_verdict(
+                &state,
+                bounce,
+                vec![play_candidate(bounce), play_candidate(basic)],
+            ),
+            "land_sequencing_play_other_first",
+            -BOUNCE_DEPRIORITIZE,
+        );
+        engine::game::engine::apply(
+            &mut state,
+            AI,
+            GameAction::PlayLand {
+                object_id: basic,
+                card_id: CardId(2),
+            },
+        )
+        .expect("the policy-selected basic land must be engine-legal");
+        assert!(state.battlefield.contains(&basic));
     }
 }

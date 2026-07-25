@@ -8,8 +8,10 @@ use super::board_development::BoardDevelopmentPolicy;
 use super::board_wipe_telegraph::BoardWipeTelegraphPolicy;
 use super::card_advantage::CardAdvantagePolicy;
 use super::chalice_avoidance::ChaliceAvoidancePolicy;
+use super::combat_withdrawal::CombatWithdrawalPolicy;
 use super::context::{PolicyContext, PriorsEnv};
 use super::copy_value::CopyValuePolicy;
+use super::crew_timing::CrewTimingPolicy;
 use super::cycling_discipline::CyclingDisciplinePolicy;
 use super::effect_timing::EffectTimingPolicy;
 use super::etb_value::EtbValuePolicy;
@@ -135,6 +137,8 @@ pub enum PolicyId {
     PoisonClock,
     /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
     GraveyardTypes,
+    CrewTiming,
+    CombatWithdrawal,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -382,6 +386,8 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&ENERGY_PAYOFF)),
             Box::new(ChaliceAvoidancePolicy),
             Box::new(PaymentSelectionPolicy),
+            Box::new(CrewTimingPolicy),
+            Box::new(CombatWithdrawalPolicy),
             Box::new(SeparatePilesTimingPolicy),
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),

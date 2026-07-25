@@ -6,7 +6,7 @@ use crate::types::ability::{
     ReplacementMode, RestrictionExpiry, StaticDefinition, TargetFilter, TriggerDefinition,
     VoteSubject,
 };
-use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef};
+use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, PrintedLoyalty};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{GameState, MeldPairRecord};
@@ -100,10 +100,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Printed defense number for battles.
     let defense = card_face
         .defense
@@ -120,6 +118,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // enters the battlefield, through the CR 614.1c intrinsic replacement
     // channel (`enter_with_counters` on the ZoneChange ProposedEvent).
     obj.loyalty = loyalty;
+    obj.printed_loyalty = printed_loyalty;
     // CR 310.4a: `obj.defense` is the face's printed defense, stored as base
     // data. Defense counters are seeded through the CR 614.1c intrinsic
     // replacement when the battle enters the battlefield.
@@ -146,6 +145,7 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.base_toughness = toughness;
     obj.base_name = card_face.name.clone();
     obj.base_loyalty = loyalty;
+    obj.base_printed_loyalty = printed_loyalty;
     obj.base_defense = defense;
     obj.base_card_types = card_face.card_type.clone();
     obj.base_mana_cost = card_face.mana_cost.clone();
@@ -253,10 +253,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
     let power = parse_pt(&card_face.power);
     let toughness = parse_pt(&card_face.toughness);
-    let loyalty = card_face
-        .loyalty
-        .as_ref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
+    let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Back-face printed defense for DFCs that transform into battles.
     let defense = card_face
         .defense
@@ -268,6 +266,7 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.power = power;
     back_face.toughness = toughness;
     back_face.loyalty = loyalty;
+    back_face.printed_loyalty = printed_loyalty;
     back_face.defense = defense;
     back_face.card_types = card_face.card_type.clone();
     back_face.mana_cost = card_face.mana_cost.clone();
@@ -290,6 +289,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.power = back_face.power;
     obj.toughness = back_face.toughness;
     obj.loyalty = back_face.loyalty;
+    obj.printed_loyalty = back_face.printed_loyalty;
     obj.defense = back_face.defense;
     obj.card_types = back_face.card_types.clone();
     obj.mana_cost = back_face.mana_cost.clone();
@@ -302,6 +302,7 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.base_toughness = back_face.toughness;
     obj.base_name = back_face.name.clone();
     obj.base_loyalty = back_face.loyalty;
+    obj.base_printed_loyalty = back_face.printed_loyalty;
     obj.base_defense = back_face.defense;
     obj.base_card_types = back_face.card_types;
     obj.base_mana_cost = back_face.mana_cost.clone();
@@ -385,10 +386,20 @@ fn intrinsic_saga_lore_counter(card_types: &CardType) -> Option<(CounterType, u3
 /// the Saga lore counter when the entering face is a Saga (CR 712.14a
 /// transformed entry reads the back face here before the physical swap).
 pub fn intrinsic_entry_counters_for_face(
-    loyalty: Option<u32>,
+    printed_loyalty: Option<PrintedLoyalty>,
+    fallback_loyalty: Option<u32>,
+    resolving_spell_x: Option<u32>,
     defense: Option<u32>,
     card_types: &CardType,
 ) -> Vec<(CounterType, u32)> {
+    // `printed_loyalty` is authoritative when present: in particular, an
+    // explicit printed X must remain zero outside the resolving-spell path.
+    // Older serialized objects and lightweight engine constructors predate that
+    // provenance field, but their fixed `loyalty` baseline is still the printed
+    // loyalty number required by CR 306.5b.
+    let loyalty = printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(fallback_loyalty);
     let mut counters = intrinsic_face_counters(loyalty, defense);
     if let Some(lore) = intrinsic_saga_lore_counter(card_types) {
         counters.push(lore);
@@ -396,8 +407,15 @@ pub fn intrinsic_entry_counters_for_face(
     counters
 }
 
-pub fn intrinsic_etb_counters(obj: &GameObject) -> Vec<(CounterType, u32)> {
-    let mut counters = intrinsic_face_counters(obj.loyalty, obj.defense);
+pub fn intrinsic_etb_counters(
+    obj: &GameObject,
+    resolving_spell_x: Option<u32>,
+) -> Vec<(CounterType, u32)> {
+    let loyalty = obj
+        .printed_loyalty
+        .map(|value| value.entry_counter_count(resolving_spell_x))
+        .or(obj.loyalty);
+    let mut counters = intrinsic_face_counters(loyalty, obj.defense);
     // CR 702.156a + CR 107.3m: Ravenous is an intrinsic ETB replacement
     // effect. The paid X is stamped on the object when the spell leaves the
     // stack, before the ZoneChange replacement pipeline applies counters.
@@ -471,6 +489,7 @@ pub fn intrinsic_copiable_values(obj: &GameObject) -> CopiableValues {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         keywords: obj.base_keywords.clone(),
         // CopiableValues now shares `Arc<Vec<_>>` with the source object —
         // a copy-effect never mutates the ability set, so refcount sharing
@@ -581,10 +600,9 @@ pub(crate) fn copiable_values_from_face(result_face: &CardFace) -> CopiableValue
         card_types: result_face.card_type.clone(),
         power: parse_pt(&result_face.power),
         toughness: parse_pt(&result_face.toughness),
-        loyalty: result_face
-            .loyalty
-            .as_ref()
-            .and_then(|value| value.parse::<u32>().ok()),
+        loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref())
+            .map(PrintedLoyalty::off_stack_value),
+        printed_loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref()),
         keywords: result_face.keywords.clone(),
         abilities: Arc::new(result_face.abilities.clone()),
         trigger_definitions: Arc::new(result_face.triggers.clone()),
@@ -629,6 +647,7 @@ pub fn apply_copiable_values(
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
     // All four ability sets are Arc-shared — refcount bumps, no deep copy.
     obj.abilities = Arc::clone(&values.abilities);
@@ -663,6 +682,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.power = values.power;
     obj.toughness = values.toughness;
     obj.loyalty = values.loyalty;
+    obj.printed_loyalty = values.printed_loyalty;
     obj.keywords = values.keywords.clone();
     obj.abilities = Arc::clone(&values.abilities);
     obj.replacement_definitions = Arc::clone(&values.replacement_definitions).into();
@@ -675,6 +695,7 @@ pub fn install_copiable_values_as_base(obj: &mut GameObject, values: &CopiableVa
     obj.base_power = values.power;
     obj.base_toughness = values.toughness;
     obj.base_loyalty = values.loyalty;
+    obj.base_printed_loyalty = values.printed_loyalty;
     obj.base_keywords = values.keywords.clone();
     obj.base_abilities = Arc::clone(&values.abilities);
     obj.base_replacement_definitions = Arc::clone(&values.replacement_definitions);
@@ -690,6 +711,7 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         power: obj.power,
         toughness: obj.toughness,
         loyalty: obj.loyalty,
+        printed_loyalty: obj.printed_loyalty,
         defense: obj.defense,
         card_types: obj.card_types.clone(),
         mana_cost: obj.mana_cost.clone(),
@@ -737,6 +759,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
         power: obj.base_power,
         toughness: obj.base_toughness,
         loyalty: obj.base_loyalty,
+        printed_loyalty: obj.base_printed_loyalty,
         defense: obj.base_defense,
         card_types: obj.base_card_types.clone(),
         mana_cost: obj.base_mana_cost.clone(),
@@ -1486,6 +1509,7 @@ pub fn populate_back_face_if_dfc(obj: &mut GameObject, db: &CardDatabase, card_f
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: Default::default(),
         mana_cost: Default::default(),
@@ -2333,6 +2357,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: normal_half.card_type.clone(),
             mana_cost: normal_cost.clone(),
@@ -2730,8 +2755,51 @@ mod tests {
         obj.cost_x_paid = Some(4);
 
         assert_eq!(
-            intrinsic_etb_counters(&obj),
+            intrinsic_etb_counters(&obj, None),
             vec![(CounterType::Plus1Plus1, 4)]
+        );
+    }
+
+    #[test]
+    fn x_loyalty_uses_the_resolving_spell_x_and_survives_copying() {
+        let resolving = intrinsic_entry_counters_for_face(
+            Some(PrintedLoyalty::X),
+            Some(0),
+            Some(3),
+            None,
+            &CardType::default(),
+        );
+        assert_eq!(resolving, vec![(CounterType::Loyalty, 3)]);
+
+        let mut source = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "X Walker".to_string(),
+            Zone::Battlefield,
+        );
+        source.base_printed_loyalty = Some(PrintedLoyalty::X);
+        source.printed_loyalty = Some(PrintedLoyalty::X);
+        source.base_loyalty = Some(0);
+        source.loyalty = Some(0);
+
+        let values = intrinsic_copiable_values(&source);
+        assert_eq!(values.printed_loyalty, Some(PrintedLoyalty::X));
+
+        let mut copy = GameObject::new(
+            ObjectId(2),
+            CardId(2),
+            PlayerId(0),
+            "Copy".to_string(),
+            Zone::Battlefield,
+        );
+        install_copiable_values_as_base(&mut copy, &values);
+        assert_eq!(copy.printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(copy.base_printed_loyalty, Some(PrintedLoyalty::X));
+        assert_eq!(
+            intrinsic_etb_counters(&copy, None),
+            Vec::new(),
+            "CR 107.3g: a copied X-loyalty permanent that is not resolving a spell has X=0"
         );
     }
 

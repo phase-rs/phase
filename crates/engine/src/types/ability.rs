@@ -7,7 +7,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -20885,6 +20885,8 @@ pub struct CopiableValues {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     pub keywords: Vec<Keyword>,
     /// Ability-set fields are `Arc<Vec<_>>` so copy-effect propagation from
     /// source to target uses refcount sharing rather than deep clones.

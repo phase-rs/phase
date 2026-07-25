@@ -47,6 +47,7 @@ fn sanctum_of_the_sun_back_face() -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![engine::types::card_type::Supertype::Legendary],

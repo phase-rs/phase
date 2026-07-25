@@ -3946,7 +3946,9 @@ fn retarget_intrinsic_entry_counters_to_copy(
     });
     enter_with_counters.extend(
         crate::game::printed_cards::intrinsic_entry_counters_for_face(
+            copy_spec.values.printed_loyalty,
             copy_spec.values.loyalty,
+            None,
             None,
             &copy_spec.values.card_types,
         ),

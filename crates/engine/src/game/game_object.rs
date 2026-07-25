@@ -12,7 +12,7 @@ use crate::types::ability::{
     SpellCastingOption, StaticDefinition, TriggerBaseSetInstanceRef, TriggerDefinition,
     TriggerDefinitionOccurrenceRef, TriggerEntry, TriggerOccurrenceState,
 };
-use crate::types::card::{LayoutKind, PrintedCardRef, TokenImageRef};
+use crate::types::card::{LayoutKind, PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
@@ -185,6 +185,8 @@ pub struct BackFaceData {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4: Defense of a battle (printed number while off the battlefield).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub defense: Option<u32>,
@@ -439,6 +441,8 @@ pub struct GameObject {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4c: Defense of a battle on the battlefield — derived from defense
     /// counters. Kept in sync with `CounterType::Defense` by layer evaluation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +526,8 @@ pub struct GameObject {
     pub base_name: String,
     #[serde(default)]
     pub base_loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_printed_loyalty: Option<PrintedLoyalty>,
     /// CR 310.4a: Printed defense number (off-battlefield defense).
     #[serde(default)]
     pub base_defense: Option<u32>,
@@ -1156,6 +1162,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         power: _,
         toughness: _,
         loyalty: _,
+        printed_loyalty: _,
         defense: _,
         token_rules_text: _,
         card_types: _,
@@ -1183,6 +1190,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_toughness: _,
         base_name: _,
         base_loyalty: _,
+        base_printed_loyalty: _,
         base_defense: _,
         base_card_types: _,
         base_mana_cost: _,
@@ -2018,6 +2026,7 @@ impl GameObject {
             power: None,
             toughness: None,
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             token_rules_text: None,
             card_types: CardType::default(),
@@ -2045,6 +2054,7 @@ impl GameObject {
             base_toughness: None,
             base_name: name.clone(),
             base_loyalty: None,
+            base_printed_loyalty: None,
             base_defense: None,
             base_card_types: CardType::default(),
             base_mana_cost: ManaCost::default(),
@@ -2320,6 +2330,7 @@ impl GameObject {
         self.power = self.base_power;
         self.toughness = self.base_toughness;
         self.loyalty = self.base_loyalty;
+        self.printed_loyalty = self.base_printed_loyalty;
         // CR 310.4a + CR 400.7: Battle defense reverts to printed baseline off the battlefield.
         self.defense = self.base_defense;
         self.card_types = self.base_card_types.clone();
@@ -2983,6 +2994,28 @@ mod tests {
         let deserialized: GameObject = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "Test Card");
         assert_eq!(deserialized.id, ObjectId(1));
+    }
+
+    #[test]
+    fn legacy_game_object_payload_defaults_printed_loyalty_provenance() {
+        let mut obj = GameObject::new(
+            ObjectId(1),
+            CardId(100),
+            PlayerId(0),
+            "Test Card".to_string(),
+            Zone::Battlefield,
+        );
+        obj.printed_loyalty = Some(PrintedLoyalty::X);
+        obj.base_printed_loyalty = Some(PrintedLoyalty::X);
+
+        let mut json = serde_json::to_value(&obj).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("printed_loyalty");
+        fields.remove("base_printed_loyalty");
+
+        let legacy: GameObject = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.printed_loyalty, None);
+        assert_eq!(legacy.base_printed_loyalty, None);
     }
 
     #[test]

@@ -87,7 +87,11 @@ const MAX_ACTIVATIONS_PER_SOURCE_PER_TURN: u32 = 4;
 /// flashback + recast, Eternal Witness reanimate chain) while preventing the
 /// thousands-of-iterations pathology observed in #563.
 const MAX_CASTS_OF_SAME_CARD_PER_TURN: usize = 3;
-const LARGE_BOARD_FAST_PRIORITY_OBJECTS: usize = 1000;
+// Iterative deepening repeatedly serializes and simulates the whole game state.
+// A token-heavy battlefield is already expensive well before a thousand objects,
+// so keep normal search for ordinary games while routing pathological boards
+// through the bounded, policy-scored priority path.
+const LARGE_BOARD_FAST_PRIORITY_OBJECTS: usize = 128;
 
 fn pick_lowest_value_sacrifices(
     state: &GameState,
@@ -114,10 +118,6 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
-    if let Some(action) = fast_priority_action(state, ai_player) {
-        return Some(action);
-    }
-
     let session = AiSession::arc_from_game(state);
     choose_action_with_session(state, ai_player, config, rng, &session)
 }
@@ -217,7 +217,7 @@ pub fn choose_action_with_session(
         }
     }
 
-    if let Some(action) = fast_priority_action(state, ai_player) {
+    if let Some(action) = fast_priority_action(state, ai_player, config, session) {
         return Some(action);
     }
 
@@ -275,7 +275,12 @@ fn random_card_predicate_guess(
     Some(GameAction::ChooseOption { choice })
 }
 
-fn fast_priority_action(state: &GameState, ai_player: PlayerId) -> Option<GameAction> {
+fn fast_priority_action(
+    state: &GameState,
+    ai_player: PlayerId,
+    config: &AiConfig,
+    session: &Arc<AiSession>,
+) -> Option<GameAction> {
     let WaitingFor::Priority { player } = state.waiting_for else {
         return None;
     };
@@ -288,15 +293,16 @@ fn fast_priority_action(state: &GameState, ai_player: PlayerId) -> Option<GameAc
     }
 
     let actions = engine::ai_support::flat_priority_actions(state);
-    low_value_priority_pass_from_actions(state, ai_player, &actions)
-        .or_else(|| large_board_main_phase_fast_action_from_actions(state, ai_player, &actions))
+    low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
+        large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
+    })
 }
 
 fn large_board_main_phase_has_no_development_sources(
     state: &GameState,
     ai_player: PlayerId,
 ) -> bool {
-    if state.battlefield.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+    if state.objects.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
         || state.active_player != ai_player
         || !state.stack.is_empty()
         || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
@@ -558,12 +564,14 @@ fn large_board_main_phase_fast_action_from_actions(
     state: &GameState,
     ai_player: PlayerId,
     actions: &[GameAction],
+    config: &AiConfig,
+    session: &Arc<AiSession>,
 ) -> Option<GameAction> {
     let WaitingFor::Priority { player } = state.waiting_for else {
         return None;
     };
     if player != ai_player
-        || state.battlefield.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
+        || state.objects.len() < LARGE_BOARD_FAST_PRIORITY_OBJECTS
         || state.active_player != ai_player
         || !state.stack.is_empty()
         || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
@@ -571,20 +579,44 @@ fn large_board_main_phase_fast_action_from_actions(
         return None;
     }
 
-    if let Some(action) = prefer_land_drop(state, ai_player, actions) {
-        return Some(action);
-    }
+    // Deep search over a token-heavy own main phase is not a bounded operation.
+    // Retain the fast path, but score the exact engine-legal candidates through
+    // the tactical registry so land sequencing and other safety policies still
+    // participate. Spell mana value remains the deterministic baseline that
+    // this shortcut historically used; policies may adjust or reject it.
+    let decision = build_decision_context(state);
+    let context = build_ai_context_with_session(state, ai_player, config, Arc::clone(session));
+    let policies = PolicyRegistry::shared();
 
-    actions
+    decision
+        .candidates
         .iter()
-        .filter_map(|action| match action {
-            GameAction::CastSpell { object_id, .. } => {
-                Some((evaluate_card_value(state, *object_id), action.clone()))
-            }
-            _ => None,
+        .filter(|candidate| actions.contains(&candidate.action))
+        .map(|candidate| {
+            let baseline = match candidate.action {
+                GameAction::CastSpell { object_id, .. } => evaluate_card_value(state, object_id),
+                _ => 0.0,
+            };
+            let tactical = policies.score(&PolicyContext {
+                state,
+                decision: &decision,
+                candidate,
+                ai_player,
+                config,
+                context: &context,
+                cast_facts: cast_facts_for_action(state, &candidate.action, ai_player),
+                search_depth: SearchDepth::Root,
+            });
+            (candidate.action.clone(), baseline + tactical)
         })
-        .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
-        .map(|(_, action)| action)
+        .filter(|(_, score)| score.is_finite())
+        .max_by(|(left_action, left_score), (right_action, right_score)| {
+            left_score
+                .partial_cmp(right_score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| right_action.cmp_stable(left_action))
+        })
+        .map(|(action, _)| action)
 }
 
 /// Emit a structured decision-trace event for the chosen tactical action.
@@ -1726,10 +1758,6 @@ pub fn score_candidates(
     ai_player: PlayerId,
     config: &AiConfig,
 ) -> Vec<(GameAction, f64)> {
-    if let Some(action) = fast_priority_action(state, ai_player) {
-        return vec![(action, 1.0)];
-    }
-
     let session = AiSession::arc_from_game(state);
     score_candidates_with_session(state, ai_player, config, &session)
 }
@@ -1864,7 +1892,7 @@ fn score_candidates_core(
     session: &Arc<AiSession>,
     deadline_override: Option<engine::util::Deadline>,
 ) -> Vec<(GameAction, f64)> {
-    if let Some(action) = fast_priority_action(state, ai_player) {
+    if let Some(action) = fast_priority_action(state, ai_player, config, session) {
         return vec![(action, 1.0)];
     }
 
@@ -2929,10 +2957,16 @@ fn prefer_land_drop(
         return None;
     }
 
-    actions
+    // This is a latency shortcut only when the land play is unambiguous. A
+    // first-match choice bypasses `LandSequencingPolicy`, which must compare
+    // self-bouncing lands with their ordinary-land siblings. Let scoring make
+    // every ambiguous land choice; this applies equally to the large-board
+    // priority shortcut that calls this helper.
+    let mut land_actions = actions
         .iter()
-        .find(|action| matches!(action, GameAction::PlayLand { .. }))
-        .cloned()
+        .filter(|action| matches!(action, GameAction::PlayLand { .. }));
+    let only_land = land_actions.next()?;
+    land_actions.next().is_none().then(|| only_land.clone())
 }
 
 /// Evaluate a card's value for scry/dig/surveil decisions.
@@ -4204,13 +4238,14 @@ mod tests {
     }
 
     #[test]
-    fn large_board_main_phase_fast_action_picks_best_cast_spell() {
+    fn large_board_main_phase_fast_action_uses_bounded_policy_scoring() {
         let mut state = make_state();
         for _ in 0..LARGE_BOARD_FAST_PRIORITY_OBJECTS {
             add_creature(&mut state, PlayerId(1), 1, 1);
         }
         let cheap = add_spell_to_hand(&mut state, PlayerId(0), "Cheap Spell", 1);
         let expensive = add_spell_to_hand(&mut state, PlayerId(0), "Expensive Spell", 6);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 6);
         let actions = vec![
             GameAction::PassPriority,
             GameAction::CastSpell {
@@ -4226,15 +4261,24 @@ mod tests {
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         ];
+        let config = AiConfig::default();
+        let session = AiSession::arc_from_game(&state);
 
         assert_eq!(
-            large_board_main_phase_fast_action_from_actions(&state, PlayerId(0), &actions),
+            large_board_main_phase_fast_action_from_actions(
+                &state,
+                PlayerId(0),
+                &actions,
+                &config,
+                &session,
+            ),
             Some(GameAction::CastSpell {
                 object_id: expensive,
                 card_id: CardId(expensive.0),
                 targets: Vec::new(),
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
-            })
+            }),
+            "large-board action selection must remain bounded while retaining tactical scoring"
         );
     }
 
@@ -4255,9 +4299,17 @@ mod tests {
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         ];
+        let config = AiConfig::default();
+        let session = AiSession::arc_from_game(&state);
 
         assert_eq!(
-            large_board_main_phase_fast_action_from_actions(&state, PlayerId(0), &actions),
+            large_board_main_phase_fast_action_from_actions(
+                &state,
+                PlayerId(0),
+                &actions,
+                &config,
+                &session,
+            ),
             None
         );
     }
@@ -4707,6 +4759,43 @@ mod tests {
                 object_id: land_id,
                 card_id: CardId(99)
             })
+        );
+        engine::game::engine::apply(&mut state, PlayerId(0), action.unwrap())
+            .expect("the production controller's unique-land choice must be engine-legal");
+        assert!(state.battlefield.contains(&land_id));
+    }
+
+    #[test]
+    fn land_fast_path_only_accepts_a_unique_legal_land() {
+        let state = make_state();
+        let land = GameAction::PlayLand {
+            object_id: ObjectId(1),
+            card_id: CardId(1),
+        };
+        assert_eq!(
+            prefer_land_drop(
+                &state,
+                PlayerId(0),
+                &[GameAction::PassPriority, land.clone()]
+            ),
+            Some(land.clone()),
+            "a single legal land may use the fast path"
+        );
+        assert_eq!(
+            prefer_land_drop(
+                &state,
+                PlayerId(0),
+                &[
+                    GameAction::PassPriority,
+                    land,
+                    GameAction::PlayLand {
+                        object_id: ObjectId(2),
+                        card_id: CardId(2),
+                    },
+                ],
+            ),
+            None,
+            "competing land plays must reach policy scoring"
         );
     }
 

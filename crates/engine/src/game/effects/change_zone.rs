@@ -9495,6 +9495,7 @@ mod tests {
                 power: None,
                 toughness: None,
                 loyalty: Some(3),
+                printed_loyalty: None,
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],

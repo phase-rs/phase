@@ -19402,6 +19402,7 @@ mod tests {
             power: Some(1),
             toughness: Some(1),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: std::sync::Arc::default(),
             trigger_definitions: std::sync::Arc::default(),

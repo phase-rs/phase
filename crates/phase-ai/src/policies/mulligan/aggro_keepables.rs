@@ -19,7 +19,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 pub struct AggroKeepablesMulligan;
 
@@ -55,8 +55,10 @@ impl MulliganPolicy for AggroKeepablesMulligan {
                 continue;
             };
             let core_types = &obj.card_types.core_types;
-            if core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 lands += 1;
+            }
+            if core_types.contains(&CoreType::Land) {
                 continue;
             }
 

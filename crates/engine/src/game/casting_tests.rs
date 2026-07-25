@@ -9689,6 +9689,7 @@ fn hearth_elemental_self_cost_reduction_counts_adventures() {
                 power: None,
                 toughness: None,
                 loyalty: None,
+                printed_loyalty: None,
                 defense: None,
                 card_types: Default::default(),
                 mana_cost: ManaCost::generic(1),
@@ -25214,6 +25215,7 @@ fn create_adventure_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25304,6 +25306,7 @@ fn create_enchantment_adventure_in_hand(state: &mut GameState, player: PlayerId)
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -25390,6 +25393,7 @@ fn create_omen_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut ct = crate::types::card_type::CardType::default();
@@ -29011,6 +29015,7 @@ fn add_disturb_creature_to_graveyard(
         power: Some(1),
         toughness: Some(1),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: {
             let mut card_types = crate::types::card_type::CardType::default();
@@ -34909,6 +34914,7 @@ mod mtmte_cast_flow {
             power: Some(7),
             toughness: Some(7),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types,
             mana_cost: ManaCost::default(),
@@ -47988,6 +47994,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             defense: None,
             card_types: {
                 let mut types = crate::types::card_type::CardType::default();

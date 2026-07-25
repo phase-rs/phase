@@ -11,7 +11,6 @@
 //!
 use engine::game::bracket_estimate::CommanderBracketTier;
 use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter, TypeFilter};
-use engine::types::card_type::CoreType;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 
@@ -23,7 +22,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Minimum kept-hand size for a cEDH AI. A 3-card hand essentially can't win
 /// at a cEDH table, so we never take a mulligan that would leave fewer cards
@@ -143,12 +142,7 @@ impl MulliganPolicy for CedhKeepablesMulligan {
 
 fn count_lands_in_hand(hand: &[ObjectId], state: &GameState) -> u32 {
     hand.iter()
-        .filter(|&&id| {
-            state
-                .objects
-                .get(&id)
-                .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Land))
-        })
+        .filter(|&&id| state.objects.get(&id).is_some_and(is_land_source))
         .count() as u32
 }
 

@@ -7015,6 +7015,7 @@ pub(crate) fn compute_current_copiable_values(
             // the overridden loyalty value.
             ContinuousModification::SetStartingLoyalty { value } => {
                 values.loyalty = Some(*value);
+                values.printed_loyalty = Some(crate::types::card::PrintedLoyalty::Fixed(*value));
             }
             // CR 707.9a: A copy effect that grants/retains an ability ("…
             // and it has this ability") makes that ability part of the
@@ -17807,6 +17808,7 @@ mod tests {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: Default::default(),
             trigger_definitions: Default::default(),

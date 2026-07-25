@@ -2832,12 +2832,14 @@ fn execute_zone_move_with_applied_terminal(
             let intrinsic = match (enter_transformed, obj.back_face.as_ref()) {
                 (true, Some(back)) => {
                     crate::game::printed_cards::intrinsic_entry_counters_for_face(
+                        back.printed_loyalty,
                         back.loyalty,
+                        None,
                         back.defense,
                         &back.card_types,
                     )
                 }
-                _ => crate::game::printed_cards::intrinsic_etb_counters(obj),
+                _ => crate::game::printed_cards::intrinsic_etb_counters(obj, None),
             };
             if !intrinsic.is_empty() {
                 if let ProposedEvent::ZoneChange {

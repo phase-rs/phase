@@ -22096,6 +22096,7 @@ pub mod tests {
                 power: None,
                 toughness: None,
                 loyalty: Some(4),
+                printed_loyalty: None,
                 defense: None,
                 card_types: CardType {
                     supertypes: vec![],

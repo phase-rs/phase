@@ -91,6 +91,7 @@ fn tamiyo_third_draw_returns_transformed_not_stranded_in_exile() {
         power: None,
         toughness: None,
         loyalty: Some(2),
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![Supertype::Legendary],

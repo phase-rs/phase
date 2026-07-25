@@ -1596,6 +1596,7 @@ fn room_back_face(name: &str) -> BackFaceData {
         power: None,
         toughness: None,
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType::default(),
         mana_cost: ManaCost::default(),
