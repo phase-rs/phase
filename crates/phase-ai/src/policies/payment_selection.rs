@@ -173,14 +173,13 @@ fn discard_spends_last_playable_land(
         .any(|land| {
             sibling_land_plays
                 .iter()
-                .filter(|(sibling, _)| !sibling.contains(&land))
-                .next()
-                .is_some_and(|_| {
+                .any(|(sibling, _)| !sibling.contains(&land))
+                && {
                     sibling_land_plays
                         .iter()
                         .filter(|(sibling, _)| !sibling.contains(&land))
                         .all(|(_, lands)| lands.as_slice() == [land])
-                })
+                }
         })
 }
 
