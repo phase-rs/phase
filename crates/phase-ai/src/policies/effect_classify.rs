@@ -283,6 +283,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExileHaunting { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }
         | Effect::FlipCoin { .. }

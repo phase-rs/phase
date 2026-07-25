@@ -478,6 +478,7 @@ fn redundancy_delta(
         | Effect::RevealHand { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }

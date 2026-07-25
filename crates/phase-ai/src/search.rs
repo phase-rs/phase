@@ -871,6 +871,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             .copied()
             .map(|target| GameAction::ChooseEntryAttackTarget { target }),
 
+        // TargetSelection returned from the early current-legal-target branch.
+        WaitingFor::TargetSelection { .. } => unreachable!("handled before fallback match"),
+
         // TriggerTargetSelection is not a pending cast — the trigger is
         // already on the stack. ChooseTarget { target: None } signals
         // "no legal target" and causes the trigger to fizzle (CR 608.2b).
