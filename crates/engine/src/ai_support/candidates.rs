@@ -306,9 +306,8 @@ fn counter_move_distribution_candidates(
 /// CR 107.1c: Coarse candidates for a `RemoveCountersChoice` prompt — the two
 /// extremal legal answers: "remove none" (empty selection) and "remove all"
 /// (every available counter of every type). The full legal space (any per-type
-/// subset) is combinatorial; the server bypasses its enumeration gate for human
-/// submissions (`accepts_freeform_counter_removal`), so the AI only needs enough
-/// variety to never wedge.
+/// subset) is combinatorial, so the AI only needs enough variety to never
+/// wedge. The engine validates every submitted selection directly.
 // ponytail: two extremal candidates; add per-type partials if a policy ever
 // wants finer counter-shedding control.
 fn counter_removal_candidates(

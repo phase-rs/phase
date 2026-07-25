@@ -46110,8 +46110,8 @@ fn cancel_clears_pins() {
     );
 }
 
-/// TEST 7: MP-accepts — SpendPoolMana is classified as a mana ability so it
-/// rides session skip_legality.
+/// TEST 7: SpendPoolMana is classified as a mana ability so AI candidate
+/// enumeration omits mana-payment-window bookkeeping actions.
 #[test]
 fn spend_pool_mana_is_mana_ability() {
     assert!(
@@ -46119,14 +46119,14 @@ fn spend_pool_mana_is_mana_ability() {
             pip_id: ManaPipId(1)
         }
         .is_mana_ability(),
-        "SpendPoolMana must be a mana ability (MP skip_legality)"
+        "SpendPoolMana must be a mana ability"
     );
     assert!(
         GameAction::UnspendPoolMana {
             pip_id: ManaPipId(1)
         }
         .is_mana_ability(),
-        "UnspendPoolMana must be a mana ability (MP skip_legality)"
+        "UnspendPoolMana must be a mana ability"
     );
 }
 

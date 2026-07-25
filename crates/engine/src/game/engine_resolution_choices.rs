@@ -797,10 +797,8 @@ fn validate_exact_keep_on_top_selection(
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
 /// library "in any order", so a legal keep-on-top selection is any duplicate-free
-/// subset of the looked-at cards (order is the player's free choice). Because the
-/// multiplayer server bypasses its candidate-enumeration legality gate for these
-/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
-/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// subset of the looked-at cards (order is the player's free choice). `apply()` is
+/// the validation boundary: a foreign id or a duplicate would corrupt the
 /// library `retain`+`insert` (relocating or duplicating a card), so reject both
 /// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
 fn validate_keep_on_top_selection(

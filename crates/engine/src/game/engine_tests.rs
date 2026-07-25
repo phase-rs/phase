@@ -2207,6 +2207,68 @@ fn cancel_auto_pass_routes_by_actor() {
     );
 }
 
+/// Actor-scoped preference mutations must not advance an already-active
+/// auto-pass session. Before admission moved into `apply`, server-core returned
+/// directly for these six actions; routing through the shared boundary must
+/// preserve that no-progression behavior.
+#[test]
+fn actor_scoped_preferences_do_not_advance_active_auto_pass() {
+    let preferences = vec![
+        GameAction::CancelAutoPass,
+        GameAction::SetPhaseStops { stops: vec![] },
+        GameAction::SetPriorityPassingMode {
+            mode: crate::types::game_state::PriorityPassingMode::Standard,
+        },
+        GameAction::SetPriorityYield {
+            op: PriorityYieldOp::ClearAll,
+        },
+        GameAction::SetMayTriggerAutoChoice {
+            op: MayTriggerAutoChoiceOp::ClearAll,
+        },
+        GameAction::SetTriggerOrderTemplate {
+            op: TriggerOrderTemplateOp::ClearAll,
+        },
+    ];
+
+    for action in preferences {
+        let mut state = setup_game_at_main_phase();
+        state.auto_pass.insert(
+            PlayerId(0),
+            crate::types::game_state::AutoPassMode::UntilTurnBoundary {
+                until: crate::types::game_state::TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        let waiting_for = state.waiting_for.clone();
+        let priority_passes = state.priority_passes.clone();
+
+        let result = apply(&mut state, PlayerId(1), action.clone())
+            .expect("actor-scoped preference should be accepted out of priority");
+
+        assert!(
+            result.events.is_empty(),
+            "{} must not auto-pass or emit game events",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.waiting_for,
+            waiting_for,
+            "{} advanced priority",
+            action.variant_name()
+        );
+        assert_eq!(
+            state.priority_passes,
+            priority_passes,
+            "{} changed the priority-pass sequence",
+            action.variant_name()
+        );
+        assert!(
+            state.auto_pass.contains_key(&PlayerId(0)),
+            "{} consumed P0's active auto-pass session",
+            action.variant_name()
+        );
+    }
+}
+
 // --- GameAction::SetPriorityYield (CR 117.3d + CR 400.7 + CR 704.5d) ---
 
 /// Push a controller-owned `TriggeredAbility` entry onto the stack whose ability
@@ -4032,6 +4094,7 @@ fn engine_error_display() {
 #[test]
 fn apply_rejects_action_from_wrong_actor() {
     let mut state = setup_game_at_main_phase();
+    let before = state.clone();
     // `setup_game_at_main_phase` leaves P0 with priority.
     assert_eq!(
         turn_control::authorized_submitter(&state),
@@ -4044,6 +4107,10 @@ fn apply_rejects_action_from_wrong_actor() {
     assert!(
         matches!(result, Err(EngineError::WrongPlayer)),
         "expected WrongPlayer, got {result:?}"
+    );
+    assert_eq!(
+        state, before,
+        "authorization rejection must restore every boundary-side mutation"
     );
 
     // P0 submitting the same action must succeed.
@@ -4234,6 +4301,43 @@ fn apply_rejects_spoofed_concede() {
     };
     let result = apply(&mut state, PlayerId(1), self_concede);
     assert!(result.is_ok(), "self-concede should succeed: {result:?}");
+}
+
+#[test]
+fn game_over_rejects_ordinary_actions_but_keeps_preferences_actor_scoped() {
+    let mut state = setup_game_at_main_phase();
+    state.waiting_for = WaitingFor::GameOver {
+        winner: Some(PlayerId(0)),
+    };
+    let before = state.clone();
+
+    let pass = apply(&mut state, PlayerId(0), GameAction::PassPriority);
+    assert!(matches!(pass, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected ordinary action must not mutate GameOver"
+    );
+
+    let concede = apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::Concede {
+            player_id: PlayerId(1),
+        },
+    );
+    assert!(matches!(concede, Err(EngineError::WrongPlayer)));
+    assert_eq!(
+        state, before,
+        "rejected self-concede must not mutate GameOver"
+    );
+
+    apply(
+        &mut state,
+        PlayerId(1),
+        GameAction::SetPhaseStops { stops: vec![] },
+    )
+    .expect("preferences remain actor-scoped after GameOver");
+    assert!(matches!(state.waiting_for, WaitingFor::GameOver { .. }));
 }
 
 #[test]
@@ -9093,11 +9197,16 @@ fn reorder_hand_rejects_non_permutation() {
     let a = ObjectId(100);
     let b = ObjectId(101);
     state.players[0].hand = crate::im::Vector::from(vec![a, b]);
+    let before = state.clone();
 
     // Wrong length.
     let err = apply(&mut state, p0, GameAction::ReorderHand { order: vec![a] })
         .expect_err("wrong length must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "a reducer rejection must restore transient boundary state as well as the hand"
+    );
 
     // Right length, wrong contents.
     let stranger = ObjectId(999);
@@ -9110,6 +9219,10 @@ fn reorder_hand_rejects_non_permutation() {
     )
     .expect_err("stranger id must error");
     assert!(matches!(err, EngineError::InvalidAction(_)));
+    assert_eq!(
+        state, before,
+        "each rejected reducer attempt must leave the complete state unchanged"
+    );
 
     // Hand unchanged after rejected calls.
     assert_eq!(
