@@ -976,23 +976,29 @@ mod tests {
     #[test]
     fn server_message_game_started_with_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
+        let action = GameAction::PassPriority;
+        let interaction_action_id = engine::game::interaction::interaction_action_id(&action);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
         let msg = ServerMessage::GameStarted {
             state_revision: 0,
             state: state.clone(),
             your_player: PlayerId(0),
             opponent_name: Some("Opponent".to_string()),
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
-            legal_actions: vec![GameAction::PassPriority],
+            legal_actions: vec![action.clone()],
             auto_pass_recommended: false,
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
-            legal_actions_by_object: HashMap::new(),
+            legal_actions_by_object: HashMap::from([(
+                engine::types::identifiers::ObjectId(7),
+                vec![engine::game::interaction::ObjectActionPayload {
+                    action,
+                    interaction_action_id: interaction_action_id.clone(),
+                }],
+            )]),
             derived: Default::default(),
-            viewer_interaction: engine::game::interaction::derive_viewer_interaction(
-                &state,
-                &state,
-                PlayerId(0),
-            ),
+            viewer_interaction: viewer_interaction.clone(),
             player_token: None,
             events: vec![],
         };
@@ -1004,12 +1010,20 @@ mod tests {
                 opponent_name,
                 player_names,
                 legal_actions,
+                legal_actions_by_object,
+                viewer_interaction: decoded_viewer_interaction,
                 ..
             } => {
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, Some("Opponent".to_string()));
                 assert_eq!(player_names.len(), 2);
                 assert_eq!(legal_actions.len(), 1);
+                assert_eq!(decoded_viewer_interaction, viewer_interaction);
+                assert_eq!(
+                    legal_actions_by_object[&engine::types::identifiers::ObjectId(7)][0]
+                        .interaction_action_id,
+                    interaction_action_id
+                );
             }
             _ => panic!("wrong variant"),
         }
