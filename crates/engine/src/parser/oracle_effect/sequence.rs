@@ -6013,6 +6013,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // `Dig`, and the sacrificed creature feeds the continuation's filter
         // via `ObjectScope::CostPaidObject`.
         Effect::Sacrifice { .. } | Effect::PayCost { .. } => true,
+        // CR 406.3 + CR 608.2c + CR 701.24a: Exiling a face-down pile and
+        // shuffling it for its "If you do" rider is an intervening instruction;
+        // a later continuation may still refer to an earlier Dig.
+        Effect::ExileFaceDownPile { .. } => true,
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
@@ -6114,10 +6118,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
-        // CR 406.3 + CR 608.2c + CR 701.24a: Exiling a face-down pile and
-        // shuffling it for its "If you do" rider is an intervening instruction;
-        // a later continuation may still refer to an earlier Dig.
-        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::OpponentGuess { .. }
@@ -7956,6 +7956,17 @@ pub(super) fn try_parse_scoped_does_the_same(text: &str) -> Option<PlayerFilter>
 mod tests {
     use super::*;
     use crate::types::ability::QuantityExpr;
+
+    #[test]
+    fn face_down_pile_is_dig_lookback_transparent() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::TriggeringSource,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Fixed { value: 6 },
+        };
+
+        assert!(clause_is_dig_lookback_transparent(&effect));
+    }
 
     // CR 608.2c + CR 601.2c: "target opponent does the same / does so" replicates
     // the preceding sibling effect for a targeted opponent. The recognizer must
