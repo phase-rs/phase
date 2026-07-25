@@ -10417,17 +10417,17 @@ mod tests {
                 cost: AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: amount },
                 },
-                decline: Some(
-                    Box::new(AbilityDefinition::new(
+                decline: Some(Box::new(
+                    AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::SetTapState {
                             target: TargetFilter::SelfRef,
                             scope: EffectScope::Single,
                             state: TapStateChange::Tap,
                         },
-                    ))
+                    )
                     .description("It enters tapped".to_string()),
-                ),
+                )),
             })
             .valid_card(TargetFilter::SelfRef)
     }
