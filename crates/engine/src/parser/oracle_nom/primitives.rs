@@ -390,12 +390,20 @@ pub fn parse_core_type(input: &str) -> OracleResult<'_, CoreType> {
 /// as `AbilityCondition::RevealedHasCardType` match with `any`, so listing every
 /// printed leg is exactly the OR semantics the Oracle text prints.
 ///
-/// An explicit `or` boundary is REQUIRED for a multi-leg result. A bare comma
-/// list ("land, instant") is NOT a disjunction: without a printed "or" the
-/// phrase is a conjunctive/enumerated type stack, and lowering it to a set that
-/// consumers evaluate with `any` would silently widen a both-types gate into an
-/// either-type gate. Comma legs are therefore buffered and only committed once a
-/// terminal `", or "` / `" or "` leg proves the list really was disjunctive:
+/// An explicit `or` boundary is REQUIRED for a multi-leg result, because CR
+/// 205.2b describes TWO different things this grammar must not conflate. Its
+/// first sentence — "Some objects have more than one card type (for example, an
+/// artifact creature)" — is a CONJUNCTIVE type stack: ONE object bearing every
+/// listed type. Its second sentence — "Such objects satisfy the criteria for any
+/// effect that applies to any of their card types" — is the `any` match that
+/// makes a printed DISJUNCTION lower to a set.
+///
+/// Only the printed "or" tells the two apart. A bare comma list ("land,
+/// instant") or a printed "and" ("artifact and creature") is the conjunctive
+/// reading, so lowering it to a set that consumers evaluate with `any` would
+/// silently widen a both-types gate into an either-type gate. Comma legs are
+/// therefore buffered and only committed once a terminal `", or "` / `" or "`
+/// leg proves the list really was disjunctive:
 ///
 /// - `"instant or sorcery"` → `[Instant, Sorcery]`
 /// - `"artifact, creature, or enchantment"` → `[Artifact, Creature, Enchantment]`
