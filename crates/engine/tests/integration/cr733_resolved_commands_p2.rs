@@ -94,6 +94,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::PlayerLeave(command) => {
             engine::game::elimination::apply_resolved_player_leave(state, command).unwrap();
         }
+        ResolvedRulesCommand::TokenCreation(command) => {
+            engine::game::effects::token::apply_resolved_token_creation(state, command).unwrap();
+        }
         ResolvedRulesCommand::LedgerEdit(command) => {
             engine::game::ledger::apply_resolved_ledger_edit(state, command).unwrap();
         }
@@ -206,6 +209,7 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::EntryProvenance(_)
             | ResolvedRulesCommand::ObjectCease(_)
             | ResolvedRulesCommand::PlayerLeave(_)
+            | ResolvedRulesCommand::TokenCreation(_)
             | ResolvedRulesCommand::LedgerEdit(_)
             | ResolvedRulesCommand::LibraryShuffle(_)
             | ResolvedRulesCommand::ZoneChange(_)

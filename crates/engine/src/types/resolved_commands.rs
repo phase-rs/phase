@@ -11,12 +11,14 @@ use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
 use super::ability::TriggerDefinitionRef;
+use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::{SpellCastRecord, ZoneChangeRecord};
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
+use super::proposed_event::TokenSpec;
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
 use super::zones::Zone;
 
@@ -373,6 +375,55 @@ pub enum ResolvedPlayerLeaveReplayInvariantError {
     AlreadyEliminated(PlayerId),
 }
 
+/// One exact CR 111.1 token creation.
+///
+/// This is the first family whose replay MATERIALIZES an object rather than
+/// verifying and installing into one that already exists, so its precondition is
+/// inverted: the applier requires the id to be ABSENT.
+///
+/// Two allocator draws are recorded because both would otherwise be re-drawn:
+/// the `ObjectId` (from `next_object_id`) and the CR 613.7d entry timestamp.
+///
+/// SCOPE: ordinary `TokenSpec` births only. Copy tokens (CR 707.2) and meld
+/// births go through the liminal-entry path, whose `LiminalEntry` carries no
+/// body spec — `LiminalEntryKind` distinguishes Token from Meld, not Spec from
+/// Copy — so wiring them needs a new field on that shared serialized struct.
+/// They remain unjournaled for now. When they land, this struct's `spec` +
+/// `token_image_ref` pair becomes a `ResolvedTokenBody::{Spec, Copy}` payload on
+/// the SAME command: both are the CR 111.1 axis (an object came into existence
+/// and its id and timestamp were drawn), and CR 707.2 governs only how the copy
+/// body was derived upstream of this seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedTokenCreationCommand {
+    pub object: ObjectIncarnationRef,
+    pub owner: PlayerId,
+    pub entry_timestamp: u64,
+    /// The effect's token spec — the existing replacement-visible payload type
+    /// rather than a hand-rolled field list.
+    pub spec: Box<TokenSpec>,
+    /// `token_presets::find_exact_token_ref` READS game state to resolve this, so
+    /// it is a re-derivation rather than a spec field and must be recorded.
+    pub token_image_ref: Option<TokenImageRef>,
+    /// CR 614.1: the post-replacement tapped state the token actually entered
+    /// with, not the spec's pre-replacement request.
+    pub resulting_tapped: bool,
+    /// The `next_object_id` high-water after this token's id was drawn, so a
+    /// replay resuming from a shorter prefix cannot hand the same id out twice.
+    pub resulting_next_object_id: u64,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved token creation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedTokenCreationReplayInvariantError {
+    #[error("token-creation command would overwrite live object {0:?}")]
+    ObjectAlreadyExists(ObjectId),
+    #[error("token-creation command references an unknown owner {0:?}")]
+    UnknownOwner(PlayerId),
+    #[error("token-creation id {id:?} is not below its recorded high-water {high_water}")]
+    IdAboveHighWater { id: ObjectId, high_water: u64 },
+}
+
 /// The audience that received one exact revealed-card fact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedInformationAudience {
@@ -623,6 +674,7 @@ pub enum ResolvedRulesCommand {
     EntryProvenance(ResolvedEntryProvenanceCommand),
     ObjectCease(ResolvedObjectCeaseCommand),
     PlayerLeave(ResolvedPlayerLeaveCommand),
+    TokenCreation(Box<ResolvedTokenCreationCommand>),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1607,6 +1659,17 @@ impl ResolvedRulesJournal {
         self.append_command(command.cause, ResolvedRulesCommand::PlayerLeave(command))
     }
 
+    /// Records one exact CR 111.1 token creation under its causal node.
+    pub fn record_token_creation(
+        &mut self,
+        command: ResolvedTokenCreationCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::TokenCreation(Box::new(command)),
+        )
+    }
+
     /// Records one exact bounded resolution-frame transition under its causal node.
     pub fn record_frame_transition(
         &mut self,
@@ -1833,6 +1896,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::EntryProvenance(_)
                 | ResolvedRulesCommand::ObjectCease(_)
                 | ResolvedRulesCommand::PlayerLeave(_)
+                | ResolvedRulesCommand::TokenCreation(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -2159,6 +2223,20 @@ impl ResolvedRulesJournal {
                 {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "player-leave command is not attributed to a player-leave node".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::TokenCreation(command) => {
+                // CR 111.1: the token's id must be below the high-water its own
+                // draw established, or the record cannot describe an allocation
+                // that actually happened.
+                if entry.node != command.cause
+                    || command.object.object_id.0 >= command.resulting_next_object_id
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "token-creation command has an impossible id high-water, or an \
+                         unrelated cause"
+                            .to_string(),
                     ));
                 }
             }

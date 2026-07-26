@@ -22,12 +22,15 @@ use crate::types::game_state::{
     PendingCounterAddition, PendingCounterPostAction, PendingEffectResolutionEvent,
     TokenEntryEventEmission, WaitingFor,
 };
-use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
 use crate::types::keywords::{Keyword, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CopyTokenSpec, ProposedEvent, TokenSpec};
+use crate::types::resolved_commands::{
+    ResolvedTokenCreationCommand, ResolvedTokenCreationReplayInvariantError,
+};
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
@@ -826,72 +829,41 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
         // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
         let entry_timestamp = state.next_timestamp();
 
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
-            obj.is_token = true;
-            // True token from a TokenSpec — image lives in the generic-token
-            // database (Treasure, Spirit, Saproling, Soldier, etc.).
-            obj.display_source = DisplaySource::Token;
-            obj.token_image_ref = token_image_ref;
-            let has_attrs = ch.power.is_some()
-                || ch.toughness.is_some()
-                || !ch.core_types.is_empty()
-                || !ch.subtypes.is_empty()
-                || !ch.supertypes.is_empty()
-                || !ch.colors.is_empty()
-                || !ch.keywords.is_empty();
-            if has_attrs {
-                obj.power = ch.power;
-                obj.toughness = ch.toughness;
-                obj.base_name = ch.display_name.clone();
-                obj.base_power = ch.power;
-                obj.base_toughness = ch.toughness;
-                obj.card_types = CardType {
-                    supertypes: ch.supertypes.clone(),
-                    core_types: ch.core_types.clone(),
-                    subtypes: ch.subtypes.clone(),
-                };
-                obj.base_card_types = obj.card_types.clone();
-                obj.color = ch.colors.clone();
-                obj.base_color = ch.colors.clone();
-                obj.keywords = ch.keywords.clone();
-                obj.base_keywords = ch.keywords.clone();
-            }
-            // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
-            // and must run the same ETB-state reset as any other permanent
-            // (summoning sickness, echo, damage, loyalty-activated flags).
-            // Delegate to the single authority for summoning sickness and
-            // related transient flags rather than setting them ad-hoc.
-            obj.reset_for_battlefield_entry(state.turn_number, entry_timestamp);
-            obj.tapped = enter_tapped.resolve(spec.tapped);
+        // CR 614.1: the post-replacement tapped state, resolved once so the
+        // shared body installs the same value a CR 733 replay will.
+        let resulting_tapped = enter_tapped.resolve(spec.tapped);
+        let turn_number = state.turn_number;
+        let created_reference = state.objects.get_mut(&obj_id).map(|obj| {
+            materialize_token_spec_body(
+                obj,
+                &spec,
+                token_image_ref.clone(),
+                turn_number,
+                entry_timestamp,
+                resulting_tapped,
+            );
+            ObjectIncarnationRef::from_object(obj)
+        });
 
-            // CR 113.3d + CR 613.1: Apply static abilities from the token
-            // definition. Mirror onto `base_static_definitions` so the
-            // layers-reset (`base_*` → `*`) at the start of each layers pass
-            // doesn't wipe them before layer 7 reads dynamic P/T grants.
-            if !spec.static_abilities.is_empty() {
-                let static_abilities: Vec<_> = spec
-                    .static_abilities
-                    .iter()
-                    .cloned()
-                    .map(normalized_token_static_definition)
-                    .collect();
-                Arc::make_mut(&mut obj.base_static_definitions)
-                    .extend(static_abilities.iter().cloned());
-                for static_def in static_abilities {
-                    obj.static_definitions.push(static_def);
-                }
-                // CR 702.6a + CR 111.4: Only intrinsic Equip activated abilities
-                // (unconditional SelfRef `GrantAbility(Attach SelfRef → …)`)
-                // are copied onto the token object. Other grants stay in the
-                // static/layer path only.
-                let equip_abilities =
-                    intrinsic_equip_abilities_from_token_statics(&spec.static_abilities);
-                if !equip_abilities.is_empty() {
-                    Arc::make_mut(&mut obj.abilities).extend(equip_abilities.iter().cloned());
-                    Arc::make_mut(&mut obj.base_abilities).extend(equip_abilities);
-                }
-            }
+        // CR 733: journal the settled creation, after the body borrow ends.
+        // Counters, the attacking entry, and any later status change journal
+        // through their OWN families, so this command covers the birth only.
+        if let Some(object) = created_reference {
+            let cause = state.current_or_begin_rules_execution_node();
+            let command = ResolvedTokenCreationCommand {
+                object,
+                owner,
+                entry_timestamp,
+                spec: spec.clone(),
+                token_image_ref: token_image_ref.clone(),
+                resulting_tapped,
+                resulting_next_object_id: state.next_object_id,
+                cause,
+            };
+            state
+                .resolved_rules_journal
+                .record_token_creation(command)
+                .expect("resolved token creation must have a live journal cause");
         }
 
         // CR 508.4: Token enters attacking — not declared as attacker.
@@ -1052,6 +1024,148 @@ pub(crate) fn apply_create_token_after_replacement_with_created_ids(
     // TargetFilter::LastCreated (e.g., Job select, suspect).
     state.last_created_token_ids = created_ids;
     true
+}
+
+/// Materializes one already-resolved CR 111.1 token creation verbatim.
+///
+/// Unlike every other resolved-command applier, this one CREATES its subject
+/// rather than verifying and installing into an existing one, so its
+/// precondition is inverted: the recorded id must be ABSENT. It re-runs none of
+/// the CR 614 replacement pipeline that decided the token would be created, its
+/// count, or its tapped state — all of that was settled when the command was
+/// recorded.
+///
+/// The body is installed through the same `materialize_token_spec_body` the
+/// resolve path uses, so the two cannot drift.
+pub fn apply_resolved_token_creation(
+    state: &mut GameState,
+    command: &ResolvedTokenCreationCommand,
+) -> Result<(), ResolvedTokenCreationReplayInvariantError> {
+    let object_id = command.object.object_id;
+    if state.objects.contains_key(&object_id) {
+        return Err(ResolvedTokenCreationReplayInvariantError::ObjectAlreadyExists(object_id));
+    }
+    if !state
+        .players
+        .iter()
+        .any(|player| player.id == command.owner)
+    {
+        return Err(ResolvedTokenCreationReplayInvariantError::UnknownOwner(
+            command.owner,
+        ));
+    }
+    if object_id.0 >= command.resulting_next_object_id {
+        return Err(
+            ResolvedTokenCreationReplayInvariantError::IdAboveHighWater {
+                id: object_id,
+                high_water: command.resulting_next_object_id,
+            },
+        );
+    }
+
+    let mut object = GameObject::new(
+        object_id,
+        CardId(0),
+        command.owner,
+        command.spec.characteristics.display_name.clone(),
+        Zone::Battlefield,
+    );
+    materialize_token_spec_body(
+        &mut object,
+        &command.spec,
+        command.token_image_ref.clone(),
+        state.turn_number,
+        command.entry_timestamp,
+        command.resulting_tapped,
+    );
+
+    state.objects.insert(object_id, object);
+    // allow-raw-zone: replay materializes a token birth, which has no from-zone move (CR 111.1 + CR 614.12).
+    zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
+    // CR 111.1: replay must not hand the same id out again to a later allocation.
+    state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
+    Ok(())
+}
+
+/// CR 111.1 + CR 113.3d: Installs an ordinary token's body onto `object`.
+///
+/// Single authority for the ordinary-token body, shared by the resolve path and
+/// the CR 733 replay applier so the two cannot drift. Operates on a `&mut
+/// GameObject` rather than on `GameState`, so it serves both orderings: the
+/// resolve path inserts first and mutates in place, while replay builds a
+/// detached object and inserts it afterwards.
+pub(crate) fn materialize_token_spec_body(
+    object: &mut GameObject,
+    spec: &TokenSpec,
+    token_image_ref: Option<crate::types::card::TokenImageRef>,
+    turn_number: u32,
+    entry_timestamp: u64,
+    tapped: bool,
+) {
+    let ch = &spec.characteristics;
+    // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
+    object.is_token = true;
+    // True token from a TokenSpec — image lives in the generic-token
+    // database (Treasure, Spirit, Saproling, Soldier, etc.).
+    object.display_source = DisplaySource::Token;
+    object.token_image_ref = token_image_ref;
+    let has_attrs = ch.power.is_some()
+        || ch.toughness.is_some()
+        || !ch.core_types.is_empty()
+        || !ch.subtypes.is_empty()
+        || !ch.supertypes.is_empty()
+        || !ch.colors.is_empty()
+        || !ch.keywords.is_empty();
+    if has_attrs {
+        object.power = ch.power;
+        object.toughness = ch.toughness;
+        object.base_name = ch.display_name.clone();
+        object.base_power = ch.power;
+        object.base_toughness = ch.toughness;
+        object.card_types = CardType {
+            supertypes: ch.supertypes.clone(),
+            core_types: ch.core_types.clone(),
+            subtypes: ch.subtypes.clone(),
+        };
+        object.base_card_types = object.card_types.clone();
+        object.color = ch.colors.clone();
+        object.base_color = ch.colors.clone();
+        object.keywords = ch.keywords.clone();
+        object.base_keywords = ch.keywords.clone();
+    }
+    // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
+    // and must run the same ETB-state reset as any other permanent
+    // (summoning sickness, echo, damage, loyalty-activated flags).
+    // Delegate to the single authority for summoning sickness and
+    // related transient flags rather than setting them ad-hoc.
+    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    object.tapped = tapped;
+
+    // CR 113.3d + CR 613.1: Apply static abilities from the token
+    // definition. Mirror onto `base_static_definitions` so the
+    // layers-reset (`base_*` → `*`) at the start of each layers pass
+    // doesn't wipe them before layer 7 reads dynamic P/T grants.
+    if !spec.static_abilities.is_empty() {
+        let static_abilities: Vec<_> = spec
+            .static_abilities
+            .iter()
+            .cloned()
+            .map(normalized_token_static_definition)
+            .collect();
+        Arc::make_mut(&mut object.base_static_definitions).extend(static_abilities.iter().cloned());
+        for static_def in static_abilities {
+            object.static_definitions.push(static_def);
+        }
+        // CR 702.6a + CR 111.4: Only intrinsic Equip activated abilities
+        // (unconditional SelfRef `GrantAbility(Attach SelfRef → …)`)
+        // are copied onto the token object. Other grants stay in the
+        // static/layer path only.
+        let equip_abilities = intrinsic_equip_abilities_from_token_statics(&spec.static_abilities);
+        if !equip_abilities.is_empty() {
+            Arc::make_mut(&mut object.abilities).extend(equip_abilities.iter().cloned());
+            Arc::make_mut(&mut object.base_abilities).extend(equip_abilities);
+        }
+    }
 }
 
 pub(crate) fn reserve_liminal_token_object(
