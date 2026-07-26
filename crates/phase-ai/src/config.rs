@@ -454,6 +454,24 @@ pub struct PolicyPenalties {
     /// the current deck plan. Consumed by `CyclingDisciplinePolicy`.
     #[serde(default = "default_cycling_needed_land_penalty")]
     pub cycling_needed_land_penalty: f64,
+    /// Penalty for a `PayCost` discard selection that spends every land in hand
+    /// while a land drop remains available. Consumed by `PaymentSelectionPolicy`.
+    #[serde(default = "default_payment_selection_needed_land_penalty")]
+    pub payment_selection_needed_land_penalty: f64,
+    /// Strong finite penalty for crewing outside an immediate attack or block
+    /// window. Consumed by `CrewTimingPolicy`.
+    #[serde(default = "default_crew_no_immediate_use_penalty")]
+    pub crew_no_immediate_use_penalty: f64,
+    /// Strong finite penalty for activating a combat-withdrawal ability when no
+    /// exact legal target rescues one of the controller's creatures from combat.
+    /// Consumed by `CombatWithdrawalPolicy`.
+    #[serde(default = "default_combat_withdrawal_futile_penalty")]
+    pub combat_withdrawal_futile_penalty: f64,
+    /// Penalty when an exact self-counter replenishment ability has its
+    /// replacement-aware counter addition prevented. Consumed by
+    /// `SelfCostValuePolicy`.
+    #[serde(default = "default_self_cost_counter_replacement_prevented_penalty")]
+    pub self_cost_counter_replacement_prevented_penalty: f64,
     /// CR 732.2a / CR 104.2a: bonus for proposing an `UntilLethal` loop shortcut whose latched
     /// `predicted_winner` IS the proposer — the crown ends the game in their favor, and the only
     /// other outcome (`until_lethal_fallback`) restores the board a decline would have produced.
@@ -536,6 +554,11 @@ impl Default for PolicyPenalties {
             self_cost_exile_graveyard_per_card: default_self_cost_exile_graveyard_per_card(),
             cycling_patience_penalty: default_cycling_patience_penalty(),
             cycling_needed_land_penalty: default_cycling_needed_land_penalty(),
+            payment_selection_needed_land_penalty: default_payment_selection_needed_land_penalty(),
+            crew_no_immediate_use_penalty: default_crew_no_immediate_use_penalty(),
+            combat_withdrawal_futile_penalty: default_combat_withdrawal_futile_penalty(),
+            self_cost_counter_replacement_prevented_penalty:
+                default_self_cost_counter_replacement_prevented_penalty(),
             loop_shortcut_winning_declare_bonus: default_loop_shortcut_winning_declare_bonus(),
             poison_clock_pressure: default_poison_clock_pressure(),
             graveyard_types_progress: default_graveyard_types_progress(),
@@ -586,6 +609,18 @@ fn default_cycling_patience_penalty() -> f64 {
 }
 fn default_cycling_needed_land_penalty() -> f64 {
     -2.0
+}
+fn default_payment_selection_needed_land_penalty() -> f64 {
+    -2.0
+}
+fn default_crew_no_immediate_use_penalty() -> f64 {
+    5.0
+}
+fn default_combat_withdrawal_futile_penalty() -> f64 {
+    5.0
+}
+fn default_self_cost_counter_replacement_prevented_penalty() -> f64 {
+    3.0
 }
 
 /// 8.0 = mid-`critical` band. Sized for the HEURISTIC branch, which adds the tactical score RAW:
@@ -847,6 +882,22 @@ pub const UNTUNED_POLICY_PENALTY_FIELDS: &[(&str, &str)] = &[
     (
         "cycling_needed_land_penalty",
         "CyclingDisciplinePolicy sole-needed-land value occupies the finite strong band; explicitly untuned pending broader paired-seed calibration",
+    ),
+    (
+        "payment_selection_needed_land_penalty",
+        "PaymentSelectionPolicy retains the final playable hand land at the authoritative PayCost selection boundary; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "crew_no_immediate_use_penalty",
+        "CrewTimingPolicy timing guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "combat_withdrawal_futile_penalty",
+        "CombatWithdrawalPolicy exact-combat rescue guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
+    ),
+    (
+        "self_cost_counter_replacement_prevented_penalty",
+        "SelfCostValuePolicy replacement-aware counter-replenishment guard; awaiting paired-seed ai-gate calibration before joining the CMA-ES vector",
     ),
     (
         "loop_shortcut_winning_declare_bonus",

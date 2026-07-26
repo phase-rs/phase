@@ -1001,6 +1001,110 @@ scryfall_oracle_id = "b1a2b096-a440-4ef9-ab2a-059c79999297"
 preset_id = "00bc234b-f9c2-54ce-9033-84fbf420cc7e"
 
 [[token]]
+id = "00c16b60-4dc9-5e2e-9753-7c89f3b73f77"
+category = "Creature"
+fidelity = "Full"
+source_card_names = [
+    "Ambassador Oak",
+    "Battle for Bretagard",
+    "Dwynen's Elite",
+    "Elderleaf Mentor",
+    "Elfsworn Giant",
+    "Elven Ambush",
+    "Elven Bow",
+    "Elvish Promenade",
+    "Elvish Warmaster",
+    "Exquisite Huntmaster",
+    "Eyeblight Cullers",
+    "Flourishing Defenses",
+    "Galadhrim Ambush",
+    "Gilt-Leaf Ambush",
+    "Hunting Triad",
+    "Imperious Perfect",
+    "Lathril, Blade of the Elves",
+    "Lys Alana Huntmaster",
+    "Nadier, Agent of the Duskenel",
+    "Nath of the Gilt-Leaf",
+    "Presence of Gond",
+    "Prowess of the Fair",
+    "Return Upon the Tide",
+    "Skemfar Elderhall",
+    "Sylvan Offering",
+    "Thorn Lieutenant",
+    "Tyvar Kell",
+    "Windswift Slice",
+    "Wolverine Riders",
+]
+set_code = "SLD"
+set_name = "Secret Lair Drop"
+collector_number = "7170"
+released_at = "2019-12-02"
+type_line = "Token Creature — Elf Warrior"
+
+[token.body]
+display_name = "Elf Warrior"
+power = 1
+toughness = 1
+core_types = ["Creature"]
+subtypes = [
+    "Elf",
+    "Warrior",
+]
+supertypes = []
+colors = ["Green"]
+keywords = []
+
+[[token.source_card_refs]]
+card_name = "Tyvar Kell"
+scryfall_oracle_id = "14c8a590-88ec-4982-ad7b-36a219ff6de7"
+scryfall_id = "9a46a0f5-390c-4d5f-9d1f-38031b68aa25"
+
+[[token.source_card_refs]]
+card_name = "Sylvan Offering"
+scryfall_oracle_id = "732aaa4b-22ea-49e2-b09f-e6169f726537"
+scryfall_id = "8f171772-eb52-4cc2-b3cd-8ceb0f15732f"
+
+[[token.source_card_refs]]
+card_name = "Lys Alana Huntmaster"
+scryfall_oracle_id = "3f3439e1-75ce-482d-881f-836492dca6e9"
+scryfall_id = "c5fc9e54-8fc4-4de4-be74-e925a85187b4"
+
+[[token.source_card_refs]]
+card_name = "Lathril, Blade of the Elves"
+scryfall_oracle_id = "9b568c34-ba0a-44a7-a0ee-bee3a37b3396"
+scryfall_id = "f7f00791-de5e-4f10-9931-8694afcd580c"
+
+[[token.source_card_refs]]
+card_name = "Presence of Gond"
+scryfall_oracle_id = "ab42398c-f0a1-4b94-ac5f-b8768e1b4e05"
+scryfall_id = "74e28915-216d-45c1-a3fc-aa34120afddf"
+
+[[token.source_card_refs]]
+card_name = "Imperious Perfect"
+scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
+scryfall_id = "084d98ec-9978-4386-972a-4cbddde7109e"
+
+[[token.source_card_refs]]
+card_name = "Imperious Perfect"
+scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
+scryfall_id = "3b2e604b-5ca5-4b17-834c-9067f1605147"
+
+[[token.source_card_refs]]
+card_name = "Ambassador Oak"
+scryfall_oracle_id = "4045c24e-098f-4582-8c50-576a94c7b705"
+scryfall_id = "fb619508-67a2-426d-819b-57e21bf61d66"
+
+[[token.source_card_refs]]
+card_name = "Elven Bow"
+scryfall_oracle_id = "43daed96-2216-4f17-82ce-3eccd5d69936"
+scryfall_id = "fd78af69-4b8e-4063-a3bb-48026054cbd2"
+
+[token.token_image_ref]
+scryfall_id = "ecbfc4bf-56be-4275-b36b-c2c57f93ad15"
+scryfall_oracle_id = "dac8a765-6845-4b57-bb79-4ec463436f92"
+preset_id = "00c16b60-4dc9-5e2e-9753-7c89f3b73f77"
+
+[[token]]
 id = "00d52cd6-c646-5765-94f3-27ce41227c05"
 category = "Creature"
 fidelity = "Full"
@@ -54535,6 +54639,7 @@ source_card_names = [
     "Battle for Bretagard",
     "Dwynen's Elite",
     "Elderleaf Mentor",
+    "Elf Warrior",
     "Elfsworn Giant",
     "Elven Ambush",
     "Elven Bow",
@@ -54579,51 +54684,6 @@ subtypes = [
 supertypes = []
 colors = ["Green"]
 keywords = []
-
-[[token.source_card_refs]]
-card_name = "Tyvar Kell"
-scryfall_oracle_id = "14c8a590-88ec-4982-ad7b-36a219ff6de7"
-scryfall_id = "9a46a0f5-390c-4d5f-9d1f-38031b68aa25"
-
-[[token.source_card_refs]]
-card_name = "Sylvan Offering"
-scryfall_oracle_id = "732aaa4b-22ea-49e2-b09f-e6169f726537"
-scryfall_id = "8f171772-eb52-4cc2-b3cd-8ceb0f15732f"
-
-[[token.source_card_refs]]
-card_name = "Lys Alana Huntmaster"
-scryfall_oracle_id = "3f3439e1-75ce-482d-881f-836492dca6e9"
-scryfall_id = "c5fc9e54-8fc4-4de4-be74-e925a85187b4"
-
-[[token.source_card_refs]]
-card_name = "Lathril, Blade of the Elves"
-scryfall_oracle_id = "9b568c34-ba0a-44a7-a0ee-bee3a37b3396"
-scryfall_id = "f7f00791-de5e-4f10-9931-8694afcd580c"
-
-[[token.source_card_refs]]
-card_name = "Presence of Gond"
-scryfall_oracle_id = "ab42398c-f0a1-4b94-ac5f-b8768e1b4e05"
-scryfall_id = "74e28915-216d-45c1-a3fc-aa34120afddf"
-
-[[token.source_card_refs]]
-card_name = "Imperious Perfect"
-scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
-scryfall_id = "084d98ec-9978-4386-972a-4cbddde7109e"
-
-[[token.source_card_refs]]
-card_name = "Imperious Perfect"
-scryfall_oracle_id = "3fa71348-fa4d-4f39-a451-cf1570591991"
-scryfall_id = "3b2e604b-5ca5-4b17-834c-9067f1605147"
-
-[[token.source_card_refs]]
-card_name = "Ambassador Oak"
-scryfall_oracle_id = "4045c24e-098f-4582-8c50-576a94c7b705"
-scryfall_id = "fb619508-67a2-426d-819b-57e21bf61d66"
-
-[[token.source_card_refs]]
-card_name = "Elven Bow"
-scryfall_oracle_id = "43daed96-2216-4f17-82ce-3eccd5d69936"
-scryfall_id = "fd78af69-4b8e-4063-a3bb-48026054cbd2"
 
 [token.token_image_ref]
 scryfall_id = "e9db3b46-a9cf-4221-830a-dbed7ad76ead"
@@ -58782,6 +58842,7 @@ source_card_names = [
     "Otterball Antics",
     "Ral, Crackling Wit",
     "Stormchaser's Talent",
+    "Tolabow, Loch Rascal",
 ]
 set_code = "BLB"
 set_name = "Bloomburrow"
@@ -147271,6 +147332,11 @@ scryfall_id = "2daa0737-e1a5-4112-afde-34a3375e23f7"
 card_name = "Shiny Impetus"
 scryfall_oracle_id = "aae76e5c-f5e0-4d18-b465-e6a829be908a"
 scryfall_id = "71bcf8d7-cc70-4d52-9607-09ed7e08d61b"
+
+[[token.source_card_refs]]
+card_name = "Seize the Spoils"
+scryfall_oracle_id = "58f83528-9110-4895-b5ea-51b90af30a8d"
+scryfall_id = "c6348e42-9082-4c62-bd0e-0239b588533b"
 
 [[token.source_card_refs]]
 card_name = "Sonic the Hedgehog"

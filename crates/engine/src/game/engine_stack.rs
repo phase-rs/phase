@@ -46,33 +46,35 @@ pub(super) fn finalize_trigger_target_selection(
         if let Some(total) =
             extract_distribution_total(state, &trigger.ability, &trigger.ability.effect)
         {
-            if dist_targets.len() == 1 {
-                trigger.ability.distribution = Some(vec![(dist_targets[0].clone(), total)]);
-            } else {
-                // CR 601.2d: Distribution still outstanding. Entry is already
-                // on the stack with empty `distribution`; mutate the on-stack
-                // ability's targets (so they match what was just chosen) and
-                // keep `pending_trigger_entry` set until division completes.
-                if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
-                    // Unexpected dangling cursor: the entry is gone before the
-                    // division prompt could open. Recover per CR 608.2b / CR
-                    // 800.4a (a stack object that has left the stack does not
-                    // resolve) — record the diagnostic, abandon, hand back
-                    // priority. Matches the DistributeAmong-return convention
-                    // below; the next priority pass re-normalizes (CR 117.3b
-                    // would give the active player).
-                    triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+            match dist_targets.as_slice() {
+                [] => trigger.ability.distribution = Some(Vec::new()),
+                [target] => trigger.ability.distribution = Some(vec![(target.clone(), total)]),
+                _ => {
+                    // CR 601.2d: Distribution still outstanding. Entry is already
+                    // on the stack with empty `distribution`; mutate the on-stack
+                    // ability's targets (so they match what was just chosen) and
+                    // keep `pending_trigger_entry` set until division completes.
+                    if !triggers::mutate_pending_trigger_entry(state, &trigger.ability) {
+                        // Unexpected dangling cursor: the entry is gone before the
+                        // division prompt could open. Recover per CR 608.2b / CR
+                        // 800.4a (a stack object that has left the stack does not
+                        // resolve) — record the diagnostic, abandon, hand back
+                        // priority. Matches the DistributeAmong-return convention
+                        // below; the next priority pass re-normalizes (CR 117.3b
+                        // would give the active player).
+                        triggers::abandon_ceased_pending_trigger(state, &trigger.ability);
+                        priority::clear_priority_passes(state);
+                        return WaitingFor::Priority { player: controller };
+                    }
+                    state.pending_trigger = Some(trigger);
                     priority::clear_priority_passes(state);
-                    return WaitingFor::Priority { player: controller };
+                    return WaitingFor::DistributeAmong {
+                        player: controller,
+                        total,
+                        targets: dist_targets,
+                        unit,
+                    };
                 }
-                state.pending_trigger = Some(trigger);
-                priority::clear_priority_passes(state);
-                return WaitingFor::DistributeAmong {
-                    player: controller,
-                    total,
-                    targets: dist_targets,
-                    unit,
-                };
             }
         }
     }

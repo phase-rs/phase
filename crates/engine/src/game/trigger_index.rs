@@ -812,6 +812,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::SearchLibrary
         | EffectKind::SearchOutsideGame
         | EffectKind::ExileTop
+        | EffectKind::ExileFaceDownPile
         | EffectKind::TargetOnly
         | EffectKind::Choose
         | EffectKind::ChoosePermanent

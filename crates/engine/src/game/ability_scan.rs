@@ -1106,6 +1106,13 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_quantity_expr(count, mode));
             acc
         }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => scan_target_filter(object, target_ctx, mode)
+            .or(scan_target_filter(player, target_ctx, mode))
+            .or(scan_quantity_expr(count, mode)),
         Effect::TargetOnly { target } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
@@ -1813,6 +1820,15 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // CR 701.57a: reads a transient game-state scalar (the last discover's
         // mana-value limit); no growing resource, sibling, or projected axis.
         QuantityRef::TriggeringDiscoverValue => Axes::NONE,
+        // CR 701.22a + CR 603.2c: reads the current trigger's preserved event
+        // (`state.current_trigger_event` — the scry's own `PlayerPerformedAction`
+        // carrying its effective look count) → event axis true, mirroring
+        // `QuantityRef::EventContextAmount` below.
+        QuantityRef::TriggeringScryLookCount => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         QuantityRef::ObjectCount { filter } => {
             let mut acc = Axes {
                 event: false,
@@ -5331,6 +5347,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -5617,6 +5634,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Scry { .. }
         | Effect::Surveil { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::ExileFromTopUntil { .. }
         | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
         | Effect::Discover { .. }
@@ -5995,6 +6013,7 @@ fn effect_resolution_choice_freedom(e: &Effect) -> ResolutionChoiceFreedom {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::ChooseDamageSource { .. }
@@ -6264,6 +6283,7 @@ pub(crate) fn effect_is_randomness_bearing(e: &Effect) -> bool {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
@@ -8168,5 +8188,17 @@ mod tests {
         let mut a = base.clone();
         a.modal = Some(ModalChoice::default());
         assert_eq!(ability_resolution_choice_freedom(&a), MayPrompt);
+    }
+    // ---- PR #5872 blocker-2 regression: scry look count is event-context ----
+
+    /// CR 701.22a + CR 603.2c: "the number of cards looked at while scrying
+    /// this way" (Elrond, Master of Healing) reads the CURRENT trigger's
+    /// preserved scry event — axis 1 (event-context), mirroring
+    /// `QuantityRef::EventContextAmount` — not an inert transient scalar.
+    #[test]
+    fn triggering_scry_look_count_reads_event_context() {
+        assert!(ability_uses_event_context(&ability_with_amount(
+            QuantityRef::TriggeringScryLookCount
+        )));
     }
 }

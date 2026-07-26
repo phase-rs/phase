@@ -8397,6 +8397,198 @@ mod tests {
         assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
     }
 
+    #[test]
+    fn deferred_effect_target_traversal_crosses_transparent_links_regardless_of_sub_link() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scrying Source".to_string(),
+            Zone::Stack,
+        );
+        let creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let chain = |tail_link| {
+            let mut put_counter = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            put_counter.sub_link = tail_link;
+
+            let shuffle = ResolvedAbility::new(
+                Effect::Shuffle {
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(put_counter);
+            let change_zone = ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(shuffle);
+
+            ResolvedAbility::new(
+                Effect::Scry {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .sub_ability(change_zone)
+        };
+
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            let ability = chain(link);
+            let slots = build_target_slots(&state, &ability)
+                .expect("transparent deferred-effect links should surface the target");
+            assert_eq!(slots.len(), 1);
+            assert!(slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(creature)));
+            assert_eq!(target_slot_specs(&state, &ability).len(), 1);
+            assert!(chain_has_target_sink(&ability));
+            assert_eq!(minimum_targets_in_chain(&state, &ability), 1);
+            validate_selected_targets_for_ability(
+                &state,
+                &ability,
+                &slots,
+                &[TargetRef::Object(creature)],
+                &[],
+            )
+            .expect("the deferred-effect tail creature target should validate");
+
+            let mut compact_assigned = ability.clone();
+            assign_targets_in_chain(
+                &state,
+                &mut compact_assigned,
+                &[TargetRef::Object(creature)],
+            )
+            .expect("compact assignment must reach the deferred-effect tail");
+            assert_eq!(
+                compact_assigned
+                    .sub_ability
+                    .as_deref()
+                    .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                    .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(creature)]
+            );
+
+            let mut selected_assigned = ability;
+            assign_selected_slots_in_chain(
+                &state,
+                &mut selected_assigned,
+                &[Some(TargetRef::Object(creature))],
+            )
+            .expect("selected-slot assignment must reach the deferred-effect tail");
+            assert_eq!(
+                selected_assigned
+                    .sub_ability
+                    .as_deref()
+                    .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                    .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                    .unwrap()
+                    .targets,
+                vec![TargetRef::Object(creature)]
+            );
+        }
+
+        let mut when_you_do = chain(SubAbilityLink::ContinuationStep);
+        when_you_do
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .unwrap()
+            .condition = Some(AbilityCondition::WhenYouDo);
+        let mut resolution_timing = chain(SubAbilityLink::SequentialSibling);
+        resolution_timing
+            .sub_ability
+            .as_deref_mut()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref_mut())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref_mut())
+            .unwrap()
+            .target_choice_timing = TargetChoiceTiming::Resolution;
+
+        for ability in [when_you_do, resolution_timing] {
+            assert!(build_target_slots(&state, &ability)
+                .expect("deferred conditional target traversal should build")
+                .is_empty());
+            assert!(target_slot_specs(&state, &ability).is_empty());
+            assert!(!chain_has_target_sink(&ability));
+            assert_eq!(minimum_targets_in_chain(&state, &ability), 0);
+
+            let mut compact_assigned = ability.clone();
+            assign_targets_in_chain(&state, &mut compact_assigned, &[])
+                .expect("empty compact assignment should leave deferred targets unchosen");
+            assert!(compact_assigned
+                .sub_ability
+                .as_deref()
+                .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                .unwrap()
+                .targets
+                .is_empty());
+
+            let mut selected_assigned = ability;
+            assign_selected_slots_in_chain(&state, &mut selected_assigned, &[])
+                .expect("empty selected-slot assignment should leave deferred targets unchosen");
+            assert!(selected_assigned
+                .sub_ability
+                .as_deref()
+                .and_then(|change_zone| change_zone.sub_ability.as_deref())
+                .and_then(|shuffle| shuffle.sub_ability.as_deref())
+                .unwrap()
+                .targets
+                .is_empty());
+        }
+    }
+
     /// CR 608.2c + CR 115.1: Arcum Dagsson / #4678 — "Target artifact creature's
     /// controller sacrifices it. …". The ability must SURFACE a required target
     /// slot for the artifact creature (before the fix it compiled to a targetless

@@ -855,6 +855,7 @@ fn collect_evidence_cost_pauses_for_moved_redirect_before_resuming_its_effect() 
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),
@@ -933,6 +934,7 @@ fn collect_evidence_cost_completes_when_the_replacement_dispatcher_prevents_its_
                 GameEvent::PlayerPerformedAction {
                     player_id: P0,
                     action: engine::types::events::PlayerActionKind::CollectEvidence,
+                    ..
                 }
             ))
             .count(),

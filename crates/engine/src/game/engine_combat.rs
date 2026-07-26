@@ -757,9 +757,7 @@ pub(super) fn handle_assign_combat_damage(
 /// and every target must be an attacker the blocker is actually blocking. There
 /// is NO lethal requirement — a blocker divides its damage freely (CR 510.1d).
 ///
-/// The server bypasses its legality-enumeration gate for this state
-/// (`accepts_freeform_blocker_damage_assignment`), so this handler is the real
-/// validation boundary.
+/// This handler is the validation boundary for submitted assignments.
 pub(super) fn handle_assign_blocker_damage(
     state: &mut GameState,
     _player: PlayerId,

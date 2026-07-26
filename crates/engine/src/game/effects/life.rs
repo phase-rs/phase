@@ -432,6 +432,7 @@ fn complete_pending_life_total_assignment(
             events.push(GameEvent::PlayerPerformedAction {
                 player_id: action.player_id,
                 action: action.action,
+                look_count: None,
             });
         }
     }

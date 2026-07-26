@@ -2394,6 +2394,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::CountersOnObjects { .. }
         | QuantityRef::ControlledByEachPlayer { .. }
@@ -2728,6 +2729,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
         | QuantityRef::CountersOn { .. }
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::TargetControllerCounter { .. }
@@ -7015,6 +7017,7 @@ pub(crate) fn compute_current_copiable_values(
             // the overridden loyalty value.
             ContinuousModification::SetStartingLoyalty { value } => {
                 values.loyalty = Some(*value);
+                values.printed_loyalty = Some(crate::types::card::PrintedLoyalty::Fixed(*value));
             }
             // CR 707.9a: A copy effect that grants/retains an ability ("…
             // and it has this ability") makes that ability part of the
@@ -17274,6 +17277,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17339,6 +17343,7 @@ mod tests {
                 placement: None,
                 exile_links: ExileLinkSpec::default(),
                 replacement_applied: Default::default(),
+                face_down_in_exile: false,
             },
             &mut events,
         );
@@ -17805,6 +17810,7 @@ mod tests {
             power: Some(3),
             toughness: Some(3),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: Default::default(),
             trigger_definitions: Default::default(),

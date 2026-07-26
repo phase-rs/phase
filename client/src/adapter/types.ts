@@ -1,4 +1,5 @@
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { InteractionActionId, ViewerInteraction } from "./generated/interaction";
 
 // ── Identifiers ──────────────────────────────────────────────────────────
 
@@ -2703,6 +2704,9 @@ export interface TurnOrderSlotView {
   is_starting_player?: boolean;
 }
 
+/** CR 509.1g: engine-authored public `(blocker, attacker)` combat display pair. */
+export type BlockerAssignmentPair = [ObjectId, ObjectId];
+
 /**
  * Engine-authored projections computed at each state snapshot. Rides
  * alongside GameState through every adapter path. Frontend components
@@ -2723,8 +2727,15 @@ export interface DerivedViews {
    * recipient ObjectId-as-string. A null value means the grant remains live
    * while its source is not a public, phased-in battlefield object, so the UI
    * shows the badge without naming an unavailable source.
-   */
+  */
   temporary_cant_be_blocked?: Record<string, ObjectId | null>;
+
+  /**
+   * CR 509.1g: sorted public blocker-to-attacker pairs. BlockAssignmentLines
+   * renders these directly rather than deciding which combat relations are
+   * visible from raw combat state. Omitted when no creature is blocking.
+   */
+  blocker_assignment_pairs?: BlockerAssignmentPair[];
   /**
    * CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
    * currently supplied by a copy effect (Clone, Phantasmal Image, Vesuvan
@@ -3322,6 +3333,9 @@ export interface StuckDecisionDiagnostic {
   stuckPlayers: number[];
 }
 
+/** Engine-authored object-action identity shared with interaction surfaces. */
+export type ObjectAction = GameAction & { interactionActionId?: InteractionActionId };
+
 export interface LegalActionsResult {
   actions: GameAction[];
   autoPassRecommended: boolean;
@@ -3335,9 +3349,11 @@ export interface LegalActionsResult {
    * for "what can I do with this card?" lookups instead of inferring action
    * availability from objects.
    */
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   /** Engine progress-wedge diagnostic: present only when the current decision is wedged. */
   stuckDiagnostic?: StuckDecisionDiagnostic;
+  /** Engine-authored, viewer-scoped interaction opportunities for this snapshot. */
+  viewerInteraction?: ViewerInteraction;
 }
 
 /**
@@ -3354,7 +3370,7 @@ export interface ViewerSnapshot {
   autoPassRecommended: boolean;
   manaPaymentShortcutActions?: GameAction[];
   spellCosts?: Record<string, ManaCost>;
-  legalActionsByObject?: Record<string, GameAction[]>;
+  legalActionsByObject?: Record<string, ObjectAction[]>;
   /**
    * Engine progress-wedge diagnostic, mirrored from `LegalActionsResult` for
    * shape parity. Currently inert on this path: the store's `stuckDiagnostic`
@@ -3363,6 +3379,7 @@ export interface ViewerSnapshot {
    * carry this field, so the snapshot copy is a deliberate parity placeholder.
    */
   stuckDiagnostic?: StuckDecisionDiagnostic;
+  viewerInteraction?: ViewerInteraction;
 }
 
 export interface BatchResolveResult {

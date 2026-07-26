@@ -1626,8 +1626,8 @@ pub(crate) fn can_pay(
     scope: &PaymentScope,
 ) -> bool {
     match scope {
-        PaymentScope::Activation { .. } => {
-            if !cost.is_payable(state, payer, source_id) {
+        PaymentScope::Activation { ability_tag, .. } => {
+            if !cost.is_payable_for_activation(state, payer, source_id, *ability_tag) {
                 return false;
             }
             // CR 118.12a: disjunctive activation costs resolve via

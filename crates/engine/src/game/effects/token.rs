@@ -2617,6 +2617,7 @@ fn incubator_phyrexian_back_face() -> BackFaceData {
         power: Some(0),
         toughness: Some(0),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],

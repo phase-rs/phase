@@ -797,10 +797,8 @@ fn validate_exact_keep_on_top_selection(
 
 /// CR 701.22a / CR 701.25a: Scry and surveil put the kept cards on top of the
 /// library "in any order", so a legal keep-on-top selection is any duplicate-free
-/// subset of the looked-at cards (order is the player's free choice). Because the
-/// multiplayer server bypasses its candidate-enumeration legality gate for these
-/// freeform states (see `WaitingFor::accepts_freeform_card_selection`), `apply()`
-/// is the real validation boundary: a foreign id or a duplicate would corrupt the
+/// subset of the looked-at cards (order is the player's free choice). `apply()` is
+/// the validation boundary: a foreign id or a duplicate would corrupt the
 /// library `retain`+`insert` (relocating or duplicating a card), so reject both
 /// here. Mirrors the order-agnostic subset semantics of `selection_mismatch`.
 fn validate_keep_on_top_selection(
@@ -1282,7 +1280,26 @@ pub(super) fn handle_resolution_choice(
             // through the zone-move seam), so a continuous `TopOfLibraryMatches`
             // static must be re-evaluated — self-gated so it's a no-op otherwise.
             crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            // CR 603.2 + CR 603.3b: the resumed continuation can perform further
+            // observable game actions (e.g. a SECOND "scry N" in the same
+            // resolution — "whenever you scry" fires once per scry event) and
+            // pause again on another prompt before this action settles to
+            // Priority. `run_post_action_pipeline` only scans an action's events
+            // at a Priority settlement, so without parking here the resumed
+            // slice's events (the second scry's `PlayerPerformedAction`, which
+            // carries that scry's own effective look count) are dropped and its
+            // trigger is silently lost. Park the resumed slice into
+            // `deferred_triggers` (B2, mirroring
+            // `batch_or_drain_observer_triggers`); the queue drains with each
+            // trigger's own preserved event once resolution truly settles.
+            let resumed_events_start = events.len();
+            let waiting_for = finish_with_continuation(state, player, events);
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                resumed_events_start,
+            );
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::ArrangePlanarDeckTopChoice {
@@ -6913,6 +6930,22 @@ pub(crate) fn run_batch_completion(
             enters_under,
             events,
         ),
+        BatchCompletion::ExileFaceDownPileDeliveryComplete {
+            player,
+            source_id,
+            members,
+            required_member_count,
+        } => effects::exile_face_down_pile::complete_exile_face_down_pile_delivery(
+            state,
+            player,
+            source_id,
+            members,
+            required_member_count,
+            events,
+        ),
+        BatchCompletion::ExileFaceDownPileReturnComplete { source_id } => {
+            effects::exile_face_down_pile::complete_exile_face_down_pile_return(source_id, events)
+        }
         BatchCompletion::CastFromZoneExileDeliveryComplete {
             ability,
             in_place_ids,

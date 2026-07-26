@@ -540,6 +540,7 @@ pub fn resolve(
         events.push(GameEvent::PlayerPerformedAction {
             player_id: prepared.searcher,
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
         });
         state
             .players_who_searched_library_this_turn
@@ -879,6 +880,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::SearchedLibrary,
+                ..
             } if *player_id == PlayerId(0)
         )));
 
@@ -1027,6 +1029,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::SearchedLibrary,
+                ..
             } if *player_id == PlayerId(0)
         )));
         assert!(events.iter().any(|e| matches!(
@@ -2408,6 +2411,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::SearchedLibrary,
+                ..
             }
         )));
         assert!(state
@@ -3145,6 +3149,7 @@ mod tests {
                 GameEvent::PlayerPerformedAction {
                     player_id,
                     action: PlayerActionKind::SearchedLibrary,
+                    ..
                 } if *player_id == PlayerId(1)
             )),
             "CR 701.23f: a restricted (replaced) search still fires SearchedLibrary"

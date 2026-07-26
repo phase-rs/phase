@@ -1,3 +1,5 @@
+use engine::ai_support::legal_actions_full;
+use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::static_abilities::object_crew_power_contribution;
 use engine::types::ability::{ActivationRestriction, StaticCondition, TriggerCondition};
 use engine::types::actions::GameAction;
@@ -83,8 +85,139 @@ impl PaymentSelectionPolicy {
             CostResume::ManaAbility { .. } => 0.8,
         };
 
-        -(cost + extra_penalty) * resume_scale
+        let needed_land_penalty = if discard_spends_last_playable_land(ctx, kind, cards) {
+            ctx.penalties().payment_selection_needed_land_penalty
+        } else {
+            0.0
+        };
+
+        -(cost + extra_penalty) * resume_scale + needed_land_penalty
     }
+}
+
+/// Preserve a currently playable land only when the engine proves a sibling
+/// payment selections all leave that exact land as the sole legal `PlayLand`.
+///
+/// The probes deliberately stay at the concrete `PayCost` boundary: first the
+/// selected payment must itself leave no legal land play, then every qualifying
+/// sibling is replayed on a clone to prove the retained land is the only land
+/// it can actually play in every replay.
+/// Hand counts and land-drop counters are not substitutes for either legality
+/// check.
+fn discard_spends_last_playable_land(
+    ctx: &PolicyContext<'_>,
+    kind: &PayCostKind,
+    selected: &[ObjectId],
+) -> bool {
+    let (
+        WaitingFor::PayCost {
+            player,
+            kind: PayCostKind::Discard,
+            ..
+        },
+        GameAction::SelectCards { cards },
+    ) = (&ctx.state.waiting_for, &ctx.candidate.action)
+    else {
+        return false;
+    };
+    if *player != ctx.ai_player || cards != selected || !matches!(kind, PayCostKind::Discard) {
+        return false;
+    }
+    if !selected.iter().copied().any(|id| is_land(ctx.state, id)) {
+        return false;
+    }
+
+    let legal_actions = legal_actions_full(ctx.state).0;
+    if !legal_actions
+        .iter()
+        .any(|action| matches!(action, GameAction::SelectCards { cards } if cards == selected))
+    {
+        return false;
+    }
+
+    let mut post_selected = ctx.state.clone();
+    if apply_as_current_for_simulation(&mut post_selected, ctx.candidate.action.clone()).is_err()
+        || !playable_lands_after_stack_clears(&post_selected, ctx.ai_player).is_empty()
+    {
+        return false;
+    }
+
+    // Simulate each sibling once, then reuse the projected land plays for all
+    // land cards in this selected payment. This keeps a multi-card discard
+    // from multiplying full-state forecasts by its number of lands.
+    let sibling_land_plays: Vec<(Vec<ObjectId>, Vec<ObjectId>)> = legal_actions
+        .iter()
+        .filter_map(|action| {
+            let GameAction::SelectCards { cards: sibling } = action else {
+                return None;
+            };
+            if sibling == selected {
+                return None;
+            }
+
+            let mut post_discard = ctx.state.clone();
+            if apply_as_current_for_simulation(&mut post_discard, action.clone()).is_err() {
+                return Some((sibling.clone(), Vec::new()));
+            }
+            Some((
+                sibling.clone(),
+                playable_lands_after_stack_clears(&post_discard, ctx.ai_player),
+            ))
+        })
+        .collect();
+
+    selected
+        .iter()
+        .copied()
+        .filter(|&land| is_land(ctx.state, land))
+        .any(|land| {
+            sibling_land_plays
+                .iter()
+                .any(|(sibling, _)| !sibling.contains(&land))
+                && {
+                    sibling_land_plays
+                        .iter()
+                        .filter(|(sibling, _)| !sibling.contains(&land))
+                        .all(|(_, lands)| lands.as_slice() == [land])
+                }
+        })
+}
+
+/// Enumerate land plays in the next empty-stack priority window after a cost is paid.
+///
+/// A spell or activated ability remains on the stack immediately after `PayCost`,
+/// so `legal_actions_full` correctly omits land plays at that instant. For the
+/// resolved (empty stack) or single newly-created stack entry, this probe asks
+/// the engine's normal candidate generator about the empty-stack priority
+/// window. It declines to infer anything when other stack entries exist. This
+/// is a bounded tactical forecast, not an action application.
+fn playable_lands_after_stack_clears(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let mut next_priority = state.clone();
+    if next_priority.stack.len() > 1
+        || next_priority
+            .stack
+            .get(0)
+            .is_some_and(|entry| entry.controller != player)
+    {
+        return Vec::new();
+    }
+    next_priority.stack.clear();
+    next_priority.waiting_for = WaitingFor::Priority { player };
+    legal_actions_full(&next_priority)
+        .0
+        .iter()
+        .filter_map(|action| match action {
+            GameAction::PlayLand { object_id, .. } => Some(*object_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_land(state: &GameState, object_id: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object_id)
+        .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Land))
 }
 
 fn crew_or_saddle_score(ctx: &PolicyContext<'_>) -> Option<f64> {
@@ -351,9 +484,10 @@ mod tests {
         ContinuousModification, Effect, QuantityExpr, ResolvedAbility, StaticCondition,
         StaticDefinition, TargetFilter,
     };
-    use engine::types::game_state::PendingCast;
+    use engine::types::game_state::{CastingVariant, PendingCast, StackEntry, StackEntryKind};
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
+    use engine::types::phase::Phase;
 
     const AI: PlayerId = PlayerId(0);
 
@@ -562,6 +696,63 @@ mod tests {
         id
     }
 
+    fn install_discard_payment(state: &mut GameState, choices: Vec<ObjectId>) -> ObjectId {
+        install_discard_payment_with_count(state, choices, 1)
+    }
+
+    fn install_discard_payment_with_count(
+        state: &mut GameState,
+        choices: Vec<ObjectId>,
+        count: usize,
+    ) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(900),
+            AI,
+            "Discard Cost Spell".to_string(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, AI);
+        engine::game::stack::push_to_stack(
+            state,
+            StackEntry {
+                id: source,
+                source_id: source,
+                controller: AI,
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(900),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            },
+            &mut Vec::new(),
+        );
+        let pending = Box::new(PendingCast::new(
+            source,
+            CardId(900),
+            ability,
+            ManaCost::zero(),
+        ));
+        state.waiting_for = WaitingFor::PayCost {
+            player: AI,
+            kind: PayCostKind::Discard,
+            choices,
+            count,
+            min_count: count,
+            resume: CostResume::Spell { spell: pending },
+        };
+        source
+    }
+
+    fn production_discard_score(state: &GameState, cards: Vec<ObjectId>) -> f64 {
+        score_for_action(
+            state,
+            state.waiting_for.clone(),
+            GameAction::SelectCards { cards },
+        )
+    }
+
     #[test]
     fn discard_cost_prefers_lower_value_card() {
         let mut state = GameState::new_two_player(42);
@@ -580,6 +771,290 @@ mod tests {
         let creature_score = score_for(&state, waiting_for(vec![land, creature]), vec![creature]);
 
         assert!(land_score > creature_score);
+    }
+
+    #[test]
+    fn discard_retains_final_playable_land_over_equal_value_nonland() {
+        let mut state = GameState::new_two_player(42);
+        let land = make_land(&mut state, "Forest", Zone::Hand);
+        let nonland = create_object(
+            &mut state,
+            CardId(2),
+            AI,
+            "Blank Spell".to_string(),
+            Zone::Hand,
+        );
+        state.players[0].hand = [land, nonland].into_iter().collect();
+        let waiting_for = |choices| WaitingFor::PayCost {
+            player: AI,
+            kind: PayCostKind::Discard,
+            choices,
+            count: 1,
+            min_count: 1,
+            resume: CostResume::Spell { spell: pending() },
+        };
+
+        let discard_land = score_for(&state, waiting_for(vec![land, nonland]), vec![land]);
+        let discard_nonland = score_for(&state, waiting_for(vec![land, nonland]), vec![nonland]);
+
+        assert!(
+            discard_nonland > discard_land,
+            "the final playable land must be retained at PayCost selection"
+        );
+    }
+
+    #[test]
+    fn production_discard_probe_retains_a_land_only_when_an_engine_legal_sibling_can_play_it() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
+        let land = make_land(&mut state, "Forest", Zone::Hand);
+        let nonland = create_object(
+            &mut state,
+            CardId(2),
+            AI,
+            "Blank Spell".to_string(),
+            Zone::Hand,
+        );
+        state.players[AI.0 as usize].hand = [land, nonland].into_iter().collect();
+        install_discard_payment(&mut state, vec![land, nonland]);
+
+        let discard_land = production_discard_score(&state, vec![land]);
+        let discard_nonland = production_discard_score(&state, vec![nonland]);
+        assert!(discard_nonland > discard_land);
+
+        let mut replay = state.clone();
+        engine::game::engine::apply(
+            &mut replay,
+            AI,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("the exact legal sibling payment applies through the engine");
+        assert_eq!(playable_lands_after_stack_clears(&replay, AI), vec![land]);
+    }
+
+    #[test]
+    fn production_discard_probe_adds_no_needed_land_penalty_when_forced_or_not_playable() {
+        let mut forced = GameState::new_two_player(42);
+        let forced_land = make_land(&mut forced, "Forest", Zone::Hand);
+        install_discard_payment(&mut forced, vec![forced_land]);
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let decision = AiDecisionContext {
+            waiting_for: forced.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards {
+                cards: vec![forced_land],
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
+        };
+        let policy_context = PolicyContext {
+            state: &forced,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(!discard_spends_last_playable_land(
+            &policy_context,
+            &PayCostKind::Discard,
+            &[forced_land],
+        ),);
+        assert_eq!(production_discard_score(&forced, vec![forced_land]), -3.0);
+        engine::game::engine::apply(
+            &mut forced,
+            AI,
+            GameAction::SelectCards {
+                cards: vec![forced_land],
+            },
+        )
+        .expect("the forced-only-land payment remains engine-legal");
+
+        let mut prohibited = GameState::new_two_player(42);
+        let land = make_land(&mut prohibited, "Forest", Zone::Hand);
+        let nonland = create_object(
+            &mut prohibited,
+            CardId(3),
+            AI,
+            "Blank Spell".to_string(),
+            Zone::Hand,
+        );
+        prohibited.players[AI.0 as usize]
+            .hand
+            .extend([land, nonland]);
+        prohibited.lands_played_this_turn = prohibited.max_lands_per_turn;
+        install_discard_payment(&mut prohibited, vec![land, nonland]);
+        let decision = AiDecisionContext {
+            waiting_for: prohibited.waiting_for.clone(),
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards { cards: vec![land] },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
+        };
+        let policy_context = PolicyContext {
+            state: &prohibited,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert!(!discard_spends_last_playable_land(
+            &policy_context,
+            &PayCostKind::Discard,
+            &[land],
+        ));
+        assert_eq!(production_discard_score(&prohibited, vec![land]), -3.0);
+    }
+
+    #[test]
+    fn production_discard_probe_does_not_treat_one_of_two_retained_lands_as_final() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
+        let first_land = make_land(&mut state, "Forest", Zone::Hand);
+        let second_land = make_land(&mut state, "Island", Zone::Hand);
+        let nonland = create_object(
+            &mut state,
+            CardId(4),
+            AI,
+            "Blank Spell".to_string(),
+            Zone::Hand,
+        );
+        state.players[AI.0 as usize]
+            .hand
+            .extend([first_land, second_land, nonland]);
+        install_discard_payment(&mut state, vec![first_land, second_land, nonland]);
+
+        let mut sibling_replay = state.clone();
+        engine::game::engine::apply(
+            &mut sibling_replay,
+            AI,
+            GameAction::SelectCards {
+                cards: vec![nonland],
+            },
+        )
+        .expect("nonland discard sibling applies through the engine");
+        let mut sibling_playable_lands = playable_lands_after_stack_clears(&sibling_replay, AI);
+        sibling_playable_lands.sort_unstable();
+        sibling_playable_lands.dedup();
+        assert_eq!(
+            sibling_playable_lands,
+            vec![first_land, second_land],
+            "the negative verdict must be reached with two retained playable lands"
+        );
+
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards {
+                cards: vec![first_land],
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+        let policy_context = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        assert!(
+            !discard_spends_last_playable_land(
+                &policy_context,
+                &PayCostKind::Discard,
+                &[first_land],
+            ),
+            "discarding a land is not the final-land loss while a sibling payment leaves two land plays"
+        );
+    }
+
+    #[test]
+    fn multi_card_discard_does_not_penalize_a_land_when_another_land_survives_the_candidate() {
+        let mut state = GameState::new_two_player(42);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = AI;
+        let first_land = make_land(&mut state, "Forest", Zone::Hand);
+        let second_land = make_land(&mut state, "Island", Zone::Hand);
+        let spell = create_object(
+            &mut state,
+            CardId(5),
+            AI,
+            "Blank Spell".to_string(),
+            Zone::Hand,
+        );
+        state.players[AI.0 as usize]
+            .hand
+            .extend([first_land, second_land, spell]);
+        install_discard_payment_with_count(&mut state, vec![first_land, second_land, spell], 2);
+
+        let mut selected_replay = state.clone();
+        engine::game::engine::apply(
+            &mut selected_replay,
+            AI,
+            GameAction::SelectCards {
+                cards: vec![first_land, spell],
+            },
+        )
+        .expect("multi-card discard applies through the engine");
+        let mut retained_playable_lands = playable_lands_after_stack_clears(&selected_replay, AI);
+        retained_playable_lands.sort_unstable();
+        retained_playable_lands.dedup();
+        assert_eq!(
+            retained_playable_lands,
+            vec![second_land],
+            "the negative verdict must be reached with a retained playable land"
+        );
+
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let candidate = CandidateAction {
+            action: GameAction::SelectCards {
+                cards: vec![first_land, spell],
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Selection),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: vec![candidate.clone()],
+        };
+        let policy_context = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+
+        assert!(
+            !discard_spends_last_playable_land(
+                &policy_context,
+                &PayCostKind::Discard,
+                &[first_land, spell],
+            ),
+            "a two-card payment that still leaves another legal land play is not a final-land loss"
+        );
     }
 
     #[test]

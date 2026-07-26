@@ -551,11 +551,10 @@ fn validate_bottom_selection(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    // A repeated id would satisfy `expected_count` while moving one hand card
-    // twice (and leaving another owed card in hand), so duplicates are
-    // rejected before anything is moved — mirrors `validate_keep_on_top_selection`
-    // / `validate_dig_selection` in `engine_resolution_choices.rs`, the other
-    // freeform card-selection validators in this same family.
+    // CR 103.5: A mulligan puts the owed number of those hand cards on the
+    // bottom. Each selected object must therefore be distinct; this shared
+    // validator also protects the Tiny Leaders format-extension bottoming path.
+    // It mirrors `validate_keep_on_top_selection` / `validate_dig_selection`.
     let mut seen = std::collections::HashSet::new();
     for &card_id in cards {
         if !seen.insert(card_id) {

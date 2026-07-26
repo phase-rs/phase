@@ -1,4 +1,5 @@
 mod candidates;
+mod combat_withdrawal;
 mod context;
 mod copy;
 pub mod filter;
@@ -14,7 +15,7 @@ use crate::game::mana_abilities;
 use crate::game::mana_payment;
 use crate::game::mana_sources;
 use crate::game::triggers;
-use crate::types::ability::{AbilityKind, CounterCostSelection, TriggerDefinition};
+use crate::types::ability::{AbilityKind, CounterCostSelection, TargetRef, TriggerDefinition};
 use crate::types::actions::GameAction;
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -32,6 +33,9 @@ pub(crate) use candidates::power_threshold_witness;
 pub use candidates::{
     candidate_actions, candidate_actions_broad, candidate_actions_exact,
     candidate_actions_with_probe, ActionMetadata, CandidateAction, TacticalClass,
+};
+pub use combat_withdrawal::{
+    combat_withdrawal_fact_for_current_target, CombatWithdrawalFact, CombatWithdrawalTargetRole,
 };
 pub use context::{build_decision_context, AiDecisionContext};
 pub use copy::{
@@ -1584,8 +1588,23 @@ pub type LegalActionsFull = (
     HashMap<ObjectId, Vec<GameAction>>,
 );
 
+/// Return only the engine-computed targets for the current target-selection slot.
+///
+/// Unlike broad candidate enumeration, this accessor never falls back to a
+/// slot-wide target list or a fresh legality scan. Tactical policies that need
+/// to compare sibling targets must use this exact prompt-local authority.
+pub fn current_target_selection_targets(state: &GameState) -> Option<&[TargetRef]> {
+    match &state.waiting_for {
+        WaitingFor::TargetSelection { selection, .. }
+        | WaitingFor::TriggerTargetSelection { selection, .. } => {
+            Some(selection.current_legal_targets.as_slice())
+        }
+        _ => None,
+    }
+}
+
 fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<GameAction>> {
-    let (target_slots, current_slot, current_legal_targets) = match &state.waiting_for {
+    let (target_slots, current_slot) = match &state.waiting_for {
         WaitingFor::TargetSelection {
             target_slots,
             selection,
@@ -1595,13 +1614,11 @@ fn target_selection_actions_without_simulation(state: &GameState) -> Option<Vec<
             target_slots,
             selection,
             ..
-        } => (
-            target_slots,
-            selection.current_slot,
-            selection.current_legal_targets.as_slice(),
-        ),
+        } => (target_slots, selection.current_slot),
         _ => return None,
     };
+
+    let current_legal_targets = current_target_selection_targets(state)?;
 
     let mut actions: Vec<GameAction> = current_legal_targets
         .iter()

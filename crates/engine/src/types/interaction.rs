@@ -27,6 +27,7 @@ macro_rules! opaque_string_id {
 opaque_string_id!(InteractionSessionId);
 opaque_string_id!(InteractionId);
 opaque_string_id!(InteractionChoiceId);
+opaque_string_id!(InteractionActionId);
 opaque_string_id!(PreviewRequestId);
 
 /// Persistence slot semantics. Simultaneous pregame decisions deliberately
@@ -218,6 +219,138 @@ pub enum InteractionManaColor {
     Black,
     Red,
     Green,
+}
+
+/// Stable comparison axis used by mana-spend restrictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaComparator {
+    GreaterThan,
+    LessThan,
+    AtLeast,
+    AtMost,
+    Equal,
+    NotEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaAbilityActivationScope {
+    OfSpellType,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaZoneSpendPolarity {
+    From,
+    NotFrom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "interaction-bindings", ts(rename_all = "camelCase"))]
+pub enum InteractionManaSpecialAction {
+    CompanionToHand,
+    UnlockDoor,
+    Plot,
+    TurnFaceUp,
+    RollPlanarDie,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionManaSpellCostCriterion {
+    ManaValue {
+        comparator: InteractionManaComparator,
+        value: u32,
+    },
+    HasXInCost,
+}
+
+/// Viewer-safe, lossless projection of a runtime mana-spend restriction.
+///
+/// Type and keyword names intentionally stay semantic strings: they come from
+/// card text and are already the canonical engine vocabulary. Every runtime
+/// `ManaRestriction` variant has a corresponding case here, including nested
+/// `OnlyForAny` restrictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "interaction-bindings", derive(ts_rs::TS))]
+#[serde(
+    tag = "type",
+    content = "data",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[cfg_attr(
+    feature = "interaction-bindings",
+    ts(rename_all = "camelCase", rename_all_fields = "camelCase")
+)]
+pub enum InteractionManaRestriction {
+    OnlyForSpell,
+    OnlyForSpellType {
+        spell_type: String,
+    },
+    OnlyForCreatureType {
+        creature_type: String,
+    },
+    OnlyForTypeSpellsOrAbilities {
+        spell_type: String,
+        ability: InteractionManaAbilityActivationScope,
+    },
+    OnlyForActivation,
+    OnlyForTaggedActivation {
+        tag: String,
+    },
+    OnlyForXCosts,
+    OnlyForSpellWithKeywordKind {
+        keyword: String,
+    },
+    OnlyForSpellWithKeywordKindFromZone {
+        keyword: String,
+        zone: InteractionZoneCode,
+    },
+    OnlyForSpellWithManaValue {
+        comparator: InteractionManaComparator,
+        value: u32,
+    },
+    OnlyForSpellMatchingCostCriteria {
+        spell_type: Option<String>,
+        criteria: Vec<InteractionManaSpellCostCriterion>,
+    },
+    OnlyForSpellWithColorCount {
+        comparator: InteractionManaComparator,
+        count: u32,
+    },
+    OnlyForSpellFromZone {
+        zone: InteractionZoneCode,
+        polarity: InteractionManaZoneSpendPolarity,
+    },
+    OnlyForFaceDownSpell,
+    OnlyForAny {
+        restrictions: Vec<InteractionManaRestriction>,
+    },
+    OnlyForSpecialAction {
+        action: InteractionManaSpecialAction,
+    },
+    ConvokePayment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -508,6 +641,7 @@ pub enum InteractionRoleCode {
     ManaChoice,
     Count,
     ManaPayment,
+    ProducedMana,
     Color,
     Player,
     CastingVariant,
@@ -549,6 +683,8 @@ pub enum InteractionPresentationSurface {
     },
     Action {
         code: InteractionActionCode,
+        /// Opaque deterministic identity for the exact action payload.
+        action_id: Option<InteractionActionId>,
     },
     Player {
         role: InteractionRoleCode,
@@ -589,6 +725,7 @@ pub enum InteractionPresentationSurface {
         role: InteractionRoleCode,
         index: Option<u32>,
         symbols: Vec<String>,
+        restrictions: Vec<InteractionManaRestriction>,
     },
     Counter {
         counter_type: String,

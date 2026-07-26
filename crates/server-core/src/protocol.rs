@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use engine::game::interaction::ObjectActionPayload;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
@@ -317,13 +318,16 @@ pub enum ServerMessage {
         /// Frontends use this map for "what can I do with this card?" lookups without
         /// introspecting `GameAction` variants client-side. Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+        legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
         /// Engine-authored presentation projections computed alongside
         /// `state`. See `engine::game::derived_views::DerivedViews`.
         /// Required for Commander-format games so the CommanderDamage HUD
         /// renders; empty in non-Commander formats (JIT short-circuit).
         #[serde(default)]
         derived: engine::game::derived_views::DerivedViews,
+        /// Viewer-scoped interactive opportunities derived from the same
+        /// authoritative state as this filtered snapshot.
+        viewer_interaction: engine::types::interaction::ViewerInteraction,
         /// Included for joiners so they can persist the token for reconnection.
         /// Omitted (None) for hosts (who get it via GameCreated) and reconnects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,7 +363,7 @@ pub enum ServerMessage {
         /// Per-card grouping of `legal_actions` keyed by `GameAction::source_object()`.
         /// Empty for non-actors.
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-        legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+        legal_actions_by_object: HashMap<ObjectId, Vec<ObjectActionPayload>>,
         /// Engine-authored presentation projections for this state snapshot.
         /// See `engine::game::derived_views::DerivedViews`. Always populated
         /// by server construction sites — the `#[serde(default)]` exists
@@ -367,6 +371,9 @@ pub enum ServerMessage {
         /// silent fallback (CLAUDE.md: engine owns all logic).
         #[serde(default)]
         derived: engine::game::derived_views::DerivedViews,
+        /// Viewer-scoped interactive opportunities derived from the same
+        /// authoritative state as this filtered snapshot.
+        viewer_interaction: engine::types::interaction::ViewerInteraction,
     },
     ActionRejected {
         reason: String,
@@ -969,18 +976,29 @@ mod tests {
     #[test]
     fn server_message_game_started_with_opponent_name_roundtrips() {
         let state = GameState::new_two_player(42);
+        let action = GameAction::PassPriority;
+        let interaction_action_id = engine::game::interaction::interaction_action_id(&action);
+        let viewer_interaction =
+            engine::game::interaction::derive_viewer_interaction(&state, &state, PlayerId(0));
         let msg = ServerMessage::GameStarted {
             state_revision: 0,
             state: state.clone(),
             your_player: PlayerId(0),
             opponent_name: Some("Opponent".to_string()),
             player_names: vec!["Me".to_string(), "Opponent".to_string()],
-            legal_actions: vec![GameAction::PassPriority],
+            legal_actions: vec![action.clone()],
             auto_pass_recommended: false,
             mana_payment_shortcut_actions: vec![],
             spell_costs: HashMap::new(),
-            legal_actions_by_object: HashMap::new(),
+            legal_actions_by_object: HashMap::from([(
+                engine::types::identifiers::ObjectId(7),
+                vec![engine::game::interaction::ObjectActionPayload {
+                    action,
+                    interaction_action_id: interaction_action_id.clone(),
+                }],
+            )]),
             derived: Default::default(),
+            viewer_interaction: viewer_interaction.clone(),
             player_token: None,
             events: vec![],
         };
@@ -992,12 +1010,20 @@ mod tests {
                 opponent_name,
                 player_names,
                 legal_actions,
+                legal_actions_by_object,
+                viewer_interaction: decoded_viewer_interaction,
                 ..
             } => {
                 assert_eq!(your_player, PlayerId(0));
                 assert_eq!(opponent_name, Some("Opponent".to_string()));
                 assert_eq!(player_names.len(), 2);
                 assert_eq!(legal_actions.len(), 1);
+                assert_eq!(decoded_viewer_interaction, viewer_interaction);
+                assert_eq!(
+                    legal_actions_by_object[&engine::types::identifiers::ObjectId(7)][0]
+                        .interaction_action_id,
+                    interaction_action_id
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -1008,7 +1034,7 @@ mod tests {
         let state = GameState::new_two_player(42);
         let msg = ServerMessage::GameStarted {
             state_revision: 0,
-            state,
+            state: state.clone(),
             your_player: PlayerId(1),
             opponent_name: None,
             player_names: vec![],
@@ -1018,6 +1044,11 @@ mod tests {
             spell_costs: HashMap::new(),
             legal_actions_by_object: HashMap::new(),
             derived: Default::default(),
+            viewer_interaction: engine::game::interaction::derive_viewer_interaction(
+                &state,
+                &state,
+                PlayerId(1),
+            ),
             player_token: None,
             events: vec![],
         };
@@ -1991,8 +2022,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_21() {
-        assert_eq!(PROTOCOL_VERSION, 21);
+    fn protocol_version_is_22() {
+        assert_eq!(PROTOCOL_VERSION, 22);
     }
 
     #[test]

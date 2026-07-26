@@ -337,6 +337,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::Proliferate,
+                look_count: None,
             },
         ];
 
@@ -406,6 +407,7 @@ mod tests {
             &[GameEvent::PlayerPerformedAction {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::Scry,
+                look_count: None,
             }],
         );
         assert!(acc.generic_triggers.is_empty());

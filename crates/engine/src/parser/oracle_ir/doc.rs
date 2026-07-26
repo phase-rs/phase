@@ -1278,6 +1278,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::Reveal { .. } => {}
         Effect::RevealTop { .. } => {}
         Effect::ExileTop { .. } => {}
+        Effect::ExileFaceDownPile { .. } => {}
         Effect::TargetOnly { .. } => {}
         Effect::Choose { .. } => {}
         Effect::OpponentGuess { .. } => {}
