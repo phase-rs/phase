@@ -98,6 +98,7 @@ mod cr733_resolved_draw;
 mod cr733_resolved_enter_tapped;
 mod cr733_resolved_entry_retags;
 mod cr733_resolved_frame_transition;
+mod cr733_resolved_modifier_install;
 mod cr733_resolved_object_cease;
 mod cr733_resolved_player_leave;
 mod cr733_resolved_token_creation;

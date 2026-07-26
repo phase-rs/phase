@@ -3820,15 +3820,16 @@ pub(crate) fn create_warp_delayed_trigger(
         );
     }
 
-    state
-        .delayed_triggers
-        .push(crate::types::game_state::DelayedTrigger {
+    super::triggers::install_delayed_trigger(
+        state,
+        crate::types::game_state::DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
             ability: delayed_ability,
             controller,
             source_id: object_id,
             one_shot: true,
-        });
+        },
+    );
 }
 
 #[cfg(test)]

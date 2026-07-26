@@ -47,6 +47,15 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::Attachment(command) => {
             engine::game::effects::attach::apply_resolved_attachment(state, command).unwrap();
         }
+        ResolvedRulesCommand::DelayedTriggerInstall(command) => {
+            engine::game::triggers::apply_resolved_delayed_trigger(state, command.as_ref())
+                .unwrap();
+        }
+        ResolvedRulesCommand::ContinuousEffectInstall(command) => {
+            state
+                .apply_resolved_continuous_effect(command.as_ref())
+                .unwrap();
+        }
         ResolvedRulesCommand::ControllerOverride(command) => {
             engine::game::zones::apply_resolved_controller_override(state, command).unwrap();
         }
