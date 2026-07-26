@@ -12,6 +12,7 @@ pub mod artifacts;
 pub mod blink;
 pub mod commitment;
 pub mod control;
+pub mod cycling;
 pub mod devotion;
 pub mod enchantments;
 pub mod energy;
@@ -36,6 +37,7 @@ pub use aristocrats::AristocratsFeature;
 pub use artifacts::ArtifactsFeature;
 pub use blink::BlinkFeature;
 pub use control::ControlFeature;
+pub use cycling::CyclingFeature;
 pub use devotion::DevotionFeature;
 pub use enchantments::EnchantmentsFeature;
 pub use energy::EnergyFeature;
@@ -89,6 +91,8 @@ pub struct DeckFeatures {
     pub poison: PoisonFeature,
     /// CR 207.2c + CR 205.2a: delirium / descend graveyard type-diversity.
     pub graveyard_types: GraveyardTypesFeature,
+    /// CR 702.29: "cycling matters" payoff density (cyclers + on-cycle engines).
+    pub cycling: CyclingFeature,
     /// Declaration-derived: the deck's declared bracket tier. Unlike the
     /// other fields here, this is not structurally detected from card text —
     /// it is a per-deck declaration set at deck-analysis time from deck
@@ -136,6 +140,7 @@ impl DeckFeatures {
             energy: energy::detect(deck),
             poison: poison::detect(deck),
             graveyard_types: graveyard_types::detect(deck),
+            cycling: cycling::detect(deck),
             bracket_tier: tier,
         }
     }

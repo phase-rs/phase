@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 pub mod blink;
+pub mod cycling;
 pub mod devotion;
 pub mod enchantments;
 pub mod energy;

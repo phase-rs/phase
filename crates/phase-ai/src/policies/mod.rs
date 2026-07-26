@@ -16,6 +16,7 @@ mod control_change_awareness;
 pub(crate) mod copy_value;
 mod crew_timing;
 mod cycling_discipline;
+mod cycling_payoff;
 mod devotion;
 mod downside_awareness;
 pub(crate) mod effect_classify;
