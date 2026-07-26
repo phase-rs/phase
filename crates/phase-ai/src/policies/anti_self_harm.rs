@@ -3646,11 +3646,11 @@ mod tests {
 
         // Set up pending trigger with a removal (exile) effect, matching
         // `trigger_target_prefers_creature_over_token` above.
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: ObjectId(200),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::ChangeZone {
                     origin: None,
                     destination: Zone::Exile,
@@ -3669,7 +3669,7 @@ mod tests {
                 Vec::new(),
                 ObjectId(200),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -3680,7 +3680,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let config = AiConfig::default();
         let legal_targets = vec![
