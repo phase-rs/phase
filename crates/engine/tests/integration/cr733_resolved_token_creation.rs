@@ -9,9 +9,10 @@
 //! replay that re-drew either would hand out a colliding id or reorder the token
 //! against continuous effects in the layer system.
 //!
-//! SCOPE: ordinary `TokenSpec` births. Copy tokens (CR 707.2) and meld births go
-//! through the liminal-entry path and are not yet journaled — see the scope note
-//! on `ResolvedTokenCreationCommand`.
+//! SCOPE: ordinary `TokenSpec` births. Copy births (CR 707.2) share this command
+//! through `ResolvedTokenBody::Copy` and are covered in
+//! `cr733_resolved_copy_token_creation`. Meld is not a birth at all — it reuses
+//! the existing component object's id — so it is not in this family.
 
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::mana::ManaCost;
@@ -110,6 +111,21 @@ fn token_creation_journals_an_exact_resolved_birth() {
     assert!(
         replay.battlefield.contains(&token_id),
         "replay adds the token to the battlefield zone list, not just the object map"
+    );
+
+    // CR 302.6: the applier installs the RECORDED entry turn, never the live
+    // one. Advancing `turn_number` on the replay state before applying is what
+    // makes this non-vacuous — it fails if the applier reads `state.turn_number`.
+    let mut shifted = state.clone();
+    shifted.objects.remove(&token_id);
+    shifted.battlefield.retain(|id| *id != token_id);
+    shifted.turn_number = birth.entry_turn + 5;
+    engine::game::effects::token::apply_resolved_token_creation(&mut shifted, birth)
+        .expect("the recorded birth must replay regardless of the live turn");
+    assert_eq!(
+        shifted.objects[&token_id].entered_battlefield_turn,
+        Some(birth.entry_turn),
+        "CR 302.6: replay stamps the recorded entry turn, not the live one"
     );
 
     // The inverted precondition: this applier CREATES its subject, so a second

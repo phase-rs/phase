@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::TriggerDefinitionRef;
+use super::ability::{ContinuousModification, TriggerDefinitionRef};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -20,7 +20,7 @@ use super::game_state::{
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
-use super::proposed_event::TokenSpec;
+use super::proposed_event::{CopyTokenSpec, TokenSpec};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
 use super::zones::Zone;
 
@@ -467,7 +467,62 @@ pub enum ResolvedPlayerLeaveReplayInvariantError {
     AlreadyEliminated(PlayerId),
 }
 
-/// One exact CR 111.1 token creation.
+/// How one copy token's CR 707.9 "except ..." exceptions relate to its birth.
+///
+/// The two production copy seams complete the body at different moments, and a
+/// replay has to know which one it is looking at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedCopyBodyModifications {
+    /// CR 707.2: no copy exceptions — the copiable values are the whole body.
+    NoExceptions,
+    /// CR 707.9: exceptions folded into the copiable values BEFORE the token
+    /// entered (the liminal seam), so replay reapplies them from this record.
+    ///
+    /// `all_creature_types` is recorded rather than re-read because
+    /// `remove_subtype_set` consults the live list, which changeling and other
+    /// type-changing effects mutate (CR 205.3 + CR 702.73a).
+    Folded {
+        modifications: Vec<ContinuousModification>,
+        all_creature_types: Vec<String>,
+    },
+    /// Exceptions applied AFTER the birth by `apply_token_modifications`
+    /// (`game/effects/token_copy.rs`) — a pausable, state-level seam that has no
+    /// resolved family of its own yet. The birth is still journaled, but replay
+    /// REFUSES rather than installing a body that is missing them.
+    ///
+    /// Delete this variant when that seam gets its own family; the refusal in
+    /// `apply_resolved_token_creation` disappears with it.
+    DeferredToUnjournaledSeam {
+        modifications: Vec<ContinuousModification>,
+    },
+}
+
+/// How the entering object's body was built for one journaled token birth.
+///
+/// CR 111.1 is the journaled axis for BOTH variants — an object came into
+/// existence and its id and timestamp were drawn. CR 707.2 governs only how a
+/// copy body was derived upstream of this seam, so it parameterizes the body
+/// rather than forking the family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResolvedTokenBody {
+    /// CR 111.1: an ordinary token minted from a `TokenSpec`.
+    Spec {
+        /// The effect's token spec — the existing replacement-visible payload
+        /// type rather than a hand-rolled field list.
+        spec: Box<TokenSpec>,
+        /// `token_presets::find_exact_token_ref` READS game state to resolve
+        /// this, so it is a re-derivation rather than a spec field.
+        token_image_ref: Option<TokenImageRef>,
+    },
+    /// CR 707.2: a token that entered the battlefield as a copy of an object.
+    /// The copy's own art pointer and printed ref already live on `copy`.
+    Copy {
+        copy: Box<CopyTokenSpec>,
+        modifications: ResolvedCopyBodyModifications,
+    },
+}
+
+/// One exact CR 111.1 token creation, ordinary or copy.
 ///
 /// This is the first family whose replay MATERIALIZES an object rather than
 /// verifying and installing into one that already exists, so its precondition is
@@ -476,26 +531,23 @@ pub enum ResolvedPlayerLeaveReplayInvariantError {
 /// Two allocator draws are recorded because both would otherwise be re-drawn:
 /// the `ObjectId` (from `next_object_id`) and the CR 613.7d entry timestamp.
 ///
-/// SCOPE: ordinary `TokenSpec` births only. Copy tokens (CR 707.2) and meld
-/// births go through the liminal-entry path, whose `LiminalEntry` carries no
-/// body spec — `LiminalEntryKind` distinguishes Token from Meld, not Spec from
-/// Copy — so wiring them needs a new field on that shared serialized struct.
-/// They remain unjournaled for now. When they land, this struct's `spec` +
-/// `token_image_ref` pair becomes a `ResolvedTokenBody::{Spec, Copy}` payload on
-/// the SAME command: both are the CR 111.1 axis (an object came into existence
-/// and its id and timestamp were drawn), and CR 707.2 governs only how the copy
-/// body was derived upstream of this seam.
+/// SCOPE: token births only. Meld is NOT here — `finish_meld_entry` reuses the
+/// existing component object's id and moves it through the ordinary zone
+/// pipeline, so it materializes nothing and belongs with transform/frame
+/// semantics instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedTokenCreationCommand {
     pub object: ObjectIncarnationRef,
     pub owner: PlayerId,
     pub entry_timestamp: u64,
-    /// The effect's token spec — the existing replacement-visible payload type
-    /// rather than a hand-rolled field list.
-    pub spec: Box<TokenSpec>,
-    /// `token_presets::find_exact_token_ref` READS game state to resolve this, so
-    /// it is a re-derivation rather than a spec field and must be recorded.
-    pub token_image_ref: Option<TokenImageRef>,
+    /// CR 302.6: the turn the token entered, which backs "has been under its
+    /// controller's control continuously since their most recent turn began"
+    /// (summoning sickness). Recorded rather than re-read from
+    /// `GameState::turn_number` so the command is self-contained: a replay that
+    /// observed a different live turn would stamp the wrong entered-turn and let
+    /// a replayed creature attack when it should not.
+    pub entry_turn: u32,
+    pub body: ResolvedTokenBody,
     /// CR 614.1: the post-replacement tapped state the token actually entered
     /// with, not the spec's pre-replacement request.
     pub resulting_tapped: bool,
@@ -514,6 +566,15 @@ pub enum ResolvedTokenCreationReplayInvariantError {
     UnknownOwner(PlayerId),
     #[error("token-creation id {id:?} is not below its recorded high-water {high_water}")]
     IdAboveHighWater { id: ObjectId, high_water: u64 },
+    /// CR 707.9: the birth was journaled, but its copy exceptions were applied
+    /// after the fact by `apply_token_modifications`, which has no resolved
+    /// family yet. Refusing keeps the hole visible instead of installing a body
+    /// that is silently missing them.
+    #[error(
+        "copy-token {object:?} has {count} post-birth copy modification(s) owned by the \
+         unjournaled `apply_token_modifications` seam; replay cannot reproduce them"
+    )]
+    UnreplayableCopyModifications { object: ObjectId, count: usize },
 }
 
 /// The audience that received one exact revealed-card fact.
