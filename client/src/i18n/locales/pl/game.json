@@ -1086,10 +1086,10 @@
       "playerCounters_one": "zdobądź {{count}} znacznik {{kind}}",
       "playerCounters_other": "zdobądź {{count}} znaczników {{kind}}",
       "playerCounterKind": {
-        "poison": "trucizny",
-        "experience": "doświadczenia",
-        "rad": "promieniowania",
-        "ticket": "biletu"
+        "Poison": "trucizny",
+        "Experience": "doświadczenia",
+        "Rad": "promieniowania",
+        "Ticket": "biletu"
       },
       "generic": "koszt",
       "pay": "Zapłać {{cost}}"

@@ -3439,13 +3439,22 @@ function formatManaCost(cost: { type: string; shards?: string[]; generic?: numbe
 }
 
 function formatUnlessCost(
-  cost: {
-    type: string;
-    cost?: { type: string; shards?: string[]; generic?: number };
-    amount?: number;
-    count?: number;
-    counter_kind?: string;
-  },
+  cost:
+    // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost is a real
+    // discriminated variant with required fields (the engine's
+    // `AbilityCost::GetPlayerCounters` always sends both) — rendered
+    // unchanged, not reinterpreted (no lowercasing, no fallback defaults).
+    | {
+        type: "GetPlayerCounters";
+        count: number;
+        counter_kind: "Poison" | "Experience" | "Rad" | "Ticket";
+      }
+    | {
+        type: string;
+        cost?: { type: string; shards?: string[]; generic?: number };
+        amount?: number;
+        count?: number;
+      },
   t: TFunction<"game">,
 ): string {
   switch (cost.type) {
@@ -3477,20 +3486,14 @@ function formatUnlessCost(
     }
     case "PayEnergy":
       return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
-    // CR 702.21a + CR 122.1 + CR 104.3d: Ward's player-counter cost
-    // (The Serpent Society: "Ward—Get five poison counters."). The counter
-    // kind is looked up through i18n (not interpolated as raw English) so
-    // non-English locales get a real translated noun, matching how the
-    // badges section already localizes poison/experience/rad counter names.
+    // The counter kind is looked up through i18n (not interpolated as raw
+    // English) so non-English locales get a real translated noun, matching
+    // how the badges section already localizes poison/experience/rad counter
+    // names. `cost.counter_kind` is rendered exactly as the engine sent it —
+    // no lowercasing, no fallback default.
     case "GetPlayerCounters": {
-      const count = cost.count ?? 1;
-      const kindKey = ["Poison", "Experience", "Rad", "Ticket"].includes(
-        cost.counter_kind ?? "",
-      )
-        ? (cost.counter_kind as string).toLowerCase()
-        : "poison";
-      const kind = t(`gamePage.cost.playerCounterKind.${kindKey}`);
-      return t("gamePage.cost.playerCounters", { count, kind });
+      const kind = t(`gamePage.cost.playerCounterKind.${cost.counter_kind}`);
+      return t("gamePage.cost.playerCounters", { count: cost.count, kind });
     }
     default:
       return t("gamePage.cost.generic");

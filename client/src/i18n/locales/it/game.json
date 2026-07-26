@@ -1086,10 +1086,10 @@
       "playerCounters_one": "ottieni {{count}} segnalino {{kind}}",
       "playerCounters_other": "ottieni {{count}} segnalini {{kind}}",
       "playerCounterKind": {
-        "poison": "veleno",
-        "experience": "esperienza",
-        "rad": "radiazione",
-        "ticket": "ticket"
+        "Poison": "veleno",
+        "Experience": "esperienza",
+        "Rad": "radiazione",
+        "Ticket": "ticket"
       },
       "generic": "un costo",
       "pay": "Paga {{cost}}"

@@ -2151,6 +2151,10 @@ mod tests {
             AbilityCost::KeywordCostOfCastSpell { .. } => AbilityCost::KeywordCostOfCastSpell {
                 keyword: crate::types::keywords::KeywordKind::Suspend,
             },
+            AbilityCost::GetPlayerCounters { .. } => AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 1,
+            },
             AbilityCost::Unimplemented { .. } => AbilityCost::Unimplemented {
                 description: "test".to_string(),
             },
@@ -2263,6 +2267,10 @@ mod tests {
             },
             AbilityCost::KeywordCostOfCastSpell {
                 keyword: crate::types::keywords::KeywordKind::Suspend,
+            },
+            AbilityCost::GetPlayerCounters {
+                counter_kind: crate::types::player::PlayerCounterKind::Poison,
+                count: 1,
             },
             AbilityCost::Unimplemented {
                 description: String::new(),

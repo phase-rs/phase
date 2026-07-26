@@ -1086,10 +1086,10 @@
       "playerCounters_one": "obtenir {{count}} marqueur {{kind}}",
       "playerCounters_other": "obtenir {{count}} marqueurs {{kind}}",
       "playerCounterKind": {
-        "poison": "poison",
-        "experience": "expérience",
-        "rad": "rad",
-        "ticket": "ticket"
+        "Poison": "poison",
+        "Experience": "expérience",
+        "Rad": "rad",
+        "Ticket": "ticket"
       },
       "generic": "un coût",
       "pay": "Payer {{cost}}"

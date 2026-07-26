@@ -154,3 +154,62 @@ fn serpent_society_ward_paid_gives_five_poison_and_the_spell_resolves() {
         "paying Ward's cost must let the targeted destroy spell resolve, removing Serpent Society from the battlefield"
     );
 }
+
+/// CR 104.3d + CR 704.5c: a payment that pushes the payer to ten or more
+/// poison counters must trigger the loss state-based action immediately —
+/// before the targeted destroy spell gets a chance to continue resolving.
+/// Mirrors `crates/engine/src/game/sba.rs`'s own `sba_poison_10_player_loses`
+/// unit test's expected shape.
+#[test]
+fn serpent_society_ward_payment_that_reaches_ten_poison_loses_the_game() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let serpent_society = scenario
+        .add_creature_from_oracle(P0, "The Serpent Society", 3, 4, SERPENT_SOCIETY)
+        .id();
+    let destroy = scenario
+        .add_spell_to_hand_from_oracle(P1, "Destroy Spell", true, "Destroy target creature.")
+        .id();
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        state.players[P1.0 as usize].poison_counters = 5;
+    }
+
+    runner
+        .cast(destroy)
+        .target_objects(&[serpent_society])
+        .commit();
+    runner.advance_until_stack_empty();
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the opponent pays Ward's poison-counter cost");
+
+    assert_eq!(
+        runner.state().players[P1.0 as usize].poison_counters,
+        10,
+        "5 existing + 5 from Ward's cost must reach the ten-poison threshold"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver {
+                winner: Some(p) if p == P0
+            }
+        ),
+        "reaching ten poison must trigger the CR 104.3d loss SBA immediately, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner
+            .state()
+            .objects
+            .get(&serpent_society)
+            .is_some_and(|obj| obj.zone == engine::types::zones::Zone::Battlefield),
+        "the game must end (P1 loses) before the destroy spell gets a chance to resolve, so Serpent Society must still be on the battlefield"
+    );
+}

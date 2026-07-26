@@ -778,6 +778,13 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
                     });
                 }
             }
+            // CR 702.21a: recognized as counter-shaped ("get ... counter(s)")
+            // but the count or counter kind didn't parse — fail closed rather
+            // than falling through to the mana-cost fallback below, which
+            // would otherwise silently produce a free, always-paid Ward for
+            // unsupported/malformed counter text (phase-rs/phase#6640's exact
+            // bug class, for different malformed input).
+            return None;
         }
     }
 
@@ -2899,6 +2906,22 @@ mod tests {
                 count: 1,
             }))
         );
+    }
+
+    // Issue #6640 follow-up: counter-shaped "get ... counter(s)" text that
+    // fails to parse (malformed count, unknown kind) must fail closed
+    // (`None`) rather than silently falling through to the mana-cost
+    // fallback and becoming a free, always-paid Ward.
+    #[test]
+    fn ward_get_counters_with_unparseable_count_fails_closed() {
+        let result = parse_ward_cost("Get many poison counters.");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn ward_get_counters_with_unknown_kind_fails_closed() {
+        let result = parse_ward_cost("Get five sprocket counters.");
+        assert_eq!(result, None);
     }
 
     #[test]

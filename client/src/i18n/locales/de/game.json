@@ -1086,10 +1086,10 @@
       "playerCounters_one": "{{count}} {{kind}}marke erhalten",
       "playerCounters_other": "{{count}} {{kind}}marken erhalten",
       "playerCounterKind": {
-        "poison": "Gift",
-        "experience": "Erfahrung",
-        "rad": "Strahlung",
-        "ticket": "Ticket"
+        "Poison": "Gift",
+        "Experience": "Erfahrung",
+        "Rad": "Strahlung",
+        "Ticket": "Ticket"
       },
       "generic": "Kosten",
       "pay": "{{cost}} bezahlen"
