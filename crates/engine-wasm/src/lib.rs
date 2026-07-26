@@ -2085,7 +2085,12 @@ mod resolve_all_tests {
             controller,
             kind: StackEntryKind::ActivatedAbility {
                 source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    object_id,
+                    controller,
+                )),
             },
         }
     }

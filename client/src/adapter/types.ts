@@ -559,6 +559,8 @@ export type ManaRestriction =
         count: number;
       };
     }
+  // "Spend this mana only to cast spells of the source's chosen color."
+  | { OnlyForSpellColor: ManaColor }
   // "Spend this mana only to cast a spell from, or not from, the named zone."
   | { OnlyForSpellFromZone: ZoneSpend }
   // "Spend this mana only to cast a face-down spell."
@@ -571,6 +573,8 @@ export type ManaRestriction =
   | { OnlyForAny: ManaRestriction[] }
   // "Spend this mana only on the named special action."
   | { OnlyForSpecialAction: SpecialAction }
+  // A source-dependent restriction could not resolve its required choice.
+  | "Impossible"
   // Internal convoke-tap marker — never surfaced to the player.
   | "ConvokePayment";
 

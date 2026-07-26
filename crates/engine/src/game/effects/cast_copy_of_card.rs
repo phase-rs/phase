@@ -228,7 +228,7 @@ fn cast_one_copy(
             controller: ability.controller,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: resolved,
+                ability: resolved.map(Box::new),
                 casting_variant: CastingVariant::Normal,
                 // CR 118.9 + CR 601.2f: "Without paying its mana cost" is an alternative cost.
                 // DEFERRED: the parsed `Effect::CastCopyOfCard.cost` is intentionally

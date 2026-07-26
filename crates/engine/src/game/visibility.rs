@@ -1857,7 +1857,7 @@ mod tests {
         Box::new(PendingCast {
             object_id,
             card_id,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Dummy".to_string(),
                     description: None,
@@ -1865,7 +1865,7 @@ mod tests {
                 vec![],
                 object_id,
                 caster,
-            ),
+            )),
             cost: ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -1909,7 +1909,7 @@ mod tests {
         Box::new(PendingManaAbility {
             player,
             source_id,
-            ability_index: 0,
+            ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
             color_override: None,
@@ -3231,7 +3231,7 @@ mod tests {
         state
             .pending_begin_game_abilities
             .push(PendingBeginGameAbility {
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Hidden Begin Game Ability".to_string(),
                         description: None,
@@ -3239,7 +3239,7 @@ mod tests {
                     vec![],
                     source,
                     PlayerId(0),
-                ),
+                )),
             });
         state.resolving_begin_game_abilities = true;
 

@@ -64,7 +64,12 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
         controller,
         kind: StackEntryKind::ActivatedAbility {
             source_id: object_id,
-            ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
+            ability: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                object_id,
+                controller,
+            )),
         },
     }
 }
@@ -153,7 +158,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ability.clone(),
+        ability: Box::new(ability.clone()),
         timestamp: 0,
         target_constraints: vec![],
         distribute: None,
@@ -182,7 +187,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             die_result: None,
         },
     });
-    state.pending_trigger = Some(pending);
+    state.pending_trigger = Some(Box::new(pending));
     state.pending_trigger_entry = Some(entry_id);
     let stack_len_before = state.stack.len();
 
@@ -234,7 +239,7 @@ fn choose_new_targets_all_allows_unchanged_illegal_target() {
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(stack_ability),
+            ability: Some(Box::new(stack_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -2057,6 +2062,7 @@ fn unlock_door_restricted_mana_rejected_for_effect_and_spell_payments() {
         source_types: &["Artifact".to_string()],
         source_subtypes: &["Equipment".to_string()],
         ability_tag: None,
+        mana_color_constraint: crate::types::mana::ActivationManaColorConstraint::Unrestricted,
     }));
     let _ = ManaType::Red;
 }
@@ -7563,7 +7569,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
         object_id: ObjectId(0),
         card_id: CardId(0),
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Unimplemented {
                 name: "Test".to_string(),
                 description: None,
@@ -7571,7 +7577,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
             vec![],
             ObjectId(0),
             PlayerId(0),
-        ),
+        )),
         cost: crate::types::mana::ManaCost::NoCost,
         base_cost: None,
         declared_mana_additions: Vec::new(),
@@ -7957,7 +7963,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
     state.pending_cast = Some(Box::new(crate::types::game_state::PendingCast {
         object_id: ObjectId(0),
         card_id: CardId(0),
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             crate::types::ability::Effect::Unimplemented {
                 name: "Test".to_string(),
                 description: None,
@@ -7965,7 +7971,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
             vec![],
             ObjectId(0),
             PlayerId(0),
-        ),
+        )),
         cost: crate::types::mana::ManaCost::NoCost,
         base_cost: None,
         declared_mana_additions: Vec::new(),

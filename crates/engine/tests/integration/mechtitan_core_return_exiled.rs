@@ -71,7 +71,7 @@ fn install_mechtitan_return_trigger(state: &mut GameState, core: ObjectId, token
         condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
             filter: TargetFilter::SpecificObject { id: token },
         },
-        ability,
+        ability: Box::new(ability),
         controller: P0,
         source_id: core,
         one_shot: true,

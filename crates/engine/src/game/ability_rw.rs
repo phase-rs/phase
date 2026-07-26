@@ -2055,6 +2055,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
@@ -3822,6 +3823,8 @@ fn walk_definition(
         description: _,
         target_prompt: _,
         activation_restrictions: _,
+        // Payment-time only; it cannot create a resolution-time dependency.
+        activation_mana_payment_restriction: _,
         activator_filter: _,
         activation_zone: _,
         ability_tag: _,
@@ -4543,6 +4546,7 @@ fn rw_effect(
         Effect::ExileTop {
             player: _,
             count,
+            position: _,
             face_down: _,
         } => {
             let mut p = RwProfile::empty();
@@ -5744,7 +5748,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // global scalar. Event-live like the EventContextSourceModesChosen /
         // TimesCostPaidThisResolution twins, and like them NOT a frozen D5
         // carrier (the legacy-12 set is closed), so no `legacy_batch_prompt`.
-        QuantityRef::TriggeringScryLookCount => reads_event_live(),
+        QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount => {
+            reads_event_live()
+        }
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }

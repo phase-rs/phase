@@ -231,46 +231,37 @@ fn elrond_multi_scry_queues_one_trigger_per_scry_with_its_own_look_count() {
     );
 
     // CR 603.2 + CR 603.3b: BOTH scry events must have queued a trigger. The
-    // two same-controller triggers surface an OrderTriggers prompt (identity
-    // order keeps queue order: the first scry's trigger is placed first),
-    // then each trigger's OWN target selection. Collect each prompt's slot
-    // limit and pick disjoint targets so the counter assertions below
-    // separate the two triggers.
-    advance_to_trigger_target_selection(&mut runner);
+    // two same-controller triggers surface an OrderTriggers prompt, then each
+    // trigger's OWN target selection. Stack ordering may surface the later
+    // scry's trigger first, so select from each prompt by its own slot limit
+    // and assert the two limits as an order-independent pair.
     let mut slot_limits = Vec::new();
-
-    let WaitingFor::TriggerTargetSelection { target_slots, .. } =
-        runner.state().waiting_for.clone()
-    else {
-        unreachable!("advance_to_trigger_target_selection guarantees this variant");
-    };
-    slot_limits.push(target_slots.len());
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(c1), TargetRef::Object(c2)],
-        })
-        .expect("selecting two of the first trigger's allowed targets must succeed");
-
-    advance_to_trigger_target_selection(&mut runner);
-    let WaitingFor::TriggerTargetSelection { target_slots, .. } =
-        runner.state().waiting_for.clone()
-    else {
-        unreachable!("advance_to_trigger_target_selection guarantees this variant");
-    };
-    slot_limits.push(target_slots.len());
-    runner
-        .act(GameAction::SelectTargets {
-            targets: vec![TargetRef::Object(c3)],
-        })
-        .expect("selecting the second trigger's single allowed target must succeed");
+    for _ in 0..2 {
+        advance_to_trigger_target_selection(&mut runner);
+        let WaitingFor::TriggerTargetSelection { target_slots, .. } =
+            runner.state().waiting_for.clone()
+        else {
+            unreachable!("advance_to_trigger_target_selection guarantees this variant");
+        };
+        slot_limits.push(target_slots.len());
+        let targets = match target_slots.len() {
+            1 => vec![TargetRef::Object(c3)],
+            3 => vec![TargetRef::Object(c1), TargetRef::Object(c2)],
+            count => panic!("expected the scry-1 or scry-3 target limit, got {count}"),
+        };
+        runner
+            .act(GameAction::SelectTargets { targets })
+            .expect("each completed scry trigger must accept targets within its own limit");
+    }
     runner.advance_until_stack_empty();
+
+    slot_limits.sort_unstable();
 
     assert_eq!(
         slot_limits,
-        vec![3, 1],
+        vec![1, 3],
         "each trigger must expose ITS OWN scry's look count as its slot limit: \
-         the scry-3 trigger offers 3 slots and the scry-1 trigger offers 1 — \
-         independently, in the same resolution"
+         one offers 3 slots and the other 1 — independently, in the same resolution"
     );
 
     // Disjoint targets: each targeted creature got exactly one counter from

@@ -3660,6 +3660,11 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
                 count: *count,
             }
         }
+        ManaRestriction::OnlyForSpellColor(color) => {
+            InteractionManaRestriction::OnlyForSpellColor {
+                color: mana_color_dto(*color),
+            }
+        }
         ManaRestriction::OnlyForSpellFromZone(zone_spend) => {
             InteractionManaRestriction::OnlyForSpellFromZone {
                 zone: zone_code(zone_spend.zone),
@@ -3681,6 +3686,7 @@ fn interaction_mana_restriction(restriction: &ManaRestriction) -> InteractionMan
                 action: interaction_mana_special_action(*action),
             }
         }
+        ManaRestriction::Impossible => InteractionManaRestriction::Impossible,
         ManaRestriction::ConvokePayment => InteractionManaRestriction::ConvokePayment,
     }
 }
@@ -7226,6 +7232,7 @@ fn bound_outbound_mana_restriction(
         | InteractionManaRestriction::OnlyForActivation
         | InteractionManaRestriction::OnlyForXCosts
         | InteractionManaRestriction::OnlyForFaceDownSpell
+        | InteractionManaRestriction::Impossible
         | InteractionManaRestriction::ConvokePayment => {}
         InteractionManaRestriction::OnlyForSpellType { spell_type }
         | InteractionManaRestriction::OnlyForCreatureType {
@@ -7254,6 +7261,7 @@ fn bound_outbound_mana_restriction(
         }
         InteractionManaRestriction::OnlyForSpellWithManaValue { .. }
         | InteractionManaRestriction::OnlyForSpellWithColorCount { .. }
+        | InteractionManaRestriction::OnlyForSpellColor { .. }
         | InteractionManaRestriction::OnlyForSpellFromZone { .. }
         | InteractionManaRestriction::OnlyForSpecialAction { .. } => {}
         InteractionManaRestriction::OnlyForAny { restrictions } => {

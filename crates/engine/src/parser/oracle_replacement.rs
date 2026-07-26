@@ -12857,6 +12857,7 @@ mod tests {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::EventContextAmount
                     },
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
                 }
             ),

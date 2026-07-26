@@ -1624,10 +1624,11 @@ fn split_restricted_spell_and_activation(rest: &str) -> (&str, ActivationTail) {
 /// - "spend this mana only to cast a creature spell of the chosen type" -> `ChosenCreatureType`
 /// - "spend this mana only to activate abilities" -> `ActivateOnly`
 ///
-/// Returns `(restriction, grants)` where grants are properties conferred to the spell.
+/// Returns `(restrictions, grants)` where every restriction is an AND gate on
+/// the produced mana and grants are properties conferred to the spell.
 pub(crate) fn parse_mana_spend_restriction(
     lower: &str,
-) -> Option<(ManaSpendRestriction, Vec<ManaSpellGrant>)> {
+) -> Option<(Vec<ManaSpendRestriction>, Vec<ManaSpellGrant>)> {
     // CR 106.6: Negative spend restriction — "this mana can't be spent to cast
     // non<TYPE> spells" (Karn, Legacy Reforged). The double negative ("can't
     // cast non<TYPE>") is the spell-side equivalent of "only to cast <TYPE>",
@@ -1637,7 +1638,7 @@ pub(crate) fn parse_mana_spend_restriction(
     // ability stays payable) rather than `SpellType` (spells-only), which would
     // wrongly forbid paying for abilities.
     if let Some(restriction) = parse_negative_mana_spend_restriction(lower) {
-        return Some((restriction, vec![]));
+        return Some((vec![restriction], vec![]));
     }
 
     let (_, base) = nom_on_lower(lower, lower, |i| {
@@ -1655,7 +1656,7 @@ pub(crate) fn parse_mana_spend_restriction(
     .is_some()
     {
         return Some((
-            ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp),
+            vec![ManaSpendRestriction::ActivateTagged(AbilityTag::PowerUp)],
             vec![],
         ));
     }
@@ -1666,7 +1667,7 @@ pub(crate) fn parse_mana_spend_restriction(
     })
     .is_some()
     {
-        return Some((ManaSpendRestriction::ActivateOnly, vec![]));
+        return Some((vec![ManaSpendRestriction::ActivateOnly], vec![]));
     }
 
     // "spend this mana only on costs that include/contain {X}" -- X-cost restriction
@@ -1679,7 +1680,7 @@ pub(crate) fn parse_mana_spend_restriction(
     })
     .is_some()
     {
-        return Some((ManaSpendRestriction::XCostOnly, vec![]));
+        return Some((vec![ManaSpendRestriction::XCostOnly], vec![]));
     }
 
     // CR 106.6: Activation-first disjunction — "to activate X or cast Y" (Automated
@@ -1695,7 +1696,7 @@ pub(crate) fn parse_mana_spend_restriction(
         let without_to = nom_on_lower(base, &base_lower, |i| value((), tag("to ")).parse(i))
             .map_or(base, |(_, rest)| rest);
         if let Some(restriction) = parse_disjunctive_cast_clauses(without_to.trim()) {
-            return Some((restriction, vec![]));
+            return Some((vec![restriction], vec![]));
         }
     }
 
@@ -1705,10 +1706,10 @@ pub(crate) fn parse_mana_spend_restriction(
     // the standalone special-action clauses first (Overgrown Zealot's second
     // ability is turn-face-up-only). The clause parsers tolerate the leading "to ".
     if let Some(restriction) = parse_turn_face_up_clause(base, &base_lower) {
-        return Some((restriction, vec![]));
+        return Some((vec![restriction], vec![]));
     }
     if let Some(restriction) = parse_unlock_door_clause(base, &base_lower) {
-        return Some((restriction, vec![]));
+        return Some((vec![restriction], vec![]));
     }
 
     let (_, rest) = nom_on_lower(base, &base_lower, |i| value((), tag("to cast ")).parse(i))?;
@@ -1718,22 +1719,60 @@ pub(crate) fn parse_mana_spend_restriction(
     let (rest, grants) = extract_spell_grants(rest);
     let rest = rest.trim();
 
+    // CR 105.2a + CR 106.6: This rider has two independent requirements: the
+    // spell is monocolored, and its sole color equals the source's chosen
+    // color. Keep them as two restrictions so the generic color-count and
+    // color-membership building blocks remain independently reusable.
+    if parse_monocolored_spell_of_source_chosen_color(rest) {
+        return Some((
+            vec![
+                ManaSpendRestriction::SpellWithColorCount {
+                    comparator: Comparator::EQ,
+                    count: 1,
+                },
+                ManaSpendRestriction::SpellOfSourceChosenColor,
+            ],
+            grants,
+        ));
+    }
+
     // CR 106.6: Prefer the whole-remainder single-clause reading first, so a
     // type union inside one clause ("instant or sorcery spells") stays a single
     // `SpellType` and only genuinely heterogeneous disjunctions fall through to
     // the multi-clause path below.
     if let Some(restriction) = parse_single_cast_clause(rest) {
-        return Some((restriction, grants));
+        return Some((vec![restriction], grants));
     }
 
     // CR 106.6: Disjunctive spend restriction ("cast X or Y", "cast X, Y, or
     // activate Z"). Each top-level clause is parsed independently; only when ≥2
     // clauses all parse to self-evaluable restrictions do we emit `Any`.
     if let Some(restriction) = parse_disjunctive_cast_clauses(rest) {
-        return Some((restriction, grants));
+        return Some((vec![restriction], grants));
     }
 
     None
+}
+
+/// CR 105.2a + CR 106.6: Pure, terminal grammar for "monocolored spell(s) of
+/// that color" and "... of the chosen color." The parser deliberately accepts
+/// no possessives, modifiers, or trailing text: a near miss must remain an
+/// explicit residual clause rather than weakening a mana-spend restriction.
+fn parse_monocolored_spell_of_source_chosen_color(rest: &str) -> bool {
+    let lower = rest.to_lowercase();
+    nom_on_lower(rest, &lower, |input| {
+        value(
+            (),
+            all_consuming((
+                tag("monocolored "),
+                alt((tag("spells"), tag("spell"))),
+                tag(" of "),
+                alt((tag("that color"), tag("the chosen color"))),
+            )),
+        )
+        .parse(input)
+    })
+    .is_some()
 }
 
 /// CR 106.6: Parse a single post-"to cast " clause (no grant extraction, no
@@ -3975,10 +4014,10 @@ mod tests {
                 .expect("negated nonartifact restriction must parse");
         assert_eq!(
             restriction,
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
                 ability: AbilityActivationScope::Any,
-            }
+            }]
         );
         assert!(grants.is_empty());
     }
@@ -3993,10 +4032,10 @@ mod tests {
         .expect("curly-apostrophe negated restriction must parse");
         assert_eq!(
             restriction,
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Artifact".to_string(),
                 ability: AbilityActivationScope::Any,
-            }
+            }]
         );
     }
 
@@ -4009,10 +4048,10 @@ mod tests {
                 .expect("negated noncreature restriction must parse");
         assert_eq!(
             restriction,
-            ManaSpendRestriction::SpellTypeOrAbilityActivation {
+            vec![ManaSpendRestriction::SpellTypeOrAbilityActivation {
                 spell_type: "Creature".to_string(),
                 ability: AbilityActivationScope::Any,
-            }
+            }]
         );
     }
 
@@ -4025,7 +4064,7 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellMatchingCostCriteria {
+            Some(vec![ManaSpendRestriction::SpellMatchingCostCriteria {
                 spell_type: None,
                 criteria: vec![
                     SpellCostCriterion::ManaValue {
@@ -4034,7 +4073,7 @@ mod tests {
                     },
                     SpellCostCriterion::HasXInCost,
                 ],
-            })
+            }])
         );
     }
 
@@ -4047,7 +4086,7 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellMatchingCostCriteria {
+            Some(vec![ManaSpendRestriction::SpellMatchingCostCriteria {
                 spell_type: Some("Creature".to_string()),
                 criteria: vec![
                     SpellCostCriterion::ManaValue {
@@ -4056,7 +4095,7 @@ mod tests {
                     },
                     SpellCostCriterion::HasXInCost,
                 ],
-            })
+            }])
         );
     }
 
@@ -4080,10 +4119,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellWithManaValue {
+            Some(vec![ManaSpendRestriction::SpellWithManaValue {
                 comparator: Comparator::GE,
                 value: 5,
-            })
+            }])
         );
     }
 
@@ -4097,10 +4136,10 @@ mod tests {
                 "spend this mana only to cast a spell from anywhere other than your hand"
             )
             .map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+            Some(vec![ManaSpendRestriction::SpellFromZone(ZoneSpend {
                 zone: Zone::Hand,
                 polarity: ZoneSpendPolarity::NotFrom,
-            }))
+            })])
         );
         // The exclusion marker must not bleed into the inclusion reading.
         assert_eq!(
@@ -4108,10 +4147,10 @@ mod tests {
                 "spend this mana only to cast a spell from your graveyard"
             )
             .map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellFromZone(ZoneSpend {
+            Some(vec![ManaSpendRestriction::SpellFromZone(ZoneSpend {
                 zone: Zone::Graveyard,
                 polarity: ZoneSpendPolarity::From,
-            }))
+            })])
         );
     }
 
@@ -4126,10 +4165,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::Any(vec![
+            Some(vec![ManaSpendRestriction::Any(vec![
                 ManaSpendRestriction::SpellType("Room".to_string()),
                 ManaSpendRestriction::UnlockDoor,
-            ]))
+            ])])
         );
     }
 
@@ -4142,10 +4181,10 @@ mod tests {
         );
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::Any(vec![
+            Some(vec![ManaSpendRestriction::Any(vec![
                 ManaSpendRestriction::SpellType("Room".to_string()),
                 ManaSpendRestriction::UnlockDoor,
-            ]))
+            ])])
         );
     }
 
@@ -4158,9 +4197,9 @@ mod tests {
             parse_mana_spend_restriction("spend this mana only to cast instant and sorcery spells");
         assert_eq!(
             result.map(|(r, _)| r),
-            Some(ManaSpendRestriction::SpellType(
+            Some(vec![ManaSpendRestriction::SpellType(
                 "Instant and Sorcery".to_string()
-            ))
+            )])
         );
     }
 
@@ -4179,11 +4218,11 @@ mod tests {
                 "spend this mana only to cast an enchantment spell, unlock a door, or turn a permanent face up",
             )
             .map(|(r, _)| r),
-            Some(ManaSpendRestriction::Any(vec![
+            Some(vec![ManaSpendRestriction::Any(vec![
                 ManaSpendRestriction::SpellType("Enchantment".to_string()),
                 ManaSpendRestriction::UnlockDoor,
                 ManaSpendRestriction::TurnPermanentFaceUp,
-            ])),
+            ])]),
         );
         // Tin Street Gossip: face-down spells or turn creatures face up.
         assert_eq!(
@@ -4191,16 +4230,16 @@ mod tests {
                 "spend this mana only to cast face-down spells or to turn creatures face up",
             )
             .map(|(r, _)| r),
-            Some(ManaSpendRestriction::Any(vec![
+            Some(vec![ManaSpendRestriction::Any(vec![
                 ManaSpendRestriction::FaceDownSpell,
                 ManaSpendRestriction::TurnPermanentFaceUp,
-            ])),
+            ])]),
         );
         // Overgrown Zealot: pure turn-permanents-face-up (no cast clause at all).
         assert_eq!(
             parse_mana_spend_restriction("spend this mana only to turn permanents face up")
                 .map(|(r, _)| r),
-            Some(ManaSpendRestriction::TurnPermanentFaceUp),
+            Some(vec![ManaSpendRestriction::TurnPermanentFaceUp]),
         );
     }
 
@@ -4216,10 +4255,10 @@ mod tests {
         .expect("equip abilities plural must parse");
         assert_eq!(
             restriction,
-            ManaSpendRestriction::Any(vec![
+            vec![ManaSpendRestriction::Any(vec![
                 ManaSpendRestriction::SpellType("Equipment".to_string()),
                 ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
-            ])
+            ])]
         );
         assert!(grants.is_empty());
     }
@@ -4234,11 +4273,48 @@ mod tests {
         .expect("equip ability singular must parse");
         assert_eq!(
             restriction,
-            ManaSpendRestriction::Any(vec![
+            vec![ManaSpendRestriction::Any(vec![
                 ManaSpendRestriction::SpellType("Equipment".to_string()),
                 ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
-            ])
+            ])]
         );
         assert!(grants.is_empty());
+    }
+
+    // CR 105.2a + CR 106.6: The Great Henge-style compound rider is an AND,
+    // not an alternative. The exact grammar consumes the entire subject so a
+    // trailing qualifier cannot silently widen this restriction.
+    #[test]
+    fn mana_spend_restriction_monocolored_spell_of_source_chosen_color() {
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast monocolored spells of that color",
+            )
+            .map(|(restrictions, _)| restrictions),
+            Some(vec![
+                ManaSpendRestriction::SpellWithColorCount {
+                    comparator: Comparator::EQ,
+                    count: 1,
+                },
+                ManaSpendRestriction::SpellOfSourceChosenColor,
+            ]),
+        );
+        assert_eq!(
+            parse_mana_spend_restriction(
+                "spend this mana only to cast monocolored spell of the chosen color",
+            )
+            .map(|(restrictions, _)| restrictions),
+            Some(vec![
+                ManaSpendRestriction::SpellWithColorCount {
+                    comparator: Comparator::EQ,
+                    count: 1,
+                },
+                ManaSpendRestriction::SpellOfSourceChosenColor,
+            ]),
+        );
+        assert!(parse_mana_spend_restriction(
+            "spend this mana only to cast monocolored spells of that color with mana value 3 or greater",
+        )
+        .is_none());
     }
 }

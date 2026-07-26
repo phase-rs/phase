@@ -808,7 +808,7 @@ mod tests {
             source_id: ObjectId(201),
             controller: P0,
             kind: StackEntryKind::Spell {
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::Destroy {
                         target: TargetFilter::Any,
                         cant_regenerate: false,
@@ -816,7 +816,7 @@ mod tests {
                     vec![TargetRef::Object(creature)],
                     ObjectId(201),
                     P0,
-                )),
+                ))),
                 card_id: CardId(201),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,

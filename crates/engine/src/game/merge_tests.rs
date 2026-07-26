@@ -1302,7 +1302,7 @@ mod cast_pipeline {
             controller,
             kind: StackEntryKind::Spell {
                 card_id: CardId(card_id),
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Mutate creature".to_string(),
                         description: None,
@@ -1310,7 +1310,7 @@ mod cast_pipeline {
                     vec![TargetRef::Object(target)],
                     spell,
                     controller,
-                )),
+                ))),
                 casting_variant: CastingVariant::Mutate,
                 actual_mana_spent: 0,
             },

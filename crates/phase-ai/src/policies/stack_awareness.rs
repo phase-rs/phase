@@ -360,7 +360,7 @@ mod tests {
             source_id: ObjectId(999),
             controller: PlayerId(1),
             kind: StackEntryKind::Spell {
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 card_id: CardId(999),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,

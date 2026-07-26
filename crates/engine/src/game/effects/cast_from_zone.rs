@@ -1803,7 +1803,7 @@ mod tests {
             controller: PlayerId(0),
             kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
                 source_id: siege_id,
-                ability: ability.clone(),
+                ability: Box::new(ability.clone()),
             },
         });
 

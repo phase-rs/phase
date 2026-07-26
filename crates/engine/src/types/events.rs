@@ -1265,6 +1265,11 @@ pub enum GameEvent {
         /// are constructed. `None` for actions without a magnitude.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         look_count: Option<u32>,
+        /// CR 701.22a + CR 701.22d: Number of cards put on the bottom as the
+        /// completed scry's controller chose. `Some(0)` distinguishes a
+        /// completed nonzero scry that left every looked-at card on top.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scry_bottom_count: Option<u32>,
     },
     /// Engine-authored diagnostic for top-card predicate
     /// guesses. This is intentionally a log/debug event rather than rules input:

@@ -70,7 +70,7 @@ pub struct PendingTrigger {
     pub source_id: ObjectId,
     pub controller: PlayerId,
     pub condition: Option<TriggerCondition>,
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     pub timestamp: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_constraints: Vec<TargetSelectionConstraint>,
@@ -1692,7 +1692,7 @@ fn collect_matching_triggers_inner(
                             .condition
                             .as_ref()
                             .and_then(|condition| stack_condition_for_trigger(trig_def, condition)),
-                        ability: pending_ability,
+                        ability: Box::new(pending_ability),
                         timestamp,
                         target_constraints: trig_def
                             .execute
@@ -2707,7 +2707,7 @@ fn collect_latched_batched_zone_triggers(
                 condition: latched.definition.condition.as_ref().and_then(|condition| {
                     stack_condition_for_trigger(&latched.definition, condition)
                 }),
-                ability,
+                ability: Box::new(ability),
                 timestamp: source_context.entered_battlefield_turn.unwrap_or(0),
                 target_constraints: latched
                     .definition
@@ -2990,7 +2990,7 @@ fn collect_pending_triggers_with_collection(
                             source_id: obj_id,
                             controller,
                             condition: prowess_trig_def.condition,
-                            ability: prowess_ability,
+                            ability: Box::new(prowess_ability),
                             timestamp,
                             target_constraints: Vec::new(),
                             distribute: None,
@@ -3037,7 +3037,7 @@ fn collect_pending_triggers_with_collection(
                             source_id: obj_id,
                             controller,
                             condition: ravenous_trigger.condition,
-                            ability: draw_ability,
+                            ability: Box::new(draw_ability),
                             timestamp,
                             target_constraints: Vec::new(),
                             distribute: None,
@@ -3078,7 +3078,7 @@ fn collect_pending_triggers_with_collection(
                             source_id: obj_id,
                             controller,
                             condition: fb_trig_def.condition,
-                            ability: fb_ability,
+                            ability: Box::new(fb_ability),
                             timestamp,
                             target_constraints: Vec::new(),
                             distribute: None,
@@ -3125,7 +3125,7 @@ fn collect_pending_triggers_with_collection(
                         source_id: obj_id,
                         controller,
                         condition: decayed_trigger.condition,
-                        ability: decayed_ability,
+                        ability: Box::new(decayed_ability),
                         timestamp,
                         target_constraints: Vec::new(),
                         distribute: None,
@@ -3169,7 +3169,7 @@ fn collect_pending_triggers_with_collection(
                             source_id: *object_id,
                             controller,
                             condition: None,
-                            ability: exploit_ability,
+                            ability: Box::new(exploit_ability),
                             timestamp,
                             target_constraints: Vec::new(),
                             distribute: None,
@@ -3256,7 +3256,7 @@ fn collect_pending_triggers_with_collection(
                                         source_id: obj_id,
                                         controller,
                                         condition: None,
-                                        ability: ward_ability,
+                                        ability: Box::new(ward_ability),
                                         timestamp,
                                         target_constraints: Vec::new(),
                                         distribute: None,
@@ -3669,7 +3669,7 @@ fn collect_pending_triggers_with_collection(
                         source_id: *cast_obj_id,
                         controller: *caster,
                         condition: storm_trig_def.condition,
-                        ability: storm_ability,
+                        ability: Box::new(storm_ability),
                         timestamp,
                         target_constraints: Vec::new(),
                         distribute: None,
@@ -3731,7 +3731,7 @@ fn collect_pending_triggers_with_collection(
                     source_id: *cast_obj_id,
                     controller,
                     condition: cascade_trig_def.condition,
-                    ability: cascade_ability,
+                    ability: Box::new(cascade_ability),
                     timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -3791,7 +3791,7 @@ fn collect_pending_triggers_with_collection(
                     source_id: *cast_obj_id,
                     controller: ripple_controller,
                     condition: ripple_trig_def.condition,
-                    ability: ripple_ability,
+                    ability: Box::new(ripple_ability),
                     timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -3912,7 +3912,7 @@ fn collect_pending_triggers_with_collection(
                     // casualty_copy_ability_definition(), which reads the already-set
                     // `ability.context.additional_cost_paid = true` above.
                     condition: None,
-                    ability: casualty_ability,
+                    ability: Box::new(casualty_ability),
                     timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -3983,7 +3983,7 @@ fn collect_pending_triggers_with_collection(
                     source_id: *cast_obj_id,
                     controller: dynamically_granted_conspire_instances.1,
                     condition: None,
-                    ability: conspire_ability,
+                    ability: Box::new(conspire_ability),
                     timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -4055,7 +4055,7 @@ fn collect_pending_triggers_with_collection(
                         source_id: *cast_obj_id,
                         controller,
                         condition: None,
-                        ability: replicate_ability,
+                        ability: Box::new(replicate_ability),
                         timestamp,
                         target_constraints: Vec::new(),
                         distribute: None,
@@ -4113,7 +4113,7 @@ fn collect_pending_triggers_with_collection(
                     source_id: *cast_obj_id,
                     controller: dynamically_granted_demonstrate_instances.1,
                     condition: None,
-                    ability: demonstrate_ability,
+                    ability: Box::new(demonstrate_ability),
                     timestamp,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -4145,7 +4145,7 @@ fn collect_pending_triggers_with_collection(
                         source_id: ObjectId(0),
                         controller: monarch_id,
                         condition: trig_def.condition,
-                        ability: draw_ability,
+                        ability: Box::new(draw_ability),
                         timestamp: 0,
                         target_constraints: Vec::new(),
                         distribute: None,
@@ -4180,7 +4180,7 @@ fn collect_pending_triggers_with_collection(
                         source_id: ObjectId(0),
                         controller: init_holder,
                         condition: trig_def.condition,
-                        ability: venture_ability,
+                        ability: Box::new(venture_ability),
                         timestamp: 0,
                         target_constraints: Vec::new(),
                         distribute: None,
@@ -4275,7 +4275,7 @@ fn collect_pending_triggers_with_collection(
                             source_id: *source_id,
                             controller: new_monarch,
                             condition: trig_def.condition,
-                            ability: become_ability,
+                            ability: Box::new(become_ability),
                             timestamp: 0,
                             target_constraints: Vec::new(),
                             distribute: None,
@@ -4319,7 +4319,7 @@ fn collect_pending_triggers_with_collection(
                             source_id: *source_id,
                             controller: new_holder,
                             condition: trig_def.condition,
-                            ability: take_init,
+                            ability: Box::new(take_init),
                             timestamp: 0,
                             target_constraints: Vec::new(),
                             distribute: None,
@@ -4364,7 +4364,7 @@ fn collect_pending_triggers_with_collection(
                     source_id: speed_key_source(),
                     controller: trigger_controller,
                     condition: trig_def.condition,
-                    ability: increase_ability,
+                    ability: Box::new(increase_ability),
                     timestamp: 0,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -4411,7 +4411,7 @@ fn collect_pending_triggers_with_collection(
                     source_id: ObjectId(0),
                     controller: active,
                     condition: trig_def.condition,
-                    ability: rad_ability,
+                    ability: Box::new(rad_ability),
                     timestamp: 0,
                     target_constraints: Vec::new(),
                     distribute: None,
@@ -4654,7 +4654,7 @@ fn ring_pending_trigger(
         source_id,
         controller: trigger_controller,
         condition: None,
-        ability,
+        ability: Box::new(ability),
         timestamp: 0,
         target_constraints: Vec::new(),
         distribute: None,
@@ -6195,7 +6195,7 @@ pub(crate) fn push_pending_trigger_to_stack_with_event_batch(
         controller,
         kind: StackEntryKind::TriggeredAbility {
             source_id,
-            ability: Box::new(ability),
+            ability,
             condition,
             trigger_event,
             description,
@@ -6580,7 +6580,7 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             state.pending_trigger_event_batch = trigger_events;
-            state.pending_trigger = Some(pending_for_state);
+            state.pending_trigger = Some(Box::new(pending_for_state));
             state.pending_trigger_entry = Some(entry_id);
 
             // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at random"
@@ -6739,7 +6739,7 @@ fn dispatch_pending_trigger_context(
                                 events_out,
                             );
                             state.pending_trigger_event_batch = trigger_events;
-                            state.pending_trigger = Some(pending_for_state);
+                            state.pending_trigger = Some(Box::new(pending_for_state));
                             state.pending_trigger_entry = Some(entry_id);
                             state.waiting_for =
                                 crate::types::game_state::WaitingFor::DistributeAmong {
@@ -6777,7 +6777,7 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             state.pending_trigger_event_batch = trigger_events;
-            state.pending_trigger = Some(pending_for_state);
+            state.pending_trigger = Some(Box::new(pending_for_state));
             state.pending_trigger_entry = Some(entry_id);
             restore_trigger_event_context(state, context_snapshot);
             TriggerDispatchDisposition::Paused
@@ -7298,7 +7298,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     source_id: obj_id,
                     controller,
                     condition: trigger.condition.clone(),
-                    ability,
+                    ability: Box::new(ability),
                     timestamp,
                     target_constraints,
                     distribute: trigger
@@ -10053,6 +10053,7 @@ fn quantity_ref_refs_cost_paid_object(qty: &QuantityRef) -> bool {
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
         | QuantityRef::PlayerCount { .. }
         | QuantityRef::EventContextPlayerCount { .. }
         | QuantityRef::PlayerCounter { .. }
@@ -11275,11 +11276,11 @@ pub mod tests {
             source_id,
             controller,
         );
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: vec![],
             distribute: None,
@@ -11290,7 +11291,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: controller,
             source_id,
@@ -13851,7 +13852,7 @@ pub mod tests {
             controller: player,
             kind: StackEntryKind::Spell {
                 card_id: CardId(2),
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
@@ -13859,7 +13860,7 @@ pub mod tests {
                     Vec::new(),
                     spell,
                     player,
-                )),
+                ))),
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
                 actual_mana_spent: 1,
             },
@@ -14447,7 +14448,7 @@ pub mod tests {
                     id: TrackedSetId(1),
                 },
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::PutCounter {
                     counter_type: crate::types::counter::CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value: 2 },
@@ -14456,7 +14457,7 @@ pub mod tests {
                 vec![],
                 source,
                 PlayerId(0),
-            ),
+            )),
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
@@ -15943,7 +15944,7 @@ pub mod tests {
             source_id: land,
             controller: P0,
             condition: trig.condition,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -16017,7 +16018,12 @@ pub mod tests {
             source_id: desert,
             controller: P0,
             condition: desert_trig.condition.clone(),
-            ability: build_triggered_ability(runner.state(), &desert_trig, desert, P0),
+            ability: Box::new(build_triggered_ability(
+                runner.state(),
+                &desert_trig,
+                desert,
+                P0,
+            )),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -16035,7 +16041,12 @@ pub mod tests {
             source_id: sibling,
             controller: P0,
             condition: draw_trig.condition.clone(),
-            ability: build_triggered_ability(runner.state(), &draw_trig, sibling, P0),
+            ability: Box::new(build_triggered_ability(
+                runner.state(),
+                &draw_trig,
+                sibling,
+                P0,
+            )),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -16174,7 +16185,7 @@ pub mod tests {
             condition: DelayedTriggerCondition::WhenDies {
                 filter: TargetFilter::Any,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -16182,7 +16193,7 @@ pub mod tests {
                 vec![],
                 source_draw,
                 controller,
-            ),
+            )),
             controller,
             source_id: source_draw,
             one_shot: true,
@@ -16192,7 +16203,7 @@ pub mod tests {
             condition: DelayedTriggerCondition::WhenDies {
                 filter: TargetFilter::Any,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                     player: TargetFilter::Controller,
@@ -16200,7 +16211,7 @@ pub mod tests {
                 vec![],
                 source_gain,
                 controller,
-            ),
+            )),
             controller,
             source_id: source_gain,
             one_shot: true,
@@ -16312,7 +16323,7 @@ pub mod tests {
             condition: DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::Upkeep,
             },
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                     player: TargetFilter::Controller,
@@ -16320,7 +16331,7 @@ pub mod tests {
                 vec![],
                 delayed_source,
                 controller,
-            ),
+            )),
             controller,
             source_id: delayed_source,
             one_shot: true,
@@ -18202,7 +18213,7 @@ pub mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: TargetFilter::Controller,
@@ -18210,7 +18221,7 @@ pub mod tests {
                     vec![],
                     spell_id,
                     PlayerId(0),
-                )),
+                ))),
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -25502,7 +25513,7 @@ pub mod tests {
             controller: caster,
             kind: StackEntryKind::Spell {
                 card_id: CardId(2),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -25589,7 +25600,7 @@ pub mod tests {
             controller: caster,
             kind: StackEntryKind::Spell {
                 card_id: CardId(2),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -25671,7 +25682,7 @@ pub mod tests {
             controller: caster,
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: Default::default(),
                 actual_mana_spent: 0,
             },
@@ -26809,7 +26820,7 @@ pub mod tests {
                     controller,
                 );
                 ability.description = Some(name.to_string());
-                ability
+                Box::new(ability)
             },
             timestamp: 0,
             target_constraints: Vec::new(),
@@ -26927,7 +26938,7 @@ pub mod tests {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -27144,7 +27155,7 @@ pub mod tests {
             source_id,
             controller,
             condition: None,
-            ability,
+            ability: Box::new(ability),
             timestamp: 0,
             target_constraints: Vec::new(),
             distribute: None,
@@ -29465,11 +29476,11 @@ pub mod tests {
                 source_id: source,
                 controller: PlayerId(0),
                 condition: trigger.condition,
-                ability: crate::game::ability_utils::build_resolved_from_def(
+                ability: Box::new(crate::game::ability_utils::build_resolved_from_def(
                     trigger.execute.as_deref().unwrap(),
                     source,
                     PlayerId(0),
-                ),
+                )),
                 timestamp: 0,
                 target_constraints: Vec::new(),
                 distribute: None,
@@ -29638,7 +29649,7 @@ pub mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(2),
-                ability: Some(syphon),
+                ability: Some(Box::new(syphon)),
                 casting_variant: crate::types::game_state::CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -29713,11 +29724,11 @@ pub mod tests {
                 source_id: source,
                 controller: PlayerId(0),
                 condition: trigger.condition,
-                ability: crate::game::ability_utils::build_resolved_from_def(
+                ability: Box::new(crate::game::ability_utils::build_resolved_from_def(
                     trigger.execute.as_deref().unwrap(),
                     source,
                     PlayerId(0),
-                ),
+                )),
                 timestamp: 0,
                 target_constraints: Vec::new(),
                 distribute: None,
@@ -29815,11 +29826,11 @@ pub mod tests {
                 source_id: source,
                 controller: PlayerId(0),
                 condition: trigger.condition,
-                ability: crate::game::ability_utils::build_resolved_from_def(
+                ability: Box::new(crate::game::ability_utils::build_resolved_from_def(
                     trigger.execute.as_deref().unwrap(),
                     source,
                     PlayerId(0),
-                ),
+                )),
                 timestamp: 0,
                 target_constraints: Vec::new(),
                 distribute: None,
@@ -30007,11 +30018,11 @@ pub mod tests {
                 source_id: source,
                 controller: PlayerId(0),
                 condition: trigger.condition,
-                ability: crate::game::ability_utils::build_resolved_from_def(
+                ability: Box::new(crate::game::ability_utils::build_resolved_from_def(
                     trigger.execute.as_deref().unwrap(),
                     source,
                     PlayerId(0),
-                ),
+                )),
                 timestamp: 0,
                 target_constraints: Vec::new(),
                 distribute: None,
@@ -30097,11 +30108,11 @@ pub mod tests {
                 source_id: source,
                 controller: PlayerId(0),
                 condition: trigger.condition,
-                ability: crate::game::ability_utils::build_resolved_from_def(
+                ability: Box::new(crate::game::ability_utils::build_resolved_from_def(
                     trigger.execute.as_deref().unwrap(),
                     source,
                     PlayerId(0),
-                ),
+                )),
                 timestamp: 0,
                 target_constraints: Vec::new(),
                 distribute: None,

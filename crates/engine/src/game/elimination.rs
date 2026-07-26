@@ -923,7 +923,7 @@ fn do_eliminate(
                     source_id,
                     controller: new_holder,
                     condition: None,
-                    ability: venture_ability,
+                    ability: Box::new(venture_ability),
                     timestamp: 0,
                     target_constraints: Vec::new(),
                     distribute: None,

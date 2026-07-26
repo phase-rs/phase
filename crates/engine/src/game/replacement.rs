@@ -1390,6 +1390,26 @@ fn replacement_may_cost_has_self_zone_move(cost: &AbilityCost) -> bool {
     }
 }
 
+/// Constructs the resolution-scoped payment authority used by replacement
+/// may-costs. These payments are not activations, so this deliberately carries
+/// no activation-only payment context.
+fn replacement_may_cost_payment_ability(
+    cost: &AbilityCost,
+    source_id: ObjectId,
+    player: PlayerId,
+) -> ResolvedAbility {
+    ResolvedAbility::new(
+        crate::types::ability::Effect::PayCost {
+            cost: cost.clone(),
+            scale: None,
+            payer: TargetFilter::Controller,
+        },
+        Vec::new(),
+        source_id,
+        player,
+    )
+}
+
 fn pay_replacement_may_cost(
     state: &mut GameState,
     player: PlayerId,
@@ -1463,16 +1483,7 @@ fn pay_replacement_may_cost(
             // `source_id` and resolves the (here fixed) discard `count` against
             // it. Modeling it as `Effect::PayCost { cost }` keeps the context
             // self-describing without inventing a fake target chain.
-            let ability = ResolvedAbility::new(
-                crate::types::ability::Effect::PayCost {
-                    cost: cost.clone(),
-                    scale: None,
-                    payer: TargetFilter::Controller,
-                },
-                Vec::new(),
-                source_id,
-                player,
-            );
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
             // CR 118.12 + CR 701.9b: when the eligible set exceeds the requirement
             // the resolution authority sets `WaitingFor::DiscardChoice` for the
             // player to pick *which* card(s) to discard. The non-composite discard
@@ -1505,16 +1516,7 @@ fn pay_replacement_may_cost(
         // follows the same pattern as Discard: the resolution authority handles
         // the interactive choice via `WaitingFor::EffectZoneChoice` with is_cost_payment: true.
         AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => {
-            let ability = ResolvedAbility::new(
-                crate::types::ability::Effect::PayCost {
-                    cost: cost.clone(),
-                    scale: None,
-                    payer: TargetFilter::Controller,
-                },
-                Vec::new(),
-                source_id,
-                player,
-            );
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
             let prior_waiting_for = state.waiting_for.clone();
             match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
                 state, player, cost, &ability, events,
@@ -1542,15 +1544,22 @@ fn pay_replacement_may_cost(
                 Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
         }
-        _ => match crate::game::casting::pay_ability_cost_for_activation(
-            state, player, source_id, cost, None, events,
-        ) {
-            Ok(crate::game::costs::PaymentOutcome::Paid) => true,
-            Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
-                return MayCostOutcome::PausedForChoice { remaining_cost };
+        // A replacement's may-cost is paid while applying the replacement; it
+        // is not an activation of `source_id`. Use the dedicated resolution
+        // payment authority so it neither invents an ability index nor applies
+        // an unrelated activation-only mana rider.
+        _ => {
+            let ability = replacement_may_cost_payment_ability(cost, source_id, player);
+            match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
+                state, player, cost, &ability, events,
+            ) {
+                Ok(crate::game::costs::PaymentOutcome::Paid) => true,
+                Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
+                    return MayCostOutcome::PausedForChoice { remaining_cost };
+                }
+                Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
             }
-            Ok(crate::game::costs::PaymentOutcome::Failed { .. }) | Err(_) => false,
-        },
+        }
     };
     if paid {
         MayCostOutcome::Paid

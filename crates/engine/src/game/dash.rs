@@ -67,7 +67,7 @@ pub(crate) fn install_dash_riders(
         state,
         DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: return_to_hand,
+            ability: Box::new(return_to_hand),
             controller,
             source_id: object_id,
             one_shot: true,

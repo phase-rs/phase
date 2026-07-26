@@ -15591,6 +15591,7 @@ fn exile_top_of_your_library_parses_as_exile_top() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -15613,6 +15614,7 @@ fn exile_top_card_of_your_library_face_down_parses_with_face_down_true() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15639,6 +15641,7 @@ fn exile_card_from_top_of_your_library_face_down_for_each_opponent() {
                         filter: crate::types::ability::PlayerFilter::Opponent,
                     },
                 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15660,6 +15663,7 @@ fn exile_top_target_opponents_library() {
         Effect::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down,
         } => {
             assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
@@ -15687,6 +15691,7 @@ fn exile_top_target_players_library_singular() {
             Effect::ExileTop {
                 player: TargetFilter::Player,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -15714,6 +15719,7 @@ fn gonti_night_minister_look_and_exile_face_down_fuses_to_exile_top() {
             Effect::ExileTop {
                 player: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15756,6 +15762,7 @@ fn look_at_top_then_exile_it_face_down_rewrites_dig_to_exile_top() {
             Effect::ExileTop {
                 player: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: true,
             }
         ),
@@ -15829,6 +15836,7 @@ fn exile_top_then_free_play_that_card_binds_cast_to_tracked_set() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -15873,6 +15881,7 @@ fn abbot_of_keral_keep_paid_impulse_grant_unchanged() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22457,6 +22466,7 @@ fn parse_impulse_draw_chain_next_turn() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22501,6 +22511,7 @@ fn escape_to_the_wilds_play_clause() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 5 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22823,6 +22834,7 @@ fn parse_impulse_draw_chain() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -22988,6 +23000,7 @@ fn exile_top_x_cards_of_your_library() {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::Variable { ref name }
                 },
+                position: LibraryPosition::Top,
                 face_down: false,
             } if name == "X"
         ),
@@ -23014,6 +23027,7 @@ fn exile_top_x_cards_with_where_x_card_types_among_other_nonland_permanents() {
                             },
                     },
             },
+        position: LibraryPosition::Top,
         face_down: false,
     } = &*def.effect
     else {
@@ -23059,6 +23073,7 @@ fn jeleva_etb_each_player_exiles_top_x_resolves_to_mana_spent_to_cast() {
                         metric: crate::types::ability::CastManaSpentMetric::Total,
                     },
             },
+        position: LibraryPosition::Top,
         face_down: false,
     } = &*def.effect
     else {
@@ -23094,6 +23109,7 @@ fn exile_top_card_of_that_players_library_uses_parent_target() {
             Effect::ExileTop {
                 player: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -23766,6 +23782,7 @@ fn defending_player_exiles_top_twenty_cards() {
             Effect::ExileTop {
                 player: TargetFilter::DefendingPlayer,
                 count: QuantityExpr::Fixed { value: 20 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),
@@ -23784,6 +23801,7 @@ fn target_opponent_exiles_top_half_library() {
         Effect::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down: _,
         } => {
             assert!(
@@ -40092,6 +40110,7 @@ fn parser_shape_evelyn_exiles_each_library_with_collection_counter_and_permissio
     let Effect::ExileTop {
         player: TargetFilter::Controller,
         count: QuantityExpr::Fixed { value: 1 },
+        position: LibraryPosition::Top,
         face_down: false,
     } = *def.effect
     else {
@@ -43048,6 +43067,7 @@ fn alt_cost_rider_folds_onto_prior_cast_from_zone() {
             Effect::ExileTop {
                 player: TargetFilter::Controller,
                 count: QuantityExpr::Fixed { value: 1 },
+                position: LibraryPosition::Top,
                 face_down: false,
             }
         ),

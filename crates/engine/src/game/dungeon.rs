@@ -339,6 +339,7 @@ pub fn room_effects(
                 Effect::ExileTop {
                     player: TargetFilter::Controller,
                     count: fixed(2),
+                    position: crate::types::ability::LibraryPosition::Top,
                     face_down: false,
                 },
                 source_id,

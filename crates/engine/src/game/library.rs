@@ -114,6 +114,7 @@ pub fn apply_resolved_library_shuffle(
         player_id: command.player,
         action: PlayerActionKind::ShuffledLibrary,
         look_count: None,
+        scry_bottom_count: None,
     });
     Ok(())
 }
@@ -174,6 +175,7 @@ mod tests {
                 player_id: PlayerId(0),
                 action: PlayerActionKind::ShuffledLibrary,
                 look_count: None,
+                scry_bottom_count: None,
             }]
         );
     }

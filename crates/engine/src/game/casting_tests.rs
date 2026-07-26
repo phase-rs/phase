@@ -1059,11 +1059,16 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
         Zone::Battlefield,
     );
     let cost = ManaCost::generic(1);
+    Arc::make_mut(&mut state.objects.get_mut(&ability_source).unwrap().abilities).push(
+        AbilityDefinition::new(AbilityKind::Activated, Effect::Proliferate)
+            .cost(AbilityCost::Mana { cost: cost.clone() }),
+    );
 
     assert!(can_pay_ability_mana_cost_after_auto_tap(
         &state,
         PlayerId(0),
         ability_source,
+        Some(0),
         &cost
     ));
 
@@ -1072,8 +1077,8 @@ fn activation_mana_payment_auto_taps_activation_only_source() {
         &mut state,
         PlayerId(0),
         ability_source,
+        Some(0),
         &cost,
-        None,
         &mut events,
     )
     .unwrap();
@@ -7551,7 +7556,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
         controller: PlayerId(0),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ObjectId(901),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -7559,7 +7564,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
                 Vec::new(),
                 ObjectId(901),
                 PlayerId(0),
-            ),
+            )),
         },
     });
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
@@ -11727,7 +11732,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(997),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     cant_regenerate: false,
@@ -11735,7 +11740,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 vec![TargetRef::Object(large_creature)],
                 opposing_bolt,
                 PlayerId(1),
-            )),
+            ))),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 1,
         },
@@ -11785,7 +11790,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         controller: PlayerId(1),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ability_source,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Destroy {
                     target: TargetFilter::Typed(TypedFilter::creature()),
                     cant_regenerate: false,
@@ -11793,7 +11798,7 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
                 vec![TargetRef::Object(large_creature)],
                 ability_source,
                 PlayerId(1),
-            ),
+            )),
         },
     });
     let not_of_this_world_targeting_ability = ResolvedAbility::new(
@@ -25682,7 +25687,7 @@ fn adventure_exile_on_resolve() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(70),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
@@ -25692,7 +25697,7 @@ fn adventure_exile_on_resolve() {
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Adventure,
             actual_mana_spent: 0,
         },
@@ -25733,7 +25738,7 @@ fn adventure_countered_to_graveyard() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(70),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 2 },
                     target: crate::types::ability::TargetFilter::Any,
@@ -25743,7 +25748,7 @@ fn adventure_countered_to_graveyard() {
                 vec![TargetRef::Player(PlayerId(1))],
                 obj_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Adventure,
             actual_mana_spent: 0,
         },
@@ -25843,7 +25848,7 @@ fn can_pay_sacrifice_cost_with_eligible() {
         PlayerId(0),
         source,
         &cost,
-        None
+        Some(0)
     ));
 }
 
@@ -25869,7 +25874,7 @@ fn cannot_pay_sacrifice_cost_no_eligible() {
         PlayerId(0),
         source,
         &cost,
-        None
+        Some(0)
     ));
 }
 
@@ -31080,7 +31085,7 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, None, &mut events)
+    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, Some(0), &mut events)
         .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
@@ -33084,8 +33089,15 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
-            .expect("cost should pay with 2 +1/+1 counters available");
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            source,
+            &cost,
+            Some(0),
+            &mut events,
+        )
+        .expect("cost should pay with 2 +1/+1 counters available");
         let remaining = state
             .objects
             .get(&source)
@@ -33126,7 +33138,7 @@ mod remove_counter_cost {
             "cost must be unpayable when the source has no +1/+1 counters"
         );
         assert!(
-            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, None),
+            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, Some(0)),
             "can_pay_ability_cost_now must reject an unpayable remove-counter cost"
         );
     }
@@ -33163,8 +33175,15 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         let mut events = Vec::new();
-        pay_ability_cost_for_activation(&mut state, PlayerId(0), source, &cost, None, &mut events)
-            .unwrap();
+        pay_ability_cost_for_activation(
+            &mut state,
+            PlayerId(0),
+            source,
+            &cost,
+            Some(0),
+            &mut events,
+        )
+        .unwrap();
         let removed_count = events
             .iter()
             .filter_map(|e| match e {
@@ -34612,7 +34631,7 @@ mod unattach_cost {
             PlayerId(0),
             equipment,
             &cost,
-            None,
+            Some(0),
             &mut Vec::new(),
         )
         .expect("attached Equipment should be able to unattach as a cost");
@@ -36328,7 +36347,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("exert cost pays");
@@ -36388,7 +36407,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("first exert");
@@ -36397,7 +36416,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("second exert");
@@ -36445,7 +36464,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -36465,7 +36484,7 @@ mod exert_cost {
             PlayerId(0),
             id,
             &AbilityCost::Exert,
-            None,
+            Some(0),
             &mut events,
         )
         .expect("exert cost pays");
@@ -38704,7 +38723,7 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(707),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Aura".to_string(),
                     description: None,
@@ -38712,7 +38731,7 @@ fn bestow_illegal_target_at_resolution_reverts_to_creature() {
                 vec![TargetRef::Object(target_creature)],
                 bestow_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Bestow,
             actual_mana_spent: 0,
         },
@@ -38791,7 +38810,7 @@ fn bestow_legal_target_resolves_attached_as_aura() {
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(709),
-            ability: Some(ResolvedAbility::new(
+            ability: Some(Box::new(ResolvedAbility::new(
                 Effect::Unimplemented {
                     name: "Aura".to_string(),
                     description: None,
@@ -38799,7 +38818,7 @@ fn bestow_legal_target_resolves_attached_as_aura() {
                 vec![TargetRef::Object(target_creature)],
                 bestow_id,
                 PlayerId(0),
-            )),
+            ))),
             casting_variant: CastingVariant::Bestow,
             actual_mana_spent: 0,
         },

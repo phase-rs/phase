@@ -23,8 +23,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastingPermission, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, CopyRetargetPermission, CounterSourceRider, DigSource,
     Duration, Effect, EffectScope, ExcessRecipient, FaceDownBody, FaceDownProfile, FilterProp,
-    ForEachCategoryAction, LibraryPosition, MultiTargetSpec, ObjectScope, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
+    ForEachCategoryAction, LibraryPosition, ManaSpendRestriction, MultiTargetSpec, ObjectScope,
+    PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RevealUntilDisposition,
     SpellStackToGraveyardReplacement, StaticDefinition, TargetChoiceTiming, TargetFilter,
     TypeFilter, TypedFilter,
 };
@@ -3787,7 +3787,7 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::ManaRestriction {
-            restriction,
+            restrictions: new_restrictions,
             grants: new_grants,
         } => {
             let Some(previous) = defs.last_mut() else {
@@ -3799,7 +3799,7 @@ pub(super) fn apply_clause_continuation(
                 ..
             } = &mut *previous.effect
             {
-                restrictions.push(restriction);
+                restrictions.extend(new_restrictions);
                 grants.extend(new_grants);
             }
         }
@@ -4862,6 +4862,7 @@ pub(super) fn apply_clause_continuation(
             *defs[bound_index].effect = Effect::ExileTop {
                 player,
                 count,
+                position: crate::types::ability::LibraryPosition::Top,
                 face_down,
             };
         }
@@ -6507,10 +6508,14 @@ pub(super) fn parse_followup_continuation_ast(
             // (coverage green). A dropped unsupported restriction also drops any
             // paired `grants`; that is intentional (no real card pairs a grant with
             // an unsupported restriction).
-            if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
-                if restriction.is_coverage_supported() {
+            if let Some((restrictions, grants)) = super::mana::parse_mana_spend_restriction(&lower) {
+                if !restrictions.is_empty()
+                    && restrictions
+                        .iter()
+                        .all(ManaSpendRestriction::is_coverage_supported)
+                {
                     return Some(ContinuationAst::ManaRestriction {
-                        restriction,
+                        restrictions,
                         grants,
                     });
                 }

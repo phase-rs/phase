@@ -82,7 +82,7 @@ fn epic_spell_on_stack(state: &mut GameState, card: u64, is_token: bool) -> Obje
         controller: PlayerId(0),
         kind: StackEntryKind::Spell {
             card_id: CardId(card),
-            ability: Some(snapshot(id)),
+            ability: Some(Box::new(snapshot(id))),
             casting_variant: CastingVariant::default(),
             actual_mana_spent: 0,
         },

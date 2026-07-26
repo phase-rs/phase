@@ -95,7 +95,7 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         source_id: trigger_creature,
         controller: PlayerId(0),
         condition: None,
-        ability,
+        ability: Box::new(ability),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -114,7 +114,7 @@ fn trigger_target_selection_select_targets_pushes_to_stack() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
 
     let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -188,7 +188,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         source_id: ObjectId(1),
         controller: PlayerId(0),
         condition: None,
-        ability: crate::types::ability::ResolvedAbility::new(
+        ability: Box::new(crate::types::ability::ResolvedAbility::new(
             Effect::ChangeZone {
                 enters_modified_if: None,
                 origin: Some(Zone::Battlefield),
@@ -207,7 +207,7 @@ fn trigger_target_selection_rejects_illegal_target() {
             vec![],
             ObjectId(1),
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -226,7 +226,7 @@ fn trigger_target_selection_rejects_illegal_target() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
 
     state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -267,7 +267,7 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
         source_id: ObjectId(20),
         controller: PlayerId(0),
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "modal_placeholder".to_string(),
                 description: None,
@@ -275,7 +275,7 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
             vec![],
             ObjectId(20),
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -314,7 +314,7 @@ fn triggered_modal_modes_with_targets_wait_for_target_selection() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     state.waiting_for = WaitingFor::AbilityModeChoice {
         player: PlayerId(0),
@@ -428,12 +428,12 @@ fn setup_vindictive_lich_pending_trigger(state: &mut GameState) {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::unimplemented("modal_placeholder", "modal fixture placeholder"),
             vec![],
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -453,7 +453,7 @@ fn setup_vindictive_lich_pending_trigger(state: &mut GameState) {
     let mut setup_events = Vec::new();
     let entry_id =
         crate::game::triggers::push_pending_trigger_to_stack(state, pending, &mut setup_events);
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
 }
 
@@ -545,7 +545,7 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "modal_placeholder".to_string(),
                 description: None,
@@ -553,7 +553,7 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
             vec![],
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -598,7 +598,7 @@ fn triggered_modal_modes_without_targets_consume_pending_trigger() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     state.waiting_for = WaitingFor::AbilityModeChoice {
         player: PlayerId(0),
@@ -666,7 +666,7 @@ fn triggered_commander_modal_cap_uses_controller_board_state() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "modal_placeholder".to_string(),
                 description: None,
@@ -674,7 +674,7 @@ fn triggered_commander_modal_cap_uses_controller_board_state() {
             vec![],
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -723,7 +723,7 @@ fn triggered_commander_modal_cap_uses_controller_board_state() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
 
     let waiting = begin_pending_trigger_target_selection(&mut state)
@@ -766,28 +766,30 @@ fn trigger_target_selection_enforces_different_player_constraint() {
         source_id: ObjectId(30),
         controller: PlayerId(0),
         condition: None,
-        ability: crate::types::ability::ResolvedAbility::new(
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Player,
-                damage_source: None,
-                excess: None,
-            },
-            vec![],
-            ObjectId(30),
-            PlayerId(0),
-        )
-        .sub_ability(crate::types::ability::ResolvedAbility::new(
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Player,
-                damage_source: None,
-                excess: None,
-            },
-            vec![],
-            ObjectId(30),
-            PlayerId(0),
-        )),
+        ability: Box::new(
+            crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                ObjectId(30),
+                PlayerId(0),
+            )
+            .sub_ability(crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                ObjectId(30),
+                PlayerId(0),
+            )),
+        ),
         timestamp: 1,
         target_constraints: vec![TargetSelectionConstraint::DifferentTargetPlayers],
         distribute: None,
@@ -806,7 +808,7 @@ fn trigger_target_selection_enforces_different_player_constraint() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     state.waiting_for = WaitingFor::TriggerTargetSelection {
         player: PlayerId(0),
@@ -913,28 +915,30 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
         source_id: ObjectId(31),
         controller: PlayerId(0),
         condition: None,
-        ability: crate::types::ability::ResolvedAbility::new(
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Player,
-                damage_source: None,
-                excess: None,
-            },
-            vec![],
-            ObjectId(31),
-            PlayerId(0),
-        )
-        .sub_ability(crate::types::ability::ResolvedAbility::new(
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Player,
-                damage_source: None,
-                excess: None,
-            },
-            vec![],
-            ObjectId(31),
-            PlayerId(0),
-        )),
+        ability: Box::new(
+            crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                ObjectId(31),
+                PlayerId(0),
+            )
+            .sub_ability(crate::types::ability::ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Player,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                ObjectId(31),
+                PlayerId(0),
+            )),
+        ),
         timestamp: 1,
         target_constraints: target_constraints.clone(),
         distribute: None,
@@ -953,7 +957,7 @@ fn choose_target_action_advances_trigger_selection_from_engine_state() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     state.waiting_for = WaitingFor::TriggerTargetSelection {
         player: PlayerId(0),
@@ -1022,7 +1026,7 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
         source_id: ObjectId(40),
         controller: PlayerId(0),
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "modal_placeholder".to_string(),
                 description: None,
@@ -1030,7 +1034,7 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
             vec![],
             ObjectId(40),
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -1071,7 +1075,7 @@ fn triggered_modal_modes_reject_unsatisfiable_target_constraints() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     state.waiting_for = WaitingFor::AbilityModeChoice {
         player: PlayerId(0),
@@ -1142,7 +1146,7 @@ fn all_modes_exhausted_clears_pending_trigger() {
         source_id,
         controller: PlayerId(0),
         condition: None,
-        ability: ResolvedAbility::new(
+        ability: Box::new(ResolvedAbility::new(
             Effect::Unimplemented {
                 name: "placeholder".to_string(),
                 description: None,
@@ -1150,7 +1154,7 @@ fn all_modes_exhausted_clears_pending_trigger() {
             vec![],
             source_id,
             PlayerId(0),
-        ),
+        )),
         timestamp: 1,
         target_constraints: Vec::new(),
         distribute: None,
@@ -1185,7 +1189,7 @@ fn all_modes_exhausted_clears_pending_trigger() {
         pending,
         &mut setup_events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
 
     // Call the private function via the engine path.

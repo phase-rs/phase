@@ -76,6 +76,7 @@ fn emit_empty_proliferate_action(actor: PlayerId, events: &mut Vec<GameEvent>) {
         player_id: actor,
         action: PlayerActionKind::Proliferate,
         look_count: None,
+        scry_bottom_count: None,
     });
 }
 

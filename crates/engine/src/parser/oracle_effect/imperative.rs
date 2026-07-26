@@ -3116,6 +3116,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         } => Effect::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down,
         },
         SearchCreationImperativeAst::CopyTokenOf {
@@ -8043,11 +8044,94 @@ fn parse_dynamic_exile_from_top<'a>(
     None
 }
 
+/// Parse the two library edges that a positional exile instruction currently
+/// supports. Keeping the edge separate from its surrounding sentence lets a
+/// caller preserve `LibraryPosition` rather than degrading a bottom instruction
+/// into a library-wide card selection.
+fn parse_exile_library_edge(input: &str) -> OracleResult<'_, LibraryPosition> {
+    alt((
+        value(LibraryPosition::Top, tag::<_, _, OracleError<'_>>("top")),
+        value(LibraryPosition::Bottom, tag("bottom")),
+    ))
+    .parse(input)
+}
+
+/// The owner axis of the completed-scry exile form. It is intentionally a
+/// parser of the possessive library phrase rather than part of a sentence-sized
+/// literal, so other positional library instructions can reuse it.
+fn parse_controller_library_owner(input: &str) -> OracleResult<'_, TargetFilter> {
+    value(
+        TargetFilter::Controller,
+        (tag::<_, _, OracleError<'_>>("your"), space1, tag("library")),
+    )
+    .parse(input)
+}
+
+/// CR 701.13a + CR 401.2: Parse "exile that many cards from the <edge> of
+/// <owner>'s library" as independent quantity, edge, and owner grammar axes.
+/// The caller supplies the quantity provenance because "that many" is only
+/// meaningful within a typed triggering-event context.
+fn parse_exile_that_many_from_library_edge(
+    input: &str,
+) -> OracleResult<'_, (LibraryPosition, TargetFilter)> {
+    let (input, _) = (
+        tag::<_, _, OracleError<'_>>("exile"),
+        space1,
+        tag("that"),
+        space1,
+        tag("many"),
+        space1,
+        tag("cards"),
+        space1,
+        tag("from"),
+        space1,
+        tag("the"),
+        space1,
+    )
+        .parse(input)?;
+    let (input, position) = parse_exile_library_edge(input)?;
+    let (input, _) = (space1, tag("of"), space1).parse(input)?;
+    let (input, player) = parse_controller_library_owner(input)?;
+    Ok((input, (position, player)))
+}
+
 pub(super) fn parse_exile_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ZoneCounterImperativeAst> {
+    // CR 701.13a + CR 401.2: A completed-scry trigger provides the only
+    // supported provenance for this "that many" library-edge form. Do not
+    // borrow generic EventContextAmount here: a textually similar clause in an
+    // unrelated trigger has no completed-scry bottom-count to read.
+    let mut positional_that_many = all_consuming(terminated(
+        parse_exile_that_many_from_library_edge,
+        opt(one_of(".;")),
+    ));
+    if let Ok((_, (position, player))) = positional_that_many.parse(lower) {
+        if matches!(
+            &ctx.quantity_ref,
+            Some(QuantityRef::TriggeringScryBottomCount)
+        ) {
+            return Some(ZoneCounterImperativeAst::ExileTop {
+                player,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringScryBottomCount,
+                },
+                position,
+                face_down: false,
+            });
+        }
+        // Preserve the pre-existing dynamic top-of-library path below, which
+        // supplies `EventContextAmount` for its supported trigger forms. A
+        // bottom-edge form has no such generic provenance, so decline instead
+        // of letting the broad `exile` fallback turn it into a library-wide
+        // `ChangeZone` instruction.
+        if matches!(position, LibraryPosition::Bottom) {
+            return None;
+        }
+    }
+
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
         let (initial_count, remainder) =
             if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
@@ -8089,6 +8173,7 @@ pub(super) fn parse_exile_ast(
             return Some(ZoneCounterImperativeAst::ExileTop {
                 player,
                 count,
+                position: LibraryPosition::Top,
                 face_down,
             });
         }
@@ -8136,6 +8221,7 @@ pub(super) fn parse_exile_ast(
                 return Some(ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count,
+                    position: LibraryPosition::Top,
                     face_down,
                 });
             }
@@ -8229,6 +8315,7 @@ pub(super) fn parse_exile_ast(
         return Some(ZoneCounterImperativeAst::ExileTop {
             player: TargetFilter::Controller,
             count,
+            position: LibraryPosition::Top,
             face_down,
         });
     }
@@ -8261,6 +8348,7 @@ pub(super) fn parse_exile_ast(
         return Some(ZoneCounterImperativeAst::ExileTop {
             player,
             count,
+            position: LibraryPosition::Top,
             face_down,
         });
     }
@@ -12595,10 +12683,12 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         ZoneCounterImperativeAst::ExileTop {
             player,
             count,
+            position,
             face_down,
         } => Effect::ExileTop {
             player,
             count,
+            position,
             face_down,
         },
         ZoneCounterImperativeAst::Counter {
@@ -19901,6 +19991,7 @@ mod tests {
                 ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
                     face_down: false,
                 }
             ),
@@ -19919,6 +20010,7 @@ mod tests {
                 ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 2 },
+                    position: LibraryPosition::Top,
                     face_down: false,
                 }
             ),
@@ -19933,10 +20025,51 @@ mod tests {
                 ZoneCounterImperativeAst::ExileTop {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 },
+                    position: LibraryPosition::Top,
                     face_down: false,
                 }
             ),
             "expected ExileTop(Controller, 1) at EOF, got {eof:?}"
+        );
+    }
+
+    /// CR 701.22a + CR 701.13a: The completed-scry bottom-count provenance
+    /// binds "that many" to the scry choice, while the grammar retains the
+    /// named bottom edge as `LibraryPosition::Bottom`.
+    #[test]
+    fn completed_scry_bottom_exile_uses_typed_quantity_and_position() {
+        let mut ctx = ParseContext {
+            quantity_ref: Some(QuantityRef::TriggeringScryBottomCount),
+            in_trigger: true,
+            ..Default::default()
+        };
+        let parsed = parse_exile_ast(
+            "exile that many cards from the bottom of your library.",
+            "exile that many cards from the bottom of your library.",
+            &mut ctx,
+        )
+        .expect("completed-scry bottom exile should parse");
+        assert!(matches!(
+            parsed,
+            ZoneCounterImperativeAst::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::TriggeringScryBottomCount,
+                },
+                position: LibraryPosition::Bottom,
+                face_down: false,
+            }
+        ));
+
+        let mut unrelated_ctx = ParseContext::default();
+        assert!(
+            parse_exile_ast(
+                "exile that many cards from the bottom of your library.",
+                "exile that many cards from the bottom of your library.",
+                &mut unrelated_ctx,
+            )
+            .is_none(),
+            "an unrelated trigger must decline instead of fabricating a generic library exile"
         );
     }
 

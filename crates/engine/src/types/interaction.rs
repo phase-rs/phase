@@ -339,6 +339,9 @@ pub enum InteractionManaRestriction {
         comparator: InteractionManaComparator,
         count: u32,
     },
+    OnlyForSpellColor {
+        color: InteractionManaColor,
+    },
     OnlyForSpellFromZone {
         zone: InteractionZoneCode,
         polarity: InteractionManaZoneSpendPolarity,
@@ -350,6 +353,7 @@ pub enum InteractionManaRestriction {
     OnlyForSpecialAction {
         action: InteractionManaSpecialAction,
     },
+    Impossible,
     ConvokePayment,
 }
 

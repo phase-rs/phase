@@ -172,7 +172,7 @@ fn push_spell(state: &mut GameState, id: ObjectId, controller: PlayerId, ability
         controller,
         kind: StackEntryKind::Spell {
             card_id: CardId(id.0),
-            ability: Some(ability),
+            ability: Some(Box::new(ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },

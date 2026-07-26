@@ -214,7 +214,7 @@ pub fn cast_paradigm_copy(
             controller,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -621,7 +621,7 @@ mod tests {
         );
         if let Some(entry) = state.stack.iter_mut().find(|e| e.id == copy_id) {
             if let StackEntryKind::Spell { ability, .. } = &mut entry.kind {
-                *ability = Some(resolved);
+                *ability = Some(Box::new(resolved));
             }
         }
 

@@ -17,11 +17,17 @@
 //! point is unobservable. Do not replace it with a simpler card.
 //!
 //! Every replay below applies a recorded push to a prefix containing no stack
-//! POP, because pops are not journaled yet (CR 608.1 / CR 603.3c/d / CR 701.6a
-//! / CR 601.2a). Past the first un-journaled removal the recorded
-//! `resulting_position` no longer matches the replayed depth and the applier
-//! fails closed by design — so a future test that replays across a pop should
-//! assert `StackDepthMismatch`, not relax the precondition.
+//! POP, and the `StackDepthMismatch` assertions here are about a push applied
+//! TWICE — a push is not idempotent — not about crossing a removal.
+//!
+//! The CR 405.2 top-of-stack pop IS journaled now
+//! (`cr733_resolved_stack_pop.rs`), so a replay may cross one by applying the
+//! recorded pop first; `a_recorded_pop_unblocks_a_later_push_replay` in that
+//! file demonstrates exactly that against a predecessor where the push alone
+//! still fails. Removals that remain un-journaled (remove-at-index and
+//! retain-by-predicate, CR 701.6a and the CR 800.4a elimination sweep) still
+//! make a crossing replay fail closed by design — the fix there is to journal
+//! them, never to relax this applier's precondition.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::stack::apply_resolved_stack_push;

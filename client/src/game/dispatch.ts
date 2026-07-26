@@ -13,7 +13,7 @@ import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
-  isMultiplayerMode,
+  isAuthorityRemote,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -291,7 +291,7 @@ async function processAction(
   const { gameMode } = useGameStore.getState();
   const shouldSaveHistory =
     UNDOABLE_ACTIONS.has(action.type) &&
-    !isMultiplayerMode(gameMode) &&
+    !isAuthorityRemote(gameMode) &&
     gameState.stack.length === 0;
 
   // 3. Call WASM — get events without updating state yet.

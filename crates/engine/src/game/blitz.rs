@@ -77,7 +77,7 @@ pub(crate) fn install_blitz_riders(
         state,
         DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: sacrifice,
+            ability: Box::new(sacrifice),
             controller,
             source_id: object_id,
             one_shot: true,

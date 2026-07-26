@@ -253,6 +253,11 @@ pub struct SpellMeta {
     /// color-count spend restrictions (`OnlyForSpellWithColorCount`). `None` at
     /// payment sites with no associated spell.
     pub color_count: Option<u32>,
+    /// CR 105.2: The spell's exact colors, consulted by color-specific spend
+    /// restrictions. This is distinct from `color_count`: a monocolored spell
+    /// must also have the particular required color to satisfy a rider such as
+    /// "monocolored spells of that color."
+    pub colors: Vec<ManaColor>,
     /// CR 107.3 + CR 202.3e: Whether the spell's printed mana cost contains an
     /// `{X}` symbol. Consulted by the "with {X} in their mana costs" disjunct of
     /// MV/X spend restrictions (`OnlyForSpellMatchingCostCriteria`). `false` at
@@ -309,6 +314,11 @@ pub enum PaymentContext<'a> {
         source_types: &'a [String],
         source_subtypes: &'a [String],
         ability_tag: Option<AbilityTag>,
+        /// CR 106.6: An ability's own activation-cost rider can constrain the
+        /// actual mana type paid, independently of what a unit's spend
+        /// restriction allows. This is checked before unit restrictions so an
+        /// as-though payment permission cannot bypass it.
+        mana_color_constraint: ActivationManaColorConstraint,
     },
     /// Payment for a cost during spell or ability resolution. Current
     /// restriction variants name spell-casting or ability-activation use, so
@@ -323,6 +333,50 @@ pub enum PaymentContext<'a> {
     /// context variant covers every restrictable special-action class rather
     /// than a sibling per action.
     SpecialAction(SpecialAction),
+}
+
+impl PaymentContext<'_> {
+    /// CR 106.6: Whether a mana unit's actual type may be used in this payment
+    /// context before its own spend restrictions are considered. Activation
+    /// riders constrain the physical mana paid, so this gate applies equally to
+    /// unrestricted and restricted units.
+    pub fn permits_actual_mana_type(&self, mana_type: ManaType) -> bool {
+        match self {
+            Self::Activation {
+                mana_color_constraint,
+                ..
+            } => mana_color_constraint.permits(mana_type),
+            Self::Spell(_) | Self::Effect | Self::SpecialAction(_) => true,
+        }
+    }
+}
+
+/// CR 106.6: A color constraint imposed by the activated ability whose cost is
+/// being paid (for example, "Spend only mana of the chosen color to activate
+/// this ability"). This is an AND gate on the actual `ManaUnit::color`, not a
+/// conversion of the mana's type and not an as-though permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivationManaColorConstraint {
+    /// The ability has no color-specific activation-payment rider.
+    #[default]
+    Unrestricted,
+    /// Every mana unit spent for this activation must have this actual color.
+    Only(ManaColor),
+    /// The rider refers to a source choice that is unavailable. Fail closed:
+    /// no mana unit may pay the activation cost.
+    Impossible,
+}
+
+impl ActivationManaColorConstraint {
+    /// CR 106.6: Whether this exact mana unit type may pay the activation
+    /// before the unit's own spend restrictions are considered.
+    pub fn permits(self, mana_type: ManaType) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Only(color) => mana_type == ManaType::from(color),
+            Self::Impossible => false,
+        }
+    }
 }
 
 /// CR 116.2: A class of special action whose mana cost can be the subject of a
@@ -534,6 +588,10 @@ pub enum ManaRestriction {
     /// colors" (also "N or more / N or fewer"). `comparator` applies
     /// `spell_color_count <cmp> count`. Colorless spells have color_count 0.
     OnlyForSpellWithColorCount { comparator: Comparator, count: u32 },
+    /// CR 105.2 + CR 106.6: "Spend this mana only to cast spells of [color]."
+    /// Usually composed with `OnlyForSpellWithColorCount { EQ, 1 }` for the
+    /// stricter "monocolored spells of that color" reading.
+    OnlyForSpellColor(ManaColor),
     /// CR 106.6 + CR 400.7: "Spend this mana only to cast spells from your
     /// graveyard" / "from exile" ([`ZoneSpendPolarity::From`]) and "from anywhere
     /// other than your hand" ([`ZoneSpendPolarity::NotFrom`], Mm'menon, the Right
@@ -580,6 +638,10 @@ pub enum ManaRestriction {
     /// Parameterized over the action class so one variant covers every
     /// restrictable special action (door unlock today; extensible).
     OnlyForSpecialAction(SpecialAction),
+    /// A source-dependent template could not resolve a required choice. This
+    /// remains attached to the produced mana rather than being dropped so the
+    /// resulting unit is unspendable instead of accidentally unrestricted.
+    Impossible,
     /// CR 702.51a: Internal marker for a convoke tap that substitutes for
     /// paying mana. The payment algorithm may consume it for the current spell,
     /// but cast-spent metrics and mana-added triggers must ignore it.
@@ -730,11 +792,13 @@ fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std:
             ManaRestriction::OnlyForSpellWithManaValue { .. } => 9,
             ManaRestriction::OnlyForSpellMatchingCostCriteria { .. } => 10,
             ManaRestriction::OnlyForSpellWithColorCount { .. } => 11,
-            ManaRestriction::OnlyForSpellFromZone(_) => 12,
-            ManaRestriction::OnlyForFaceDownSpell => 13,
-            ManaRestriction::OnlyForAny(_) => 14,
-            ManaRestriction::OnlyForSpecialAction(_) => 15,
-            ManaRestriction::ConvokePayment => 16,
+            ManaRestriction::OnlyForSpellColor(_) => 12,
+            ManaRestriction::OnlyForSpellFromZone(_) => 13,
+            ManaRestriction::OnlyForFaceDownSpell => 14,
+            ManaRestriction::OnlyForAny(_) => 15,
+            ManaRestriction::OnlyForSpecialAction(_) => 16,
+            ManaRestriction::Impossible => 17,
+            ManaRestriction::ConvokePayment => 18,
         }
     }
     rank(left).cmp(&rank(right)).then_with(|| match (left, right) {
@@ -803,6 +867,9 @@ fn cmp_mana_restriction(left: &ManaRestriction, right: &ManaRestriction) -> std:
         ) => comparator_rank(*a_cmp)
             .cmp(&comparator_rank(*b_cmp))
             .then_with(|| a_count.cmp(b_count)),
+        (ManaRestriction::OnlyForSpellColor(a), ManaRestriction::OnlyForSpellColor(b)) => {
+            a.cmp(b)
+        }
         (
             ManaRestriction::OnlyForSpellFromZone(a),
             ManaRestriction::OnlyForSpellFromZone(b),
@@ -1007,6 +1074,9 @@ impl ManaRestriction {
             ManaRestriction::OnlyForSpellWithColorCount { comparator, count } => meta
                 .color_count
                 .is_some_and(|cc| comparator.evaluate(cc as i32, *count as i32)),
+            ManaRestriction::OnlyForSpellColor(required_color) => {
+                meta.colors.contains(required_color)
+            }
             // CR 106.6 + CR 400.7: zone-gated spend. `From` requires the spell be
             // cast from the named zone; `NotFrom` requires it be cast from any
             // zone *except* the named one (e.g. "from anywhere other than your
@@ -1039,6 +1109,7 @@ impl ManaRestriction {
             ManaRestriction::OnlyForAny(subs) => subs.iter().any(|r| r.allows_spell(meta)),
             // CR 116.2: Special-action-only mana never pays for a spell cast.
             ManaRestriction::OnlyForSpecialAction(_) => false,
+            ManaRestriction::Impossible => false,
             ManaRestriction::ConvokePayment => true,
         }
     }
@@ -1063,11 +1134,13 @@ impl ManaRestriction {
             | ManaRestriction::OnlyForSpellWithManaValue { .. }
             | ManaRestriction::OnlyForSpellMatchingCostCriteria { .. }
             | ManaRestriction::OnlyForSpellWithColorCount { .. }
+            | ManaRestriction::OnlyForSpellColor(_)
             | ManaRestriction::OnlyForSpellFromZone(_)
             // CR 708.4: Face-down-spell-only mana never pays for ability activation.
             | ManaRestriction::OnlyForFaceDownSpell
             // CR 116.2: Special-action-only mana never pays for ability activation.
-            | ManaRestriction::OnlyForSpecialAction(_) => false,
+            | ManaRestriction::OnlyForSpecialAction(_)
+            | ManaRestriction::Impossible => false,
             // CR 106.6: The ability-activation half of the OR. `OfSpellType`
             // restricts to abilities of permanents whose type matches the
             // restriction ("Elemental sources" includes creature type Elemental —
@@ -1110,6 +1183,7 @@ impl ManaRestriction {
                 source_types,
                 source_subtypes,
                 ability_tag,
+                mana_color_constraint: _,
             } => self.allows_activation(source_types, source_subtypes, *ability_tag),
             PaymentContext::Effect => false,
             // CR 116.2: A special-action payment is permitted only by mana that
@@ -1131,7 +1205,23 @@ impl ManaRestriction {
             ManaRestriction::OnlyForAny(subs) => {
                 subs.iter().any(|r| r.allows_special_action(action))
             }
-            _ => false,
+            ManaRestriction::OnlyForSpell
+            | ManaRestriction::OnlyForSpellType(_)
+            | ManaRestriction::OnlyForCreatureType(_)
+            | ManaRestriction::OnlyForTypeSpellsOrAbilities { .. }
+            | ManaRestriction::OnlyForActivation
+            | ManaRestriction::OnlyForTaggedActivation(_)
+            | ManaRestriction::OnlyForXCosts
+            | ManaRestriction::OnlyForSpellWithKeywordKind(_)
+            | ManaRestriction::OnlyForSpellWithKeywordKindFromZone(_, _)
+            | ManaRestriction::OnlyForSpellWithManaValue { .. }
+            | ManaRestriction::OnlyForSpellMatchingCostCriteria { .. }
+            | ManaRestriction::OnlyForSpellWithColorCount { .. }
+            | ManaRestriction::OnlyForSpellColor(_)
+            | ManaRestriction::OnlyForSpellFromZone(_)
+            | ManaRestriction::OnlyForFaceDownSpell
+            | ManaRestriction::Impossible
+            | ManaRestriction::ConvokePayment => false,
         }
     }
 }
@@ -2047,16 +2137,15 @@ impl ManaPool {
     /// never spent.
     pub fn spend_for(&mut self, color: ManaType, ctx: &PaymentContext<'_>) -> Option<ManaUnit> {
         // First pass: prefer unrestricted mana of this color
-        if let Some(pos) = self
-            .mana
-            .iter()
-            .position(|m| m.color == color && m.restrictions.is_empty())
-        {
+        if let Some(pos) = self.mana.iter().position(|m| {
+            m.color == color && ctx.permits_actual_mana_type(m.color) && m.restrictions.is_empty()
+        }) {
             return Some(self.mana.swap_remove(pos));
         }
         // Second pass: restricted mana that allows this payment context
         if let Some(pos) = self.mana.iter().position(|m| {
             m.color == color
+                && ctx.permits_actual_mana_type(m.color)
                 && !m.restrictions.is_empty()
                 && m.restrictions.iter().all(|r| r.allows(ctx))
         }) {
@@ -2362,6 +2451,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2373,6 +2463,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2384,6 +2475,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2411,6 +2503,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2422,6 +2515,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2433,6 +2527,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2482,6 +2577,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2493,6 +2589,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2504,6 +2601,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2523,6 +2621,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2535,6 +2634,7 @@ mod tests {
             source_types: &source_types,
             source_subtypes: &source_subtypes,
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -2549,6 +2649,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2560,6 +2661,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2571,6 +2673,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2607,6 +2710,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2635,6 +2739,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2697,6 +2802,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2723,6 +2829,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2734,6 +2841,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2745,6 +2853,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2756,6 +2865,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2781,6 +2891,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2792,6 +2903,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2803,6 +2915,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2858,6 +2971,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2869,6 +2983,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2909,6 +3024,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2920,6 +3036,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2931,6 +3048,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2942,6 +3060,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2958,11 +3077,13 @@ mod tests {
             source_types: &["Creature".to_string()],
             source_subtypes: &["Human".to_string()],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(restriction.allows(&PaymentContext::Activation {
             source_types: &["Land".to_string()],
             source_subtypes: &[],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
     }
 
@@ -2979,6 +3100,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -2990,6 +3112,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3004,11 +3127,13 @@ mod tests {
             source_types: &artifact_types,
             source_subtypes: &no_subtypes,
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Activation {
             source_types: &creature_types,
             source_subtypes: &no_subtypes,
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -3042,6 +3167,7 @@ mod tests {
             source_types: &["Creature".to_string()],
             source_subtypes: &[],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
         assert!(!restriction.allows(&PaymentContext::SpecialAction(SpecialAction::UnlockDoor)));
@@ -3070,6 +3196,7 @@ mod tests {
             source_types: &["Creature".to_string()],
             source_subtypes: &[],
             ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Unrestricted,
         }));
         assert!(!restriction.allows(&PaymentContext::Effect));
     }
@@ -3102,6 +3229,73 @@ mod tests {
         assert!(!restriction.allows(&PaymentContext::Spell(&creature)));
     }
 
+    #[test]
+    fn source_chosen_color_mana_restriction_uses_live_spell_colors() {
+        let red_only = ManaRestriction::OnlyForSpellColor(ManaColor::Red);
+        let red = SpellMeta {
+            colors: vec![ManaColor::Red],
+            ..SpellMeta::default()
+        };
+        let blue = SpellMeta {
+            colors: vec![ManaColor::Blue],
+            ..SpellMeta::default()
+        };
+        let multicolor = SpellMeta {
+            colors: vec![ManaColor::Red, ManaColor::Blue],
+            ..SpellMeta::default()
+        };
+        let colorless = SpellMeta::default();
+        assert!(red_only.allows(&PaymentContext::Spell(&red)));
+        assert!(red_only.allows(&PaymentContext::Spell(&multicolor)));
+        assert!(!red_only.allows(&PaymentContext::Spell(&blue)));
+        assert!(!red_only.allows(&PaymentContext::Spell(&colorless)));
+        assert!(!ManaRestriction::Impossible.allows(&PaymentContext::Spell(&red)));
+    }
+
+    #[test]
+    fn activation_color_constraint_rejects_wrong_actual_mana_color() {
+        assert!(ActivationManaColorConstraint::Only(ManaColor::Red).permits(ManaType::Red));
+        assert!(!ActivationManaColorConstraint::Only(ManaColor::Red).permits(ManaType::Blue));
+        assert!(!ActivationManaColorConstraint::Only(ManaColor::Red).permits(ManaType::Colorless));
+        assert!(!ActivationManaColorConstraint::Impossible.permits(ManaType::Red));
+    }
+
+    #[test]
+    fn spend_for_enforces_activation_color_constraint_for_both_passes() {
+        let source_types = vec!["Artifact".to_string()];
+        let source_subtypes = Vec::new();
+        let context = PaymentContext::Activation {
+            source_types: &source_types,
+            source_subtypes: &source_subtypes,
+            ability_tag: None,
+            mana_color_constraint: ActivationManaColorConstraint::Only(ManaColor::Red),
+        };
+        let mut pool = ManaPool {
+            mana: vec![
+                // First pass would take this unrestricted blue unit without
+                // checking the activation's actual-color rider.
+                make_unit(ManaType::Blue),
+                // Second pass must reject it too, even though its restriction
+                // otherwise permits any activation.
+                make_restricted_unit(
+                    ManaType::Blue,
+                    ObjectId(2),
+                    vec![ManaRestriction::OnlyForActivation],
+                ),
+                make_unit(ManaType::Red),
+            ],
+        };
+
+        assert!(pool.spend_for(ManaType::Blue, &context).is_none());
+        assert_eq!(pool.total(), 3);
+        assert_eq!(
+            pool.spend_for(ManaType::Red, &context)
+                .expect("matching actual mana color should remain spendable")
+                .color,
+            ManaType::Red
+        );
+    }
+
     // CR 106.6 + CR 601.2g: "Spend this mana only to cast instant and sorcery
     // spells" (Tablet of Discovery, issue #1975) names a union of two distinct
     // spell types. Per the Melek, Izzet Paragon example (CR 601.3e), an "instant
@@ -3122,6 +3316,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3133,6 +3328,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3144,6 +3340,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3187,6 +3384,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3198,6 +3396,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3217,6 +3416,7 @@ mod tests {
         let mv_six = SpellMeta {
             mana_value: Some(6),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3225,6 +3425,7 @@ mod tests {
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3248,6 +3449,7 @@ mod tests {
         let mv_two = SpellMeta {
             mana_value: Some(2),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3256,6 +3458,7 @@ mod tests {
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3280,6 +3483,7 @@ mod tests {
         let mv_four = SpellMeta {
             mana_value: Some(4),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3293,6 +3497,7 @@ mod tests {
         let mv_five = SpellMeta {
             mana_value: Some(5),
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3328,6 +3533,7 @@ mod tests {
         };
         let three_colors = SpellMeta {
             color_count: Some(3),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3335,6 +3541,7 @@ mod tests {
         };
         let two_colors = SpellMeta {
             color_count: Some(2),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3359,6 +3566,7 @@ mod tests {
         };
         let colorless = SpellMeta {
             color_count: Some(0),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3366,6 +3574,7 @@ mod tests {
         };
         let one_color = SpellMeta {
             color_count: Some(1),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3389,6 +3598,7 @@ mod tests {
         };
         let three_colors = SpellMeta {
             color_count: Some(3),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3396,6 +3606,7 @@ mod tests {
         };
         let one_color = SpellMeta {
             color_count: Some(1),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3421,6 +3632,7 @@ mod tests {
 
         let one_color = SpellMeta {
             color_count: Some(1),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3433,6 +3645,7 @@ mod tests {
 
         let two_colors = SpellMeta {
             color_count: Some(2),
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3714,6 +3927,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,
@@ -3727,6 +3941,7 @@ mod tests {
             cast_from_zone: None,
             mana_value: None,
             color_count: None,
+            colors: vec![],
             has_x_in_cost: false,
             is_face_down: false,
             cant_spend_mana: false,

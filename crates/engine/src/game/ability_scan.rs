@@ -1099,6 +1099,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::ExileTop {
             player,
             count,
+            position: _,
             face_down: _,
         } => {
             let mut acc = Axes::NONE;
@@ -1824,7 +1825,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // (`state.current_trigger_event` — the scry's own `PlayerPerformedAction`
         // carrying its effective look count) → event axis true, mirroring
         // `QuantityRef::EventContextAmount` below.
-        QuantityRef::TriggeringScryLookCount => Axes {
+        QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount => Axes {
             event: true,
             sibling: false,
             projected: false,
@@ -4252,6 +4253,8 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         description: _,
         target_prompt: _,
         activation_restrictions: _,
+        // Payment-time only; it cannot create a resolution-time dependency.
+        activation_mana_payment_restriction: _,
         activator_filter: _,
         activation_zone: _,
         ability_tag: _,
@@ -8257,5 +8260,20 @@ mod tests {
         assert!(ability_uses_event_context(&ability_with_amount(
             QuantityRef::TriggeringScryLookCount
         )));
+    }
+
+    /// CR 701.22a + CR 701.22d + CR 603.2c: the completed-scry bottom count is
+    /// carried by the current trigger event, never a sibling or projected
+    /// resource. Assert the scanner axes directly so the shared match arm cannot
+    /// accidentally classify it more broadly.
+    #[test]
+    fn triggering_scry_bottom_count_has_only_the_event_axis() {
+        let axes = scan_quantity_ref(
+            &QuantityRef::TriggeringScryBottomCount,
+            ScanMode::Conservative,
+        );
+        assert!(axes.event);
+        assert!(!axes.sibling);
+        assert!(!axes.projected);
     }
 }
