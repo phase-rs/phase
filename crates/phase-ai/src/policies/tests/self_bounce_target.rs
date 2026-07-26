@@ -21,7 +21,7 @@ use engine::types::zones::{EtbTapState, Zone};
 use crate::config::AiConfig;
 use crate::context::AiContext;
 use crate::policies::context::{PolicyContext, SearchDepth};
-use crate::policies::registry::{PolicyVerdict, TacticalPolicy};
+use crate::policies::registry::{PolicyId, PolicyRegistry, PolicyVerdict, TacticalPolicy};
 use crate::policies::self_bounce_target::*;
 
 const AI: PlayerId = PlayerId(0);
@@ -133,7 +133,8 @@ fn make_object(state: &mut GameState, idx: u64, is_land: bool, tapped: bool) -> 
 }
 
 /// Build the land pool (index 0 is the bounce source) and score the given
-/// selection under a battlefield→hand `ChangeZone` land bounce.
+/// selection under a battlefield→hand `ChangeZone` land bounce, via a direct
+/// `verdict` call.
 fn verdict_delta(pool_spec: &[(bool, bool)], selection: &[usize]) -> f64 {
     verdict_delta_kinds(
         pool_spec,
@@ -144,8 +145,7 @@ fn verdict_delta(pool_spec: &[(bool, bool)], selection: &[usize]) -> f64 {
     )
 }
 
-/// `pool_spec[i] = (is_source_placeholder_unused, tapped)`; index 0 is always
-/// the ability source. `lands` toggles land vs creature pool objects.
+/// Direct-call variant; always `Some` (panics on `Reject`).
 fn verdict_delta_kinds(
     pool_spec: &[(bool, bool)],
     selection: &[usize],
@@ -153,6 +153,36 @@ fn verdict_delta_kinds(
     destination: Option<Zone>,
     effect_kind: EffectKind,
 ) -> f64 {
+    eval(pool_spec, selection, lands, destination, effect_kind, false)
+        .expect("direct verdict always returns a score")
+}
+
+/// The score for `selection` as the **production registry** produces it —
+/// classify → filter by `DecisionKind` → run `activation` → `verdict`. `None`
+/// when `SelfBounceTargetPolicy` did not run at all (unregistered, or the
+/// `EffectZoneChoice` no longer routes to its declared kind).
+fn routed_delta(pool_spec: &[(bool, bool)], selection: &[usize]) -> Option<f64> {
+    eval(
+        pool_spec,
+        selection,
+        true,
+        Some(Zone::Hand),
+        EffectKind::ChangeZone,
+        true,
+    )
+}
+
+/// `pool_spec[i] = (unused, tapped)`; index 0 is always the ability source.
+/// `lands` toggles land vs creature pool objects. `route` runs the full
+/// `PolicyRegistry` instead of calling the policy directly.
+fn eval(
+    pool_spec: &[(bool, bool)],
+    selection: &[usize],
+    lands: bool,
+    destination: Option<Zone>,
+    effect_kind: EffectKind,
+    route: bool,
+) -> Option<f64> {
     let mut st = state();
     let pool: Vec<ObjectId> = pool_spec
         .iter()
@@ -206,8 +236,42 @@ fn verdict_delta_kinds(
         cast_facts: None,
         search_depth: SearchDepth::Root,
     };
-    match SelfBounceTargetPolicy.verdict(&ctx) {
-        PolicyVerdict::Score { delta, .. } => delta,
+
+    let verdict = if route {
+        PolicyRegistry::default()
+            .verdicts(&ctx)
+            .into_iter()
+            .find(|(id, _)| *id == PolicyId::SelfBounceTarget)
+            .map(|(_, verdict)| verdict)?
+    } else {
+        SelfBounceTargetPolicy.verdict(&ctx)
+    };
+    match verdict {
+        PolicyVerdict::Score { delta, .. } => Some(delta),
         PolicyVerdict::Reject { reason } => panic!("unexpected Reject: {reason:?}"),
     }
+}
+
+// ─── production seam (registry routing) ─────────────────────────────────────
+
+#[test]
+fn registry_registers_the_policy() {
+    assert!(PolicyRegistry::default().has_policy(PolicyId::SelfBounceTarget));
+}
+
+/// End-to-end routing: `WaitingFor::EffectZoneChoice` classifies to
+/// `DecisionKind::ActivateAbility`, the policy declares that kind, and the three
+/// land selections come out ordered tapped-other > untapped-other > source. A
+/// direct-`verdict` probe would stay green even if the policy were dropped from
+/// the registry or the routing changed; this asserts the shipped seam.
+#[test]
+fn registry_routes_the_land_bounce_ordering() {
+    let pool = &[(true, true), (false, true), (false, false)];
+    let source = routed_delta(pool, &[0]).expect("source selection must reach the policy");
+    let tapped = routed_delta(pool, &[1]).expect("tapped selection must reach the policy");
+    let untapped = routed_delta(pool, &[2]).expect("untapped selection must reach the policy");
+    assert!(
+        source < untapped && untapped < tapped,
+        "routed ordering source < untapped < tapped, got {source} {untapped} {tapped}"
+    );
 }
