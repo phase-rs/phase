@@ -551,7 +551,16 @@ fn validate_bottom_selection(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
+    // A repeated id would satisfy `expected_count` while moving one hand card
+    // twice (and leaving another owed card in hand), so duplicates are
+    // rejected before anything is moved — mirrors `validate_keep_on_top_selection`
+    // / `validate_dig_selection` in `engine_resolution_choices.rs`, the other
+    // freeform card-selection validators in this same family.
+    let mut seen = std::collections::HashSet::new();
     for &card_id in cards {
+        if !seen.insert(card_id) {
+            return Err(format!("Duplicate card {:?} in bottom selection", card_id));
+        }
         if !player_data.hand.contains(&card_id) {
             return Err(format!("Card {:?} is not in player's hand", card_id));
         }
