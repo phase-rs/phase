@@ -267,6 +267,40 @@ pub fn apply_resolved_stack_entry_finalize(
     Ok(())
 }
 
+/// CR 603.3d: removes an uncommitted triggered ability from the stack.
+///
+/// The "push first, choose second" invariant (see
+/// [`GameState::pending_trigger_entry`]) puts a triggered ability on the stack
+/// BEFORE its choices are gathered, so the entry is live while a `WaitingFor`
+/// fills its slots. CR 603.3d: "If a choice is required when the triggered
+/// ability goes on the stack but no legal choices can be made for it, or if a
+/// rule or a continuous effect otherwise makes the ability illegal, the ability
+/// is simply removed from the stack." This is the single authority for that
+/// removal.
+///
+/// The two side tables are cleared here rather than by the callers because they
+/// are keyed on the entry and settle WITH the pop — a removal that dropped the
+/// entry but left `stack_paid_facts` or `stack_trigger_event_batches` behind
+/// would strand rows against an id no longer on the stack.
+///
+/// Guarded on the entry still being topmost: the cursor can outlive the entry
+/// when another path already removed it, and popping unconditionally would then
+/// discard an unrelated stack object.
+///
+/// Note this deliberately does NOT clear `pending_trigger`; that is a separate
+/// piece of construction state owned by
+/// `engine::drop_mid_construction_pending_trigger`, which calls this and then
+/// clears it.
+pub(crate) fn pop_uncommitted_pending_trigger_entry(state: &mut GameState) {
+    if let Some(entry_id) = state.pending_trigger_entry.take() {
+        if state.stack.back().map(|e| e.id) == Some(entry_id) {
+            state.stack.pop_back();
+            state.stack_paid_facts.remove(&entry_id);
+            state.stack_trigger_event_batches.remove(&entry_id);
+        }
+    }
+}
+
 /// The ability currently represented by a stack entry for presentation.
 ///
 /// A spell is placed on the stack before its cast is finalized (CR 601.2a-b),

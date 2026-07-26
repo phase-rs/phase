@@ -8562,13 +8562,7 @@ fn apply_retarget(
 /// CR 603.3c + CR 608.2c: Drop a mid-construction optional triggered modal that
 /// was declined before mode choice.
 pub(super) fn drop_mid_construction_pending_trigger(state: &mut GameState) {
-    if let Some(entry_id) = state.pending_trigger_entry.take() {
-        if state.stack.back().map(|e| e.id) == Some(entry_id) {
-            state.stack.pop_back();
-            state.stack_paid_facts.remove(&entry_id);
-            state.stack_trigger_event_batches.remove(&entry_id);
-        }
-    }
+    super::stack::pop_uncommitted_pending_trigger_entry(state);
     state.pending_trigger = None;
 }
 
@@ -8663,13 +8657,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                 &mode_abilities,
                 &unavailable_modes,
             ) else {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
+                super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
                 return Ok(None);
             };
@@ -8688,13 +8676,7 @@ pub(super) fn begin_pending_trigger_target_selection(
                  dispatch_pending_trigger_context must resolve it inline",
             );
             if modal.selection.is_random() {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
+                super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
                 return Ok(None);
             }
@@ -8708,13 +8690,7 @@ pub(super) fn begin_pending_trigger_target_selection(
             // dead branch — kept as a defensive cleanup for any
             // delayed-revalidation paths.
             if unavailable_modes.len() >= modal.mode_count {
-                if let Some(entry_id) = state.pending_trigger_entry.take() {
-                    if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                        state.stack.pop_back();
-                        state.stack_paid_facts.remove(&entry_id);
-                        state.stack_trigger_event_batches.remove(&entry_id);
-                    }
-                }
+                super::stack::pop_uncommitted_pending_trigger_entry(state);
                 state.pending_trigger = None;
                 return Ok(None);
             }
@@ -8829,13 +8805,7 @@ pub(super) fn begin_pending_trigger_target_selection(
         // branch above: if the "push first" dispatcher already pushed an
         // in-construction entry for this trigger, pop it before clearing the
         // cursor.
-        if let Some(entry_id) = state.pending_trigger_entry.take() {
-            if state.stack.back().map(|e| e.id) == Some(entry_id) {
-                state.stack.pop_back();
-                state.stack_paid_facts.remove(&entry_id);
-                state.stack_trigger_event_batches.remove(&entry_id);
-            }
-        }
+        super::stack::pop_uncommitted_pending_trigger_entry(state);
         state.pending_trigger = None;
         return Ok(None);
     };
