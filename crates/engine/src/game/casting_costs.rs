@@ -1356,7 +1356,7 @@ fn finish_pending_cost_or_cast(
         player,
         pending.object_id,
         pending.card_id,
-        pending.ability,
+        *pending.ability,
         &pending.cost,
         base_cost,
         pending.casting_variant,
@@ -1695,12 +1695,12 @@ pub(crate) fn handle_discard_for_cost(
         match super::effects::discard::discard_as_cost(state, card_id, player, events) {
             super::effects::discard::DiscardOutcome::Complete => {}
             super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
                     player,
                     pending: pending.clone(),
                     chosen: chosen.to_vec(),
                     paused_at_index: index,
-                });
+                }));
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 // CR 603.2 + CR 603.3b: Earlier cards in a count>1 discard cost may
                 // already have emitted graveyard `ZoneChanged` events before this
@@ -1887,7 +1887,7 @@ fn finish_cost_object_moves(
                 player,
                 pending.object_id,
                 pending.card_id,
-                pending.ability,
+                *pending.ability,
                 &pending.cost,
                 pending.casting_variant,
                 pending.casting_permission_index,
@@ -2077,12 +2077,12 @@ pub(crate) fn resume_interrupted_cost_payment(
                         .iter()
                         .position(|&id| id == card_id)
                         .unwrap_or(resume.paused_at_index + 1);
-                    state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
                         player,
                         pending: pending.clone(),
                         chosen: resume.chosen.clone(),
                         paused_at_index,
-                    });
+                    }));
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                     // CR 603.2 + CR 603.3b: Same mid-loop replacement pause as
                     // `handle_discard_for_cost` — park already-emitted discard
@@ -4152,7 +4152,7 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         player,
         pending.object_id,
         ability_index,
-        pending.ability,
+        *pending.ability,
         pending.activation_cost.as_ref(),
         pending.activation_residual,
         pending.activation_target_selection,
@@ -4685,7 +4685,7 @@ pub(super) fn push_ability_entry(
             controller: player,
             kind: StackEntryKind::ActivatedAbility {
                 source_id,
-                ability: resolved,
+                ability: Box::new(resolved),
             },
         },
         events,
@@ -4765,7 +4765,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
     cost: ManaCost,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    pending.ability = ability;
+    pending.ability = Box::new(ability);
     pending.cost = cost;
     // If an optional additional cost was already decided (paid or declined) in the
     // deferred-target-selection flow, skip re-detection — the player already made
@@ -4793,7 +4793,7 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         player,
         object_id,
         card_id,
-        ability,
+        *ability,
         &cost,
         base_cost,
         casting_variant,
@@ -6021,7 +6021,7 @@ pub(crate) fn handle_defiler_payment(
                 player,
                 pending.object_id,
                 pending.card_id,
-                pending.ability,
+                *pending.ability,
                 &cost,
                 base_cost,
                 pending.casting_variant,
@@ -6069,7 +6069,7 @@ pub(crate) fn handle_defiler_payment(
         player,
         pending.object_id,
         pending.card_id,
-        pending.ability,
+        *pending.ability,
         &cost,
         base_cost,
         pending.casting_variant,
@@ -8721,7 +8721,7 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .expect("spell stack entry from announcement still present at finalize");
     let resulting_kind = StackEntryKind::Spell {
         card_id,
-        ability: stack_ability,
+        ability: stack_ability.map(Box::new),
         casting_variant,
         actual_mana_spent,
     };
@@ -11446,7 +11446,7 @@ fn finalize_mana_payment_with_resume(
             let mut pending_resumed = PendingCast::new(
                 pending.object_id,
                 pending.card_id,
-                pending.ability,
+                *pending.ability,
                 crate::types::mana::ManaCost::NoCost,
             );
             pending_resumed.casting_variant = pending.casting_variant;
@@ -11471,7 +11471,7 @@ fn finalize_mana_payment_with_resume(
                     player,
                     pending.object_id,
                     pending.card_id,
-                    pending.ability,
+                    *pending.ability,
                     &pending.cost,
                     pending.casting_variant,
                     pending.casting_permission_index,
@@ -11513,7 +11513,7 @@ fn finalize_mana_payment_with_resume(
             player,
             pending.object_id,
             pending.card_id,
-            pending.ability,
+            *pending.ability,
             &final_cast_cost,
             pending.casting_variant,
             pending.casting_permission_index,
@@ -11646,7 +11646,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 player,
                 pending.object_id,
                 ability_index,
-                pending.ability.clone(),
+                (*pending.ability).clone(),
                 pending.activation_cost.as_ref(),
                 pending.activation_residual,
                 pending.activation_target_selection,
@@ -11773,7 +11773,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             let mut pending_resumed = PendingCast::new(
                 pending.object_id,
                 pending.card_id,
-                pending.ability,
+                *pending.ability,
                 crate::types::mana::ManaCost::NoCost,
             );
             pending_resumed.casting_variant = pending.casting_variant;
@@ -11796,7 +11796,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                     player,
                     pending.object_id,
                     pending.card_id,
-                    pending.ability,
+                    *pending.ability,
                     &pending.cost,
                     pending.casting_variant,
                     pending.casting_permission_index,
@@ -11845,7 +11845,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             player,
             pending.object_id,
             pending.card_id,
-            pending.ability.clone(),
+            (*pending.ability).clone(),
             &final_cast_cost,
             pending.casting_variant,
             pending.casting_permission_index,
@@ -12308,7 +12308,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -12396,7 +12396,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -12531,7 +12531,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -12657,7 +12657,7 @@ mod tests {
         PendingCast {
             object_id: source_id,
             card_id: CardId(0),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Scry {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: crate::types::ability::TargetFilter::Controller,
@@ -12665,7 +12665,7 @@ mod tests {
                 Vec::new(),
                 source_id,
                 PlayerId(0),
-            ),
+            )),
             cost: ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -13161,7 +13161,7 @@ mod tests {
         pending.origin_zone = Zone::Hand;
         // Targeted effect with deferred target selection: the cast pauses after
         // costs are paid (CR 601.2c).
-        pending.ability = ResolvedAbility::new(
+        pending.ability = Box::new(ResolvedAbility::new(
             Effect::DealDamage {
                 amount: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -13171,7 +13171,7 @@ mod tests {
             Vec::new(),
             spell,
             PlayerId(0),
-        );
+        ));
         pending.deferred_target_selection = true;
 
         state.stack.push_back(StackEntry {
@@ -15236,7 +15236,7 @@ mod tests {
             )]);
 
         let mut pending = make_pending(source);
-        pending.ability = ResolvedAbility::new(
+        pending.ability = Box::new(ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::Variable {
@@ -15248,7 +15248,7 @@ mod tests {
             Vec::new(),
             source,
             PlayerId(0),
-        );
+        ));
         let legal = vec![squirrel_a, squirrel_b];
         let chosen = vec![squirrel_a, squirrel_b];
         let mut events = Vec::new();
@@ -15323,7 +15323,12 @@ mod tests {
         )]);
 
         let mut pending = make_pending(source);
-        pending.ability = ResolvedAbility::new(token_effect, Vec::new(), source, PlayerId(0));
+        pending.ability = Box::new(ResolvedAbility::new(
+            token_effect,
+            Vec::new(),
+            source,
+            PlayerId(0),
+        ));
         pending.ability.set_chosen_x_recursive(2);
         let legal = vec![source];
         let chosen = vec![source];
@@ -17769,7 +17774,7 @@ mod tests {
         let pending = PendingCast {
             object_id: source_id,
             card_id: CardId(900),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
@@ -17778,7 +17783,7 @@ mod tests {
                 Vec::new(),
                 source_id,
                 caster,
-            ),
+            )),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -17903,7 +17908,7 @@ mod tests {
         let pending = PendingCast {
             object_id: source_id,
             card_id: CardId(900),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
@@ -17912,7 +17917,7 @@ mod tests {
                 Vec::new(),
                 source_id,
                 caster,
-            ),
+            )),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -18006,7 +18011,7 @@ mod tests {
         let pending = PendingCast {
             object_id: source_id,
             card_id: CardId(900),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_rider: None,
@@ -18015,7 +18020,7 @@ mod tests {
                 Vec::new(),
                 source_id,
                 caster,
-            ),
+            )),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -18098,7 +18103,7 @@ mod tests {
         let pending = PendingCast {
             object_id: source_id,
             card_id: CardId(900),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_rider: None,
@@ -18107,7 +18112,7 @@ mod tests {
                 Vec::new(),
                 source_id,
                 caster,
-            ),
+            )),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -18223,7 +18228,7 @@ mod tests {
         let pending = PendingCast {
             object_id: source_id,
             card_id: CardId(900),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_rider: None,
@@ -18232,7 +18237,7 @@ mod tests {
                 Vec::new(),
                 source_id,
                 caster,
-            ),
+            )),
             cost: crate::types::mana::ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -21595,7 +21600,7 @@ its replicate cost was paid.)\nDraw a card.";
                 &mut state,
                 caster,
                 pending.clone(),
-                pending.ability.clone(),
+                (*pending.ability).clone(),
                 pending.cost.clone(),
                 &mut events,
             )

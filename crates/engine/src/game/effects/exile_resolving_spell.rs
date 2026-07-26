@@ -207,7 +207,7 @@ fn arm_return_to(
             // CR 603.7b: when the one-shot return fires (Feather: "at the
             // beginning of the next end step").
             condition: timing,
-            ability,
+            ability: Box::new(ability),
             controller,
             source_id,
             // CR 603.7b: one-shot — removed after it fires.

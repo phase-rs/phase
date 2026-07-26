@@ -877,12 +877,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         StackEntryKind::ActivatedAbility { ability, .. } => {
             (Some(ability.clone()), false, CastingVariant::Normal, 0)
         }
-        StackEntryKind::TriggeredAbility { ability, .. } => (
-            Some(ResolvedAbility::clone(ability)),
-            false,
-            CastingVariant::Normal,
-            0,
-        ),
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            (Some(ability.clone()), false, CastingVariant::Normal, 0)
+        }
         StackEntryKind::KeywordAction { .. } => unreachable!(
             "KeywordAction stack entries are resolved via the early-return branch above"
         ),
@@ -1270,7 +1267,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         });
         if has_epic {
             if let Some(spell_ability) = ability.clone() {
-                super::effects::epic::arm_epic(state, entry.id, entry.controller, spell_ability);
+                super::effects::epic::arm_epic(state, entry.id, entry.controller, *spell_ability);
             }
         }
     }
@@ -1623,7 +1620,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                                         state,
                                         &entry,
-                                        ability.as_ref(),
+                                        ability.as_deref(),
                                         casting_variant,
                                         actual_mana_spent,
                                         &spell_targets,
@@ -1769,7 +1766,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     state.push_spell_resolution(pending_spell_resolution_snapshot(
                         state,
                         &entry,
-                        ability.as_ref(),
+                        ability.as_deref(),
                         casting_variant,
                         actual_mana_spent,
                         &spell_targets,
@@ -1997,7 +1994,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state.push_spell_resolution(pending_spell_resolution_snapshot(
                                 state,
                                 &entry,
-                                ability.as_ref(),
+                                ability.as_deref(),
                                 casting_variant,
                                 actual_mana_spent,
                                 &spell_targets,
@@ -4265,7 +4262,7 @@ pub(crate) fn create_warp_delayed_trigger(
         state,
         crate::types::game_state::DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: delayed_ability,
+            ability: Box::new(delayed_ability),
             controller,
             source_id: object_id,
             one_shot: true,
@@ -4320,7 +4317,7 @@ mod tests {
         let entry = StackEntry {
             kind: StackEntryKind::Spell {
                 card_id: CardId(10),
-                ability: Some(final_ability),
+                ability: Some(Box::new(final_ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4527,7 +4524,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4627,11 +4624,11 @@ mod tests {
         });
         state.pending_trigger_entry = Some(entry_id);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,
             controller: PlayerId(0),
             condition: None,
-            ability: state.stack.back().unwrap().ability().unwrap().clone(),
+            ability: Box::new(state.stack.back().unwrap().ability().unwrap().clone()),
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
             distribute: None,
@@ -4642,7 +4639,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
@@ -4711,7 +4708,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(102),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -4978,7 +4975,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(724),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5299,7 +5296,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(72),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -5890,7 +5887,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -5921,7 +5918,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::GraveyardPermission {
                     source: ObjectId(999),
                     frequency: crate::types::statics::CastFrequency::OncePerTurn,
@@ -6026,7 +6023,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Flashback,
                 actual_mana_spent: 0,
             },
@@ -6345,7 +6342,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::Spell {
                     card_id: CardId(1),
-                    ability: Some(ability),
+                    ability: Some(Box::new(ability)),
                     casting_variant: CastingVariant::Normal,
                     actual_mana_spent: 0,
                 },
@@ -6397,7 +6394,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(modal_ability.clone()),
+                ability: Some(Box::new(modal_ability.clone())),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 3,
             },
@@ -6444,7 +6441,7 @@ mod tests {
         };
         state.stack.back_mut().unwrap().kind = StackEntryKind::Spell {
             card_id: CardId(1),
-            ability: Some(modal_ability),
+            ability: Some(Box::new(modal_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 3,
         };
@@ -6610,7 +6607,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(300),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -6712,7 +6709,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(900),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -6762,7 +6759,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(901),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -11089,7 +11086,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

@@ -589,7 +589,7 @@ fn queue_begin_game_abilities(state: &mut GameState) {
                         .iter()
                         .find(|a| a.kind == AbilityKind::BeginGame)?;
                     Some(PendingBeginGameAbility {
-                        ability: build_resolved_from_def(ability, obj_id, player_id),
+                        ability: Box::new(build_resolved_from_def(ability, obj_id, player_id)),
                     })
                 })
                 .collect::<Vec<_>>()

@@ -218,7 +218,10 @@ export function GameMenu({
               }}
             />
           )}
-          {isOnlineMode && onRequestTakeback && (
+          {/* The prop's presence is the authority, matching `showSandboxTools`
+              two blocks above. A menu should not re-derive when an action is
+              legal — GamePage decides, from the transport that implements it. */}
+          {onRequestTakeback && (
             <MenuButton
               label={t("gameMenu.requestTakeback")}
               onClick={() => {

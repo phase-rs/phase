@@ -1628,7 +1628,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: perm,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     Effect::Unimplemented {
                         name: "Act".to_string(),
                         description: None,
@@ -1636,7 +1636,7 @@ mod tests {
                     vec![],
                     perm,
                     PlayerId(1),
-                ),
+                )),
             },
         });
         state.stack.push_back(StackEntry {

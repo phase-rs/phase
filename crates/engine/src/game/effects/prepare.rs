@@ -751,7 +751,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -811,7 +811,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(42),
-                ability: Some(resolved),
+                ability: Some(Box::new(resolved)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

@@ -2282,7 +2282,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 2,
             },

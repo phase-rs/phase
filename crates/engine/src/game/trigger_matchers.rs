@@ -9725,7 +9725,7 @@ mod tests {
             controller,
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -11976,7 +11976,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: Some(ResolvedAbility::new(
+                ability: Some(Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -11984,7 +11984,7 @@ mod tests {
                     vec![],
                     spell_id,
                     PlayerId(0),
-                )),
+                ))),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },
@@ -12056,7 +12056,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(10),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -12064,7 +12064,7 @@ mod tests {
                     vec![],
                     ObjectId(10),
                     PlayerId(1),
-                ),
+                )),
             },
         });
         (state, ability_id)
@@ -12968,7 +12968,7 @@ mod tests {
             controller: PlayerId(0), // Different controller
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(10),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -12976,7 +12976,7 @@ mod tests {
                     vec![],
                     ObjectId(10),
                     PlayerId(0),
-                ),
+                )),
             },
         });
 
@@ -13032,7 +13032,7 @@ mod tests {
             controller: PlayerId(0), // Same player as trigger owner
             kind: StackEntryKind::ActivatedAbility {
                 source_id: pw_id,
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
                         target: crate::types::ability::TargetFilter::Controller,
@@ -13040,7 +13040,7 @@ mod tests {
                     vec![],
                     pw_id,
                     PlayerId(0),
-                ),
+                )),
             },
         });
 

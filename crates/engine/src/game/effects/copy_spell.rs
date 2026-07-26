@@ -719,7 +719,7 @@ fn stack_entry_from_exiled_spell_object(
         controller,
         kind: StackEntryKind::Spell {
             card_id,
-            ability: Some(resolved),
+            ability: Some(Box::new(resolved)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 0,
         },
@@ -899,7 +899,7 @@ mod tests {
             controller: owner,
             kind: StackEntryKind::Spell {
                 card_id,
-                ability: Some(ability),
+                ability: Some(Box::new(ability)),
                 casting_variant: variant,
                 actual_mana_spent: 0,
             },
@@ -2241,7 +2241,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2325,7 +2325,7 @@ mod tests {
                 controller: PlayerId(0),
                 kind: StackEntryKind::ActivatedAbility {
                     source_id,
-                    ability: build_resolved_from_def(&definition, source_id, PlayerId(0)),
+                    ability: Box::new(build_resolved_from_def(&definition, source_id, PlayerId(0))),
                 },
             },
             &mut events,
@@ -2394,7 +2394,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: basalt,
-                ability: untap_basalt,
+                ability: Box::new(untap_basalt),
             },
         });
         state.current_trigger_event = Some(GameEvent::AbilityActivated {
@@ -2466,7 +2466,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: source_creature,
-                ability: draw_resolved,
+                ability: Box::new(draw_resolved),
             },
         });
 
@@ -2531,7 +2531,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_ability,
+                ability: Box::new(gogo_ability),
             },
         });
 
@@ -2557,7 +2557,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: other_id,
-                ability: copy_gogo,
+                ability: Box::new(copy_gogo),
             },
         });
 
@@ -2874,7 +2874,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: gogo_id,
-                ability: gogo_copy,
+                ability: Box::new(gogo_copy),
             },
         });
 
@@ -3467,7 +3467,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(1),
-                ability: Some(original),
+                ability: Some(Box::new(original)),
                 casting_variant: CastingVariant::Normal,
                 actual_mana_spent: 0,
             },

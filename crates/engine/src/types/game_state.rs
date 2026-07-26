@@ -5258,7 +5258,7 @@ pub struct DelayedTrigger {
     /// When this trigger fires.
     pub condition: DelayedTriggerCondition,
     /// The ability to execute when it fires.
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     /// CR 603.7d: Controller (the player who created it).
     pub controller: PlayerId,
     /// Source permanent that created this delayed trigger.
@@ -5370,7 +5370,7 @@ pub struct CastingPermissionIndex(pub usize);
 pub struct PendingCast {
     pub object_id: ObjectId,
     pub card_id: CardId,
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
     pub cost: ManaCost,
     /// CR 601.2f: The tax-inclusive base mana cost captured at announcement,
     /// BEFORE any cost reductions/increases or {X} concretization. Lets the
@@ -5822,7 +5822,7 @@ impl PendingCast {
         Self {
             object_id,
             card_id,
-            ability,
+            ability: Box::new(ability),
             cost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -6506,7 +6506,7 @@ fn default_one_u32() -> u32 {
 /// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingBeginGameAbility {
-    pub ability: ResolvedAbility,
+    pub ability: Box<ResolvedAbility>,
 }
 
 /// CR 103.5b: Which declare-point action a pending `BottomCards` obligation
@@ -10092,7 +10092,7 @@ impl StackEntry {
     /// `ResolvedAbility`.
     pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
-            StackEntryKind::Spell { ability, .. } => ability.as_ref(),
+            StackEntryKind::Spell { ability, .. } => ability.as_deref(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
             StackEntryKind::KeywordAction { .. } => None,
@@ -10105,7 +10105,7 @@ impl StackEntry {
     /// `ResolvedAbility`.
     pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
-            StackEntryKind::Spell { ability, .. } => ability.as_mut(),
+            StackEntryKind::Spell { ability, .. } => ability.as_deref_mut(),
             StackEntryKind::ActivatedAbility { ability, .. } => Some(ability),
             StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
             StackEntryKind::KeywordAction { .. } => None,
@@ -10569,6 +10569,27 @@ impl CastingVariant {
     }
 }
 
+// clippy::large_enum_variant: this fires *because* the stack-budget fix
+// succeeded. Every variant used to carry an inline `ResolvedAbility`, so all of
+// them were ~5,264 B and the spread between them was small; boxing that payload
+// took the enum from 5,312 B to 320 B and left `TriggeredAbility` (320 B) as the
+// outlier against `Spell` (60 B).
+//
+// The residual weight is NOT the ability — that is now 8 B in every variant. It
+// is `condition: Option<TriggerCondition>` at 184 B, plus `trigger_event:
+// Option<GameEvent>` at 56 B (measured with `-Zprint-type-sizes`). Boxing those
+// is a separate design decision on separate types: `TriggerCondition` is
+// inspected on every trigger-condition re-check, and the same field is spelled
+// inline on `PendingTrigger`, so the two would have to move together. That is
+// out of scope here and is recorded as follow-up rather than done by reflex.
+//
+// The size that actually reaches a stack frame is bounded and pinned:
+// `StackEntry` is the only path from this enum into `GameState`
+// (`resolving_stack_entry`), and the `StackEntry` assert in
+// `types/game_state_size.rs` holds it under the ceiling recorded there. Follows
+// the documented allows on `Effect` / `CastingPermission` /
+// `OutsideGameChoiceSource`.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StackEntryKind {
@@ -10578,7 +10599,7 @@ pub enum StackEntryKind {
         /// spell-level effect (creatures, artifacts, etc.) — they simply enter the
         /// battlefield on resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        ability: Option<ResolvedAbility>,
+        ability: Option<Box<ResolvedAbility>>,
         /// How this spell was cast — determines resolution behavior (zone routing,
         /// exile permissions, delayed triggers).
         #[serde(default)]
@@ -10588,7 +10609,7 @@ pub enum StackEntryKind {
     },
     ActivatedAbility {
         source_id: ObjectId,
-        ability: ResolvedAbility,
+        ability: Box<ResolvedAbility>,
     },
     TriggeredAbility {
         source_id: ObjectId,
@@ -11353,7 +11374,7 @@ pub struct GameState {
 
     // Triggered ability targeting
     #[serde(default)]
-    pub pending_trigger: Option<crate::game::triggers::PendingTrigger>,
+    pub pending_trigger: Option<Box<crate::game::triggers::PendingTrigger>>,
     /// Sidecar for `pending_trigger`: full simultaneous event set for batched
     /// trigger context, consumed when the pending trigger is put on the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -12823,7 +12844,7 @@ pub struct GameState {
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
-    pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
+    pub pending_discard_for_cost: Option<Box<PendingDiscardForCostResume>>,
 
     /// Pending cast info saved when entering ManaPayment state (X-cost or convoke).
     /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
@@ -19134,7 +19155,7 @@ mod tests {
         let mut a = GameState::new_two_player(7);
         a.delayed_triggers.push(DelayedTrigger {
             condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
-            ability: draw_ability(1),
+            ability: Box::new(draw_ability(1)),
             controller: PlayerId(0),
             source_id: ObjectId(5),
             one_shot: true,
@@ -19145,7 +19166,7 @@ mod tests {
             controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(5),
-                ability: draw_ability(1),
+                ability: Box::new(draw_ability(1)),
             },
         });
 
@@ -20693,7 +20714,7 @@ mod tests {
             Box::new(PendingCast {
                 object_id: ObjectId(1),
                 card_id: CardId(1),
-                ability: ResolvedAbility::new(
+                ability: Box::new(ResolvedAbility::new(
                     crate::types::ability::Effect::Unimplemented {
                         name: "Dummy".to_string(),
                         description: None,
@@ -20701,7 +20722,7 @@ mod tests {
                     vec![],
                     ObjectId(1),
                     PlayerId(0),
-                ),
+                )),
                 cost: ManaCost::NoCost,
                 base_cost: None,
                 declared_mana_additions: Vec::new(),
@@ -21099,7 +21120,7 @@ mod tests {
         let pending = Box::new(PendingCast {
             object_id: ObjectId(1),
             card_id: CardId(1),
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 crate::types::ability::Effect::Unimplemented {
                     name: "Dummy".to_string(),
                     description: None,
@@ -21107,7 +21128,7 @@ mod tests {
                 vec![],
                 ObjectId(1),
                 PlayerId(0),
-            ),
+            )),
             cost: ManaCost::NoCost,
             base_cost: None,
             declared_mana_additions: Vec::new(),
@@ -21987,7 +22008,7 @@ mod tests {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -21995,7 +22016,7 @@ mod tests {
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 42,
             target_constraints: Vec::new(),
             distribute: None,
@@ -22049,11 +22070,11 @@ mod tests {
                 return_zone: Zone::Battlefield,
             },
         });
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
-            ability: ResolvedAbility::new(
+            ability: Box::new(ResolvedAbility::new(
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
@@ -22061,7 +22082,7 @@ mod tests {
                 vec![],
                 ObjectId(5),
                 PlayerId(0),
-            ),
+            )),
             timestamp: 1,
             target_constraints: Vec::new(),
             distribute: None,
@@ -22072,7 +22093,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let json = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&json).unwrap();
@@ -22658,7 +22679,7 @@ mod tests {
             controller: PlayerId(1),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(5),
-                ability: act_ability,
+                ability: Box::new(act_ability),
             },
         };
         assert!(!state.is_priority_yielded(PlayerId(0), &spell));

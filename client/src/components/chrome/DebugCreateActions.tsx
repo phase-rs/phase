@@ -33,6 +33,8 @@ import {
   TextInput,
   useAccordion,
 } from "./debugFields";
+import { WebSocketAdapter } from "../../adapter/ws-adapter.ts";
+import { useGameStore } from "../../stores/gameStore";
 
 const ZONES: readonly Zone[] = [
   "Battlefield",
@@ -791,11 +793,42 @@ function CopyPermanentForm({ onDispatch }: Props) {
 
 export function DebugCreateActions({ onDispatch }: Props) {
   const { expanded, toggle } = useAccordion();
+  // `Debug::CreateCard` resolves a card NAME, which needs a `CardDatabase` at
+  // action-handling time. Only the WASM layer holds one: `engine-wasm/src/lib.rs`
+  // intercepts the action before `apply()` ever sees it, and `apply()` itself
+  // returns `InvalidAction("Debug::CreateCard must be handled at the WASM
+  // layer")` (`engine/src/game/engine_debug.rs`). `server-core`'s
+  // `handle_action` takes no `&CardDatabase` and has no interception — the
+  // wire path's only CreateCard handling is a string-length guard that
+  // ADMITS the action — so on a server-backed transport this form dispatches
+  // an action that always fails, surfacing as a generic "CreateCard failed".
+  //
+  // Transport capability, not a mode policy — the same seam as the takeback
+  // gate, and for the same reason: the mode does not determine which engine
+  // is behind the adapter, and P2P runs the WASM engine at the host.
+  //
+  // The three sibling forms below are unaffected: `CreateToken` and
+  // `CreateTokenCopy` are handled in `engine_debug.rs` and carry their own
+  // characteristics rather than a name to look up, so they work everywhere.
+  const adapter = useGameStore((s) => s.adapter);
+  const canCreateCardByName = !(adapter instanceof WebSocketAdapter);
 
   return (
     <div>
       <AccordionItem label="Create Card" expanded={expanded === "card"} onToggle={() => toggle("card")}>
-        <CreateCardForm onDispatch={onDispatch} />
+        {canCreateCardByName ? (
+          <CreateCardForm onDispatch={onDispatch} />
+        ) : (
+          /* Named rather than hidden, matching the checkpoint-restore notice:
+             the capability is genuinely absent here and a silently missing
+             accordion body reads as a bug. Hardcoded rather than `t()`-wrapped
+             — `client/src/i18n/README.md` lists dev/debug strings under
+             "Never wrap with t()". */
+          <p className="px-2 py-3 text-xs text-gray-600">
+            Spawning a card by name needs the in-browser engine. The token forms
+            below work on this connection.
+          </p>
+        )}
       </AccordionItem>
       <AccordionItem label="Create Token (Catalog)" expanded={expanded === "token-catalog"} onToggle={() => toggle("token-catalog")}>
         <CatalogTokenForm onDispatch={onDispatch} />
