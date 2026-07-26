@@ -1151,19 +1151,28 @@ pub enum ResolvedUncommittedTriggerRemovalReplayInvariantError {
     UnexpectedRemovableEntry(ObjectId),
 }
 
-/// One exact CR 405.2 removal of the topmost object from the stack.
+/// One exact CR 405.2 removal of a single object from the stack.
 ///
-/// Recorded by `stack::pop_top_stack_entry`, the single authority behind the
-/// CR 405.5 resolution pop and the drain loops (batched resolution, inert no-op
-/// batches, CR 724.1b stack exile). A drain of N entries records N of these
-/// rather than one bulk removal, so a replay reproduces the removal ORDER and
-/// not merely the final depth.
+/// Recorded by `stack::remove_stack_entry_at`, the single authority behind every
+/// one-entry stack removal: the CR 405.5 resolution pop, the drain loops
+/// (batched resolution, inert no-op batches, CR 724.1b stack exile), the
+/// CR 701.6a counter, and the CR 601.2a/601.2i cast rollbacks.
+///
+/// PARAMETERIZED BY `index` RATHER THAN SPLIT INTO POP/REMOVE-AT SIBLINGS. A
+/// top-of-stack pop is exactly the removal at `index == resulting_depth`, so a
+/// separate pop command would be this one with a field the caller could derive.
+/// Adding that sibling is what the enum's existing `StackPush` /
+/// `StackEntryFinalize` / `UncommittedTriggerRemoval` cluster makes tempting and
+/// is precisely the debt to avoid.
+///
+/// A drain of N entries records N of these rather than one bulk removal, so a
+/// replay reproduces the removal ORDER and not merely the final depth.
 ///
 /// NOT unified with [`ResolvedUncommittedTriggerRemovalCommand`], despite both
-/// removing a stack entry. The axis would have to span CR 603.3d
+/// removing a stack entry. That axis would have to span CR 603.3d
 /// trigger-construction and CR 405.5 resolution — different rule sections the
 /// engine resolves separately — and the operand sets genuinely differ: the
-/// CR 603.3d removal consumes a cursor and may legitimately pop NOTHING, an
+/// CR 603.3d removal consumes a cursor and may legitimately remove NOTHING, an
 /// outcome that has no analogue here. Unifying them would buy one enum variant
 /// at the cost of an applier that checks preconditions belonging to whichever
 /// family it was not handed.
@@ -1174,22 +1183,30 @@ pub enum ResolvedUncommittedTriggerRemovalReplayInvariantError {
 /// pin an invariant, and carrying `Vec<GameEvent>` batches would widen every
 /// journal entry on the hottest path in the engine for nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ResolvedStackPopCommand {
+pub struct ResolvedStackRemovalCommand {
     /// The removed entry, recorded verbatim so replay verifies the whole object
     /// rather than trusting the id.
     pub entry: Box<StackEntry>,
+    /// CR 405.2: the index the entry occupied. Recorded rather than re-found,
+    /// because the production sites locate it by a `position`/`rposition` scan
+    /// whose predicate can match a DIFFERENT entry on a stack that has since
+    /// diverged — `counter.rs` in particular scans on `id OR source_id`, which
+    /// matches every ability sharing a source permanent.
+    pub index: usize,
     /// Stack depth AFTER the removal (CR 405.2).
     pub resulting_depth: usize,
     pub cause: RulesExecutionNodeRef,
 }
 
-/// Typed failure while applying one already-resolved CR 405.2 stack pop.
+/// Typed failure while applying one already-resolved CR 405.2 stack removal.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ResolvedStackPopReplayInvariantError {
-    #[error("stack pop expected depth {expected} before removal, found {found}")]
+pub enum ResolvedStackRemovalReplayInvariantError {
+    #[error("stack removal expected depth {expected} before removal, found {found}")]
     DepthMismatch { expected: usize, found: usize },
-    #[error("stack pop expected a different entry on top of the stack")]
-    PoppedEntryMismatch,
+    #[error("stack removal targets index {index}, but the stack holds only {depth} entries")]
+    IndexOutOfRange { index: usize, depth: usize },
+    #[error("stack removal expected a different entry at the recorded index")]
+    RemovedEntryMismatch,
 }
 
 /// Semantic command payload currently carried by a resolved-rules journal entry.
@@ -1222,7 +1239,7 @@ pub enum ResolvedRulesCommand {
     StackPush(Box<ResolvedStackPushCommand>),
     StackEntryFinalize(Box<ResolvedStackEntryFinalizeCommand>),
     UncommittedTriggerRemoval(Box<ResolvedUncommittedTriggerRemovalCommand>),
-    StackPop(Box<ResolvedStackPopCommand>),
+    StackRemoval(Box<ResolvedStackRemovalCommand>),
 }
 
 /// An append-only trigger collection command has no replay-time precondition.
@@ -2301,13 +2318,13 @@ impl ResolvedRulesJournal {
     }
 
     /// Records one exact CR 405.2 top-of-stack removal under its cause.
-    pub fn record_stack_pop(
+    pub fn record_stack_removal(
         &mut self,
-        command: ResolvedStackPopCommand,
+        command: ResolvedStackRemovalCommand,
     ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
         self.append_command(
             command.cause,
-            ResolvedRulesCommand::StackPop(Box::new(command)),
+            ResolvedRulesCommand::StackRemoval(Box::new(command)),
         )
     }
 
@@ -2528,7 +2545,7 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::StackPush(_)
                 | ResolvedRulesCommand::StackEntryFinalize(_)
                 | ResolvedRulesCommand::UncommittedTriggerRemoval(_)
-                | ResolvedRulesCommand::StackPop(_) => {}
+                | ResolvedRulesCommand::StackRemoval(_) => {}
             }
         }
         for node in &self.nodes {
@@ -2992,12 +3009,12 @@ impl ResolvedRulesJournal {
                     }
                 }
             }
-            ResolvedRulesCommand::StackPop(command) => {
+            ResolvedRulesCommand::StackRemoval(command) => {
                 // Cause-only. A pop draws no id and no timestamp, so there is no
                 // allocator receipt to cross-check. Both of its preconditions
                 // (the CR 405.2 depth and the exact entry on top) are
                 // state-dependent and are enforced by
-                // `stack::apply_resolved_stack_pop`, where the state exists to
+                // `stack::apply_resolved_stack_removal`, where the state exists to
                 // check them against.
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(

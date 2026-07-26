@@ -1,17 +1,23 @@
-//! CR733 P2 coverage for the CR 405.2 top-of-stack removal.
+//! CR733 P2 coverage for the CR 405.2 single-entry stack removal.
 //!
-//! CR 405.5: "When all players pass in succession, the top (last-added) object
-//! on the stack resolves." That removal, plus the drain loops that clear several
-//! entries in one pass (batched resolution, inert no-op batches, and the
-//! CR 724.1b end-phase stack exile), all funnel through the single authority
-//! `stack::pop_top_stack_entry`, which drops the entry together with the two
-//! per-entry side tables keyed on it.
+//! Every one-entry removal funnels through `stack::remove_stack_entry_at`, which
+//! drops the entry together with the two per-entry side tables keyed on it: the
+//! CR 405.5 resolution pop and the drain loops (batched resolution, inert no-op
+//! batches, CR 724.1b end-phase exile) via the `pop_top_stack_entry` wrapper,
+//! the CR 701.6a counter, and the CR 601.2a / CR 601.2i cast rollbacks.
+//!
+//! ONE COMMAND PARAMETERIZED BY `index`, not a pop/remove-at pair. A top pop is
+//! the removal at `index == resulting_depth`, so a separate pop command would
+//! carry a field its caller could derive.
+//! `countering_a_buried_spell_journals_a_removal_at_the_recorded_index` is what
+//! makes the field non-vacuous — it asserts `index != resulting_depth`, which is
+//! unreachable through any pop.
 //!
 //! A drain of N entries journals N separate commands rather than one bulk
 //! removal, so a replay reproduces the removal ORDER and not merely the final
 //! depth. `resolving_two_spells_journals_two_pops_in_lifo_order` is what pins
 //! that: it would still pass on a bulk record if it only checked the end state,
-//! so it asserts the per-command depths descend.
+//! so it asserts the per-command depths AND indices descend.
 //!
 //! THE CROSS-POP CANARY IS THE ACCEPTANCE TEST FOR THIS FAMILY. Before pops were
 //! journaled, `apply_resolved_stack_push` failed `StackDepthMismatch` on any
@@ -23,15 +29,15 @@
 //! is what proves the pop record is doing the work.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::game::stack::{apply_resolved_stack_pop, apply_resolved_stack_push};
+use engine::game::stack::{apply_resolved_stack_push, apply_resolved_stack_removal};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::resolved_commands::{
-    ResolvedRulesCommand, ResolvedStackPopCommand, ResolvedStackPopReplayInvariantError,
-    ResolvedStackPushCommand, ResolvedStackPushReplayInvariantError,
+    ResolvedRulesCommand, ResolvedStackPushCommand, ResolvedStackPushReplayInvariantError,
+    ResolvedStackRemovalCommand, ResolvedStackRemovalReplayInvariantError,
 };
 
 /// A no-target sorcery: nothing to retarget, and no trigger to add stack entries
@@ -39,7 +45,7 @@ use engine::types::resolved_commands::{
 const ELVISH_TOKEN_SPELL: &str = "Create a 1/1 green Elf Warrior creature token.";
 
 /// Every stack pop journaled after `from`, in journal order.
-fn stack_pops(state: &GameState, from: usize) -> Vec<ResolvedStackPopCommand> {
+fn stack_removals(state: &GameState, from: usize) -> Vec<ResolvedStackRemovalCommand> {
     state
         .resolved_rules_journal
         .entries()
@@ -47,7 +53,7 @@ fn stack_pops(state: &GameState, from: usize) -> Vec<ResolvedStackPopCommand> {
         .skip(from)
         .filter_map(|entry| entry.command.clone())
         .filter_map(|command| match command {
-            ResolvedRulesCommand::StackPop(command) => Some(*command),
+            ResolvedRulesCommand::StackRemoval(command) => Some(*command),
             _ => None,
         })
         .collect()
@@ -115,7 +121,7 @@ fn resolving_a_spell_journals_an_exact_pop() {
 
     // The discriminating assertion: the removal is journaled. A raw
     // `stack.pop_back()` records nothing here.
-    let pops = stack_pops(runner.state(), journal_start);
+    let pops = stack_removals(runner.state(), journal_start);
     let recorded: Vec<_> = pops.iter().filter(|pop| pop.entry.id == spell).collect();
     assert_eq!(
         recorded.len(),
@@ -128,6 +134,11 @@ fn resolving_a_spell_journals_an_exact_pop() {
         "CR 405.2: the recorded depth is the depth AFTER the removal"
     );
     assert_eq!(
+        pop.index, 0,
+        "CR 405.2: a top-of-stack pop is the removal at index == resulting_depth, \
+         which is what makes a separate pop command unnecessary"
+    );
+    assert_eq!(
         *pop.entry, before_pop.stack[0],
         "the recorded entry is the entry that was on the stack, verbatim"
     );
@@ -135,7 +146,7 @@ fn resolving_a_spell_journals_an_exact_pop() {
     // Replay-exactness: from the captured predecessor, applying the record
     // reproduces the removal with nothing re-derived.
     let mut replay = before_pop.clone();
-    apply_resolved_stack_pop(&mut replay, pop)
+    apply_resolved_stack_removal(&mut replay, pop)
         .expect("the recorded pop must replay against its captured predecessor");
     assert!(replay.stack.is_empty(), "replay removes the recorded entry");
     assert!(
@@ -151,8 +162,8 @@ fn resolving_a_spell_journals_an_exact_pop() {
     // so it fails closed rather than popping an unrelated object.
     assert!(
         matches!(
-            apply_resolved_stack_pop(&mut replay, pop),
-            Err(ResolvedStackPopReplayInvariantError::DepthMismatch {
+            apply_resolved_stack_removal(&mut replay, pop),
+            Err(ResolvedStackRemovalReplayInvariantError::DepthMismatch {
                 expected: 1,
                 found: 0
             })
@@ -171,7 +182,7 @@ fn pop_rejects_a_divergent_predecessor() {
     let before_pop = runner.state().clone();
     let journal_start = before_pop.resolved_rules_journal.entries().len();
     runner.resolve_top();
-    let pops = stack_pops(runner.state(), journal_start);
+    let pops = stack_removals(runner.state(), journal_start);
     let pop = pops
         .iter()
         .find(|pop| pop.entry.id == spell)
@@ -185,8 +196,8 @@ fn pop_rejects_a_divergent_predecessor() {
     too_deep.stack.push_front(duplicate);
     assert!(
         matches!(
-            apply_resolved_stack_pop(&mut too_deep, pop),
-            Err(ResolvedStackPopReplayInvariantError::DepthMismatch {
+            apply_resolved_stack_removal(&mut too_deep, pop),
+            Err(ResolvedStackRemovalReplayInvariantError::DepthMismatch {
                 expected: 1,
                 found: 2
             })
@@ -210,8 +221,8 @@ fn pop_rejects_a_divergent_predecessor() {
         .source_id = ObjectId(4242);
     assert!(
         matches!(
-            apply_resolved_stack_pop(&mut wrong_top, pop),
-            Err(ResolvedStackPopReplayInvariantError::PoppedEntryMismatch)
+            apply_resolved_stack_removal(&mut wrong_top, pop),
+            Err(ResolvedStackRemovalReplayInvariantError::RemovedEntryMismatch)
         ),
         "a pop must refuse a predecessor whose top entry diverges from the record"
     );
@@ -244,7 +255,7 @@ fn resolving_two_spells_journals_two_pops_in_lifo_order() {
 
     runner.advance_until_stack_empty();
 
-    let pops: Vec<_> = stack_pops(runner.state(), journal_start)
+    let pops: Vec<_> = stack_removals(runner.state(), journal_start)
         .into_iter()
         .filter(|pop| pop.entry.id == lower || pop.entry.id == upper)
         .collect();
@@ -260,6 +271,108 @@ fn resolving_two_spells_journals_two_pops_in_lifo_order() {
         (1, 0),
         "the recorded depths descend one per removal, which a single bulk record \
          could not express"
+    );
+    assert_eq!(
+        (pops[0].index, pops[1].index),
+        (1, 0),
+        "CR 405.2: each record names the index its entry occupied at the moment \
+         it was removed, not its index in the original stack"
+    );
+}
+
+/// CR 701.6a: a counter removes an entry that is NOT on top, which is the case
+/// the recorded index exists for. A pop-shaped command could not express it.
+#[test]
+fn countering_a_buried_spell_journals_a_removal_at_the_recorded_index() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = scenario
+        .add_spell_to_hand_from_oracle(P0, "Journal Counter Victim", true, ELVISH_TOKEN_SPELL)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let counterspell = scenario
+        // Instant speed: a counterspell must be castable while its target is on
+        // the stack, which is the whole point of the buried-index fixture.
+        .add_spell_to_hand_from_oracle(P0, "Journal Counterspell", true, "Counter target spell.")
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    // A third entry is REQUIRED for this fixture to be non-vacuous. The
+    // counterspell removes itself from the stack before its effect executes
+    // (CR 608.2 resolution pops first), so with only two entries the victim
+    // would be on TOP when countered and the index would be indistinguishable
+    // from a pop. The filler sits above the victim and stays there.
+    let filler = scenario
+        .add_spell_to_hand_from_oracle(P0, "Journal Counter Filler", true, ELVISH_TOKEN_SPELL)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    cast(&mut runner, victim);
+    cast(&mut runner, filler);
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let predecessor = runner.state().clone();
+    assert_eq!(
+        predecessor.stack.len(),
+        2,
+        "reach guard: the victim is BURIED under the filler before the counter is cast"
+    );
+
+    // The `targets` field on `CastSpell` does NOT pre-fill target selection —
+    // the engine parks in `WaitingFor::TargetSelection` — so the choice goes
+    // through the runner's builder, which submits it.
+    runner
+        .cast(counterspell)
+        .target_object(victim)
+        .commit()
+        .resolve();
+    runner.advance_until_stack_empty();
+
+    let removals = stack_removals(runner.state(), journal_start);
+    let victim_removal = removals
+        .iter()
+        .find(|removal| removal.entry.id == victim)
+        .expect("CR 701.6a: countering the victim journals its removal");
+
+    // The discriminating assertion for the index field: the victim sat UNDER the
+    // counterspell, so it was removed from index 0 while the stack still held
+    // the counterspell above it. A pop-shaped record would have described the
+    // wrong entry.
+    assert_eq!(
+        victim_removal.index, 0,
+        "CR 701.6a: the countered spell is removed from the index it occupied, \
+         underneath the counterspell"
+    );
+    assert!(
+        victim_removal.resulting_depth >= 1,
+        "the counterspell is still on the stack when its target is removed, so \
+         the removal is genuinely not a top-of-stack pop (depth {})",
+        victim_removal.resulting_depth
+    );
+    assert_ne!(
+        victim_removal.index, victim_removal.resulting_depth,
+        "index != resulting_depth is exactly the case a pop-only command could \
+         not express"
+    );
+
+    // Replay-exactness against a reconstructed predecessor: the recorded index
+    // is used verbatim rather than re-scanned.
+    let mut replay = predecessor.clone();
+    // Rebuild the pre-removal stack: victim at index 0, counterspell above it.
+    while replay.stack.len() < victim_removal.resulting_depth + 1 {
+        let mut filler = replay.stack[0].clone();
+        filler.id = ObjectId(9100 + replay.stack.len() as u64);
+        replay.stack.push_back(filler);
+    }
+    apply_resolved_stack_removal(&mut replay, victim_removal)
+        .expect("the recorded counter removal replays at its recorded index");
+    assert!(
+        !replay.stack.iter().any(|entry| entry.id == victim),
+        "replay removes the countered entry"
+    );
+    assert_eq!(
+        replay.stack.len(),
+        victim_removal.resulting_depth,
+        "replay lands on the recorded depth"
     );
 }
 
@@ -284,7 +397,7 @@ fn a_recorded_pop_unblocks_a_later_push_replay() {
     runner.resolve_top();
     cast(&mut runner, second);
 
-    let pop = stack_pops(runner.state(), journal_start)
+    let pop = stack_removals(runner.state(), journal_start)
         .into_iter()
         .find(|pop| pop.entry.id == first)
         .expect("resolving the first spell journaled its pop");
@@ -316,7 +429,7 @@ fn a_recorded_pop_unblocks_a_later_push_replay() {
 
     // AFTER-half: same predecessor, pop applied first, and the push now lands.
     let mut sequenced = predecessor.clone();
-    apply_resolved_stack_pop(&mut sequenced, &pop)
+    apply_resolved_stack_removal(&mut sequenced, &pop)
         .expect("the recorded pop replays against the predecessor");
     apply_resolved_stack_push(&mut sequenced, &push)
         .expect("with the pop applied, the push replays across it");
