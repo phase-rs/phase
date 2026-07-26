@@ -17688,6 +17688,35 @@ fn trigger_enchanted_player_attacked() {
 }
 
 #[test]
+fn trigger_one_or_more_of_your_opponents_are_attacked() {
+    // Issue #6643 (Party Dude, level 3): CR 508.3b + CR 102.3 — fires when any
+    // creature attacks a player who is an opponent of the controller.
+    let def = parse_trigger_line(
+        "Whenever one or more of your opponents are attacked, up to one target attacking creature gets +X/+X until end of turn, where X is the number of cards in your hand.",
+        "Party Dude",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    // CR 508.3b: only fires when the opponent player themselves is attacked,
+    // not when a planeswalker they control or battle they protect is.
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(def.execute.is_some());
+}
+
+#[test]
+fn trigger_one_of_your_opponents_is_attacked() {
+    // Singular counterpart of the same CR 508.3b class — same parse shape.
+    let def = parse_trigger_line(
+        "Whenever one of your opponents is attacked, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Attacks);
+    assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
+    assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(def.execute.is_some());
+}
+
+#[test]
 fn trigger_two_or_more_creatures_attack() {
     // CR 508.1a + CR 603.2c: head-noun counts use the full attackers-declared
     // batch, not source-relative co-attacker counting.
