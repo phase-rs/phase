@@ -5517,7 +5517,15 @@ async fn handle_client_message(
 
             match result {
                 Err(reason) => {
-                    let msg = ServerMessage::error(reason);
+                    // The third member of the same class as the two arms
+                    // above: `cancel_takeback`'s only failures are benign
+                    // refusals ("only the player who requested the takeback
+                    // may cancel it", "there is no pending takeback
+                    // request"). Answer on the rejection channel, not the
+                    // terminal error channel — `handleNativeEvent` disposes
+                    // the adapter on ANY `error` event, so a mis-clicked
+                    // cancel would end the desktop session.
+                    let msg = ServerMessage::ActionRejected { reason };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;
                     }
