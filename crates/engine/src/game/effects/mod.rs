@@ -2198,7 +2198,7 @@ fn try_begin_reflexive_target_selection_inner(
             trigger_events,
             events,
         );
-        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger = Some(Box::new(pending_for_state));
         state.pending_trigger_entry = Some(entry_id);
 
         match crate::game::engine::begin_pending_trigger_target_selection(state)
@@ -2291,7 +2291,7 @@ fn try_begin_reflexive_target_selection_inner(
         trigger_events,
         events,
     );
-    state.pending_trigger = Some(pending_for_state);
+    state.pending_trigger = Some(Box::new(pending_for_state));
     state.pending_trigger_entry = Some(entry_id);
     // CR 115.1d + CR 603.3d: the reflexive triggered ability is on the stack
     // before targets are chosen; finalization mutates this pending entry once

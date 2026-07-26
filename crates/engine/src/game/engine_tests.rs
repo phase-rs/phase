@@ -187,7 +187,7 @@ fn pending_trigger_with_no_legal_target_at_choose_time_drops_not_errors() {
             die_result: None,
         },
     });
-    state.pending_trigger = Some(pending);
+    state.pending_trigger = Some(Box::new(pending));
     state.pending_trigger_entry = Some(entry_id);
     let stack_len_before = state.stack.len();
 

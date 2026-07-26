@@ -6580,7 +6580,7 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             state.pending_trigger_event_batch = trigger_events;
-            state.pending_trigger = Some(pending_for_state);
+            state.pending_trigger = Some(Box::new(pending_for_state));
             state.pending_trigger_entry = Some(entry_id);
 
             // CR 700.2b (override) + CR 701.9b (analogous): "choose ... at random"
@@ -6739,7 +6739,7 @@ fn dispatch_pending_trigger_context(
                                 events_out,
                             );
                             state.pending_trigger_event_batch = trigger_events;
-                            state.pending_trigger = Some(pending_for_state);
+                            state.pending_trigger = Some(Box::new(pending_for_state));
                             state.pending_trigger_entry = Some(entry_id);
                             state.waiting_for =
                                 crate::types::game_state::WaitingFor::DistributeAmong {
@@ -6777,7 +6777,7 @@ fn dispatch_pending_trigger_context(
                 events_out,
             );
             state.pending_trigger_event_batch = trigger_events;
-            state.pending_trigger = Some(pending_for_state);
+            state.pending_trigger = Some(Box::new(pending_for_state));
             state.pending_trigger_entry = Some(entry_id);
             restore_trigger_event_context(state, context_snapshot);
             TriggerDispatchDisposition::Paused
@@ -11275,7 +11275,7 @@ pub mod tests {
             source_id,
             controller,
         );
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id,
             controller,
             condition: None,
@@ -11290,7 +11290,7 @@ pub mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: controller,
             source_id,

@@ -11353,7 +11353,7 @@ pub struct GameState {
 
     // Triggered ability targeting
     #[serde(default)]
-    pub pending_trigger: Option<crate::game::triggers::PendingTrigger>,
+    pub pending_trigger: Option<Box<crate::game::triggers::PendingTrigger>>,
     /// Sidecar for `pending_trigger`: full simultaneous event set for batched
     /// trigger context, consumed when the pending trigger is put on the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -12823,7 +12823,7 @@ pub struct GameState {
     /// CR 601.2h + CR 616.1: Resume a sequential discard cost after a
     /// replacement choice. Cost moves use `pending_cost_move_resume` above.
     #[serde(skip)]
-    pub pending_discard_for_cost: Option<PendingDiscardForCostResume>,
+    pub pending_discard_for_cost: Option<Box<PendingDiscardForCostResume>>,
 
     /// Pending cast info saved when entering ManaPayment state (X-cost or convoke).
     /// Consumed by the (ManaPayment, PassPriority) handler to finalize the cast.
@@ -22049,7 +22049,7 @@ mod tests {
                 return_zone: Zone::Battlefield,
             },
         });
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: ObjectId(5),
             controller: PlayerId(0),
             condition: None,
@@ -22072,7 +22072,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
 
         let json = serde_json::to_string(&state).unwrap();
         let mut deserialized: GameState = serde_json::from_str(&json).unwrap();

@@ -4624,7 +4624,7 @@ mod tests {
         });
         state.pending_trigger_entry = Some(entry_id);
         state.pending_trigger_event_batch = vec![trigger_event.clone()];
-        state.pending_trigger = Some(PendingTrigger {
+        state.pending_trigger = Some(Box::new(PendingTrigger {
             source_id: predator,
             controller: PlayerId(0),
             condition: None,
@@ -4639,7 +4639,7 @@ mod tests {
             may_trigger_origin: Some(MayTriggerOrigin::Printed { trigger_index: 0 }),
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };

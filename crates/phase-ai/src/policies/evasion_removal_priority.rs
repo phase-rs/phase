@@ -495,7 +495,7 @@ mod tests {
             add_creature(&mut state, PlayerId(2), &format!("Goblin {index}"), 1, 1);
         }
         let trigger_source = ObjectId(999);
-        state.pending_trigger = Some(engine::game::triggers::PendingTrigger {
+        state.pending_trigger = Some(Box::new(engine::game::triggers::PendingTrigger {
             source_id: trigger_source,
             controller: P0,
             condition: None,
@@ -518,7 +518,7 @@ mod tests {
             may_trigger_origin: None,
             subject_match_count: None,
             die_result: None,
-        });
+        }));
         let config = AiConfig::default();
         let slot = TargetSelectionSlot {
             legal_targets: vec![TargetRef::Object(low), TargetRef::Object(high)],

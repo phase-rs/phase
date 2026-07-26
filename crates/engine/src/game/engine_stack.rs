@@ -66,7 +66,7 @@ pub(super) fn finalize_trigger_target_selection(
                         priority::clear_priority_passes(state);
                         return WaitingFor::Priority { player: controller };
                     }
-                    state.pending_trigger = Some(trigger);
+                    state.pending_trigger = Some(Box::new(trigger));
                     priority::clear_priority_passes(state);
                     return WaitingFor::DistributeAmong {
                         player: controller,
@@ -183,7 +183,7 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
     Ok(finalize_trigger_target_selection(
-        state, trigger, *ability, events,
+        state, *trigger, *ability, events,
     ))
 }
 
@@ -340,7 +340,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
             Ok(finalize_trigger_target_selection(
-                state, trigger, *ability, events,
+                state, *trigger, *ability, events,
             ))
         }
     }

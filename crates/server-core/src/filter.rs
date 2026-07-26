@@ -713,7 +713,7 @@ mod tests {
         );
 
         let mut state = GameState::new_two_player(42);
-        state.pending_trigger = Some(ctx.pending.clone());
+        state.pending_trigger = Some(Box::new(ctx.pending.clone()));
         state.pending_trigger_event_batch = vec![GameEvent::GameStarted];
 
         // Controller view: payload intact, batch intact.

@@ -1695,12 +1695,12 @@ pub(crate) fn handle_discard_for_cost(
         match super::effects::discard::discard_as_cost(state, card_id, player, events) {
             super::effects::discard::DiscardOutcome::Complete => {}
             super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
                     player,
                     pending: pending.clone(),
                     chosen: chosen.to_vec(),
                     paused_at_index: index,
-                });
+                }));
                 super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                 // CR 603.2 + CR 603.3b: Earlier cards in a count>1 discard cost may
                 // already have emitted graveyard `ZoneChanged` events before this
@@ -2077,12 +2077,12 @@ pub(crate) fn resume_interrupted_cost_payment(
                         .iter()
                         .position(|&id| id == card_id)
                         .unwrap_or(resume.paused_at_index + 1);
-                    state.pending_discard_for_cost = Some(PendingDiscardForCostResume {
+                    state.pending_discard_for_cost = Some(Box::new(PendingDiscardForCostResume {
                         player,
                         pending: pending.clone(),
                         chosen: resume.chosen.clone(),
                         paused_at_index,
-                    });
+                    }));
                     super::casting::pause_cost_payment_for_replacement_choice(state, choice_player);
                     // CR 603.2 + CR 603.3b: Same mid-loop replacement pause as
                     // `handle_discard_for_cost` — park already-emitted discard

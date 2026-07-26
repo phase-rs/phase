@@ -476,7 +476,7 @@ fn handle_triggered_mode_choice(
             // WaitingFor if a sibling trigger needs input; use that result
             // instead of falling through to Priority below.
             return Ok(engine_stack::finalize_trigger_target_selection(
-                state, trigger, resolved, events,
+                state, *trigger, resolved, events,
             ));
         } else {
             // CR 601.2c + CR 603.3d: Mode chosen but target choice still
