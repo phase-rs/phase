@@ -3521,7 +3521,14 @@ fn spell_object_matches_property(
                     context.source_id,
                 ),
             };
-            comparator.evaluate(object_pt_value(spell_obj, *stat, *scope), threshold)
+            // CR 208.2a: resolve the candidate spell's off-battlefield power
+            // through its CDA (if any) before comparing — a dynamic-P/T creature
+            // spell (Tarmogoyf-class) must gate on its CDA-defined power, not the
+            // stored 0. A fixed-P/T spell reads its printed value unchanged.
+            comparator.evaluate(
+                spell_object_effective_pt_value(context.state, spell_obj, *stat, *scope),
+                threshold,
+            )
         }
         _ => spell_record_matches_property(record, prop),
     }
@@ -4110,6 +4117,105 @@ fn object_pt_value(obj: &GameObject, stat: PtStat, scope: PtValueScope) -> i32 {
         PtValueScope::Current => pt_value_from_pair(stat, obj.power, obj.toughness),
         PtValueScope::Base => pt_value_from_pair(stat, obj.base_power, obj.base_toughness),
     }
+}
+
+/// CR 208.2a + CR 613.4b: a power/toughness characteristic-defining ability
+/// (CDA) functions in EVERY zone — hand, stack, graveyard — not just the
+/// battlefield. A candidate spell object loaded from card data stores a printed
+/// `*` P/T as `Some(0)` (`printed_cards::parse_pt` maps `PtValue::Variable`/
+/// `Quantity` to 0), and the battlefield layer pass (`evaluate_layers`) only
+/// recomputes P/T for battlefield objects — a hand/stack object keeps that
+/// stored 0. So a power-gated cost modifier (Goreclaw: "creature spells you cast
+/// with power 4 or greater cost {2} less") that read `object_pt_value` directly
+/// would treat an eligible dynamic-P/T creature spell (Tarmogoyf-class) as power
+/// 0 and never reduce it.
+///
+/// Resolve the candidate's off-battlefield P/T through the SAME authority the
+/// layer pass uses, rather than re-deriving CDA evaluation here: gather the
+/// continuous effects the object's own statics source
+/// (`active_continuous_effects_from_static_source`), keep only the
+/// characteristic-defining self-referential dynamic-P/T modifications, and
+/// resolve each magnitude with the layer pass's quantity resolver
+/// (`resolve_quantity`, mirroring `apply_continuous_effect` at layers.rs). Apply
+/// the layer-7a/7b *set* CDAs before the layer-7c *add* CDAs (CR 613.4a: P/T
+/// characteristic-defining abilities apply first, in layer 7a). A fixed-P/T
+/// object (Fire Elemental) sources
+/// no such effect, so this returns its stored `object_pt_value` unchanged.
+fn spell_object_effective_pt_value(
+    state: &GameState,
+    obj: &GameObject,
+    stat: PtStat,
+    scope: PtValueScope,
+) -> i32 {
+    use crate::game::layers::active_continuous_effects_from_static_source;
+    use crate::game::quantity::{
+        continuous_modification_dynamic_quantity, quantity_expr_uses_recipient,
+        resolve_quantity_with_recipient,
+    };
+    use crate::types::ability::ContinuousModification;
+
+    // Stored printed value — 0 for an unevaluated `*` CDA card, the true fixed
+    // value for a fixed-P/T card.
+    let (mut power, mut toughness) = match scope {
+        PtValueScope::Current => (obj.power, obj.toughness),
+        PtValueScope::Base => (obj.base_power, obj.base_toughness),
+    };
+
+    let effects = active_continuous_effects_from_static_source(state, obj);
+    // Only the object's OWN CDA (SelfRef, characteristic-defining) functions
+    // off the battlefield per CR 208.2a; a non-CDA "as long as ..." dynamic P/T
+    // static is battlefield-only and is correctly excluded here.
+    let self_cda = |e: &&crate::types::layers::ActiveContinuousEffect| {
+        e.characteristic_defining && matches!(e.affected_filter, TargetFilter::SelfRef)
+    };
+    // Mirror `apply_continuous_effect`'s recipient dispatch: a self-CDA's
+    // recipient IS its source, so both resolvers see the same object.
+    let resolve = |m: &ContinuousModification| -> Option<i32> {
+        let expr = continuous_modification_dynamic_quantity(m)?;
+        Some(if quantity_expr_uses_recipient(expr) {
+            resolve_quantity_with_recipient(state, expr, obj.controller, obj.id, obj.id)
+        } else {
+            resolve_quantity(state, expr, obj.controller, obj.id)
+        })
+    };
+
+    // CR 613.4b (layer 7a/7b): dynamic *set* CDAs establish the base P/T first.
+    for effect in effects.iter().filter(self_cda) {
+        match &effect.modification {
+            ContinuousModification::SetDynamicPower { .. }
+            | ContinuousModification::SetPowerDynamic { .. } => {
+                if let Some(v) = resolve(&effect.modification) {
+                    power = Some(v);
+                }
+            }
+            ContinuousModification::SetDynamicToughness { .. }
+            | ContinuousModification::SetToughnessDynamic { .. } => {
+                if let Some(v) = resolve(&effect.modification) {
+                    toughness = Some(v);
+                }
+            }
+            _ => {}
+        }
+    }
+    // CR 613.4c (layer 7c): dynamic *add* CDAs (e.g. a life-total CDA) stack on
+    // top of the set base.
+    for effect in effects.iter().filter(self_cda) {
+        match &effect.modification {
+            ContinuousModification::AddDynamicPower { .. } => {
+                if let Some(v) = resolve(&effect.modification) {
+                    power = Some(power.unwrap_or(0) + v);
+                }
+            }
+            ContinuousModification::AddDynamicToughness { .. } => {
+                if let Some(v) = resolve(&effect.modification) {
+                    toughness = Some(toughness.unwrap_or(0) + v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pt_value_from_pair(stat, power, toughness)
 }
 
 fn zone_change_pt_value(record: &ZoneChangeRecord, stat: PtStat, scope: PtValueScope) -> i32 {

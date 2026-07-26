@@ -159,3 +159,104 @@ fn power_exactly_four_creature_spell_is_reduced_boundary() {
         "a power-4 creature spell must be reduced by {{2}} (GE boundary; generic 2 → 0)"
     );
 }
+
+/// Cast-cost probe for a single named spell in P0's hand, with `graveyard` real
+/// cards seeded into P0's graveyard FIRST so a graveyard-counting CDA (Tarmogoyf:
+/// power = number of card types among cards in all graveyards) resolves against
+/// them. Mirrors `goreclaw_generics` but returns the one probed spell's generic.
+fn goreclaw_generic_with_graveyard(spell_name: &str, graveyard: &[&str]) -> u32 {
+    let db = shared_card_db().expect("Goreclaw regression requires the integration card fixture");
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let cost_static =
+        parse_static_line(GORECLAW_COST_LINE).expect("Goreclaw cost line must parse to a static");
+    scenario
+        .add_creature(P0, "Goreclaw, Terror of Qal Sisma", 4, 5)
+        .with_static_definition(cost_static);
+
+    // Real cards of DISTINCT card types in the graveyard set Tarmogoyf's CDA
+    // power to exactly `graveyard.len()`.
+    for name in graveyard {
+        scenario.add_real_card(P0, name, Zone::Graveyard, db);
+    }
+
+    let spell = scenario.add_real_card(P0, spell_name, Zone::Hand, db);
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let cost = engine::game::casting::display_spell_cost(runner.state(), P0, spell)
+        .expect("spell should have a displayable cost");
+    match cost {
+        ManaCost::Cost { generic, .. } => generic,
+        other => panic!("expected ManaCost::Cost, got {other:?}"),
+    }
+}
+
+/// CR 208.2a + CR 613.4b (#6375, MED-1): a dynamic-P/T creature spell must gate on
+/// its CHARACTERISTIC-DEFINING power, which functions in every zone — not on the
+/// stale 0 that a `*` card stores off the battlefield. Tarmogoyf ({1}{G}, power =
+/// number of card types among all graveyards) with a four-distinct-type graveyard
+/// (Creature + Instant + Sorcery + Artifact) has CDA power 4, so Goreclaw reduces
+/// it: generic 1 → 0.
+///
+/// Revert-guard: reverting the CDA resolution (`spell_object_effective_pt_value` →
+/// the raw `object_pt_value`) reads Tarmogoyf's stored power as 0, fails the GE-4
+/// gate, and leaves the generic at 1 — this assertion then fails. The power-3
+/// sibling below is the discriminating lower bound.
+#[test]
+fn dynamic_cda_power_four_creature_spell_is_reduced() {
+    let generic = goreclaw_generic_with_graveyard(
+        "Tarmogoyf",
+        &[
+            "Absolver Thrull",
+            "Abrade",
+            "Arc Lightning",
+            "Amulet of Vigor",
+        ],
+    );
+    assert_eq!(
+        generic, 0,
+        "a CDA creature spell whose CDA power is 4 must be reduced by {{2}} \
+         (generic 1 → 0); reverting the CDA resolution reads power 0 and wrongly \
+         leaves it unreduced at 1 (issue #6375 MED-1)"
+    );
+}
+
+/// CR 208.2a (#6375, MED-1): the discriminating lower bound. The SAME Tarmogoyf
+/// with a three-distinct-type graveyard (Instant + Sorcery + Artifact) has CDA
+/// power 3 (< 4) and is NOT reduced: generic 1 stays 1. Together with the power-4
+/// sibling this proves the gate reads the true CDA magnitude (3 vs 4), not merely
+/// "nonzero".
+#[test]
+fn dynamic_cda_power_three_creature_spell_is_not_reduced() {
+    let generic = goreclaw_generic_with_graveyard(
+        "Tarmogoyf",
+        &["Abrade", "Arc Lightning", "Amulet of Vigor"],
+    );
+    assert_eq!(
+        generic, 1,
+        "a CDA creature spell whose CDA power is 3 must NOT be reduced (3 < 4); \
+         the power-4 sibling on a four-type graveyard IS reduced"
+    );
+}
+
+/// CR 208.1 (#6375, MED-1): fixed-P/T control. Fire Elemental (fixed power 5,
+/// {3}{R}{R}) on the SAME three-type graveyard as the power-3 CDA test is still
+/// reduced 3 → 1 — its printed power is unaffected by CDA resolution. This proves
+/// the new resolution path changes nothing for a fixed-P/T spell (it must return
+/// the stored `object_pt_value` unchanged when the object sources no self-CDA).
+#[test]
+fn fixed_power_control_reduced_regardless_of_graveyard() {
+    let generic = goreclaw_generic_with_graveyard(
+        "Fire Elemental",
+        &["Abrade", "Arc Lightning", "Amulet of Vigor"],
+    );
+    assert_eq!(
+        generic, 1,
+        "a fixed power-5 creature spell is reduced 3 → 1 regardless of graveyard \
+         (control: CDA resolution must not change fixed-P/T behavior)"
+    );
+}

@@ -4381,6 +4381,35 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     if let Some(zone) = &stat.affected_zone {
         d.push(("zone".into(), fmt_zone(zone)));
     }
+    // CR 601.2f (#6375, MED-2): a `ModifyCost` static's payload is otherwise
+    // invisible to the parse-diff — `StaticMode`'s Display collapses `ModifyCost`
+    // to a bare "ReduceCost"/"RaiseCost"/"MinimumCost" (the `ParsedItem::label`),
+    // dropping `amount`, `spell_filter`, and `dynamic_count`, and `static_details`
+    // projected none of them. So a change to WHICH spells the reduction targets
+    // (Goreclaw's `spell_filter` flipping from `None` to a power-gated creature
+    // filter) produced a byte-identical signature and a false "No card-parse
+    // changes detected". Project every semantically-relevant ModifyCost field so
+    // the diff surfaces the change. Deterministic: `fmt_target` and `Debug` are
+    // stable, ordering-free encodings.
+    if let StaticMode::ModifyCost {
+        mode,
+        amount,
+        spell_filter,
+        dynamic_count,
+    } = &stat.mode
+    {
+        d.push(("cost mode".into(), format!("{mode:?}")));
+        d.push(("cost amount".into(), format!("{amount:?}")));
+        d.push((
+            "cost filter".into(),
+            spell_filter
+                .as_ref()
+                .map_or_else(|| "any".into(), fmt_target),
+        ));
+        if let Some(dynamic) = dynamic_count {
+            d.push(("cost per".into(), format!("{dynamic:?}")));
+        }
+    }
     d
 }
 
@@ -10776,6 +10805,86 @@ mod tests {
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::{BlockExceptionKind, ProhibitionScope};
     use crate::types::zones::{EtbTapState, Zone};
+
+    /// CR 601.2f (#6375, MED-2): a `ModifyCost` static's `spell_filter` must be
+    /// visible in the parse-diff signature. Goreclaw's fix flipped `spell_filter`
+    /// from `None` (reduces ALL spells) to a power-gated creature filter, but the
+    /// `ParsedItem` label (Display) collapses `ModifyCost` to a bare "ReduceCost"
+    /// and `static_details` projected no ModifyCost payload — so both variants
+    /// hashed identically and CI reported "No card-parse changes detected".
+    ///
+    /// Red/green: the two static_details projections differ ONLY when the
+    /// `spell_filter` row is emitted. Revert-probe: dropping the `static_details`
+    /// ModifyCost projection makes both vectors byte-identical and this fails.
+    #[test]
+    fn modify_cost_signature_exposes_spell_filter() {
+        use crate::types::ability::{
+            Comparator, FilterProp, PtStat, PtValueScope, QuantityExpr, TargetFilter, TypeFilter,
+            TypedFilter,
+        };
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::{CostModifyMode, StaticMode};
+
+        let modify_cost_static = |spell_filter: Option<TargetFilter>| -> StaticDefinition {
+            StaticDefinition {
+                mode: StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(2),
+                    spell_filter,
+                    dynamic_count: None,
+                },
+                affected: Some(TargetFilter::Controller),
+                modifications: vec![],
+                condition: None,
+                per_player_condition: None,
+                affected_zone: None,
+                effect_zone: None,
+                active_zones: vec![],
+                characteristic_defining: false,
+                description: Some("cost reduction".to_string()),
+                attack_defended: None,
+                source_controller: None,
+                source_object: None,
+                bypass_beneficiary: None,
+                protection_does_not_remove: None,
+            }
+        };
+
+        // Goreclaw's real filter: creature spells with power 4 or greater.
+        let goreclaw_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            }],
+        });
+
+        let unfiltered = static_details(&modify_cost_static(None));
+        let filtered = static_details(&modify_cost_static(Some(goreclaw_filter)));
+
+        // The `spell_filter` change must surface in the projected signature.
+        assert_ne!(
+            unfiltered, filtered,
+            "a ModifyCost spell_filter change (None → power-gated creature filter) \
+             must produce a different coverage signature (issue #6375 MED-2)"
+        );
+        // Specifically, the "cost filter" row must reflect each value.
+        let filter_row = |d: &[(String, String)]| -> String {
+            d.iter()
+                .find(|(k, _)| k == "cost filter")
+                .map(|(_, v)| v.clone())
+                .expect("ModifyCost projection must emit a 'cost filter' row")
+        };
+        assert_eq!(filter_row(&unfiltered), "any", "None filter → \"any\"");
+        assert_ne!(
+            filter_row(&filtered),
+            "any",
+            "a power-gated creature filter must NOT project as \"any\""
+        );
+    }
 
     #[test]
     fn change_zone_signature_exposes_enters_attacking() {
