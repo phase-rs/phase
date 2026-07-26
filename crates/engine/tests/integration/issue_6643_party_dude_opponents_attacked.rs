@@ -212,6 +212,11 @@ fn party_dude_level3_triggers_exactly_once_when_two_opponents_are_attacked_simul
         }
         let _ = runner.act(GameAction::PassPriority);
     }
+    assert_eq!(
+        runner.waiting_for_kind(),
+        "DeclareAttackers",
+        "ramp-up loop must reach DeclareAttackers before declaring attacks"
+    );
     runner
         .act(GameAction::DeclareAttackers {
             attacks: vec![
