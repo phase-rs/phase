@@ -3008,8 +3008,16 @@ fn legacy_effect(x: &Effect) -> bool {
                 }
         }
         Effect::ChooseCounterKind { target } => legacy_target_filter(target),
-        Effect::PutChosenCounter { target, count } => {
-            legacy_quantity_expr(count) || legacy_target_filter(target)
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
+            legacy_quantity_expr(count)
+                || target_condition
+                    .as_ref()
+                    .is_some_and(|condition| legacy_quantity_expr(&condition.rhs))
+                || legacy_target_filter(target)
         }
         Effect::ChooseCounterAdjustment { count, .. } => legacy_quantity_expr(count),
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
@@ -4120,8 +4128,13 @@ fn rw_effect(
         // ChosenAttribute::Counter on the SOURCE — a per-source binding a later
         // PutChosenCounter consumes (member-bound; mirrors Effect::Choose{persist}).
         // No board WRITE: the placement is the separate PutChosenCounter.
-        Effect::ChooseCounterKind { target: _ } => {
-            let mut p = reads_board_of(StateKind::ObjectCounters);
+        Effect::ChooseCounterKind { target } => {
+            let mut p = if target.is_context_ref() {
+                reads_board_of(StateKind::ObjectCounters)
+            } else {
+                board_value_aggregate_read(target, StateKind::ObjectCounters)
+            };
+            p.merge(rw_target_filter(target));
             p.reads_member_bound = true;
             (p, None)
         }
@@ -4129,10 +4142,18 @@ fn rw_effect(
         // source's persisted ChosenAttribute::Counter kind to `target`. An
         // ObjectCounters write (like PutCounter) that CONSUMES the per-source
         // chosen-kind binding ⇒ member-bound read.
-        Effect::PutChosenCounter { target, count } => {
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             let (mut p, sc) = obj(StateKind::ObjectCounters, target);
             p.reads_member_bound = true;
             p.merge(rw_quantity_expr(count));
+            if let Some(condition) = target_condition {
+                p.merge(reads_board_of(StateKind::ObjectCounters));
+                p.merge(rw_quantity_expr(&condition.rhs));
+            }
             (p, sc)
         }
         // CR 122.1 + CR 608.2d: slot-less counter adjustment reads/writes the

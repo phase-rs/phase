@@ -9968,6 +9968,16 @@ pub enum ExiledSpellRider {
     BecomePlotted,
 }
 
+/// CR 608.2c + CR 122.1: A resolution-time predicate over the number of
+/// counters of the kind selected by a preceding `ChooseCounterKind` instruction.
+/// `rhs` is explicit so "no counter of that kind" (`EQ 0`) and future numeric
+/// thresholds share one parameterized representation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenCounterCountCondition {
+    pub comparator: Comparator,
+    pub rhs: QuantityExpr,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
@@ -11134,6 +11144,10 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 608.2c: Optional eligibility predicate evaluated against the
+        /// resolved target's count of the chosen counter kind before placement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_condition: Option<ChosenCounterCountCondition>,
     },
     /// CR 122.1: Place counters on all objects matching a filter (no targeting).
     PutCounterAll {
@@ -15052,8 +15066,15 @@ impl Effect {
             Effect::PutCounter { count, .. } => {
                 f(count);
             }
-            Effect::PutChosenCounter { count, .. } => {
+            Effect::PutChosenCounter {
+                count,
+                target_condition,
+                ..
+            } => {
                 f(count);
+                if let Some(condition) = target_condition {
+                    f(&condition.rhs);
+                }
             }
             Effect::PutCounterAll { count, .. } => {
                 f(count);
@@ -23320,6 +23341,25 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn put_chosen_counter_quantity_visitor_includes_target_condition_rhs() {
+        let count = QuantityExpr::Fixed { value: 1 };
+        let rhs = QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        };
+        let effect = Effect::PutChosenCounter {
+            target: TargetFilter::ParentTarget,
+            count: count.clone(),
+            target_condition: Some(ChosenCounterCountCondition {
+                comparator: Comparator::EQ,
+                rhs: rhs.clone(),
+            }),
+        };
+        let mut visited = Vec::new();
+        effect.for_each_quantity_expr(&mut |quantity| visited.push(quantity.clone()));
+        assert_eq!(visited, vec![count, rhs]);
+    }
 
     /// CR 109.1: `with_own_cast_exclusion` injects the `Another` marker and
     /// `peel_own_cast_exclusion` is its exact dual across the three inner shapes

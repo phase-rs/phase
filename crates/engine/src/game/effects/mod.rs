@@ -5527,9 +5527,19 @@ fn has_member_driven_repeat_after_hydration(state: &GameState, ability: &Resolve
 /// the prompt lets the effect resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
-        Effect::PutChosenCounter { .. } => {
-            choose_counter_kind::chosen_counter_kind(state).is_none()
-        }
+        Effect::PutChosenCounter {
+            target,
+            target_condition,
+            ..
+        } => choose_counter_kind::chosen_counter_kind(state).is_none_or(|chosen_kind| {
+            !put_chosen_counter::target_condition_is_satisfied(
+                state,
+                ability,
+                target,
+                &chosen_kind,
+                target_condition.as_ref(),
+            )
+        }),
         // CR 122.1: "you may remove a <kind> counter from <object>. If you do, X"
         // with zero matching counters cannot be performed — removing a counter
         // that isn't there does nothing, so the up-front prompt (and its
@@ -11564,11 +11574,11 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, AggregateFunction, BounceSelection,
         CardPredicateChoice, CastingPermission, ChoiceType, ChoiceValue, Chooser, ChosenAttribute,
-        Comparator, ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration,
-        EffectScope, FilterProp, ManaSpendPermission, ObjectProperty, PermissionGrantee,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, SpellContext,
-        StaticDefinition, TapStateChange, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter,
-        TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
+        ChosenCounterCountCondition, Comparator, ContinuousModification, ControllerRef,
+        DelayedTriggerCondition, Duration, EffectScope, FilterProp, ManaSpendPermission,
+        ObjectProperty, PermissionGrantee, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, SpellContext, StaticDefinition, TapStateChange, TargetFilter, TargetRef,
+        TargetSelectionMode, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::CardFace;
@@ -25791,6 +25801,84 @@ mod tests {
                 "a valid typed cast from {zone:?} must remain offerable"
             );
         }
+    }
+
+    /// CR 608.2d + CR 122.1: An optional chosen-counter placement is infeasible
+    /// when its typed target predicate is false, and becomes feasible when the
+    /// same target state makes the predicate true. The legacy condition-free
+    /// form remains offerable.
+    #[test]
+    fn optional_put_chosen_counter_respects_target_condition() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(901),
+            PlayerId(0),
+            "Counter Target".to_string(),
+            Zone::Battlefield,
+        );
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: Some(ChosenCounterCountCondition {
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        assert!(
+            optional_effect_is_infeasible(&state, &ability),
+            "an existing chosen-kind counter makes the EQ-zero option impossible"
+        );
+
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .remove(&CounterType::Stun);
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "an absent chosen-kind counter satisfies the EQ-zero predicate"
+        );
+
+        let Effect::PutChosenCounter {
+            target_condition, ..
+        } = &mut ability.effect
+        else {
+            unreachable!("test constructs PutChosenCounter");
+        };
+        *target_condition = None;
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        assert!(
+            !optional_effect_is_infeasible(&state, &ability),
+            "the existing condition-free additional-counter behavior stays offerable"
+        );
     }
 
     /// CR 608.2d: an exact missing parent cannot become actionable through the

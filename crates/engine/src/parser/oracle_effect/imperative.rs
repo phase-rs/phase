@@ -3841,30 +3841,51 @@ fn try_parse_choose_damage_source(rest: &str) -> Option<ChooseImperativeAst> {
     Some(ChooseImperativeAst::DamageSource { source_filter })
 }
 
-/// CR 608.2d + CR 122.1: "a counter on <anaphor>" — the counter-kind choice
-/// head for the anaphoric form (`it` / `that permanent` / `that creature` →
-/// `ParentTarget`, The Caves of Androzani II/III). Combinator-based: `tag("a
-/// counter on ")` then the anaphor phrase, consuming the entire residual.
+/// CR 608.2d + CR 122.1: "a counter on <domain>" — the counter-kind choice
+/// head. An anaphor (`it` / `that permanent` / `that creature`) binds to
+/// `ParentTarget` (The Caves of Androzani); a typed untargeted domain uses the
+/// shared target parser (Aven Courier's "a permanent you control").
 ///
 /// The declared-target form ("a counter on target permanent", Ichormoon
-/// Gauntlet) is intentionally excluded: its consumer ("put one more counter of
-/// that kind on that permanent or remove one of those counters from it") is not
-/// yet implemented, so parsing only the head would create a partial and
-/// rules-incorrect parse. Left as an honest Unimplemented gap.
+/// Gauntlet / Clockspinning) is intentionally excluded so the declared target
+/// remains owned by the existing target-designation path rather than being
+/// misclassified as a resolution-time source population.
 fn try_parse_choose_counter_kind(rest_lower: &str) -> Option<ChooseImperativeAst> {
-    let anaphor = |i| -> OracleResult<'_, ()> {
-        let (i, _) = tag("a counter on ").parse(i)?;
-        let (i, _) = alt((tag("it"), tag("that permanent"), tag("that creature"))).parse(i)?;
-        let (i, _) = opt(tag(".")).parse(i)?;
-        let (i, _) = eof.parse(i)?;
-        Ok((i, ()))
-    };
-    if anaphor(rest_lower.trim()).is_ok() {
+    let (domain, _) = tag::<_, _, OracleError<'_>>("a counter on ")
+        .parse(rest_lower.trim())
+        .ok()?;
+    if tag::<_, _, OracleError<'_>>("target ")
+        .parse(domain)
+        .is_ok()
+    {
+        return None;
+    }
+
+    if all_consuming(terminated(
+        alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("that permanent"),
+            tag("that creature"),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(domain)
+    .is_ok()
+    {
         return Some(ChooseImperativeAst::CounterKind {
             target: TargetFilter::ParentTarget,
         });
     }
-    None
+
+    let (target, remainder) = parse_target(domain);
+    if matches!(target, TargetFilter::Any)
+        || all_consuming(opt(tag::<_, _, OracleError<'_>>(".")))
+            .parse(remainder.trim_start())
+            .is_err()
+    {
+        return None;
+    }
+    Some(ChooseImperativeAst::CounterKind { target })
 }
 
 /// CR 108.3 + CR 701.38d: Detect "a <type> owned by the voter" and emit
@@ -12381,10 +12402,17 @@ pub(super) fn parse_zone_counter_ast(
         if let Some(after_put) =
             nom_on_lower(text, lower, |i| value((), tag("put ")).parse(i)).map(|((), rest)| rest)
         {
-            if let Some(Effect::PutChosenCounter { target, count }) =
-                super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
+            if let Some(Effect::PutChosenCounter {
+                target,
+                count,
+                target_condition,
+            }) = super::counter::try_parse_put_chosen_counter(&after_put.to_ascii_lowercase())
             {
-                return Some(ZoneCounterImperativeAst::PutChosenCounter { target, count });
+                return Some(ZoneCounterImperativeAst::PutChosenCounter {
+                    target,
+                    count,
+                    target_condition,
+                });
             }
         }
         // Try move-counters first ("put its counters on ...")
@@ -12643,9 +12671,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             target,
         },
         // CR 122.1 + CR 122.6: "put an additional counter of that kind on <anaphor>".
-        ZoneCounterImperativeAst::PutChosenCounter { target, count } => {
-            Effect::PutChosenCounter { target, count }
-        }
+        ZoneCounterImperativeAst::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        },
         // CR 122.1: PutCounterList is always intercepted upstream in
         // `lower_imperative_family_ast` because it lowers to a sub_ability
         // chain that a bare Effect can't express. If execution reaches here
@@ -13306,6 +13340,38 @@ mod tests {
                         }
                     ))
         )));
+    }
+
+    /// CR 608.2d + CR 122.1: Aven Courier's untargeted source domain lowers to
+    /// `ChooseCounterKind` over permanents the controller controls.
+    #[test]
+    fn try_parse_choose_counter_kind_accepts_typed_untargeted_domain() {
+        let ast = try_parse_choose_counter_kind("a counter on a permanent you control.")
+            .expect("typed untargeted counter domain must parse");
+        let ChooseImperativeAst::CounterKind {
+            target: TargetFilter::Typed(filter),
+        } = ast
+        else {
+            panic!("expected typed CounterKind domain, got {ast:?}");
+        };
+        assert_eq!(filter.type_filters, vec![TypeFilter::Permanent]);
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 115.1 + CR 608.2d: Literal-target siblings remain owned by the
+    /// stack-target designation path (Clockspinning / Ichormoon Gauntlet), not
+    /// the untargeted chosen-counter population parser.
+    #[test]
+    fn try_parse_choose_counter_kind_rejects_literal_target_siblings() {
+        assert!(
+            try_parse_choose_counter_kind("a counter on target permanent.").is_none(),
+            "Ichormoon-style literal target must not become a resolution population"
+        );
+        assert!(
+            try_parse_choose_counter_kind("a counter on target permanent or suspended card.")
+                .is_none(),
+            "Clockspinning literal target must stay in TargetOnly parsing"
+        );
     }
 
     fn has_type(tf: &TypedFilter, ty: TypeFilter) -> bool {

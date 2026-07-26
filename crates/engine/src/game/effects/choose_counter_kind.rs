@@ -14,7 +14,7 @@
 //! can read it.
 
 use crate::types::ability::{
-    ChoiceType, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility, TargetRef,
+    ChoiceType, ChosenAttribute, Effect, EffectError, EffectKind, ResolvedAbility,
 };
 use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::events::GameEvent;
@@ -28,9 +28,10 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    if !matches!(&ability.effect, Effect::ChooseCounterKind { .. }) {
-        return Err(EffectError::MissingParam("ChooseCounterKind".to_string()));
-    }
+    let target_filter = match &ability.effect {
+        Effect::ChooseCounterKind { target } => target,
+        _ => return Err(EffectError::MissingParam("ChooseCounterKind".to_string())),
+    };
 
     let (mut source, persist_player) = crate::game::effects::choose::named_choice_authority(
         state,
@@ -55,21 +56,25 @@ pub fn resolve(
     }
     state.last_named_choice = None;
 
-    // CR 122.1: Enumerate the distinct counter kinds currently on the RESOLVED
-    // target object(s). Both shapes bind the object into `ability.targets`: the
-    // member-driven `repeat_for` loop binds the i-th permanent for a
-    // `ParentTarget` head (The Caves of Androzani), and the targeting pipeline
-    // binds the declared "target permanent" (Ichormoon Gauntlet). Reading the
-    // bound targets — rather than re-matching a filter against the whole
-    // battlefield — keeps the choice scoped to exactly that object.
-    let target_ids: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|t| match t {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
+    // CR 608.2d + CR 122.1: A context reference names an already-bound object
+    // (The Caves of Androzani's per-member `ParentTarget`), while a typed
+    // noncontext filter describes the complete resolution-time choice domain
+    // (Aven Courier's "a permanent you control"). The latter must ignore
+    // `ability.targets`: those are stack targets declared by other instructions
+    // in the same ability, and are not the population from which this untargeted
+    // choice is made.
+    let target_ids: Vec<ObjectId> = if target_filter.is_context_ref() {
+        crate::game::targeting::resolved_object_ids_for_filter(state, ability, target_filter)
+    } else {
+        let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+        state
+            .battlefield_phased_in_ids()
+            .into_iter()
+            .filter(|id| {
+                crate::game::filter::matches_target_filter(state, *id, target_filter, &filter_ctx)
+            })
+            .collect()
+    };
     let mut seen: HashSet<CounterType> = HashSet::new();
     let mut kinds: Vec<CounterType> = Vec::new();
     for id in &target_ids {
@@ -137,7 +142,8 @@ pub(crate) fn chosen_counter_kind(state: &GameState) -> Option<CounterType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{TargetFilter, TargetRef};
+    use crate::types::ability::{ControllerRef, TargetFilter, TargetRef, TypedFilter};
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -185,6 +191,115 @@ mod tests {
             }
             other => panic!("expected NamedChoice, got {other:?}"),
         }
+    }
+
+    /// CR 608.2d + CR 122.1: A typed untargeted domain is enumerated from the
+    /// battlefield at resolution. An explicit downstream stack target must not
+    /// narrow the population to itself; because it is also a controlled
+    /// permanent, its kind remains one member of the complete legal union.
+    #[test]
+    fn typed_domain_unions_controlled_permanents_despite_downstream_target() {
+        let mut state = GameState::new_two_player(1);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Aven".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let controlled_stun = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Controlled Stun".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let controlled_plus = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(3),
+            PlayerId(0),
+            "Controlled Plus".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let opponent = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(4),
+            PlayerId(1),
+            "Opponent".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        let downstream_target = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(5),
+            PlayerId(0),
+            "Downstream Target".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        for id in [
+            source,
+            controlled_stun,
+            controlled_plus,
+            opponent,
+            downstream_target,
+        ] {
+            let object = state.objects.get_mut(&id).unwrap();
+            object.card_types.core_types.push(CoreType::Creature);
+            object.base_card_types = object.card_types.clone();
+        }
+        state
+            .objects
+            .get_mut(&controlled_stun)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+        state
+            .objects
+            .get_mut(&controlled_plus)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state
+            .objects
+            .get_mut(&opponent)
+            .unwrap()
+            .counters
+            .insert(CounterType::Loyalty, 1);
+        state
+            .objects
+            .get_mut(&downstream_target)
+            .unwrap()
+            .counters
+            .insert(CounterType::Generic("charge".to_string()), 1);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChooseCounterKind {
+                target: TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ),
+            },
+            vec![TargetRef::Object(downstream_target)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let WaitingFor::NamedChoice { options, .. } = &state.waiting_for else {
+            panic!("two controlled counter kinds must produce NamedChoice");
+        };
+        assert_eq!(
+            options,
+            &vec![
+                CounterType::Plus1Plus1.as_str().into_owned(),
+                "charge".to_string(),
+                CounterType::Stun.as_str().into_owned(),
+            ],
+            "all kinds on controlled permanents are legal despite a downstream target"
+        );
+        assert!(
+            !options.contains(&CounterType::Loyalty.as_str().into_owned()),
+            "the opponent's kind must be excluded"
+        );
     }
 
     /// CR 608.2d: A single counter kind is auto-selected — no prompt, and the

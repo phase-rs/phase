@@ -608,10 +608,17 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc
         }
-        Effect::PutChosenCounter { target, count } => {
+        Effect::PutChosenCounter {
+            target,
+            count,
+            target_condition,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc = acc.or(scan_quantity_expr(count, mode));
+            if let Some(condition) = target_condition {
+                acc = acc.or(scan_quantity_expr(&condition.rhs, mode));
+            }
             acc
         }
         Effect::Sacrifice {
@@ -5248,6 +5255,10 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         //     `battlefield_phased_in_ids()` for a non-targeted "double the counters on
         //     each matching permanent" when `ability.targets.is_empty()`.
         | Effect::MultiplyCounter { .. }
+        //   CR 608.2d + CR 122.1: a typed counter-kind source domain enumerates
+        //     every matching permanent at resolution and unions the kinds of
+        //     counters on them, so the read scales with battlefield growth.
+        | Effect::ChooseCounterKind { .. }
         //   CR 707.2 + CR 509.1g + CR 506.3e (team-lead override of the combat-scoped
         //     relax): `copy_token_blocking.rs` UNCONDITIONALLY enumerates
         //     `zone_object_ids(Battlefield).filter(matches source_filter)` and creates one
@@ -5295,7 +5306,6 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         | Effect::Counter { .. }
         | Effect::Token { .. }
         | Effect::RemoveCounter { .. }
-        | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -5555,7 +5565,7 @@ enum CensusRole {
 #[cfg(test)]
 fn effect_census_role(e: &Effect) -> CensusRole {
     match e {
-        // -- CENSUS (30): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
+        // -- CENSUS (31): verbatim mirror of `effect_target_ctx`'s LiveBoardCensus
         // arm - mass battlefield population reads that scale with growth.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
@@ -5603,6 +5613,9 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::TurnFaceUp { .. }
         | Effect::TurnFaceDown { .. }
         | Effect::MultiplyCounter { .. }
+        // CR 608.2d + CR 122.1: a typed counter-kind source domain scans the
+        // matching battlefield population and unions its counter kinds.
+        | Effect::ChooseCounterKind { .. }
         // CR 707.2 + CR 509.1g (team-lead override): `copy_token_blocking.rs` creates one
         // token copy per matching attacker over an UNCONDITIONAL battlefield scan (grows
         // the board); unsound across CR 508.1 multi-combat loops. Mirror of the new
@@ -5701,7 +5714,6 @@ fn effect_census_role(e: &Effect) -> CensusRole {
         | Effect::Counter { .. }
         | Effect::Token { .. }
         | Effect::RemoveCounter { .. }
-        | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::Sacrifice { .. }
         | Effect::DiscardCard { .. }
@@ -6980,7 +6992,7 @@ mod tests {
     }
 
     /// guard#3 (mitigation #3): the `LiveBoardCensus` tag set of `effect_target_ctx`
-    /// == EXACTLY the enumeration-derived MASS-POPULATION set (30). Source-scanned, not
+    /// == EXACTLY the enumeration-derived MASS-POPULATION set (31). Source-scanned, not
     /// hand-counted (the hand-count is what produced the earlier "relax=4" miss). Under
     /// B's SnapshotOrEvent default this is the primary false-certificate gate: only a
     /// census tag vetoes a mass read that ESCALATES over inert token growth (which
@@ -7015,6 +7027,7 @@ mod tests {
             "BounceAll",
             "ChangeZoneAll",
             "ChooseAndSacrificeRest",
+            "ChooseCounterKind",
             "ChooseObjectsIntoTrackedSet",
             "ChoosePermanent",
             "CounterAll",
@@ -7061,7 +7074,7 @@ mod tests {
             got, want,
             "census tag set drifted from the enumeration-derived mass-population set"
         );
-        assert_eq!(got.len(), 30, "exactly 30 mass-population census tags");
+        assert_eq!(got.len(), 31, "exactly 31 mass-population census tags");
     }
 
     /// A7' (mitigation #4, replaces the void census-default A7): with SnapshotOrEvent the
@@ -7072,7 +7085,7 @@ mod tests {
     /// the SOLE effect with a DEDICATED SnapshotOrEvent arm (the region between the
     /// census arm and the single-object group); giving any OTHER census-role slot a
     /// dedicated Snapshot arm turns this RED. Dual-guard with
-    /// `census_tag_set_is_exactly_enumerated` (guard#3, pins the 28 census tags).
+    /// `census_tag_set_is_exactly_enumerated` (guard#3, pins the 31 census tags).
     #[test]
     fn obligation_ii_census_exception_is_exactly_settapstate() {
         use crate::types::ability::{EffectScope, TapStateChange};
@@ -7172,7 +7185,7 @@ mod tests {
     /// with `effect_target_ctx` on the Census/Relax boundary, closing the F1 gap where a
     /// census-ROLE slot silently in the generic relax `|`-chain (exactly R1's Suspect{All})
     /// is invisible to the census-arm-only guards. Structural: both functions' `Census`
-    /// name-sets are source-scanned and asserted IDENTICAL (== the 30). Behavioral: the
+    /// name-sets are source-scanned and asserted IDENTICAL (== the 31). Behavioral: the
     /// two oracles agree on every discriminator, incl. BOTH Suspect/Unsuspect scopes.
     ///
     /// REVERT-PROBE (discrimination proof): moving `Suspect{All}` out of the census arm of
@@ -7187,7 +7200,7 @@ mod tests {
         use crate::types::ability::{EffectScope, TapStateChange};
         use ScanMode::LoopFirewall;
 
-        // -- Structural: the two census name-sets are byte-identical (and == 30).
+        // -- Structural: the two census name-sets are byte-identical (and == 31).
         fn census_names(fnsrc: &str, terminator: &str) -> Vec<String> {
             let end = fnsrc.find(terminator).expect("census terminator");
             let block = &fnsrc[..end];
@@ -7216,7 +7229,7 @@ mod tests {
             etc_census, ecr_census,
             "effect_census_role Census set diverged from effect_target_ctx"
         );
-        assert_eq!(ecr_census.len(), 30, "exactly 30 census members");
+        assert_eq!(ecr_census.len(), 31, "exactly 31 census members");
 
         // -- Behavioral: the two oracles agree on the Census/Relax boundary for every
         // discriminator. `census(e, true)` requires BOTH `effect_census_role == Census`
@@ -7271,6 +7284,7 @@ mod tests {
         census(&settap, false);
         census(&Effect::HeistExile, false);
         census(&Effect::NoOp, false);
+        census(&Effect::ChooseCounterKind { target: f() }, true);
         // CR 701.27a + CR 115.10a: mass Transform is a battlefield census in BOTH oracles
         // (scope:All), and a bounded single-target read (scope:Single) that relaxes. It is
         // a true Census, NOT the SetTapState relax exception (ObjectPt/ability write).
@@ -7444,7 +7458,7 @@ mod tests {
     ///     helper-enumerator mass reads on existing relaxed variants; raw-iteration mass
     ///     reads rely on the oracle's no-wildcard forcing.
     ///   - BOUNDED raw-iter / O(1) reads are deliberately kept OUT of `CLASSIFIED` (so the
-    ///     set-equality stays over the 14 idiom-matched files — no allowlist pollution):
+    ///     set-equality stays over the 15 idiom-matched files — no allowlist pollution):
     ///     `vote.rs` (`votes_per_session_for` = 1 + count of `GrantsExtraVote` statics,
     ///     snapshotted at session start — bounded single outcome) and `switch_pt.rs`
     ///     (O(1) `state.battlefield.contains()` over the effect's own `ids` — bounded
@@ -7477,6 +7491,12 @@ mod tests {
                 true,
                 "ChangeZoneAll: mass battlefield zone move (census); single ChangeZone path \
                  also present in-file",
+            ),
+            (
+                "choose_counter_kind.rs",
+                true,
+                "ChooseCounterKind: typed resolution-time domain scans every matching \
+                 battlefield permanent and unions its counter kinds",
             ),
             (
                 "copy_token_blocking.rs",
@@ -7602,6 +7622,7 @@ mod tests {
             .collect();
         let census_reps: &[(&str, &str)] = &[
             ("change_zone.rs", "ChangeZoneAll"),
+            ("choose_counter_kind.rs", "ChooseCounterKind"),
             ("copy_token_blocking.rs", "CopyTokenBlockingAttacker"),
             ("counters.rs", "PutCounterAll"),
             ("goad.rs", "GoadAll"),
