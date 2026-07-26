@@ -51,6 +51,7 @@ pub mod registry;
 mod removal_lethality;
 mod sacrifice_land_protection;
 mod sacrifice_value;
+mod self_bounce_target;
 mod self_cost;
 mod self_cost_value;
 mod self_protection_classify;

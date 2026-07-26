@@ -16,3 +16,4 @@ pub mod poison;
 pub mod reanimator_payoff;
 pub mod removal_lethality;
 pub mod score_contract_lint;
+pub mod self_bounce_target;

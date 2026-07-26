@@ -142,6 +142,8 @@ pub enum PolicyId {
     GraveyardTypes,
     CrewTiming,
     CombatWithdrawal,
+    /// CR 608.2c: "return a land you control" self-bounce target choice.
+    SelfBounceTarget,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -396,6 +398,7 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&REANIMATOR_PAYOFF)),
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
+            Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {
