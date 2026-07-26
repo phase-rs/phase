@@ -4,8 +4,9 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, DevotionColors, Effect, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, ContinuousModification, DevotionColors, Effect,
+    ManaContribution, ManaProduction, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -281,4 +282,46 @@ fn distinct_thresholds_are_all_retained() {
         vec![3, 5],
         "both distinct thresholds retained"
     );
+}
+
+/// [HIGH] Nykthos-style ramp: a mana ability that produces mana equal to your
+/// devotion lives in `Effect::Mana`'s `ManaProduction`, which `count_expr` does
+/// not reach — the dedicated mana-production scan must still detect it as a
+/// devotion payoff.
+#[test]
+fn nykthos_mana_production_is_a_payoff() {
+    let mut nykthos = card("Nykthos", CoreType::Artifact, &[], 0);
+    nykthos.abilities = vec![AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::ChosenColor {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: DevotionColors::ChosenColor,
+                    },
+                },
+                contribution: ManaContribution::Base,
+                fixed_alternative: None,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )];
+    // A ChosenColor payoff makes every color eligible, so the deck's densest
+    // color becomes primary and Nykthos is counted as a payoff.
+    let deck = vec![
+        entry(nykthos, 1),
+        entry(
+            pip_body("Green Body", &[ManaCostShard::Green, ManaCostShard::Green]),
+            8,
+        ),
+    ];
+    let f = detect(&deck);
+    assert_eq!(
+        f.payoff_count, 1,
+        "Nykthos must register as a devotion payoff"
+    );
+    assert_eq!(f.primary_color, Some(ManaColor::Green));
 }

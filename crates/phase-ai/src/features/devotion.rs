@@ -8,7 +8,8 @@
 //!   `Not{DevotionGE}`).
 //! - `QuantityRef::Devotion { colors: DevotionColors }` at
 //!   `crates/engine/src/types/ability.rs:5574` — scaling payoffs (Gray
-//!   Merchant's drain, Anax's power), Nykthos ramp, and X-cost reductions.
+//!   Merchant's drain, Anax's power) and Nykthos-style mana ramp (`Effect::Mana`
+//!   whose `ManaProduction` count is devotion).
 //! - `DevotionColors::{Fixed(Vec<ManaColor>), ChosenColor}` at
 //!   `crates/engine/src/types/ability.rs:1818`.
 //! - Pip density reuses `ManaCost::count_colored_pips` (`types/mana.rs:1746`),
@@ -21,7 +22,8 @@
 //! CR 700.5: devotion to a color is the number of that color's mana symbols
 //! among the mana costs of permanents you control. It is the payoff currency
 //! for the Theros gods (which are not creatures below their threshold), Gray
-//! Merchant-style drains, and Nykthos ramp — 43 cards in the corpus read it.
+//! Merchant-style drains, and Nykthos-style ramp — 43 cards in the corpus read
+//! it.
 //! The AI's evaluation models mana value and board presence but not pip
 //! density, so it will not prefer a double-pip permanent over an off-color one,
 //! nor see that a god is one pip from turning on.
@@ -248,10 +250,47 @@ fn collect_devotion_colors_in_effect(effect: &Effect, out: &mut Vec<DevotionColo
     // `Effect::count_expr` is the engine's exhaustive authority for an effect's
     // magnitude `QuantityExpr` (drain amount, damage, token count, draw count,
     // …), so every count/amount-bearing payoff is covered without hand-listing
-    // effect variants. Mana-production reads (Nykthos ramp) and cost-reduction
-    // self-discounts are intentionally NOT reached — see the module limitation.
+    // effect variants.
     if let Some(expr) = effect.count_expr() {
         collect_devotion_colors_in_expr(expr, out);
+    }
+    // CR 605.1a: `count_expr` deliberately returns `None` for `Effect::Mana`
+    // because a mana effect has no count/amount magnitude — its `QuantityExpr`
+    // lives inside the `ManaProduction`. That is the Nykthos / Nyx Lotus /
+    // Karametra's Acolyte carrier ("add mana equal to your devotion"), so it is
+    // dug out explicitly here.
+    if let Effect::Mana { produced, .. } = effect {
+        if let Some(expr) = mana_production_count(produced) {
+            collect_devotion_colors_in_expr(expr, out);
+        }
+    }
+}
+
+/// CR 605.1a: the `QuantityExpr` count a mana-production carries, if any.
+/// Enumerated without a wildcard so a new `ManaProduction` variant forces this
+/// devotion scan to be reconsidered. `Fixed` / `Mixed` produce a statically
+/// sized bundle and carry no dynamic count.
+fn mana_production_count(
+    production: &engine::types::ability::ManaProduction,
+) -> Option<&QuantityExpr> {
+    use engine::types::ability::ManaProduction as MP;
+    match production {
+        MP::Colorless { count }
+        | MP::AnyOneColor { count, .. }
+        | MP::AnyCombination { count, .. }
+        | MP::ChosenColor { count, .. }
+        | MP::OpponentLandColors { count }
+        | MP::AnyCombinationOfObjectColors { count, .. }
+        | MP::AnyTypeProduceableBy { count, .. }
+        | MP::AnyInCommandersColorIdentity { count, .. }
+        | MP::AnyOneColorAmongPermanents { count, .. } => Some(count),
+        // No dynamic count: fixed/statically-sized bundles and choice-set forms.
+        MP::Fixed { .. }
+        | MP::Mixed { .. }
+        | MP::ChoiceAmongExiledColors { .. }
+        | MP::ChoiceAmongCombinations { .. }
+        | MP::DistinctColorsAmongPermanents { .. }
+        | MP::TriggerEventManaType => None,
     }
 }
 
@@ -280,7 +319,9 @@ fn collect_devotion_colors_in_expr(expr: &QuantityExpr, out: &mut Vec<DevotionCo
 }
 
 /// The dynamic magnitude carried by a continuous modification, if any. Mirrors
-/// `game::quantity::continuous_modification_dynamic_quantity`.
+/// `game::quantity::continuous_modification_dynamic_quantity` — enumerated
+/// without a wildcard so a new `QuantityExpr`-carrying variant forces this
+/// devotion scan to be reconsidered alongside the engine authority.
 fn continuous_modification_quantity(
     m: &engine::types::ability::ContinuousModification,
 ) -> Option<&QuantityExpr> {
@@ -293,7 +334,56 @@ fn continuous_modification_quantity(
         | CM::AddDynamicPower { value }
         | CM::AddDynamicToughness { value }
         | CM::AddDynamicKeyword { value, .. } => Some(value),
-        _ => None,
+        CM::AddCounterOnEnter { .. }
+        | CM::SetStartingLoyalty { .. }
+        | CM::CopyValues { .. }
+        | CM::CopyChosen
+        | CM::SetName { .. }
+        | CM::SetTextName { .. }
+        | CM::AddPower { .. }
+        | CM::AddToughness { .. }
+        | CM::SetPower { .. }
+        | CM::SetToughness { .. }
+        | CM::AddKeyword { .. }
+        | CM::AddKeywordWithDerivedCost { .. }
+        | CM::RemoveKeyword { .. }
+        | CM::GrantAbility { .. }
+        | CM::GrantAllActivatedAbilitiesOf { .. }
+        | CM::GrantAllTriggeredAbilitiesOf { .. }
+        | CM::GrantTrigger { .. }
+        | CM::GrantReplacement { .. }
+        | CM::RemoveAllAbilities
+        | CM::AddType { .. }
+        | CM::RemoveType { .. }
+        | CM::AddSubtype { .. }
+        | CM::RemoveSubtype { .. }
+        | CM::SetCardTypes { .. }
+        | CM::RemoveAllSubtypes { .. }
+        | CM::AddAllCreatureTypes
+        | CM::AddAllBasicLandTypes
+        | CM::AddAllLandTypes
+        | CM::AddChosenSubtype { .. }
+        | CM::AddChosenColor { .. }
+        | CM::RemoveChosenKeyword
+        | CM::AddChosenKeyword
+        | CM::SetColor { .. }
+        | CM::AddColor { .. }
+        | CM::AddStaticMode { .. }
+        | CM::GrantStaticAbility { .. }
+        | CM::SwitchPowerToughness
+        | CM::AssignDamageFromToughness
+        | CM::AssignDamageAsThoughUnblocked
+        | CM::AssignNoCombatDamage
+        | CM::ChangeController
+        | CM::SetBasicLandType { .. }
+        | CM::SetChosenBasicLandType
+        | CM::SetChosenName
+        | CM::RetainPrintedTriggerFromSource { .. }
+        | CM::RetainPrintedAbilityFromSource { .. }
+        | CM::RetainAllOtherAbilitiesFromSource
+        | CM::AddSupertype { .. }
+        | CM::RemoveSupertype { .. }
+        | CM::RemoveManaCost => None,
     }
 }
 
