@@ -20,14 +20,13 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::phase::Phase;
-use engine::types::resolved_commands::{
-    ResolvedPlayerEdit, ResolvedRulesCommand, RulesExecutionNodeRef,
-};
+use engine::types::resolved_commands::{ResolvedRulesCommand, RulesExecutionNodeRef};
 
 #[test]
 fn losing_the_game_journals_an_exact_player_leave_under_its_own_node() {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
+    let bolt = scenario.add_bolt_to_hand(P0);
     let mut runner = scenario.build();
 
     // Three players so the elimination does not immediately end the game — the
@@ -38,18 +37,14 @@ fn losing_the_game_journals_an_exact_player_leave_under_its_own_node() {
         .iter_mut()
         .find(|player| player.id == P1)
         .expect("the victim is in the game")
-        .life = 1;
+        .life = 3;
 
     let journal_start = runner.state().resolved_rules_journal.entries().len();
 
-    // CR 704.5a: a player with 0 or less life loses the game. Driving the life to
-    // 0 through the ordinary resource authority makes the state-based action fire
-    // on the next check rather than poking `is_eliminated` directly.
-    runner
-        .state_mut()
-        .resolve_and_apply_player_edit(P1, ResolvedPlayerEdit::Life { delta: -1 })
-        .expect("the victim can lose their last point of life");
-    runner.advance_until_stack_empty();
+    // CR 704.5a: a player with 0 or less life loses the game. A real burn spell
+    // resolving at the victim takes them to 0 and makes the state-based action
+    // fire through the production pipeline, rather than poking `is_eliminated`.
+    runner.cast(bolt).target_player(P1).resolve();
 
     // CR 704.5a reach guard: the victim actually left. Without it the journal
     // assertions below could pass vacuously.
