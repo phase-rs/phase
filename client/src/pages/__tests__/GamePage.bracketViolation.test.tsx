@@ -19,6 +19,7 @@ import { GamePage } from "../GamePage";
 import type { FormatConfig } from "../../adapter/types";
 import type { WsAdapterEvent } from "../../adapter/ws-adapter";
 import type { P2PAdapterEvent } from "../../adapter/p2p-adapter";
+import { WebSocketAdapter } from "../../adapter/ws-adapter";
 
 // ── Hoisted variables (must be declared before vi.mock hoisting) ─────────────
 
@@ -28,10 +29,18 @@ let capturedFormatConfig: FormatConfig | undefined;
 let capturedOnWsEvent: ((event: WsAdapterEvent) => void) | undefined;
 let capturedOnP2PEvent: ((event: P2PAdapterEvent) => void) | undefined;
 
-const { mockClearPromptOverlayState, mockSetGameState } = vi.hoisted(() => ({
+const { mockClearPromptOverlayState, mockSetGameState, storeOverrides } = vi.hoisted(() => ({
   mockClearPromptOverlayState: vi.fn(),
   mockSetGameState: vi.fn(),
+  // Mutable slice of the mocked game store. Defaults match the previous
+  // hardcoded values, so every pre-existing test is unaffected; tests that
+  // need a live adapter assign here and `beforeEach` resets.
+  storeOverrides: { adapter: null as unknown },
 }));
+
+// Captures the props GameMenu was rendered with, so tests can assert which
+// affordances GamePage decided to offer without rendering the real menu.
+let capturedGameMenuProps: Record<string, unknown> | undefined;
 
 const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
   const mockMultiplayerState = {
@@ -126,7 +135,7 @@ vi.mock("../../stores/gameStore", () => ({
         events: [],
         eventHistory: [],
         logHistory: [],
-        adapter: null,
+        adapter: storeOverrides.adapter,
         lobbyProgress: null,
       }),
     ),
@@ -228,7 +237,10 @@ vi.mock("../../adapter/draft-adapter", () => ({
 }));
 
 vi.mock("../../components/chrome/GameMenu", () => ({
-  GameMenu: () => null,
+  GameMenu: (props: Record<string, unknown>) => {
+    capturedGameMenuProps = props;
+    return null;
+  },
 }));
 
 vi.mock("../../hooks/useCardDataMeta", () => ({
@@ -257,6 +269,8 @@ beforeEach(() => {
   capturedFormatConfig = undefined;
   capturedOnWsEvent = undefined;
   capturedOnP2PEvent = undefined;
+  capturedGameMenuProps = undefined;
+  storeOverrides.adapter = null;
   vi.clearAllMocks();
 });
 
@@ -548,5 +562,72 @@ describe("GamePage — a refused request is survivable", () => {
     expect(capturedOnWsEvent).toBeDefined();
     expect(mockMultiplayerState.showToast).toHaveBeenCalledWith("refused");
     expect(screen.queryByText("Connection lost")).toBeNull();
+  });
+});
+
+/**
+ * Takeback is offered by TRANSPORT, not by mode.
+ *
+ * `onRequestTakeback` used to be gated on `isOnlineMode`, which is URL-derived
+ * and can never see `native-ai` — desktop solo arrives as `mode=ai`. So the one
+ * mode with a server-authoritative takeback and no client-side undo was the one
+ * mode that never got the button, while spectators (whom `request_takeback`
+ * rejects server-side) did.
+ */
+describe("GamePage — takeback is a transport capability", () => {
+  class FakeWebSocketAdapter extends WebSocketAdapter {
+    // Bypass the real constructor: this fixture only needs `instanceof` to
+    // hold, which is the exact predicate GamePage and `handleRequestTakeback`
+    // both use.
+    constructor() {
+      super("ws://test/ws", "host", { main_deck: [], sideboard: [] });
+    }
+  }
+
+  it("offers takeback for a WebSocketAdapter in desktop-solo mode", () => {
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    // `mode=ai` is exactly how desktop solo-vs-AI reaches this page, and it is
+    // the case the old `isOnlineMode` gate got wrong.
+    expect(capturedGameMenuProps?.isOnlineMode).toBe(false);
+    expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+  });
+
+  it("withholds takeback when the adapter cannot send it", () => {
+    // Paired negative: `null` stands for any non-WebSocket adapter (the WASM
+    // engine of browser solo, which has real local undo instead). Proves the
+    // gate is a transport check and not "always on".
+    storeOverrides.adapter = null;
+
+    renderGamePage("/game/test-game-123?mode=ai");
+
+    // Reach guard: GameMenu really was rendered, so the undefined prop is the
+    // gate rather than an unmounted menu.
+    expect(capturedGameMenuProps).toBeDefined();
+    expect(capturedGameMenuProps?.onRequestTakeback).toBeUndefined();
+  });
+
+  it("withholds takeback from spectators even on a WebSocketAdapter", () => {
+    // This removes a currently-VISIBLE control from a live mode, so it gets
+    // its own case rather than riding on the justification that
+    // `request_takeback` rejects spectators server-side anyway.
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+
+    renderGamePage("/game/test-game-123?mode=spectate");
+
+    // Reach guard: the transport half of the gate is satisfied, so the
+    // undefined prop can only come from the spectate half.
+    expect(capturedGameMenuProps?.isOnlineMode).toBe(true);
+    expect(capturedGameMenuProps?.onRequestTakeback).toBeUndefined();
+  });
+
+  it("keeps offering takeback to online play", () => {
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+
+    renderGamePage("/game/test-game-123?mode=host");
+
+    expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
   });
 });
