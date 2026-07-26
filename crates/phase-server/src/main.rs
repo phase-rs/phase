@@ -115,10 +115,14 @@ const SPECTATOR_PLAYER_ID: PlayerId = PlayerId(u8::MAX);
 ///     stack high-water fell only ~1.36x. The residual is **unattributed** — it
 ///     was not instrumented, so treat what follows as the leading candidate,
 ///     not a finding. Boxing covered every `ResolvedAbility` *storage* site but
-///     none of the by-value *parameter* sites (48 in `crates/`, of which 13 are
-///     in `engine/src/game/casting_costs.rs`; population and counting method
-///     are stated in `engine/tests/integration/game_state_stack_budget.rs`, and
-///     48 is a lower bound because grep undercounts this shape). Those nest two
+///     none of the by-value *parameter* sites (**41 production-reachable**; 48
+///     in `crates/` total, of which 7 are test-only, and 13 of the 48 are in
+///     `engine/src/game/casting_costs.rs`; population and counting method are
+///     stated in `engine/tests/integration/game_state_stack_budget.rs`, and
+///     both figures are lower bounds because grep undercounts this shape). The
+///     production figure is the relevant one here: this is a claim about
+///     production stack frames, and a test-only parameter never appears in
+///     one. Those nest two
 ///     deep on the ordinary cast path, so part of the residual plausibly still
 ///     scales with `ResolvedAbility`. Either way, no static size fix is proven
 ///     to bound it;

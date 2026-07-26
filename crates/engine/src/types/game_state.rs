@@ -10586,11 +10586,9 @@ impl CastingVariant {
 // The size that actually reaches a stack frame is bounded and pinned:
 // `StackEntry` is the only path from this enum into `GameState`
 // (`resolving_stack_entry`), and the `StackEntry` assert in
-// `types/game_state_size.rs` holds it under that file's measured ceiling. The
-// bound is deliberately named rather than restated here — an earlier copy of
-// this comment quoted a literal that went stale the first time the ceilings
-// were re-measured. Follows the documented allows on `Effect` /
-// `CastingPermission` / `OutsideGameChoiceSource`.
+// `types/game_state_size.rs` holds it under the ceiling recorded there. Follows
+// the documented allows on `Effect` / `CastingPermission` /
+// `OutsideGameChoiceSource`.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]

@@ -228,11 +228,17 @@ fn boxing_introduces_no_wrapper_level_in_the_wire_shape() {
     // promoted it onto the wire. The reach-guard at the top of this test is what
     // makes this discriminating: the serialized value really did carry a
     // populated field, so its absence here is evidence the attribute suppressed
-    // it, not evidence that there was nothing to suppress. Note the sibling
-    // field `pending_cost_move_resume` uses `skip_serializing_if =
-    // "Option::is_none"` instead — under that attribute a populated field *does*
-    // cross the wire, so the distinction this assertion draws is a live one in
-    // this very struct, not a hypothetical.
+    // it, not evidence that there was nothing to suppress.
+    //
+    // Scope honestly: `PendingDiscardForCostResume` is not `Serialize`
+    // (`types/game_state.rs`, derives `Debug, Clone, PartialEq, Eq` only), so
+    // this field cannot reach the wire until someone first adds the derives —
+    // the compiler forbids the one-step regression, and only a deliberate
+    // two-step change can reach it. What this assertion pins is the outcome if
+    // they ever do. By contrast the sibling `pending_cost_move_resume` *is*
+    // `Serialize` and uses `skip_serializing_if = "Option::is_none"`, under
+    // which a populated field does cross the wire — a contrast that shows the
+    // two attributes differ, not a live risk on this field.
     assert!(
         value.get("pending_discard_for_cost").is_none(),
         "pending_discard_for_cost is #[serde(skip)] and must stay off the wire, \
