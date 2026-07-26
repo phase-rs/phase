@@ -43,7 +43,7 @@ use engine::types::ability::{
 use engine::types::card_type::CoreType;
 use engine::types::mana::ManaColor;
 
-use crate::ability_chain::collect_chain_effects;
+use crate::ability_chain::{collect_scoped_effects, AbilityScope};
 use crate::features::commitment;
 
 /// Commitment at or above which the deck is genuinely a devotion payoff deck
@@ -59,19 +59,21 @@ pub struct DevotionFeature {
     /// Cards that pay off devotion — a `DevotionGE` gate (gods) or a
     /// `QuantityRef::Devotion` read (drains, ramp, X-scaling).
     pub payoff_count: u32,
-    /// The color the deck is most devoted to among the colors its payoffs care
-    /// about. `None` when the deck has no devotion payoff. The single color the
-    /// policy scores pip contributions in.
-    pub primary_color: Option<ManaColor>,
-    /// Raw colored-pip count in `primary_color` across the deck's permanent
-    /// faces (CR 700.5 counts permanents only).
+    /// The color SET the deck is most devoted to among the sets its payoffs
+    /// read — one color for a mono god (Erebos), two for a combined god
+    /// (Athreos W+B, Xenagos R+G). Empty when the deck has no devotion payoff.
+    /// The policy scores pip contributions against this set, counting a hybrid
+    /// pip once (CR 700.5).
+    pub primary_colors: Vec<ManaColor>,
+    /// Colored-pip count toward `primary_colors` across the deck's permanent
+    /// faces (CR 700.5 counts permanents only). Drives commitment.
     pub pip_count: u32,
-    /// Every DISTINCT `DevotionGE` threshold read in `primary_color`, sorted
-    /// ascending; empty when no threshold payoff reads it. Each entry is one
-    /// god that turns on independently, so the policy rewards a cast that
-    /// crosses ANY of them — not just the maximum. Absence is an empty vec, so a
-    /// scaling-only deck is never handed a fabricated ceiling.
-    pub thresholds: Vec<u32>,
+    /// Every DISTINCT `DevotionGE` gate, each keyed on its EXACT color set — a
+    /// two-color god's threshold is against combined devotion to both colors
+    /// (CR 700.5), not either component. Each god turns on independently, so the
+    /// policy rewards a cast that crosses ANY gate. Empty when the deck has no
+    /// threshold payoff, so a scaling-only deck is never handed a fabricated gate.
+    pub gates: Vec<DevotionGate>,
     /// `0.0..=1.0` — how central devotion is. Consumed by
     /// `DevotionPolicy::activation` as the single scaling knob.
     pub commitment: f32,
@@ -80,11 +82,29 @@ pub struct DevotionFeature {
     pub payoff_names: Vec<String>,
 }
 
-/// A payoff's color demand: a fixed color set, or "whatever color you are most
-/// devoted to" (Nykthos' `ChosenColor`), which makes every color relevant.
-struct PayoffColors {
-    fixed: Vec<ManaColor>,
-    any_chosen: bool,
+/// CR 700.5: a `DevotionGE` gate — a god that becomes a creature once devotion
+/// to `colors` (combined, hybrids once) reaches `threshold`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevotionGate {
+    pub colors: Vec<ManaColor>,
+    pub threshold: u32,
+}
+
+/// CR 700.5: colored pips in `cost` that count toward devotion to `colors` —
+/// each mana symbol counted once even when it is hybrid across two of the
+/// colors (`{W/B}` counts once for W+B devotion). The single-cost analogue of
+/// `engine::game::devotion::count_devotion` (which sums over the battlefield).
+pub(crate) fn cost_devotion_pips(
+    cost: &engine::types::mana::ManaCost,
+    colors: &[ManaColor],
+) -> u32 {
+    let engine::types::mana::ManaCost::Cost { shards, .. } = cost else {
+        return 0;
+    };
+    shards
+        .iter()
+        .filter(|shard| colors.iter().any(|c| shard.contributes_to(*c)))
+        .count() as u32
 }
 
 /// Structural detection over each `DeckEntry`'s `CardFace` AST.
@@ -98,12 +118,19 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
     let mut payoff_names: Vec<String> = Vec::new();
     // Per-color deck pip totals across permanent faces (index by ManaColor).
     let mut pip_totals = ColorTotals::default();
-    // Which colors any payoff cares about, and the god thresholds per color.
-    let mut demanded = PayoffColors {
-        fixed: Vec::new(),
-        any_chosen: false,
+    // Every color SET a payoff demands, kept whole (a two-color god demands the
+    // pair, not each color), plus whether a `ChosenColor` payoff makes every
+    // color eligible (Nykthos).
+    let mut demanded_sets: Vec<Vec<ManaColor>> = Vec::new();
+    let mut any_chosen = false;
+    let mut gates: Vec<DevotionGate> = Vec::new();
+
+    let mut demand = |set: Vec<ManaColor>| {
+        let set = normalize_colors(set);
+        if !set.is_empty() && !demanded_sets.contains(&set) {
+            demanded_sets.push(set);
+        }
     };
-    let mut thresholds = ColorThresholds::default();
 
     for entry in deck {
         let face = &entry.card;
@@ -127,15 +154,20 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
         let gate = highest_devotion_gate(face);
         let scales = reads_devotion(face);
         if let Some((colors, threshold)) = &gate {
-            for color in colors {
-                thresholds.insert(*color, *threshold);
-                demanded.fixed.push(*color);
+            let colors = normalize_colors(colors.clone());
+            demand(colors.clone());
+            let candidate = DevotionGate {
+                colors,
+                threshold: *threshold,
+            };
+            if !gates.contains(&candidate) {
+                gates.push(candidate);
             }
         }
         for colors in scaling_payoff_colors(face) {
             match colors {
-                DevotionColors::Fixed(cols) => demanded.fixed.extend(cols),
-                DevotionColors::ChosenColor => demanded.any_chosen = true,
+                DevotionColors::Fixed(cols) => demand(cols),
+                DevotionColors::ChosenColor => any_chosen = true,
             }
         }
 
@@ -145,30 +177,49 @@ pub fn detect(deck: &[DeckEntry]) -> DevotionFeature {
         }
     }
 
-    // The primary color is the deck's most-devoted color among the colors its
-    // payoffs read. A `ChosenColor` payoff (Nykthos) makes every color eligible,
-    // so the deck's own densest color wins.
-    let primary_color = ManaColor::ALL
-        .iter()
-        .copied()
-        .filter(|color| demanded.any_chosen || demanded.fixed.contains(color))
-        .max_by_key(|color| pip_totals.get(*color));
-
-    let (pip_count, thresholds) = match primary_color {
-        Some(color) => (pip_totals.get(color), thresholds.get(color)),
-        None => (0, Vec::new()),
-    };
+    // Candidate primary sets: every demanded set, plus each single color when a
+    // `ChosenColor` payoff (Nykthos) makes any color eligible. The primary is the
+    // set the deck is most devoted to, approximated by summed per-color pips —
+    // exact combined devotion is computed at runtime per gate.
+    let mut candidates = demanded_sets.clone();
+    if any_chosen {
+        for color in ManaColor::ALL {
+            let single = vec![color];
+            if !candidates.contains(&single) {
+                candidates.push(single);
+            }
+        }
+    }
+    let primary_colors = candidates
+        .into_iter()
+        .max_by_key(|set| set.iter().map(|c| pip_totals.get(*c)).sum::<u32>())
+        .unwrap_or_default();
+    let pip_count = primary_colors.iter().map(|c| pip_totals.get(*c)).sum();
 
     let commitment = compute_commitment(payoff_count, pip_count, total_nonland);
 
     DevotionFeature {
         payoff_count,
-        primary_color,
+        primary_colors,
         pip_count,
-        thresholds,
+        gates,
         commitment,
         payoff_names,
     }
+}
+
+/// CR 105.1: put a color set in canonical WUBRG order and drop duplicates so
+/// sets and gates dedup reliably.
+fn normalize_colors(mut colors: Vec<ManaColor>) -> Vec<ManaColor> {
+    let order = |c: &ManaColor| {
+        ManaColor::ALL
+            .iter()
+            .position(|x| x == c)
+            .unwrap_or(usize::MAX)
+    };
+    colors.sort_by_key(order);
+    colors.dedup();
+    colors
 }
 
 /// Calibration: Mono-Black Devotion (Gray Merchant ×4, Erebos, ~30 permanents
@@ -233,7 +284,11 @@ fn scaling_payoff_colors(face: &engine::types::card::CardFace) -> Vec<DevotionCo
 }
 
 fn collect_devotion_colors_in_ability(ability: &AbilityDefinition, out: &mut Vec<DevotionColors>) {
-    for effect in collect_chain_effects(ability) {
+    // CR 700.5 deck-time classification: `AbilityScope::Potential` walks the
+    // `else_ability`/modal branches too, so a card whose devotion payoff lives
+    // only in one mode (a modal "choose one — ... equal to your devotion") is
+    // still detected. Mirrors the poison feature's deck-time scan.
+    for effect in collect_scoped_effects(ability, AbilityScope::Potential) {
         collect_devotion_colors_in_effect(effect, out);
     }
 }
@@ -418,54 +473,6 @@ impl ColorTotals {
             ManaColor::Black => &mut self.black,
             ManaColor::Red => &mut self.red,
             ManaColor::Green => &mut self.green,
-        }
-    }
-}
-
-/// Per-color set of DISTINCT god thresholds. Each Theros god turns on
-/// independently at its own `DevotionGE` threshold, so a cast crossing a lower
-/// gate (activating a smaller god) matters even when a higher gate exists —
-/// keeping only the maximum would miss that. An empty slot distinguishes "no
-/// gate in this color" from a real threshold, so a scaling-only deck is never
-/// handed a fabricated ceiling.
-#[derive(Default)]
-struct ColorThresholds {
-    white: Vec<u32>,
-    blue: Vec<u32>,
-    black: Vec<u32>,
-    red: Vec<u32>,
-    green: Vec<u32>,
-}
-
-impl ColorThresholds {
-    fn insert(&mut self, color: ManaColor, threshold: u32) {
-        let slot = self.slot(color);
-        if !slot.contains(&threshold) {
-            slot.push(threshold);
-        }
-    }
-    /// The distinct thresholds in this color, sorted ascending.
-    fn get(&self, color: ManaColor) -> Vec<u32> {
-        let mut out = self.slot_ref(color).clone();
-        out.sort_unstable();
-        out
-    }
-    fn slot(&mut self, color: ManaColor) -> &mut Vec<u32> {
-        match color {
-            ManaColor::White => &mut self.white,
-            ManaColor::Blue => &mut self.blue,
-            ManaColor::Black => &mut self.black,
-            ManaColor::Red => &mut self.red,
-            ManaColor::Green => &mut self.green,
-        }
-    }
-    fn slot_ref(&self, color: ManaColor) -> &Vec<u32> {
-        match color {
-            ManaColor::White => &self.white,
-            ManaColor::Blue => &self.blue,
-            ManaColor::Black => &self.black,
-            ManaColor::Red => &self.red,
-            ManaColor::Green => &self.green,
         }
     }
 }

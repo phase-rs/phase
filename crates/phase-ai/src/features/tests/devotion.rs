@@ -62,6 +62,31 @@ fn god(name: &str, color: ManaColor, threshold: u32, pip: ManaCostShard) -> Card
     face
 }
 
+/// Athreos / Xenagos shape: a two-color god gated on COMBINED devotion to both
+/// colors (`DevotionGE { colors: [c1, c2], threshold }`), carrying one pip of
+/// each color in its own cost.
+fn dual_god(
+    name: &str,
+    c1: ManaColor,
+    c2: ManaColor,
+    threshold: u32,
+    pips: &[ManaCostShard],
+) -> CardFace {
+    let mut face = card(name, CoreType::Enchantment, pips, 1);
+    face.static_abilities = vec![StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(vec![ContinuousModification::RemoveType {
+            core_type: CoreType::Creature,
+        }])
+        .condition(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DevotionGE {
+                colors: vec![c1, c2],
+                threshold,
+            }),
+        })];
+    face
+}
+
 /// Gray Merchant shape: an ETB trigger draining life equal to devotion, plus
 /// two colored pips in its own cost.
 fn drain(name: &str, color: ManaColor, pips: &[ManaCostShard]) -> CardFace {
@@ -101,7 +126,7 @@ const BB: &[ManaCostShard] = &[ManaCostShard::Black, ManaCostShard::Black];
 fn empty_deck_produces_defaults() {
     let f = detect(&[]);
     assert_eq!(f.payoff_count, 0);
-    assert_eq!(f.primary_color, None);
+    assert!(f.primary_colors.is_empty());
     assert_eq!(f.commitment, 0.0);
     assert!(f.payoff_names.is_empty());
 }
@@ -111,7 +136,7 @@ fn vanilla_deck_not_registered() {
     let f = detect(&[entry(pip_body("Bear", BB), 4)]);
     // Pips but no payoff → not a devotion deck.
     assert_eq!(f.payoff_count, 0);
-    assert_eq!(f.primary_color, None);
+    assert!(f.primary_colors.is_empty());
     assert_eq!(f.commitment, 0.0);
 }
 
@@ -122,17 +147,23 @@ fn detects_god_gate_and_threshold() {
         1,
     )]);
     assert_eq!(f.payoff_count, 1);
-    assert_eq!(f.primary_color, Some(ManaColor::Black));
-    assert_eq!(f.thresholds, vec![5]);
+    assert_eq!(f.primary_colors, vec![ManaColor::Black]);
+    assert_eq!(
+        f.gates,
+        vec![DevotionGate {
+            colors: vec![ManaColor::Black],
+            threshold: 5,
+        }]
+    );
 }
 
 #[test]
 fn detects_scaling_drain_payoff() {
     let f = detect(&[entry(drain("Gray Merchant", ManaColor::Black, BB), 4)]);
     assert_eq!(f.payoff_count, 4);
-    assert_eq!(f.primary_color, Some(ManaColor::Black));
+    assert_eq!(f.primary_colors, vec![ManaColor::Black]);
     // A drain has no god threshold.
-    assert!(f.thresholds.is_empty());
+    assert!(f.gates.is_empty());
 }
 
 #[test]
@@ -142,7 +173,7 @@ fn detects_dynamic_pt_payoff() {
         4,
     )]);
     assert_eq!(f.payoff_count, 4);
-    assert_eq!(f.primary_color, Some(ManaColor::Red));
+    assert_eq!(f.primary_colors, vec![ManaColor::Red]);
 }
 
 /// CR 700.5 counts permanents only — an instant reading devotion is a payoff,
@@ -167,7 +198,7 @@ fn instant_pips_do_not_count_toward_devotion() {
         entry(spell, 4),
         entry(pip_body("Green Body", &[ManaCostShard::Green]), 1),
     ]);
-    assert_eq!(f.primary_color, Some(ManaColor::Green));
+    assert_eq!(f.primary_colors, vec![ManaColor::Green]);
     // The 4 instants contribute 0 pips; only the single permanent's green pip counts.
     assert_eq!(f.pip_count, 1);
 }
@@ -182,7 +213,7 @@ fn primary_color_follows_pip_density_among_payoff_colors() {
         entry(pip_body("Black Body", BB), 10),
     ];
     let f = detect(&deck);
-    assert_eq!(f.primary_color, Some(ManaColor::Black));
+    assert_eq!(f.primary_colors, vec![ManaColor::Black]);
     assert!(
         f.pip_count >= 20,
         "expected heavy black pip count, got {}",
@@ -200,7 +231,7 @@ fn mono_black_devotion_hits_calibration_floor() {
         entry(pip_body("Filler", &[ManaCostShard::Black]), 16),
     ];
     let f = detect(&deck);
-    assert_eq!(f.primary_color, Some(ManaColor::Black));
+    assert_eq!(f.primary_colors, vec![ManaColor::Black]);
     assert!(
         f.commitment > 0.85,
         "mono-black devotion must clear 0.85, got {}",
@@ -260,7 +291,7 @@ fn chosen_color_payoff_uses_deck_densest_color() {
         entry(pip_body("Red Body", &[ManaCostShard::Red]), 2),
     ];
     let f = detect(&deck);
-    assert_eq!(f.primary_color, Some(ManaColor::Green));
+    assert_eq!(f.primary_colors, vec![ManaColor::Green]);
 }
 
 /// Two gods at DIFFERENT thresholds in the same color must both be retained —
@@ -276,10 +307,19 @@ fn distinct_thresholds_are_all_retained() {
         entry(pip_body("Black Body", BB), 8),
     ];
     let f = detect(&deck);
-    assert_eq!(f.primary_color, Some(ManaColor::Black));
+    assert_eq!(f.primary_colors, vec![ManaColor::Black]);
     assert_eq!(
-        f.thresholds,
-        vec![3, 5],
+        f.gates,
+        vec![
+            DevotionGate {
+                colors: vec![ManaColor::Black],
+                threshold: 3,
+            },
+            DevotionGate {
+                colors: vec![ManaColor::Black],
+                threshold: 5,
+            },
+        ],
         "both distinct thresholds retained"
     );
 }
@@ -323,5 +363,72 @@ fn nykthos_mana_production_is_a_payoff() {
         f.payoff_count, 1,
         "Nykthos must register as a devotion payoff"
     );
-    assert_eq!(f.primary_color, Some(ManaColor::Green));
+    assert_eq!(f.primary_colors, vec![ManaColor::Green]);
+}
+
+/// [HIGH] Athreos (W+B): a two-color god's gate is against COMBINED devotion to
+/// both colors, and the deck's primary demand is the whole W+B set — not either
+/// color alone. The gate must retain both colors so the policy can count the
+/// combined board devotion, hybrids once (CR 700.5).
+#[test]
+fn dual_color_god_retains_the_whole_color_set() {
+    let deck = vec![
+        entry(
+            dual_god(
+                "Athreos",
+                ManaColor::White,
+                ManaColor::Black,
+                5,
+                &[ManaCostShard::White, ManaCostShard::Black],
+            ),
+            1,
+        ),
+        entry(
+            pip_body("WB Body", &[ManaCostShard::White, ManaCostShard::Black]),
+            8,
+        ),
+    ];
+    let f = detect(&deck);
+    // WUBRG-normalized: White precedes Black.
+    assert_eq!(f.primary_colors, vec![ManaColor::White, ManaColor::Black]);
+    assert_eq!(
+        f.gates,
+        vec![DevotionGate {
+            colors: vec![ManaColor::White, ManaColor::Black],
+            threshold: 5,
+        }],
+        "a two-color god's gate keeps both colors"
+    );
+}
+
+/// Xenagos (R+G): the same combined-set retention for a different color pair,
+/// confirming the axis is not White/Black-specific.
+#[test]
+fn dual_color_god_xenagos_red_green() {
+    let deck = vec![
+        entry(
+            dual_god(
+                "Xenagos",
+                ManaColor::Red,
+                ManaColor::Green,
+                5,
+                &[ManaCostShard::Red, ManaCostShard::Green],
+            ),
+            1,
+        ),
+        entry(
+            pip_body("RG Body", &[ManaCostShard::Red, ManaCostShard::Green]),
+            8,
+        ),
+    ];
+    let f = detect(&deck);
+    // WUBRG-normalized: Red precedes Green.
+    assert_eq!(f.primary_colors, vec![ManaColor::Red, ManaColor::Green]);
+    assert_eq!(
+        f.gates,
+        vec![DevotionGate {
+            colors: vec![ManaColor::Red, ManaColor::Green],
+            threshold: 5,
+        }]
+    );
 }

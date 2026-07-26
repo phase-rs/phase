@@ -21,7 +21,7 @@ use engine::types::zones::Zone;
 
 use crate::config::AiConfig;
 use crate::context::AiContext;
-use crate::features::devotion::{DevotionFeature, DEVOTION_FLOOR};
+use crate::features::devotion::{DevotionFeature, DevotionGate, DEVOTION_FLOOR};
 use crate::features::DeckFeatures;
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::devotion::*;
@@ -38,19 +38,31 @@ fn state() -> GameState {
     GameState::new(FormatConfig::standard(), 2, 42)
 }
 
+/// Single-black `DevotionGate`s at the given thresholds — the common mono-black
+/// god shape used by most policy tests.
+fn black_gates(thresholds: &[u32]) -> Vec<DevotionGate> {
+    thresholds
+        .iter()
+        .map(|&threshold| DevotionGate {
+            colors: vec![ManaColor::Black],
+            threshold,
+        })
+        .collect()
+}
+
 /// An `AiContext` whose cached devotion feature carries the given primary color
 /// and god threshold, so `verdict` reads them the way it would in a real game.
 fn context_with(
     config: &AiConfig,
-    primary_color: Option<ManaColor>,
-    thresholds: Vec<u32>,
+    primary_colors: Vec<ManaColor>,
+    gates: Vec<DevotionGate>,
 ) -> AiContext {
     let features = DeckFeatures {
         devotion: DevotionFeature {
             payoff_count: 8,
-            primary_color,
+            primary_colors,
             pip_count: 30,
-            thresholds,
+            gates,
             commitment: 0.9,
             payoff_names: Vec::new(),
         },
@@ -148,8 +160,10 @@ fn score_of(verdict: PolicyVerdict) -> (f64, PolicyReason) {
     }
 }
 
+const W: ManaCostShard = ManaCostShard::White;
 const B: ManaCostShard = ManaCostShard::Black;
 const R: ManaCostShard = ManaCostShard::Red;
+const G: ManaCostShard = ManaCostShard::Green;
 
 // ─── activation ──────────────────────────────────────────────────────────────
 
@@ -175,7 +189,7 @@ fn activation_opts_in_above_floor() {
 #[test]
 fn verdict_scores_pips_added_when_no_threshold() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), Vec::new());
+    let context = context_with(&config, vec![ManaColor::Black], Vec::new());
     let mut state = state();
     let oid = hand_card(&mut state, 1, CoreType::Creature, &[B, B]);
     let decision = priority_decision();
@@ -190,7 +204,7 @@ fn verdict_scores_pips_added_when_no_threshold() {
 #[test]
 fn verdict_god_activation_when_cast_crosses_threshold() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), vec![5]);
+    let context = context_with(&config, vec![ManaColor::Black], black_gates(&[5]));
     let mut state = state();
     // Four black pips already on board → devotion 4, one below the threshold.
     battlefield_permanent(&mut state, 1, &[B, B]);
@@ -211,7 +225,7 @@ fn verdict_god_activation_when_cast_crosses_threshold() {
 #[test]
 fn verdict_below_threshold_without_crossing_is_pip_progress() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), vec![5]);
+    let context = context_with(&config, vec![ManaColor::Black], black_gates(&[5]));
     let mut state = state();
     // Devotion 1; casting one more pip reaches 2, still short of 5.
     battlefield_permanent(&mut state, 1, &[B]);
@@ -226,7 +240,7 @@ fn verdict_below_threshold_without_crossing_is_pip_progress() {
 #[test]
 fn verdict_off_color_cast_is_neutral() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), Vec::new());
+    let context = context_with(&config, vec![ManaColor::Black], Vec::new());
     let mut state = state();
     let oid = hand_card(&mut state, 1, CoreType::Creature, &[R, R]);
     let decision = priority_decision();
@@ -241,7 +255,7 @@ fn verdict_off_color_cast_is_neutral() {
 #[test]
 fn verdict_instant_is_neutral() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), Vec::new());
+    let context = context_with(&config, vec![ManaColor::Black], Vec::new());
     let mut state = state();
     let oid = hand_card(&mut state, 1, CoreType::Instant, &[B, B]);
     let decision = priority_decision();
@@ -258,7 +272,7 @@ fn verdict_instant_is_neutral() {
 #[test]
 fn verdict_crossing_lower_threshold_activates_that_god() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), vec![3, 5]);
+    let context = context_with(&config, vec![ManaColor::Black], black_gates(&[3, 5]));
     let mut state = state();
     // Devotion 2 (one below the lower gate).
     battlefield_permanent(&mut state, 1, &[B, B]);
@@ -282,7 +296,7 @@ fn verdict_crossing_lower_threshold_activates_that_god() {
 #[test]
 fn verdict_crossing_two_thresholds_activates_both() {
     let config = config();
-    let context = context_with(&config, Some(ManaColor::Black), vec![3, 5]);
+    let context = context_with(&config, vec![ManaColor::Black], black_gates(&[3, 5]));
     let mut state = state();
     // Devotion 2; a {B}{B}{B} cast reaches 5, clearing both the 3 and the 5 gate.
     battlefield_permanent(&mut state, 1, &[B, B]);
@@ -298,6 +312,71 @@ fn verdict_crossing_two_thresholds_activates_both() {
             .iter()
             .any(|(k, v)| *k == "gods_activated" && *v == 2),
         "both gods crossed, got {:?}",
+        reason.facts
+    );
+}
+
+/// [HIGH] Athreos (W+B) crossing: the gate is against COMBINED devotion. The
+/// board carries two white and two black pips across separate permanents —
+/// combined devotion 4. Neither single-color count (2 white, 2 black) is within
+/// one pip of the 5-gate, so the OLD single-color logic could never see this
+/// crossing. Casting one more white permanent reaches combined 5 and flips the
+/// god. Regression against collapsing a two-color gate to one color.
+#[test]
+fn verdict_dual_color_god_crosses_on_combined_devotion() {
+    let config = config();
+    let gates = vec![DevotionGate {
+        colors: vec![ManaColor::White, ManaColor::Black],
+        threshold: 5,
+    }];
+    let context = context_with(&config, vec![ManaColor::White, ManaColor::Black], gates);
+    let mut state = state();
+    // Combined W+B devotion 4: two white here, two black there.
+    battlefield_permanent(&mut state, 1, &[W, W]);
+    battlefield_permanent(&mut state, 2, &[B, B]);
+    let oid = hand_card(&mut state, 1, CoreType::Enchantment, &[W]);
+    let decision = priority_decision();
+    let candidate = cast_candidate(oid);
+    let (_, reason) =
+        score_of(DevotionPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "devotion_god_activation");
+    assert!(
+        reason
+            .facts
+            .iter()
+            .any(|(k, v)| *k == "devotion" && *v == 4),
+        "combined W+B devotion must read 4, got {:?}",
+        reason.facts
+    );
+}
+
+/// Xenagos (R+G): the same combined-crossing on a different color pair, and the
+/// added pip is the OFF-primary component (green) — combined counting still
+/// reaches the gate. Confirms the axis is not White/Black-specific.
+#[test]
+fn verdict_dual_color_god_xenagos_red_green() {
+    let config = config();
+    let gates = vec![DevotionGate {
+        colors: vec![ManaColor::Red, ManaColor::Green],
+        threshold: 5,
+    }];
+    let context = context_with(&config, vec![ManaColor::Red, ManaColor::Green], gates);
+    let mut state = state();
+    // Combined R+G devotion 4: two red, two green.
+    battlefield_permanent(&mut state, 1, &[R, R]);
+    battlefield_permanent(&mut state, 2, &[G, G]);
+    let oid = hand_card(&mut state, 1, CoreType::Enchantment, &[G]);
+    let decision = priority_decision();
+    let candidate = cast_candidate(oid);
+    let (_, reason) =
+        score_of(DevotionPolicy.verdict(&ctx(&state, &candidate, &decision, &context, &config)));
+    assert_eq!(reason.kind, "devotion_god_activation");
+    assert!(
+        reason
+            .facts
+            .iter()
+            .any(|(k, v)| *k == "gods_activated" && *v == 1),
+        "one god crossed on combined R+G, got {:?}",
         reason.facts
     );
 }

@@ -31,9 +31,10 @@
 use engine::game::devotion::count_devotion;
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
+use engine::types::mana::ManaColor;
 use engine::types::player::PlayerId;
 
-use crate::features::devotion::DEVOTION_FLOOR;
+use crate::features::devotion::{cost_devotion_pips, DEVOTION_FLOOR};
 use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
@@ -68,21 +69,19 @@ impl TacticalPolicy for DevotionPolicy {
             Some(f) => &f.devotion,
             None => return PolicyVerdict::neutral(PolicyReason::new("devotion_na")),
         };
-        // `activation` already gated on the floor, but the color is what the
-        // whole verdict keys on — no primary color, nothing to score.
-        let Some(color) = feature.primary_color else {
+        // No payoff colors ⇒ nothing to score against.
+        if feature.primary_colors.is_empty() && feature.gates.is_empty() {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_na"));
-        };
+        }
 
-        // Card-local first: how many primary-color pips does THIS cast add, and
-        // is it even a permanent? CR 700.5 — only permanents contribute.
+        // Card-local first: the cast must be a permanent (CR 110.4 — only a
+        // permanent contributes devotion).
         let GameAction::CastSpell { object_id, .. } = &ctx.candidate.action else {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_na"));
         };
         let Some(obj) = ctx.state.objects.get(object_id) else {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_na"));
         };
-        // CR 110.4: only a permanent contributes devotion.
         if !obj
             .card_types
             .core_types
@@ -91,41 +90,64 @@ impl TacticalPolicy for DevotionPolicy {
         {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_na"));
         }
-        let added = obj.mana_cost.count_colored_pips(Some(color)).max(0) as u32;
-        if added == 0 {
+
+        // Cheapest board-free discriminator: does the cast add any pip toward a
+        // color set the deck actually cares about (primary demand or any gate)?
+        // Skip the battlefield scans for every off-color permanent.
+        let mut relevant: Vec<ManaColor> = feature.primary_colors.clone();
+        for gate in &feature.gates {
+            for c in &gate.colors {
+                if !relevant.contains(c) {
+                    relevant.push(*c);
+                }
+            }
+        }
+        if cost_devotion_pips(&obj.mana_cost, &relevant) == 0 {
             return PolicyVerdict::neutral(PolicyReason::new("devotion_off_color"));
         }
 
-        // Only now pay for the battlefield devotion scan (CR 700.5 authority).
-        let current = count_devotion(ctx.state, ctx.ai_player, &[color]);
         let pip_scalar = ctx.config.policy_penalties.devotion_pip_progress;
 
-        // CR 700.5 + each god's own `DevotionGE` gate: count every DISTINCT
-        // threshold this cast newly crosses. Each Theros god turns on
-        // independently, so a cast can activate more than one at once — and a
-        // cast that crosses a lower gate matters even when a higher gate it
-        // does not reach also exists.
+        // CR 700.5: evaluate each god's gate against its OWN color set —
+        // combined devotion for a two-color god (Athreos W+B, Xenagos R+G),
+        // hybrids counted once. A cast that reaches a gate's combined threshold
+        // turns that god on; several can flip at once, and a cast crossing a
+        // lower gate matters even when a higher one it does not reach exists.
         let crossed = feature
-            .thresholds
+            .gates
             .iter()
-            .filter(|&&t| current < t && current + added >= t)
+            .filter(|gate| {
+                let current = count_devotion(ctx.state, ctx.ai_player, &gate.colors);
+                let added = cost_devotion_pips(&obj.mana_cost, &gate.colors);
+                current < gate.threshold && current + added >= gate.threshold
+            })
             .count() as u32;
+
+        // The smooth-pip component is measured against the deck's primary demand.
+        let primary_added = cost_devotion_pips(&obj.mana_cost, &feature.primary_colors);
+        let primary_devotion = count_devotion(ctx.state, ctx.ai_player, &feature.primary_colors);
+
         if crossed > 0 {
             let activation = ctx.config.policy_penalties.devotion_god_activation;
             return PolicyVerdict::score(
-                activation * f64::from(crossed) + pip_scalar * f64::from(added),
+                activation * f64::from(crossed) + pip_scalar * f64::from(primary_added),
                 PolicyReason::new("devotion_god_activation")
-                    .with_fact("devotion", current as i64)
+                    .with_fact("devotion", primary_devotion as i64)
                     .with_fact("gods_activated", crossed as i64),
             );
         }
 
-        // Otherwise a smooth preference proportional to the pips added.
+        if primary_added == 0 {
+            // Pips only toward an already-met or off-primary gate: no smooth
+            // progress to score once no gate crosses.
+            return PolicyVerdict::neutral(PolicyReason::new("devotion_off_color"));
+        }
+
         PolicyVerdict::score(
-            pip_scalar * f64::from(added),
+            pip_scalar * f64::from(primary_added),
             PolicyReason::new("devotion_pip_progress")
-                .with_fact("devotion", current as i64)
-                .with_fact("added", added as i64),
+                .with_fact("devotion", primary_devotion as i64)
+                .with_fact("added", primary_added as i64),
         )
     }
 }
