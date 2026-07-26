@@ -1,4 +1,5 @@
 use crate::game::effects::change_zone::{self, ZoneMoveResult};
+use crate::game::stack::pop_top_stack_entry;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
 use crate::types::identifiers::ObjectId;
@@ -25,9 +26,8 @@ pub(super) fn exile_nonresolving_stack_objects(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
-    while let Some(entry) = state.stack.pop_back() {
-        state.stack_paid_facts.remove(&entry.id);
-        state.stack_trigger_event_batches.remove(&entry.id);
+    while let Some(removed) = pop_top_stack_entry(state) {
+        let entry = removed.entry;
         if matches!(entry.kind, StackEntryKind::Spell { .. }) {
             match change_zone::execute_zone_move(
                 state,
