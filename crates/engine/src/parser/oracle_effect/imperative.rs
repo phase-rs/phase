@@ -5331,12 +5331,31 @@ pub(super) fn parse_utility_imperative_ast(
         )
         .parse(input)
     }) {
-        let (target, _) = parse_target_with_ctx(rest, ctx);
+        let (target, remainder) = parse_target_with_ctx(rest, ctx);
         if !matches!(target, TargetFilter::Any) {
-            return Some(UtilityImperativeAst::Transform {
-                target,
-                scope: EffectScope::All,
-            });
+            // CR 712.2 (DFC front/back face): the population phrase may carry a
+            // trailing face-state restriction ("... on their front face" — That's
+            // No Moonmist: "Transform all artifacts and Phyrexian creatures on
+            // their front face.") that `parse_target_with_ctx` does NOT model as a
+            // typed predicate, leaving it in `remainder`. Emitting `scope: All`
+            // here would silently drop that restriction and transform matching
+            // back-face permanents that CR 712.2 leaves untouched. Only a
+            // fully-consumed population phrase (remainder empty after trimming
+            // whitespace and a trailing period — Moonmist's "all Humans", where
+            // the Human typing already implies front face) is an honest mass
+            // transform; when a rules-bearing suffix survives, strict-fail by
+            // returning `None` so the caller surfaces `Effect::unimplemented`
+            // (coverage-honest) instead of falling through to the single
+            // "transform <target>" branch below, which would mis-emit a targeted
+            // `scope: Single` transform that also drops the suffix.
+            let suffix = remainder.trim().trim_end_matches('.').trim();
+            if suffix.is_empty() {
+                return Some(UtilityImperativeAst::Transform {
+                    target,
+                    scope: EffectScope::All,
+                });
+            }
+            return None;
         }
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
@@ -14075,6 +14094,27 @@ mod tests {
                 "{input}: mass transform target must be a Typed population filter, got {target:?}"
             );
         }
+    }
+
+    /// CR 712.2 (issue #6403, That's No Moonmist): a mass "transform all ..."
+    /// whose population phrase carries a face-state restriction the target parser
+    /// cannot model ("... on their front face") must NOT be silently marked
+    /// supported. `parse_target_with_ctx` consumes "all artifacts and Phyrexian
+    /// creatures" and leaves " on their front face" unparsed; the mass branch
+    /// strict-fails (returns `None`) so the line surfaces as
+    /// `Effect::unimplemented` rather than dropping the suffix. Critically it must
+    /// NOT fall through to the single "transform <target>" branch, which would
+    /// emit a targeted `scope: Single` transform that also loses the restriction.
+    #[test]
+    fn parse_transform_all_with_unparsed_face_suffix_is_unsupported() {
+        let input = "transform all artifacts and Phyrexian creatures on their front face.";
+        let result = parse_utility_imperative_ast(input, input, &mut ParseContext::default());
+        assert!(
+            result.is_none(),
+            "{input}: a mass transform with an unparsed face-state restriction must \
+             strict-fail (None ⇒ Effect::unimplemented), not silently drop the \
+             'on their front face' suffix; got {result:?}"
+        );
     }
 
     /// Control (issue #6403): the single targeted transform must NOT regress to

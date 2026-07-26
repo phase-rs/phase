@@ -37,6 +37,7 @@ fn transform_journals_an_exact_resolved_transform() {
     let mut spell = scenario.add_spell_to_hand(P0, "Rouse", true);
     spell.with_ability(Effect::Transform {
         target: TargetFilter::Typed(TypedFilter::creature()),
+        scope: engine::types::ability::EffectScope::Single,
     });
     let spell_id = spell.id();
 

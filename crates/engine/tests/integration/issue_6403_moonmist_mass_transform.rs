@@ -3,6 +3,8 @@
 
 use engine::game::game_object::BackFaceData;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::parser::oracle_effect::parse_effect;
+use engine::types::ability::{Effect, EffectScope};
 use engine::types::card::LayoutKind;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::WaitingFor;
@@ -23,6 +25,7 @@ fn attach_transform_back_face(runner: &mut GameRunner, object_id: ObjectId) {
         power: Some(3),
         toughness: Some(3),
         loyalty: None,
+        printed_loyalty: None,
         defense: None,
         card_types: CardType {
             supertypes: vec![],
@@ -95,5 +98,44 @@ fn moonmist_cast_transforms_all_humans_without_target_selection() {
     assert!(
         matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
         "Moonmist must resolve without a target-selection prompt"
+    );
+}
+
+/// CR 712.2 (issue #6403, That's No Moonmist): the sibling card's Oracle text
+/// "Transform all artifacts and Phyrexian creatures on their front face." adds a
+/// face-state restriction the target parser cannot model. The mass-transform
+/// branch consumes "all artifacts and Phyrexian creatures" but leaves " on their
+/// front face" unparsed; emitting a supported `scope: All` transform there would
+/// silently ignore that restriction and turn over matching back-face permanents
+/// CR 712.2 leaves untouched. The parser must strict-fail so the card stays
+/// coverage-honestly unsupported (`Effect::Unimplemented`) rather than shipping a
+/// silent Transform (whether mass `scope: All` or single `scope: Single`).
+///
+/// Contrast Moonmist below: "Transform all Humans" fully consumes its population
+/// phrase, so it remains a supported mass `scope: All` Transform — the Human
+/// typing already implies front face (a transformed back-face Werewolf is no
+/// longer a Human and won't match), which is why the fully-parsed phrase needs no
+/// separate face guard.
+#[test]
+fn thats_no_moonmist_front_face_restriction_stays_unimplemented() {
+    let effect =
+        parse_effect("Transform all artifacts and Phyrexian creatures on their front face.");
+    assert!(
+        matches!(effect, Effect::Unimplemented { .. }),
+        "That's No Moonmist's front-face restriction must surface as Unimplemented, \
+         not a silent Transform; got {effect:?}"
+    );
+
+    let moonmist = parse_effect("Transform all Humans.");
+    assert!(
+        matches!(
+            moonmist,
+            Effect::Transform {
+                scope: EffectScope::All,
+                ..
+            }
+        ),
+        "Moonmist's fully-parsed 'all Humans' population must stay a supported mass \
+         transform; got {moonmist:?}"
     );
 }
