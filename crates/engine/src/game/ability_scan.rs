@@ -1820,9 +1820,15 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // CR 701.57a: reads a transient game-state scalar (the last discover's
         // mana-value limit); no growing resource, sibling, or projected axis.
         QuantityRef::TriggeringDiscoverValue => Axes::NONE,
-        // CR 701.22a: reads a transient game-state scalar (the last scry's
-        // effective look count); no growing resource, sibling, or projected axis.
-        QuantityRef::TriggeringScryLookCount => Axes::NONE,
+        // CR 701.22a + CR 603.2c: reads the current trigger's preserved event
+        // (`state.current_trigger_event` — the scry's own `PlayerPerformedAction`
+        // carrying its effective look count) → event axis true, mirroring
+        // `QuantityRef::EventContextAmount` below.
+        QuantityRef::TriggeringScryLookCount => Axes {
+            event: true,
+            sibling: false,
+            projected: false,
+        },
         QuantityRef::ObjectCount { filter } => {
             let mut acc = Axes {
                 event: false,
@@ -8182,5 +8188,17 @@ mod tests {
         let mut a = base.clone();
         a.modal = Some(ModalChoice::default());
         assert_eq!(ability_resolution_choice_freedom(&a), MayPrompt);
+    }
+    // ---- PR #5872 blocker-2 regression: scry look count is event-context ----
+
+    /// CR 701.22a + CR 603.2c: "the number of cards looked at while scrying
+    /// this way" (Elrond, Master of Healing) reads the CURRENT trigger's
+    /// preserved scry event — axis 1 (event-context), mirroring
+    /// `QuantityRef::EventContextAmount` — not an inert transient scalar.
+    #[test]
+    fn triggering_scry_look_count_reads_event_context() {
+        assert!(ability_uses_event_context(&ability_with_amount(
+            QuantityRef::TriggeringScryLookCount
+        )));
     }
 }
