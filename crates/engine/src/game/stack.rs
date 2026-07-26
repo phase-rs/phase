@@ -15,6 +15,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
+    ResolvedStackEntryFinalizeCommand, ResolvedStackEntryFinalizeReplayInvariantError,
     ResolvedStackPushCommand, ResolvedStackPushOrigin, ResolvedStackPushReplayInvariantError,
 };
 use crate::types::zones::Zone;
@@ -202,6 +203,67 @@ pub fn apply_resolved_stack_push(
     }
 
     state.stack.push_back(command.entry.as_ref().clone());
+    Ok(())
+}
+
+/// Installs one already-resolved CR 601.2i cast finalization verbatim.
+///
+/// CR 601.2i: the recorded finalized entry and paid-facts snapshot are written
+/// back exactly as they were recorded. Nothing is re-derived — in particular the
+/// entry is located by its recorded CR 405.2 position rather than by repeating
+/// the authority's last-match scan, and `distinct_colors_spent` is taken from
+/// the snapshot rather than re-read from the object's `colors_spent_to_cast`,
+/// which a replayed predecessor need not still agree with.
+///
+/// Fails closed on any disagreement with the predecessor state: a position past
+/// the stack depth, a different entry at that position, a pre-finalize entry
+/// that is not the one recorded, or different pre-existing paid facts.
+pub fn apply_resolved_stack_entry_finalize(
+    state: &mut GameState,
+    command: &ResolvedStackEntryFinalizeCommand,
+) -> Result<(), ResolvedStackEntryFinalizeReplayInvariantError> {
+    let depth = state.stack.len();
+    let entry = state.stack.get(command.entry_position).ok_or(
+        ResolvedStackEntryFinalizeReplayInvariantError::PositionOutOfRange {
+            position: command.entry_position,
+            depth,
+        },
+    )?;
+    if entry.id != command.object {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryIdentityMismatch {
+                position: command.entry_position,
+                expected: command.object,
+                found: entry.id,
+            },
+        );
+    }
+    if entry.kind != *command.expected_old_kind {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::EntryKindMismatch(
+                command.entry_position,
+            ),
+        );
+    }
+    // CR 601.2i settles the entry retag and the paid-facts snapshot together, so
+    // the snapshot precondition is checked BEFORE either is installed — a replay
+    // must not leave a finalized entry behind when the snapshot side is the half
+    // that disagrees.
+    if state.stack_paid_facts.get(&command.object) != command.expected_old_paid_facts.as_deref() {
+        return Err(
+            ResolvedStackEntryFinalizeReplayInvariantError::PaidFactsMismatch(command.object),
+        );
+    }
+
+    state
+        .stack
+        .get_mut(command.entry_position)
+        .expect("the entry was just read at this position")
+        .kind = command.resulting_kind.as_ref().clone();
+    state.stack_paid_facts.insert(
+        command.object,
+        command.resulting_paid_facts.as_ref().clone(),
+    );
     Ok(())
 }
 

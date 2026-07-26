@@ -25,6 +25,7 @@ use crate::types::keywords::{GiftKind, Keyword};
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
 use crate::types::replacements::ReplacementEvent;
+use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
 use crate::types::statics::{CostModifyMode, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
@@ -8712,37 +8713,69 @@ fn finalize_cast_with_phyrexian_choices_inner(
     // the finalized ability and the actual mana spent. The entry must still be
     // present — no one else can have pushed/popped between announce and
     // finalize within a single cast.
-    let entry = state
+    //
+    // CR 405.2: the position is captured rather than left implicit. This is a
+    // LAST-match scan, so recording the index it found is what lets a replay
+    // install into the same entry instead of re-scanning a stack that may have
+    // diverged.
+    let entry_position = state
         .stack
-        .iter_mut()
-        .rfind(|entry| entry.id == object_id)
+        .iter()
+        .rposition(|entry| entry.id == object_id)
         .expect("spell stack entry from announcement still present at finalize");
-    entry.kind = StackEntryKind::Spell {
+    let resulting_kind = StackEntryKind::Spell {
         card_id,
         ability: stack_ability,
         casting_variant,
         actual_mana_spent,
     };
+    // Read-then-assign rather than `mem::replace`: this keeps the retag as the
+    // same plain `entry.kind = ..` write the CR733 mutation census already
+    // classifies as one site, instead of a `&mut` borrow the census counts
+    // twice. The clone is cheap next to a correct write-site inventory.
+    let entry = state
+        .stack
+        .get_mut(entry_position)
+        .expect("rposition yielded a live stack index");
+    let expected_old_kind = entry.kind.clone();
+    entry.kind = resulting_kind.clone();
     let distinct_colors_spent = state
         .objects
         .get(&object_id)
         .map(|obj| obj.colors_spent_to_cast.distinct_colors() as u32)
         .unwrap_or_default();
-    state.stack_paid_facts.insert(
-        object_id,
-        StackPaidSnapshot {
-            actual_mana_spent,
-            x_value: cost_x_paid,
-            distinct_colors_spent,
-            kickers_paid: kickers_paid.len(),
-            additional_cost_payment_count,
-            additional_cost_payments: additional_cost_payments.clone(),
-            additional_cost_paid,
-            casting_variant,
-            cast_transformed,
-            convoked_creatures: convoked_creature_count,
-        },
-    );
+    let resulting_paid_facts = StackPaidSnapshot {
+        actual_mana_spent,
+        x_value: cost_x_paid,
+        distinct_colors_spent,
+        kickers_paid: kickers_paid.len(),
+        additional_cost_payment_count,
+        additional_cost_payments: additional_cost_payments.clone(),
+        additional_cost_paid,
+        casting_variant,
+        cast_transformed,
+        convoked_creatures: convoked_creature_count,
+    };
+    let expected_old_paid_facts = state
+        .stack_paid_facts
+        .insert(object_id, resulting_paid_facts.clone());
+
+    // CR 733: journal the settled finalization once BOTH mutations are written,
+    // so the record carries the values that were installed rather than the
+    // inputs they were derived from.
+    let cause = state.current_or_begin_rules_execution_node();
+    state
+        .resolved_rules_journal
+        .record_stack_entry_finalize(ResolvedStackEntryFinalizeCommand {
+            object: object_id,
+            entry_position,
+            expected_old_kind: Box::new(expected_old_kind),
+            resulting_kind: Box::new(resulting_kind),
+            expected_old_paid_facts: expected_old_paid_facts.map(Box::new),
+            resulting_paid_facts: Box::new(resulting_paid_facts),
+            cause,
+        })
+        .expect("resolved stack entry finalize must have a live journal cause");
 
     // Track commander cast count for tax calculation
     if was_in_command_zone {

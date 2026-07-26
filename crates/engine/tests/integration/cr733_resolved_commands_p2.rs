@@ -133,6 +133,10 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::StackPush(command) => {
             engine::game::stack::apply_resolved_stack_push(state, command.as_ref()).unwrap();
         }
+        ResolvedRulesCommand::StackEntryFinalize(command) => {
+            engine::game::stack::apply_resolved_stack_entry_finalize(state, command.as_ref())
+                .unwrap();
+        }
     }
 }
 
@@ -234,7 +238,10 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::Information(_)
             | ResolvedRulesCommand::FrameTransition(_)
             | ResolvedRulesCommand::TriggerCollection(_)
-            | ResolvedRulesCommand::StackPush(_) => apply_semantic_command(&mut replay, command),
+            | ResolvedRulesCommand::StackPush(_)
+            | ResolvedRulesCommand::StackEntryFinalize(_) => {
+                apply_semantic_command(&mut replay, command)
+            }
         }
     }
     assert!(

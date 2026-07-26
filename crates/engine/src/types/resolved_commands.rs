@@ -16,7 +16,8 @@ use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::{
-    DelayedTrigger, SpellCastRecord, StackEntry, TransientContinuousEffect, ZoneChangeRecord,
+    DelayedTrigger, SpellCastRecord, StackEntry, StackEntryKind, StackPaidSnapshot,
+    TransientContinuousEffect, ZoneChangeRecord,
 };
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
@@ -1023,6 +1024,74 @@ pub enum ResolvedStackPushReplayInvariantError {
     UnknownController(PlayerId),
 }
 
+/// One exact CR 601.2i cast finalization, retagging an announced stack entry.
+///
+/// CR 601.2a puts the spell on the stack at announcement, but the entry that
+/// lands there is a stub: `ability: None` and `actual_mana_spent: 0`, because
+/// neither is known until costs are chosen and paid. CR 601.2i is where "the
+/// spell becomes cast" — the point the finalized ability and the mana actually
+/// spent are written back onto that same entry, together with the paid-facts
+/// snapshot the rest of the engine reads for X, kicker, and convoke questions.
+///
+/// The two mutations are ONE command rather than two families because they
+/// settle together: nothing observes the retagged entry without also observing
+/// the snapshot, and a replay that installed one without the other would leave a
+/// finalized spell whose paid facts are missing (or vice versa).
+///
+/// `entry_position` is recorded rather than re-found. The authority locates its
+/// entry with `rfind`, a LAST-match scan, so a replay that re-derived the target
+/// could retag a different entry than the original execution did — the same
+/// hazard `ResolvedZoneChangeCommand::turn_zone_change_index` and the
+/// battlefield-entry retags already record positions to avoid.
+///
+/// `expected_old_paid_facts` is an `Option` rather than an absence assertion.
+/// The authority is re-entered from the top by its resume callers (Phyrexian
+/// shard choices, paused mana abilities, prepaid casts), so "no snapshot is
+/// present yet" is not a property this record can assert without proving no
+/// resume path re-reaches the insert. Recording the prior value instead makes
+/// the precondition exact under either reading and fails closed on a replay
+/// whose predecessor disagrees.
+///
+/// SCOPE: the CR 601.2i retag of an already-announced entry. The CR 601.2a push
+/// that created the entry is a separate family and a separate seam — it does not
+/// move atomically with this retag, which is precisely why the announcement
+/// snapshot and the finalized entry are two records rather than one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStackEntryFinalizeCommand {
+    /// The stack entry's own id. This family keys on the ENTRY rather than on
+    /// an `ObjectIncarnationRef` because the retag targets a stack entry, not an
+    /// object record — the same reason `ResolvedStackPushCommand` identifies its
+    /// subject by `entry.id`.
+    pub object: ObjectId,
+    /// Zero-based index of the retagged entry (CR 405.2), recorded so replay
+    /// never repeats the authority's `rfind`.
+    pub entry_position: usize,
+    /// Boxed because `StackEntryKind` embeds a whole `ResolvedAbility`, which
+    /// would otherwise widen every `ResolvedRulesCommand` in the journal.
+    pub expected_old_kind: Box<StackEntryKind>,
+    pub resulting_kind: Box<StackEntryKind>,
+    pub expected_old_paid_facts: Option<Box<StackPaidSnapshot>>,
+    pub resulting_paid_facts: Box<StackPaidSnapshot>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved CR 601.2i finalization.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedStackEntryFinalizeReplayInvariantError {
+    #[error("stack-entry finalize targets position {position}, but the stack holds {depth}")]
+    PositionOutOfRange { position: usize, depth: usize },
+    #[error("stack-entry finalize targets {expected:?} at position {position}, found {found:?}")]
+    EntryIdentityMismatch {
+        position: usize,
+        expected: ObjectId,
+        found: ObjectId,
+    },
+    #[error("stack-entry finalize expected a different pre-finalize entry at position {0}")]
+    EntryKindMismatch(usize),
+    #[error("stack-entry finalize expected different pre-existing paid facts for {0:?}")]
+    PaidFactsMismatch(ObjectId),
+}
+
 /// Semantic command payload currently carried by a resolved-rules journal entry.
 ///
 /// Additional command families are intentionally added by their owning P2
@@ -1051,6 +1120,7 @@ pub enum ResolvedRulesCommand {
     FrameTransition(Box<ResolvedFrameTransitionCommand>),
     TriggerCollection(ResolvedTriggerCollectionCommand),
     StackPush(Box<ResolvedStackPushCommand>),
+    StackEntryFinalize(Box<ResolvedStackEntryFinalizeCommand>),
 }
 
 /// An append-only trigger collection command has no replay-time precondition.
@@ -2106,6 +2176,17 @@ impl ResolvedRulesJournal {
         )
     }
 
+    /// Records one exact CR 601.2i cast finalization under its causal node.
+    pub fn record_stack_entry_finalize(
+        &mut self,
+        command: ResolvedStackEntryFinalizeCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::StackEntryFinalize(Box::new(command)),
+        )
+    }
+
     fn begin_settlement(
         &mut self,
         identity_for: impl FnOnce(SettlementNodeOrdinal) -> RulesExecutionNodeRef,
@@ -2320,7 +2401,8 @@ impl ResolvedRulesJournal {
                 | ResolvedRulesCommand::ZoneChange(_)
                 | ResolvedRulesCommand::FrameTransition(_)
                 | ResolvedRulesCommand::TriggerCollection(_)
-                | ResolvedRulesCommand::StackPush(_) => {}
+                | ResolvedRulesCommand::StackPush(_)
+                | ResolvedRulesCommand::StackEntryFinalize(_) => {}
             }
         }
         for node in &self.nodes {
@@ -2744,6 +2826,22 @@ impl ResolvedRulesJournal {
                 if entry.node != command.cause {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "stack-push command has an unrelated cause".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::StackEntryFinalize(command) => {
+                // Cause-only. There is no allocator receipt to cross-check:
+                // CR 601.2i retags an entry that CR 601.2a already created, so
+                // this authority draws no id and no timestamp and holds no
+                // high-water a forged journal could jump. Its remaining
+                // preconditions (CR 405.2 position, entry identity, the
+                // pre-finalize kind, and the prior paid facts) are all
+                // state-dependent and are enforced by
+                // `stack::apply_resolved_stack_entry_finalize`, where
+                // the state exists to check them against.
+                if entry.node != command.cause {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "stack-entry finalize command has an unrelated cause".to_string(),
                     ));
                 }
             }
