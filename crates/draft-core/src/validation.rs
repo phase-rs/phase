@@ -8,13 +8,7 @@ use crate::types::DeckAddableCards;
 /// MTR 7.2: Players may add an unlimited number of cards named Plains, Island, Swamp, Mountain,
 /// or Forest. They may not add additional snow basic land cards (e.g., Snow-Covered Forest, etc)
 /// or Wastes basic land cards, even in formats in which they are legal.
-pub const STANDARD_BASIC_LANDS: &[&str] = &[
-    "Plains",
-    "Island",
-    "Swamp",
-    "Mountain",
-    "Forest",
-];
+pub const STANDARD_BASIC_LANDS: &[&str] = &["Plains", "Island", "Swamp", "Mountain", "Forest"];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum LimitedDeckError {
