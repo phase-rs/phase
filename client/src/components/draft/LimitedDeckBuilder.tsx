@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -219,6 +219,7 @@ export function LimitedDeckBuilder({
   const submitDeck = onSubmitDeck ?? quickSubmitDeck;
 
   const [hoveredCard, setHoveredCard] = useState<CardHoverInfo | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const pool = useMemo(() => view?.pool ?? [], [view?.pool]);
 
@@ -232,18 +233,64 @@ export function LimitedDeckBuilder({
     [pool, mainDeck],
   );
 
-  const totalLands = useMemo(
+  const landNameSet = useMemo(
+    () => new Set(pool.filter((c) => c.type_line.toLowerCase().includes("land")).map((c) => c.name)),
+    [pool],
+  );
+
+  const mainDeckSpells = useMemo(
+    () => mainDeck.filter((name) => !landNameSet.has(name)),
+    [mainDeck, landNameSet],
+  );
+
+  const deckLandCount = mainDeck.length - mainDeckSpells.length;
+
+  const basicLands = useMemo(
     () => Object.values(landCounts).reduce((sum, n) => sum + n, 0),
     [landCounts],
   );
 
-  const totalCards = mainDeck.length + totalLands;
+  const totalCards = mainDeck.length + basicLands;
   const minDeckSize = view?.min_deck_size ?? 40;
   const addableCards = view?.addable_cards?.length
     ? view.addable_cards
     : BASIC_LANDS.map((land) => land.name);
   const deckValid = totalCards >= minDeckSize;
 
+  const copyDeckList = useCallback(() => {
+    const toLines = (names: string[], extra: Record<string, number> = {}): string[] => {
+      const countMap = new Map<string, number>();
+      for (const name of names) {
+        countMap.set(name, (countMap.get(name) ?? 0) + 1);
+      }
+      const lines: string[] = [];
+      for (const [name, count] of countMap) {
+        lines.push(`${count} ${name}`);
+      }
+      for (const [name, count] of Object.entries(extra)) {
+        if (count > 0) lines.push(`${count} ${name}`);
+      }
+      return lines;
+    };
+
+    const sideboardNames = remainingPool.map((c) => c.name);
+    const deckLines = toLines(mainDeck, landCounts);
+    const sideboardLines = toLines(sideboardNames);
+
+    const text = [
+      "Deck",
+      ...deckLines,
+      "",
+      "Sideboard",
+      ...sideboardLines,
+    ].join("\n");
+
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    });
+  }, [mainDeck, landCounts, remainingPool]);
+  
   if (!view) return null;
 
   return (
@@ -254,7 +301,7 @@ export function LimitedDeckBuilder({
         mobileLayout="compact"
         onDismiss={() => setHoveredCard(null)}
       />
-      <DeckStatus spells={mainDeck.length} lands={totalLands} min={minDeckSize} />
+      <DeckStatus spells={mainDeckSpells.length} lands={basicLands + deckLandCount} min={minDeckSize} />
 
       <div className="flex min-h-0 flex-1 gap-6">
         {/* Left column: Pool + Main Deck */}
@@ -344,7 +391,7 @@ export function LimitedDeckBuilder({
 
           {/* Mana curve */}
           <section>
-            <ManaCurve pool={pool} cards={mainDeck} />
+            <ManaCurve pool={pool} cards={mainDeckSpells} />
           </section>
 
           {/* Actions */}
@@ -358,6 +405,19 @@ export function LimitedDeckBuilder({
                 {t("limitedDeck.suggestDeck")}
               </button>
             )}
+            <button
+              type="button"
+              onClick={copyDeckList}
+              disabled={mainDeck.length === 0}
+              className={menuButtonClass({
+                tone: "neutral",
+                size: "sm",
+                disabled: mainDeck.length === 0,
+                className: "w-full",
+              })}
+            >
+              {copied ? t("limitedDeck.copied", "Copied!") : t("limitedDeck.copyList", "Copy Deck List")}
+            </button>
 
             <button
               type="button"
