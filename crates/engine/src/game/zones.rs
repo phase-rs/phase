@@ -1918,11 +1918,6 @@ pub(crate) fn apply_battlefield_entry_controller_override(
     let expected_old_base_controller = object_snapshot.and_then(|obj| obj.base_controller);
     let expected_old_controller = object_snapshot.map(|obj| obj.controller);
 
-    if let Some(obj) = state.objects.get_mut(&object_id) {
-        obj.base_controller = Some(controller);
-        obj.controller = controller;
-    }
-
     // Resolve the snapshot POSITIONS rather than mutating through a scan: the
     // position is what the CR 733 command records, so replay retags the same
     // record instead of re-running a last-match scan (CR 400.7 permits the same
@@ -1931,21 +1926,35 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         .zone_changes_this_turn
         .iter()
         .rposition(|record| record.object_id == object_id && record.to_zone == Zone::Battlefield);
-    if let Some(record) =
-        zone_change_index.and_then(|index| state.zone_changes_this_turn.get_mut(index))
-    {
-        record.controller = controller;
-        record.sync_trigger_source_context();
-    }
-
     let battlefield_entry_index = state
         .battlefield_entries_this_turn
         .iter()
         .rposition(|record| record.object_id == object_id);
-    if let Some(record) =
-        battlefield_entry_index.and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
-    {
-        record.controller = controller;
+
+    // CR 733: the retag itself is performed by the command applier, so resolve and
+    // replay install through one body instead of two copies that can drift. An
+    // absent object has nothing to retag on the object side but still retags its
+    // snapshots, exactly as before.
+    let command = reference.zip(expected_old_controller).map(|(object, old)| {
+        ResolvedControllerOverrideCommand {
+            object,
+            expected_old_base_controller,
+            expected_old_controller: old,
+            resulting_controller: controller,
+            zone_change_index,
+            battlefield_entry_index,
+            cause: state.current_or_begin_rules_execution_node(),
+        }
+    });
+    match &command {
+        Some(command) => apply_resolved_controller_override(state, command)
+            .expect("the freshly read object must satisfy its own override precondition"),
+        None => retag_battlefield_entry_snapshots(
+            state,
+            zone_change_index,
+            battlefield_entry_index,
+            controller,
+        ),
     }
 
     if let Some(GameEvent::ZoneChanged { record, .. }) = events.iter_mut().rev().find(|event| {
@@ -1962,31 +1971,45 @@ pub(crate) fn apply_battlefield_entry_controller_override(
         record.sync_trigger_source_context();
     }
 
-    // CR 733: journal the settled override through its owning authority. The
-    // event fix-up above is deliberately NOT part of the command — events are
-    // transient carriers consumed by the same resolution, not persistent state a
-    // replay reconstructs.
+    // CR 733: journal the settled override. The event fix-up above is deliberately
+    // NOT part of the command — events are transient carriers consumed by the same
+    // resolution, not persistent state a replay reconstructs.
     // CR 110.2a: an override onto the controller the object already had, with the
     // base controller already pinned there, retagged nothing and is not recorded.
-    let Some((reference, expected_old_controller)) = reference.zip(expected_old_controller) else {
+    let Some(command) = command else {
         return;
     };
-    if expected_old_base_controller == Some(controller) && expected_old_controller == controller {
+    if command.expected_old_base_controller == Some(controller)
+        && command.expected_old_controller == controller
+    {
         return;
     }
-    let cause = state.current_or_begin_rules_execution_node();
     state
         .resolved_rules_journal
-        .record_controller_override(ResolvedControllerOverrideCommand {
-            object: reference,
-            expected_old_base_controller,
-            expected_old_controller,
-            resulting_controller: controller,
-            zone_change_index,
-            battlefield_entry_index,
-            cause,
-        })
+        .record_controller_override(command)
         .expect("resolved controller override must have a live journal cause");
+}
+
+/// Retags the CR 400.7 zone-change and CR 403.3 battlefield-entry snapshots at
+/// the exact recorded positions. Shared by the resolve-time authority and the
+/// replay applier so both install the same retag.
+fn retag_battlefield_entry_snapshots(
+    state: &mut GameState,
+    zone_change_index: Option<usize>,
+    battlefield_entry_index: Option<usize>,
+    controller: PlayerId,
+) {
+    if let Some(record) =
+        zone_change_index.and_then(|index| state.zone_changes_this_turn.get_mut(index))
+    {
+        record.controller = controller;
+        record.sync_trigger_source_context();
+    }
+    if let Some(record) =
+        battlefield_entry_index.and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
+    {
+        record.controller = controller;
+    }
 }
 
 /// Installs one already-resolved CR 110.2a controller override verbatim.
@@ -2053,19 +2076,12 @@ pub fn apply_resolved_controller_override(
         obj.base_controller = Some(command.resulting_controller);
         obj.controller = command.resulting_controller;
     }
-    if let Some(record) = command
-        .zone_change_index
-        .and_then(|index| state.zone_changes_this_turn.get_mut(index))
-    {
-        record.controller = command.resulting_controller;
-        record.sync_trigger_source_context();
-    }
-    if let Some(record) = command
-        .battlefield_entry_index
-        .and_then(|index| state.battlefield_entries_this_turn.get_mut(index))
-    {
-        record.controller = command.resulting_controller;
-    }
+    retag_battlefield_entry_snapshots(
+        state,
+        command.zone_change_index,
+        command.battlefield_entry_index,
+        command.resulting_controller,
+    );
     Ok(())
 }
 
