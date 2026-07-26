@@ -17700,12 +17700,23 @@ fn trigger_one_or_more_of_your_opponents_are_attacked() {
     // CR 508.3b: only fires when the opponent player themselves is attacked,
     // not when a planeswalker they control or battle they protect is.
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    // CR 603.2c: the aggregate "one or more ... are attacked" phrasing is a
+    // single trigger event even if it contains multiple occurrences (e.g. two
+    // distinct opponents attacked in the same declaration), so it must be
+    // batched — otherwise the ordinary per-defending-player split would fire
+    // this once per attacked opponent.
+    assert!(
+        def.batched,
+        "aggregate 'one or more ... are attacked' must be batched (CR 603.2c)"
+    );
     assert!(def.execute.is_some());
 }
 
 #[test]
 fn trigger_one_of_your_opponents_is_attacked() {
-    // Singular counterpart of the same CR 508.3b class — same parse shape.
+    // Singular counterpart of the same CR 508.3b class: CR 603.2c's "trigger
+    // repeatedly if one event contains multiple occurrences" clause applies
+    // here instead, so this form is intentionally NOT batched.
     let def = parse_trigger_line(
         "Whenever one of your opponents is attacked, draw a card.",
         "Test Card",
@@ -17713,6 +17724,10 @@ fn trigger_one_of_your_opponents_is_attacked() {
     assert_eq!(def.mode, TriggerMode::Attacks);
     assert_eq!(def.valid_target, Some(TargetFilter::Opponent));
     assert_eq!(def.attack_target_filter, Some(AttackTargetFilter::Player));
+    assert!(
+        !def.batched,
+        "singular 'one of your opponents is attacked' must not be batched"
+    );
     assert!(def.execute.is_some());
 }
 
