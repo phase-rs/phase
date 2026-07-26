@@ -999,12 +999,12 @@ pub(crate) fn resolved_object_ids_for_filter(
             .into_iter()
             .collect(),
         TargetFilter::ParentTarget => object_targets(&ability.targets).collect(),
-        TargetFilter::ParentTargetSlot { index } => ability
-            .targets
-            .get(*index)
-            .and_then(target_ref_object)
-            .into_iter()
-            .collect(),
+        TargetFilter::ParentTargetSlot { index } => {
+            resolve_parent_slot_from_root(state, ability, *index)
+                .and_then(|target| target_ref_object(&target))
+                .into_iter()
+                .collect()
+        }
         TargetFilter::LastCreated => state.last_created_token_ids.clone(),
         TargetFilter::LastRevealed => state.last_revealed_ids.clone(),
         TargetFilter::LastZoneChanged => state.last_zone_changed_ids.clone(),
@@ -5441,6 +5441,22 @@ mod tests {
         let result = resolved_targets(&body, &TargetFilter::ParentTargetSlot { index: 1 }, &state);
 
         assert_eq!(result, vec![first, second]);
+        assert_eq!(
+            resolved_object_ids_for_filter(
+                &state,
+                &body,
+                &TargetFilter::ParentTargetSlot { index: 0 },
+            ),
+            vec![ObjectId(1)],
+        );
+        assert_eq!(
+            resolved_object_ids_for_filter(
+                &state,
+                &body,
+                &TargetFilter::ParentTargetSlot { index: 1 },
+            ),
+            vec![ObjectId(2)],
+        );
     }
 
     /// CR 706.2: a die roll's result is the amount `EventContextAmount`

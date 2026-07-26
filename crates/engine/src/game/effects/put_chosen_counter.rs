@@ -262,6 +262,83 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 122.1: an indexed predicate and its counter placement
+    /// resolve the same flattened root target slot even when the tail node's
+    /// local target list contains only the most-recent slot.
+    #[test]
+    fn parent_target_slot_condition_and_placement_share_chain_root() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+
+        let (mut state, source, first) = setup();
+        let second = crate::game::zones::create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Target".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.chosen_counter_kind_this_resolution = Some(CounterType::Stun);
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let root = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(first)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(second)],
+            source,
+            PlayerId(0),
+        ));
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(500),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(root),
+            },
+        });
+
+        let tail = ResolvedAbility::new(
+            Effect::PutChosenCounter {
+                target: TargetFilter::ParentTargetSlot { index: 0 },
+                count: QuantityExpr::Fixed { value: 1 },
+                target_condition: Some(ChosenCounterCountCondition {
+                    comparator: Comparator::EQ,
+                    rhs: QuantityExpr::Fixed { value: 0 },
+                }),
+            },
+            vec![TargetRef::Object(second)],
+            source,
+            PlayerId(0),
+        );
+
+        resolve(&mut state, &tail, &mut Vec::new()).unwrap();
+
+        assert_eq!(
+            state.objects[&first].counters.get(&CounterType::Stun),
+            Some(&1),
+            "the absent-kind predicate and placement both resolve root slot 0"
+        );
+        assert_eq!(
+            state.objects[&second].counters.get(&CounterType::Stun),
+            Some(&1),
+            "the tail-local slot must be neither checked nor modified"
+        );
+    }
+
     /// CR 614.1a + CR 122.1: PutChosenCounter delegates to the ordinary
     /// PutCounter authority, so counter-addition replacement effects still
     /// transform the placement.
