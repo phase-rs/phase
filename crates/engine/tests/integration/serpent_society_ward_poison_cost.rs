@@ -197,9 +197,7 @@ fn serpent_society_ward_payment_that_reaches_ten_poison_loses_the_game() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::GameOver {
-                winner: Some(p) if p == P0
-            }
+            WaitingFor::GameOver { winner: Some(p) } if p == P0
         ),
         "reaching ten poison must trigger the CR 104.3d loss SBA immediately, got {:?}",
         runner.state().waiting_for

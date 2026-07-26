@@ -3457,6 +3457,19 @@ function formatUnlessCost(
       },
   t: TFunction<"game">,
 ): string {
+  // `"counter_kind" in cost` narrows via property presence rather than a
+  // `cost.type` literal comparison — the sibling union member's `type: string`
+  // is too wide for a `switch (cost.type)`/`cost.type === "GetPlayerCounters"`
+  // check to exclude it, so `cost.counter_kind` would otherwise fail to
+  // type-check inside that branch. The counter kind is looked up through i18n
+  // (not interpolated as raw English) so non-English locales get a real
+  // translated noun, matching how the badges section already localizes
+  // poison/experience/rad counter names. `cost.counter_kind` is rendered
+  // exactly as the engine sent it — no lowercasing, no fallback default.
+  if ("counter_kind" in cost) {
+    const kind = t(`gamePage.cost.playerCounterKind.${cost.counter_kind}`);
+    return t("gamePage.cost.playerCounters", { count: cost.count, kind });
+  }
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
@@ -3486,15 +3499,6 @@ function formatUnlessCost(
     }
     case "PayEnergy":
       return t("gamePage.cost.energy", { amount: cost.amount ?? 0 });
-    // The counter kind is looked up through i18n (not interpolated as raw
-    // English) so non-English locales get a real translated noun, matching
-    // how the badges section already localizes poison/experience/rad counter
-    // names. `cost.counter_kind` is rendered exactly as the engine sent it —
-    // no lowercasing, no fallback default.
-    case "GetPlayerCounters": {
-      const kind = t(`gamePage.cost.playerCounterKind.${cost.counter_kind}`);
-      return t("gamePage.cost.playerCounters", { count: cost.count, kind });
-    }
     default:
       return t("gamePage.cost.generic");
   }
