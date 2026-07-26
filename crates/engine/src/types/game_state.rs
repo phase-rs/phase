@@ -16370,6 +16370,24 @@ impl GameState {
         ts
     }
 
+    /// CR 613.7: carry the timestamp allocator past a timestamp that a CR 733
+    /// replay *installed* rather than drew.
+    ///
+    /// Every applier that stamps an object with a recorded timestamp must call
+    /// this. [`GameState::next_timestamp`] is the draw counter, so an applier
+    /// that installs a recorded value without advancing it leaves the counter
+    /// behind a timestamp already in use, and a later draw hands that same
+    /// timestamp to a second object. CR 613.7 orders effects within a layer
+    /// solely by timestamp, so the two are then unordered — a corruption that
+    /// needs no forged journal, only an honest replay.
+    ///
+    /// `max` keeps the counter monotone when commands replay in an order other
+    /// than the one they were drawn in. `saturating_add` is total; its clamp is
+    /// unreachable because no game performs `u64::MAX` draws.
+    pub(crate) fn adopt_replayed_timestamp(&mut self, timestamp: u64) {
+        self.next_timestamp = self.next_timestamp.max(timestamp.saturating_add(1));
+    }
+
     pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {
         self.may_trigger_auto_choices
             .iter()

@@ -137,6 +137,21 @@ fn equip_journals_an_exact_resolved_attachment() {
             .expect("an attach draws a timestamp"),
         "CR 613.7e: replay installs the recorded timestamp instead of re-drawing one"
     );
+
+    // CR 613.7: installing a recorded timestamp is only half the contract — the
+    // allocator must also be carried past it, or a later draw in the same replay
+    // hands the same timestamp to a second object and CR 613.7 leaves the two
+    // unordered within their layer. Asserted by DRAWING rather than by reading
+    // the counter, so this pins the observable consequence and not the field.
+    let installed = attachment
+        .resulting_timestamp
+        .expect("an attach draws a timestamp");
+    let next_drawn = replay.next_timestamp();
+    assert!(
+        next_drawn > installed,
+        "CR 613.7: replay installed timestamp {installed} but the next draw handed out \
+         {next_drawn}; two objects sharing a timestamp are unordered within their layer"
+    );
 }
 
 /// CR 701.3d: an unattach records the mirror-image edit — a host precondition
@@ -176,6 +191,7 @@ fn unattach_journals_a_host_removal_without_a_timestamp_draw() {
     let attached_state = runner.state().clone();
     let journal_start = attached_state.resolved_rules_journal.entries().len();
     let attached_timestamp = attached_state.objects[&equipment].timestamp;
+    let attached_next_timestamp = attached_state.next_timestamp;
 
     let outcome = runner.cast(spell_id).target_object(creature).resolve();
 
@@ -231,5 +247,13 @@ fn unattach_journals_a_host_removal_without_a_timestamp_draw() {
     assert_eq!(
         replay.objects[&equipment].timestamp, attached_timestamp,
         "CR 613.7e: an unattach replay must not disturb the attachment's timestamp"
+    );
+    // The other side of the allocator contract: an unattach drew no timestamp,
+    // so replaying one must not advance the draw counter either. This is what
+    // keeps the advance bound to a recorded draw rather than applied blanket to
+    // every attachment command.
+    assert_eq!(
+        replay.next_timestamp, attached_next_timestamp,
+        "CR 613.7e: an unattach draws no timestamp, so replay advances no allocator"
     );
 }

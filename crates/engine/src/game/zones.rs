@@ -902,6 +902,15 @@ pub fn apply_resolved_zone_change(
         );
     }
 
+    // CR 613.7d: the battlefield entry drew this timestamp during the original
+    // execution, so replay installs it rather than drawing a fresh one — and
+    // must carry the allocator past it or a later draw reissues it. A move to
+    // any other zone drew none, which is why this is bound to the recorded
+    // `Option` rather than applied to every zone change.
+    if let Some(entry_timestamp) = command.entry_timestamp {
+        state.adopt_replayed_timestamp(entry_timestamp);
+    }
+
     let turn_zone_change_index =
         super::restrictions::record_zone_change(state, command.zone_change_record.clone());
     if turn_zone_change_index != command.turn_zone_change_index {

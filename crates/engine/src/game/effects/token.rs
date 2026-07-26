@@ -1123,6 +1123,11 @@ pub fn apply_resolved_token_creation(
     zones::add_to_zone(state, object_id, Zone::Battlefield, command.owner);
     // CR 111.1: replay must not hand the same id out again to a later allocation.
     state.next_object_id = state.next_object_id.max(command.resulting_next_object_id);
+    // CR 613.7d: the birth drew an entry timestamp alongside the object id, and
+    // the same reasoning applies to it — replay installs the recorded value, so
+    // the timestamp allocator must be carried past it or a later draw reissues
+    // it and the two objects are unordered within their CR 613 layer.
+    state.adopt_replayed_timestamp(command.entry_timestamp);
     Ok(())
 }
 

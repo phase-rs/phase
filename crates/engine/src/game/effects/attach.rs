@@ -1362,6 +1362,11 @@ pub fn apply_resolved_attachment(
             attachment.timestamp = timestamp;
         }
     }
+    // CR 613.7e: an unattach and a same-host re-attach draw no timestamp, so
+    // only a recorded draw advances the allocator past the value it installed.
+    if let Some(timestamp) = command.resulting_timestamp {
+        state.adopt_replayed_timestamp(timestamp);
+    }
     if let Some(new_host_id) = command.resulting_host.and_then(|host| host.as_object()) {
         if let Some(new_host) = state.objects.get_mut(&new_host_id) {
             if !new_host.attachments.contains(&attachment_id) {
