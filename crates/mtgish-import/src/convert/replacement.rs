@@ -421,11 +421,12 @@ fn damage_action_to_modification(
         ReplacementActionWouldDealDamage::PreventSomeOfThatDamage(g) => {
             let qty = quantity::convert(g)?;
             match qty {
-                QuantityExpr::Fixed { value } if (0..=u32::MAX as i32).contains(&value) => {
-                    Ok(DamageModification::PreventionMinus {
-                        value: value as u32,
-                    })
-                }
+                QuantityExpr::Fixed { value } => u32::try_from(value)
+                    .map(|value| DamageModification::PreventionMinus { value })
+                    .map_err(|_| ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "DamageModification",
+                        needed_variant: "PreventionMinus { count: QuantityExpr }".into(),
+                    }),
                 // CR 615.1: Dynamic prevention amount ("prevent X damage,
                 // where X is …") — engine `DamageModification::PreventionMinus`
                 // takes only `u32`, not `QuantityExpr`.
@@ -449,11 +450,13 @@ fn damage_action_to_modification(
             }
             let qty = quantity::convert(g)?;
             match qty {
-                QuantityExpr::Fixed { value } if (0..=u32::MAX as i32).contains(&value) => {
-                    Ok(DamageModification::SetTo {
-                        value: value as u32,
-                    })
-                }
+                QuantityExpr::Fixed { value } => u32::try_from(value)
+                    .map(|value| DamageModification::SetTo { value })
+                    .map_err(|_| ConversionGap::MalformedIdiom {
+                        idiom: "DamageAction/DealDamageInstead",
+                        path: String::new(),
+                        detail: "non-fixed override amount needs dynamic SetTo".into(),
+                    }),
                 _ => Err(ConversionGap::MalformedIdiom {
                     idiom: "DamageAction/DealDamageInstead",
                     path: String::new(),
@@ -3299,7 +3302,7 @@ mod tests {
     };
 
     #[test]
-    fn would_deal_damage_prevention_actions_keep_prevention_provenance() {
+    fn would_deal_damage_fixed_actions_convert_to_typed_modifications() {
         let defs = convert_replace_would_deal_damage(
             &ReplacableEventWouldDealDamage::CombatDamageWouldBeDealt,
             &[
@@ -3307,9 +3310,12 @@ mod tests {
                 ReplacementActionWouldDealDamage::PreventSomeOfThatDamage(Box::new(
                     GameNumber::Integer(2),
                 )),
+                ReplacementActionWouldDealDamage::DealDamageInstead(Box::new(GameNumber::Integer(
+                    3,
+                ))),
             ],
         )
-        .expect("fixed prevention actions should convert");
+        .expect("fixed damage replacement actions should convert");
 
         assert!(matches!(
             defs[0].damage_modification.as_ref(),
@@ -3318,6 +3324,10 @@ mod tests {
         assert!(matches!(
             defs[1].damage_modification.as_ref(),
             Some(DamageModification::PreventionMinus { value: 2 })
+        ));
+        assert!(matches!(
+            defs[2].damage_modification.as_ref(),
+            Some(DamageModification::SetTo { value: 3 })
         ));
     }
 
