@@ -45,6 +45,8 @@
   },
   "manaCurve": {
     "title": "Krzywa many",
+    "allCards": "Wszystkie",
+    "creatures": "Stwory",
     "bucketLabel": "Wartość many {{bucket}}"
   },
   "pickTimer": {
@@ -106,6 +108,8 @@
     "addableCards": "Karty do dodania",
     "autoLands": "Automatyczne ziemie",
     "suggestDeck": "Zaproponuj talię",
+    "copyList": "Skopiuj listę talii",
+    "copied": "Skopiowano!",
     "submitDeck": "Zatwierdź talię",
     "removeCard": "Usuń {{name}}",
     "addCard": "Dodaj {{name}}",

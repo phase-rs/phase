@@ -45,6 +45,8 @@
   },
   "manaCurve": {
     "title": "Mana Curve",
+    "allCards": "All",
+    "creatures": "Creatures",
     "bucketLabel": "Mana value {{bucket}}"
   },
   "pickTimer": {
@@ -106,6 +108,8 @@
     "addableCards": "Addable Cards",
     "autoLands": "Auto Lands",
     "suggestDeck": "Suggest Deck",
+    "copyList": "Copy Deck List",
+    "copied": "Copied!",
     "submitDeck": "Submit Deck",
     "removeCard": "Remove {{name}}",
     "addCard": "Add {{name}}",

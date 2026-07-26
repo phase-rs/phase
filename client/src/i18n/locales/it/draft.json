@@ -45,6 +45,8 @@
   },
   "manaCurve": {
     "title": "Curva del mana",
+    "allCards": "Tutte",
+    "creatures": "Creature",
     "bucketLabel": "Valore di mana {{bucket}}"
   },
   "pickTimer": {
@@ -106,6 +108,8 @@
     "addableCards": "Carte aggiungibili",
     "autoLands": "Terre automatiche",
     "suggestDeck": "Suggerisci mazzo",
+    "copyList": "Copia lista mazzo",
+    "copied": "Copiato!",
     "submitDeck": "Invia mazzo",
     "removeCard": "Rimuovi {{name}}",
     "addCard": "Aggiungi {{name}}",

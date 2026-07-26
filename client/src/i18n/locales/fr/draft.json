@@ -45,6 +45,8 @@
   },
   "manaCurve": {
     "title": "Courbe de mana",
+    "allCards": "Toutes",
+    "creatures": "Créatures",
     "bucketLabel": "Valeur de mana {{bucket}}"
   },
   "pickTimer": {
@@ -106,6 +108,8 @@
     "addableCards": "Cartes ajoutables",
     "autoLands": "Terrains auto",
     "suggestDeck": "Suggérer un deck",
+    "copyList": "Copier la liste du deck",
+    "copied": "Copié !",
     "submitDeck": "Soumettre le deck",
     "removeCard": "Retirer {{name}}",
     "addCard": "Ajouter {{name}}",

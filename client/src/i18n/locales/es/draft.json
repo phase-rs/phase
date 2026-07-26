@@ -45,6 +45,8 @@
   },
   "manaCurve": {
     "title": "Curva de maná",
+    "allCards": "Todo",
+    "creatures": "Criaturas",
     "bucketLabel": "Valor de maná {{bucket}}"
   },
   "pickTimer": {
@@ -106,6 +108,8 @@
     "addableCards": "Cartas añadibles",
     "autoLands": "Tierras automáticas",
     "suggestDeck": "Sugerir mazo",
+    "copyList": "Copiar lista del mazo",
+    "copied": "¡Copiado!",
     "submitDeck": "Enviar mazo",
     "removeCard": "Quitar {{name}}",
     "addCard": "Añadir {{name}}",

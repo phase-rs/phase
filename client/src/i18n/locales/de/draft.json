@@ -45,6 +45,8 @@
   },
   "manaCurve": {
     "title": "Manakurve",
+    "allCards": "Alle",
+    "creatures": "Kreaturen",
     "bucketLabel": "Manawert {{bucket}}"
   },
   "pickTimer": {
@@ -106,6 +108,8 @@
     "addableCards": "Hinzufügbare Karten",
     "autoLands": "Auto-Länder",
     "suggestDeck": "Deck vorschlagen",
+    "copyList": "Deckliste kopieren",
+    "copied": "Kopiert!",
     "submitDeck": "Deck einreichen",
     "removeCard": "{{name}} entfernen",
     "addCard": "{{name}} hinzufügen",

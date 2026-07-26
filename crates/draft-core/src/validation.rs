@@ -5,22 +5,10 @@ use serde::{Deserialize, Serialize};
 use crate::types::DeckAddableCards;
 
 /// Standard basic land names that are always available in unlimited quantity.
-/// CR 100.2a: basic lands are exempt from copy limits. All cards with the
-/// Basic supertype are listed here (five originals, Wastes, and all
-/// Snow-Covered variants).
-pub const STANDARD_BASIC_LANDS: &[&str] = &[
-    "Plains",
-    "Island",
-    "Swamp",
-    "Mountain",
-    "Forest",
-    "Wastes",
-    "Snow-Covered Plains",
-    "Snow-Covered Island",
-    "Snow-Covered Swamp",
-    "Snow-Covered Mountain",
-    "Snow-Covered Forest",
-];
+/// MTR 7.2: Players may add an unlimited number of cards named Plains, Island, Swamp, Mountain,
+/// or Forest. They may not add additional snow basic land cards (e.g., Snow-Covered Forest, etc)
+/// or Wastes basic land cards, even in formats in which they are legal.
+pub const STANDARD_BASIC_LANDS: &[&str] = &["Plains", "Island", "Swamp", "Mountain", "Forest"];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize, Deserialize)]
 pub enum LimitedDeckError {
@@ -184,12 +172,16 @@ mod tests {
     }
 
     #[test]
-    fn wastes_count_as_basic() {
+    fn wastes_not_count_as_basic() {
         let pool: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
         let mut deck: Vec<String> = (0..23).map(|i| format!("Card {i}")).collect();
         deck.extend(std::iter::repeat_n(s("Wastes"), 17));
         assert_eq!(deck.len(), 40);
-        assert!(validate_limited_deck(&deck, &pool, &addable(), 40).is_ok());
+        let errors = validate_limited_deck(&deck, &pool, &addable(), 40).unwrap_err();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            LimitedDeckError::NotInPool { name } if name == "Wastes"
+        )));
     }
 
     #[test]
