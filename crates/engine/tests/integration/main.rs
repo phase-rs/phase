@@ -774,6 +774,7 @@ mod rage_reflection_double_strike_grant;
 mod refurbished_familiar;
 mod render_silent_cant_cast;
 mod repro_pilot_crew;
+mod revealed_card_type_disjunction_518;
 mod rhys_evermore_remove_counters;
 mod riot_control_regression;
 mod ripples_of_undeath_regression;

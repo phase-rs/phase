@@ -6,7 +6,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, space0};
 use nom::combinator::{all_consuming, map, map_res, not, opt, peek, recognize, value};
-use nom::multi::{many0, many1, separated_list1};
+use nom::multi::{many0, many1};
 use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
@@ -390,32 +390,58 @@ pub fn parse_core_type(input: &str) -> OracleResult<'_, CoreType> {
 /// as `AbilityCondition::RevealedHasCardType` match with `any`, so listing every
 /// printed leg is exactly the OR semantics the Oracle text prints.
 ///
-/// Accepts both the Oxford-comma list form and the bare two-term "A or B" form.
+/// An explicit `or` boundary is REQUIRED for a multi-leg result. A bare comma
+/// list ("land, instant") is NOT a disjunction: without a printed "or" the
+/// phrase is a conjunctive/enumerated type stack, and lowering it to a set that
+/// consumers evaluate with `any` would silently widen a both-types gate into an
+/// either-type gate. Comma legs are therefore buffered and only committed once a
+/// terminal `", or "` / `" or "` leg proves the list really was disjunctive:
+///
+/// - `"instant or sorcery"` → `[Instant, Sorcery]`
+/// - `"artifact, creature, or enchantment"` → `[Artifact, Creature, Enchantment]`
+/// - `"land, instant"` → `[Land]`, remainder `", instant"` (rejected upstream by
+///   the caller's `all_consuming`)
+/// - `"artifact and creature"` → `[Artifact]`, remainder `" and creature"`
+///
 /// A single type word is a well-formed one-element disjunction, so this is a
 /// drop-in superset of [`parse_core_type`].
 pub fn parse_core_type_disjunction(input: &str) -> OracleResult<'_, Vec<CoreType>> {
-    separated_list1(parse_core_type_disjunction_separator, parse_core_type).parse(input)
-}
+    let (after_first, first) = parse_core_type(input)?;
 
-/// Separator between the legs of a CR 205.2a card-type disjunction. Ordered
-/// longest-first so the Oxford comma in "artifact, creature, or enchantment" is
-/// consumed whole rather than leaving a dangling "or ".
-///
-/// Deliberately accepts only the disjunctive "or" forms. A printed "and"
-/// between card types is a CONJUNCTION naming one object that has both types
-/// ("artifact creature", "an artifact and creature card"), which is not the
-/// `any`-match set this combinator builds — admitting it here would silently
-/// widen a both-types gate into an either-type gate.
-fn parse_core_type_disjunction_separator(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
-            tag::<_, _, OracleError<'_>>(", or "),
-            tag(" or "),
-            tag(", "),
-        )),
-    )
-    .parse(input)
+    // Comma legs are provisional until an `or` boundary appears. `pending` holds
+    // them; `probe` walks the candidate list without committing the remainder.
+    let mut pending: Vec<CoreType> = Vec::new();
+    let mut probe = after_first;
+
+    loop {
+        // Terminal disjunctive leg — commits every buffered comma leg with it.
+        // ", or " is tried before " or " because the Oxford comma must be
+        // consumed whole rather than leaving a dangling ", ".
+        if let Ok((after_last, last)) = alt((
+            preceded(tag::<_, _, OracleError<'_>>(", or "), parse_core_type),
+            preceded(tag(" or "), parse_core_type),
+        ))
+        .parse(probe)
+        {
+            let mut types = Vec::with_capacity(pending.len() + 2);
+            types.push(first);
+            types.append(&mut pending);
+            types.push(last);
+            return Ok((after_last, types));
+        }
+
+        // Intermediate ", " leg — buffer it and keep looking for the `or`.
+        match preceded(tag::<_, _, OracleError<'_>>(", "), parse_core_type).parse(probe) {
+            Ok((after_mid, mid)) => {
+                pending.push(mid);
+                probe = after_mid;
+            }
+            // No `or` boundary anywhere in the list — not a disjunction. Yield
+            // the single leading type and leave the comma tail unconsumed so a
+            // full-consumption caller rejects the phrase outright.
+            Err(_) => return Ok((after_first, vec![first])),
+        }
+    }
 }
 
 /// CR 122.1: Combinator mapping a player-counter kind word to its typed
@@ -2106,12 +2132,49 @@ mod tests {
                     CoreType::Enchantment,
                 ],
             ),
-            ("land, instant", vec![CoreType::Land, CoreType::Instant]),
+            (
+                "artifact, creature, enchantment, or land",
+                vec![
+                    CoreType::Artifact,
+                    CoreType::Creature,
+                    CoreType::Enchantment,
+                    CoreType::Land,
+                ],
+            ),
         ];
         for (input, expected) in cases {
             let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
             assert_eq!(parsed, expected, "input: {input:?}");
             assert!(rest.is_empty(), "input {input:?} left remainder {rest:?}");
+        }
+    }
+
+    /// A bare comma is NOT an `or` boundary. Without a printed "or" the phrase is
+    /// an enumerated/conjunctive type stack, and lowering it to a set that
+    /// consumers evaluate with `any` would widen a both-types gate into an
+    /// either-type gate. Only the leading type is yielded, and the comma tail is
+    /// left unconsumed so a full-consumption caller rejects the phrase outright.
+    #[test]
+    fn test_parse_core_type_disjunction_rejects_bare_comma_list() {
+        for input in ["land, instant", "artifact, creature", "land, instant, land"] {
+            let (rest, parsed) = parse_core_type_disjunction(input).unwrap();
+            assert_eq!(
+                parsed.len(),
+                1,
+                "input {input:?} must not yield a multi-leg disjunction, got {parsed:?}"
+            );
+            assert!(
+                !rest.is_empty(),
+                "input {input:?} must leave its comma tail unconsumed"
+            );
+            // The guard that actually protects callers: full consumption fails,
+            // so such a phrase can never reach a multi-type `RevealedHasCardType`.
+            assert!(
+                all_consuming(parse_core_type_disjunction)
+                    .parse(input)
+                    .is_err(),
+                "input {input:?} must be rejected under all_consuming"
+            );
         }
     }
 
@@ -2125,8 +2188,8 @@ mod tests {
         assert_eq!(rest, " and creature");
     }
 
-    /// A trailing non-type clause must not be consumed: `separated_list1` has to
-    /// backtrack over the dangling comma rather than failing the whole parse.
+    /// A trailing non-type clause must not be consumed: the comma-leg probe has
+    /// to rewind to the leading type rather than failing the whole parse.
     #[test]
     fn test_parse_core_type_disjunction_backtracks_over_trailing_clause() {
         let (rest, parsed) = parse_core_type_disjunction("instant, then draw a card").unwrap();
