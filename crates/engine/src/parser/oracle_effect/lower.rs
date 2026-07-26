@@ -5901,6 +5901,136 @@ pub(super) fn extract_remove_counter_multi_target(text: &str) -> Option<MultiTar
     None
 }
 
+/// CR 115.4 + CR 115.1a: The noun class of a "to each of ⟨count⟩ ⟨noun⟩" head.
+///
+/// Not a `bool`: the two arms are different rules with different downstream
+/// handling. CR 115.4 gives a bare plural "two targets" the damage target class
+/// (creature, player, planeswalker, or battle) ⇒ `TargetFilter::Any`, while
+/// CR 115.1a's "two target ⟨type⟩" defers to `parse_target_with_ctx` for the
+/// printed filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EachOfTargetNoun {
+    /// Bare plural `targets` — CONSUMED by the combinator; the caller supplies
+    /// `TargetFilter::Any` itself.
+    AnyTargets,
+    /// `[other |another ]target ⟨type⟩` — NOT consumed; `parse_target_with_ctx`
+    /// needs the full phrase including the `target ` article.
+    Typed,
+}
+
+/// CR 601.2c: Bounded announced count ("one or two", "one, two, or three").
+/// Composes the trailing noun off `BOUNDED_TARGET_CARDINALITIES` exactly as
+/// that constant's doc comment prescribes, so a future cardinality is added in
+/// one place.
+fn parse_bounded_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+    for &(stem, min, max) in BOUNDED_TARGET_CARDINALITIES {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(stem).parse(input) {
+            return Ok((rest, MultiTargetSpec::fixed(min, max)));
+        }
+    }
+    Err(oracle_err(input))
+}
+
+/// CR 601.2c: Optional announced count ("up to two", "up to X"). The count
+/// vocabulary is delegated to `parse_multi_target_count_expr`, the single
+/// authority for digits/English numerals/`x`/dynamic quantities.
+fn parse_optional_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+    map(
+        preceded(tag("up to "), parse_multi_target_count_expr),
+        MultiTargetSpec::up_to,
+    )
+    .parse(input)
+}
+
+/// CR 601.2c: Exact announced count ("two", "X"). "Once the number of targets
+/// the spell has is determined, that number doesn't change."
+fn parse_exact_target_cardinality(input: &str) -> OracleResult<'_, MultiTargetSpec> {
+    map(parse_multi_target_count_expr, MultiTargetSpec::exact).parse(input)
+}
+
+/// CR 115.4 + CR 115.1a: The noun following the announced count.
+///
+/// The bare-plural arm is fenced with `not(satisfy(char::is_alphanumeric))` so
+/// `targets` never matches inside a longer word — the same in-file form as the
+/// `" tapped"` fence below. `not` never consumes, so no `peek` wrapper is
+/// needed, and `satisfy` errors on empty input, so end-of-input is covered
+/// without an `eof` arm.
+///
+/// The typed arm is `peek`-only: `parse_target_with_ctx` must still see the
+/// `target `/`other target `/`another target ` article. `other`/`another` is a
+/// lexical modifier here, and `FilterProp::Another` is applied downstream by
+/// `parse_target_with_ctx` — the same grandfathered handling as
+/// `strip_optional_target_prefix`. Note the asymmetry: the bare-plural arm does
+/// NOT accept "other targets" (Drakuseth's "up to two other targets"), matching
+/// the pre-existing behaviour exactly rather than adding new leniency.
+fn parse_each_of_target_noun(input: &str) -> OracleResult<'_, EachOfTargetNoun> {
+    alt((
+        value(
+            EachOfTargetNoun::AnyTargets,
+            terminated(tag("targets"), not(satisfy(char::is_alphanumeric))),
+        ),
+        value(
+            EachOfTargetNoun::Typed,
+            peek(alt((
+                tag("target "),
+                tag("other target "),
+                tag("another target "),
+            ))),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 601.2c + CR 115.4: The parameterized "⟨cardinality⟩ ⟨noun⟩" head that
+/// follows "to each of ". Spans the full cardinality × noun matrix (bounded /
+/// optional / exact × bare-plural / typed) that two single-leaf strippers
+/// previously covered one cell each.
+///
+/// Each `alt` arm is a COMPLETE `(cardinality, multispace1, noun)` tuple so a
+/// noun failure backtracks the whole arm: `"one or two targets"` would
+/// otherwise have its leading `"one"` eaten by the exact arm. Bounded runs
+/// first as defence in depth; the tuple shape is what makes the ordering
+/// non-load-bearing.
+///
+/// Returns the ORIGINAL-CASE remainder so `parse_target_with_ctx` still sees
+/// printed casing.
+fn parse_each_of_target_distribution(
+    after_each_of: &str,
+) -> Option<(MultiTargetSpec, EachOfTargetNoun, &str)> {
+    let lower = after_each_of.to_ascii_lowercase();
+    let ((spec, noun), remainder) = nom_on_lower(after_each_of, lower.as_str(), |input| {
+        map(
+            alt((
+                (
+                    parse_bounded_target_cardinality,
+                    multispace1,
+                    parse_each_of_target_noun,
+                ),
+                (
+                    parse_optional_target_cardinality,
+                    multispace1,
+                    parse_each_of_target_noun,
+                ),
+                (
+                    parse_exact_target_cardinality,
+                    multispace1,
+                    parse_each_of_target_noun,
+                ),
+            )),
+            |(spec, _, noun)| (spec, noun),
+        )
+        .parse(input)
+    })?;
+    Some((spec, noun, remainder.trim_start()))
+}
+
+/// CR 601.2c + CR 115.4: "⟨source⟩ deals N damage to each of ⟨count⟩ ⟨noun⟩".
+///
+/// CR 601.2c fixes the announced target COUNT; CR 115.4 fixes the target CLASS
+/// for the bare-plural noun (creature, player, planeswalker, or battle). The
+/// count is recorded on `ctx.pending_damage_multi_target` so the filter and the
+/// count come from ONE parse rather than from a second text scan that can
+/// disagree with it.
 fn parse_each_of_up_to_damage_target<'a>(
     target_phrase: &'a str,
     ctx: &mut ParseContext,
@@ -5911,15 +6041,15 @@ fn parse_each_of_up_to_damage_target<'a>(
         .ok()?;
     let consumed = lower.len() - after_each_of_lower.len();
     let after_each_of = &target_phrase[consumed..];
-    if let Some((remainder, _)) = strip_bounded_targets_placeholder(after_each_of) {
-        if remainder.is_empty() {
-            return Some((TargetFilter::Any, ""));
+    let (spec, noun, remainder) = parse_each_of_target_distribution(after_each_of)?;
+    ctx.pending_damage_multi_target = Some(spec);
+    Some(match noun {
+        EachOfTargetNoun::AnyTargets => (TargetFilter::Any, remainder),
+        EachOfTargetNoun::Typed => {
+            let (target, rest) = parse_target_with_ctx(remainder, ctx);
+            refine_damage_target_remainder(target, rest)
         }
-    }
-    let (target_text, multi_target) = strip_optional_target_prefix(after_each_of);
-    multi_target.as_ref()?;
-    let (target, remainder) = parse_target_with_ctx(target_text, ctx);
-    Some(refine_damage_target_remainder(target, remainder))
+    })
 }
 
 /// Verbs where "any number of" / "up to N" modifies the target set (CR 115.1d),
@@ -12258,7 +12388,7 @@ mod strip_optional_effect_prefix_tests {
 mod dq_d_player_set_lift_tests {
     use super::{for_each_repeatable_repeat_for, strip_for_each_repeat_suffix};
     use crate::parser::oracle_nom::quantity::parse_for_each_clause_ref;
-    use crate::types::ability::{PlayerFilter, QuantityExpr, QuantityRef};
+    use crate::types::ability::{MultiTargetSpec, PlayerFilter, QuantityExpr, QuantityRef};
 
     // Matrix #3 — the shared `split_for_each_suffix` refactor is byte-identical:
     // each input yields the SAME `(Option<QuantityExpr>, String)` as pre-refactor.
@@ -12400,5 +12530,226 @@ mod dq_d_player_set_lift_tests {
                  wrapper's `rest.is_empty()` gate fire): rest={rest:?}"
             ),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // CR 601.2c + CR 115.4 — the "to each of ⟨cardinality⟩ ⟨noun⟩" matrix.
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn x_expr() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }
+    }
+
+    fn fixed(n: i32) -> QuantityExpr {
+        QuantityExpr::Fixed { value: n }
+    }
+
+    /// Claim 1 — all six cells of the cardinality × noun matrix parse, plus the
+    /// X-count and larger-literal leaves.
+    ///
+    /// CR 601.2c (announced count) × CR 115.4 (bare-plural damage target class)
+    /// / CR 115.1a (typed target).
+    #[test]
+    fn parse_each_of_target_distribution_covers_the_full_cardinality_noun_matrix() {
+        use super::{parse_each_of_target_distribution, EachOfTargetNoun};
+
+        // Cell 1 — bounded × bare plural. REGRESSION: Prismari Charm, Storm of Steel.
+        // ORDERING GUARD (load-bearing): this must be `fixed(1, 2)` with an EMPTY
+        // remainder, NOT `exact(1)` with remainder "or two targets". If the exact
+        // arm ever wins here, "one or two targets" silently becomes a one-target
+        // spell.
+        assert_eq!(
+            parse_each_of_target_distribution("one or two targets"),
+            Some((
+                MultiTargetSpec::fixed(1, 2),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            )),
+            "bounded × bare-plural must win over the exact arm's leading \"one\""
+        );
+
+        // Cell 2 — bounded × typed (new leaf). The noun is NOT consumed.
+        assert_eq!(
+            parse_each_of_target_distribution("one or two target creatures"),
+            Some((
+                MultiTargetSpec::fixed(1, 2),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cell 3 — optional × bare plural (new leaf). NEW: Shower of Coals,
+        // Jaya's Immolating Inferno, Myojin of Roaring Blades.
+        assert_eq!(
+            parse_each_of_target_distribution("up to three targets"),
+            Some((
+                MultiTargetSpec::up_to(fixed(3)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 4 — optional × typed. REGRESSION: Dual Shot, Wrap in Flames.
+        assert_eq!(
+            parse_each_of_target_distribution("up to two target creatures"),
+            Some((
+                MultiTargetSpec::up_to(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cell 5 — exact × bare plural (new leaf). NEW: Furious Reprisal,
+        // Pinnacle of Rage.
+        assert_eq!(
+            parse_each_of_target_distribution("two targets"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 5b — exact × bare plural, X count. NEW: Firestorm, Meteor Blast.
+        assert_eq!(
+            parse_each_of_target_distribution("x targets"),
+            Some((
+                MultiTargetSpec::exact(x_expr()),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 6 — exact × typed (new leaf). NEW: Jagged Lightning, Swelter,
+        // Twinstrike.
+        assert_eq!(
+            parse_each_of_target_distribution("two target creatures"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "target creatures"
+            ))
+        );
+
+        // Cell 6b — optional × bare plural, X count. Batroc the Leaper.
+        assert_eq!(
+            parse_each_of_target_distribution("up to x targets"),
+            Some((
+                MultiTargetSpec::up_to(x_expr()),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 6c — Chandra, the Firebrand's [−6].
+        assert_eq!(
+            parse_each_of_target_distribution("up to six targets"),
+            Some((
+                MultiTargetSpec::up_to(fixed(6)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Cell 6d — Fall of the Titans, Chandra Hope's Beacon.
+        assert_eq!(
+            parse_each_of_target_distribution("up to two targets"),
+            Some((
+                MultiTargetSpec::up_to(fixed(2)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            ))
+        );
+
+        // Grandfathered lexical `other` on the TYPED arm only (CR 115.3
+        // distinctness is applied downstream by `parse_target_with_ctx`, not by
+        // the cardinality head).
+        assert_eq!(
+            parse_each_of_target_distribution("up to two other target creatures"),
+            Some((
+                MultiTargetSpec::up_to(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "other target creatures"
+            ))
+        );
+
+        // FENCE GUARD — `targets` must not match inside a longer word. This pins
+        // `not(satisfy(char::is_alphanumeric))`; dropping the fence makes this
+        // return `Some(exact(2), AnyTargets, "omething")`.
+        assert_eq!(
+            parse_each_of_target_distribution("two targetsomething"),
+            None,
+            "the bare-plural arm must be fenced at a word boundary"
+        );
+
+        // Original casing is preserved in the remainder handed to
+        // `parse_target_with_ctx`.
+        assert_eq!(
+            parse_each_of_target_distribution("two target Goblins"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::Typed,
+                "target Goblins"
+            ))
+        );
+    }
+
+    /// Claim 2 — hostile negatives, each paired with a positive reach-guard in
+    /// the SAME test so no `None` assertion is vacuous.
+    #[test]
+    fn parse_each_of_target_distribution_rejects_non_cardinality_heads() {
+        use super::{parse_each_of_target_distribution, EachOfTargetNoun};
+
+        // REACH-GUARD: the combinator is live in this test.
+        assert_eq!(
+            parse_each_of_target_distribution("two targets"),
+            Some((
+                MultiTargetSpec::exact(fixed(2)),
+                EachOfTargetNoun::AnyTargets,
+                ""
+            )),
+            "reach-guard: the positive path must still parse, so the None \
+             assertions below are not vacuous"
+        );
+
+        // "~ deals N damage to each of your opponents" — must fall through to
+        // `parse_damage_each_player_scope` (DamageEachPlayer), not this seam.
+        assert_eq!(
+            parse_each_of_target_distribution("your opponents"),
+            None,
+            "player-scope heads belong to parse_damage_each_player_scope"
+        );
+
+        // No "of": "each creature" never reaches this combinator, but the head
+        // itself must not parse either.
+        assert_eq!(parse_each_of_target_distribution("each creature"), None);
+
+        // VERBATIM Shower of Coals Threshold anaphor. It must NOT parse — the
+        // second sentence stays dropped (an anaphor to the already-chosen
+        // targets), which is what keeps that card an honest PARTIAL fix.
+        assert_eq!(
+            parse_each_of_target_distribution("those permanents and/or players instead"),
+            None,
+            "the Threshold anaphor must not be mistaken for a cardinality head"
+        );
+
+        assert_eq!(parse_each_of_target_distribution("them"), None);
+
+        // A bare count with no noun at all.
+        assert_eq!(parse_each_of_target_distribution("two"), None);
+
+        // ASYMMETRY (deliberate, matches pre-existing behaviour): the
+        // bare-plural arm does NOT accept "other targets". Drakuseth's
+        // "up to two other targets" clause is dropped upstream by the
+        // compound-damage splitter, so this returns None exactly as before.
+        assert_eq!(
+            parse_each_of_target_distribution("up to two other targets"),
+            None,
+            "bare-plural `other targets` is intentionally NOT accepted"
+        );
     }
 }

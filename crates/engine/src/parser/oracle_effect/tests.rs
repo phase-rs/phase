@@ -49152,3 +49152,428 @@ fn leave_battlefield_exile_replacement_matches_6538_shape() {
         }
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CR 601.2c + CR 115.4 — "⟨source⟩ deals N damage to each of ⟨count⟩ ⟨noun⟩".
+//
+// Before this seam was parameterized, every card below lowered to
+// `Effect::DamageAll` (damage to EVERY matching permanent) with
+// `multi_target = None` — a silently-wrong parse, not an honest
+// `Effect::Unimplemented`. These tests pin the corrected `DealDamage` +
+// `MultiTargetSpec` shape at the full-line production entry point
+// (`parse_oracle_text`), so reverting the fix flips every one of them.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse a sorcery's full Oracle text and return its first ability.
+fn each_of_sorcery(name: &str, oracle: &str) -> AbilityDefinition {
+    let parsed = parse_oracle_text(oracle, name, &[], &["Sorcery".to_string()], &[]);
+    parsed
+        .abilities
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{name} must produce at least one ability"))
+}
+
+fn fixed_qty(n: i32) -> QuantityExpr {
+    QuantityExpr::Fixed { value: n }
+}
+
+fn x_qty() -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::Variable {
+            name: "X".to_string(),
+        },
+    }
+}
+
+/// Claim 3 — Jagged Lightning, the headline card. CR 601.2c: "two target
+/// creatures" announces exactly two targets; CR 115.1a supplies the creature
+/// filter. Revert-fails: the pre-fix parse is
+/// `DamageAll { Fixed(3), Typed[Creature] }` with `multi_target: None`.
+#[test]
+fn jagged_lightning_deals_damage_to_each_of_two_target_creatures() {
+    let def = each_of_sorcery(
+        "Jagged Lightning",
+        "Jagged Lightning deals 3 damage to each of two target creatures.",
+    );
+    assert!(
+        !matches!(*def.effect, Effect::DamageAll { .. }),
+        "Jagged Lightning must not lower to mass damage: {:?}",
+        def.effect
+    );
+    match &*def.effect {
+        Effect::DealDamage {
+            amount,
+            target: TargetFilter::Typed(filter),
+            ..
+        } => {
+            assert_eq!(*amount, fixed_qty(3));
+            assert!(
+                filter
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)),
+                "target filter must be a creature filter: {filter:?}"
+            );
+        }
+        other => panic!("expected DealDamage to a typed creature filter, got {other:?}"),
+    }
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::exact(fixed_qty(2))),
+        "CR 601.2c: exactly two announced targets"
+    );
+}
+
+/// Claim 3 — Furious Reprisal. CR 115.4: a BARE plural "two targets" is the
+/// damage target class (creature / player / planeswalker / battle), so the
+/// filter must be `TargetFilter::Any`, not a creature filter.
+#[test]
+fn furious_reprisal_deals_damage_to_each_of_two_bare_targets() {
+    let def = each_of_sorcery(
+        "Furious Reprisal",
+        "Furious Reprisal deals 2 damage to each of two targets.",
+    );
+    assert!(!matches!(*def.effect, Effect::DamageAll { .. }));
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "CR 115.4: bare-plural targets must be TargetFilter::Any, got {:?}",
+        def.effect
+    );
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::exact(fixed_qty(2))));
+}
+
+/// Claim 3 — Meteor Blast, the X-COUNT axis. The `X` here is the target COUNT
+/// (CR 601.2c), not the damage amount, so it must land in `multi_target`.
+#[test]
+fn meteor_blast_deals_damage_to_each_of_x_targets() {
+    let def = each_of_sorcery(
+        "Meteor Blast",
+        "Meteor Blast deals 4 damage to each of X targets.",
+    );
+    assert!(!matches!(*def.effect, Effect::DamageAll { .. }));
+    match &*def.effect {
+        Effect::DealDamage {
+            amount,
+            target: TargetFilter::Any,
+            ..
+        } => assert_eq!(*amount, fixed_qty(4), "the AMOUNT is the literal 4"),
+        other => panic!("expected DealDamage to Any, got {other:?}"),
+    }
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::exact(x_qty())),
+        "the X belongs to the target COUNT"
+    );
+}
+
+/// Claim 3 — Fall of the Titans: the mirror-image binding. Here `X` is the
+/// damage AMOUNT and the count is the fixed literal two, so `multi_target` must
+/// be `up_to(2)` with no `Variable("X")` leaf.
+#[test]
+fn fall_of_the_titans_binds_x_to_the_amount_not_the_count() {
+    let def = each_of_sorcery(
+        "Fall of the Titans",
+        "Surge {X}{R} (You may cast this spell for its surge cost if you or a teammate has \
+         cast another spell this turn.)\nFall of the Titans deals X damage to each of up to \
+         two targets.",
+    );
+    assert!(!matches!(*def.effect, Effect::DamageAll { .. }));
+    match &*def.effect {
+        Effect::DealDamage {
+            amount,
+            target: TargetFilter::Any,
+            ..
+        } => assert_eq!(*amount, x_qty(), "the X is the damage AMOUNT here"),
+        other => panic!("expected DealDamage to Any, got {other:?}"),
+    }
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(fixed_qty(2))),
+        "the COUNT is the fixed literal two"
+    );
+}
+
+/// Claim 3 — Chandra, the Firebrand `[−6]`: the seam is reached through a
+/// LOYALTY ability body (CR 602.2b), not only through a spell's effect chain.
+#[test]
+fn chandra_the_firebrand_ultimate_deals_damage_to_up_to_six_targets() {
+    let parsed = parse_oracle_text(
+        "[+1]: Chandra deals 1 damage to any target.\n[−2]: When you next cast an instant or \
+         sorcery spell this turn, copy that spell. You may choose new targets for the copy.\n\
+         [−6]: Chandra deals 6 damage to each of up to six targets.",
+        "Chandra, the Firebrand",
+        &[],
+        &["Legendary".to_string(), "Planeswalker".to_string()],
+        &[],
+    );
+    let ultimate = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::DealDamage { .. }) && a.multi_target.is_some())
+        .expect("the [-6] loyalty body must lower to a multi-target DealDamage");
+    assert!(
+        matches!(
+            &*ultimate.effect,
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "CR 115.4: bare-plural targets ⇒ Any, got {:?}",
+        ultimate.effect
+    );
+    assert_eq!(
+        ultimate.multi_target,
+        Some(MultiTargetSpec::up_to(fixed_qty(6)))
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(&*a.effect, Effect::DamageAll { .. })),
+        "no Chandra ability may lower to mass damage: {:?}",
+        parsed.abilities
+    );
+}
+
+/// Claim 3 — Shower of Coals is a PARTIAL fix, and this test says so out loud.
+/// Sentence 1 (`up to three targets`, per the verbatim card-data text) is
+/// fixed; sentence 2's Threshold anaphor to the already-chosen targets was
+/// dropped before this change and remains dropped. Asserting the partial state
+/// keeps the coverage claim honest.
+#[test]
+fn shower_of_coals_first_sentence_fixed_threshold_anaphor_still_dropped() {
+    let parsed = parse_oracle_text(
+        "Shower of Coals deals 2 damage to each of up to three targets.\nThreshold — Shower of \
+         Coals deals 4 damage to each of those permanents and/or players instead if there are \
+         seven or more cards in your graveyard.",
+        "Shower of Coals",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let damage = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(&*a.effect, Effect::DealDamage { .. }))
+        .expect("sentence 1 must lower to DealDamage");
+    assert_eq!(
+        damage.multi_target,
+        Some(MultiTargetSpec::up_to(fixed_qty(3))),
+        "CR 601.2c: up to THREE targets (verbatim card-data text)"
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(|a| matches!(&*a.effect, Effect::DamageAll { .. })),
+        "sentence 1 must no longer be mass damage: {:?}",
+        parsed.abilities
+    );
+}
+
+/// Batroc the Leaper — MANDATORY PIN, deliberately NOT counted as a fix. Its
+/// backlog bullet stays because the KickerCount-through-trigger runtime path
+/// carries no runtime test here. This pins the observed parser shape so the
+/// behaviour change can never be silent.
+#[test]
+fn batroc_the_leaper_each_of_up_to_x_targets_pinned_shape() {
+    let parsed = parse_oracle_text(
+        "Multikicker {2} (You may pay an additional {2} any number of times as you cast this \
+         spell.)\nBatroc enters with a +1/+1 counter on him for each time he was kicked.\n\
+         When Batroc enters, he deals damage equal to his power to each of up to X targets, \
+         where X is the number of times he was kicked.",
+        "Batroc the Leaper",
+        &["Multikicker".to_string()],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Batroc's ETB trigger must carry an execute body");
+    assert!(
+        !matches!(&*execute.effect, Effect::DamageAll { .. }),
+        "Batroc must no longer lower to mass damage: {:?}",
+        execute.effect
+    );
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "expected DealDamage to Any, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::KickerCount
+        })),
+        "the where-X must bind to KickerCount, leaving no unbound Variable(\"X\")"
+    );
+}
+
+/// Claim 3 — Drakuseth non-regression. Its second clause ("and 3 damage to each
+/// of up to two other targets") is dropped by the compound-damage splitter
+/// BEFORE this seam (root cause #27, out of scope). The primary
+/// `DealDamage { 4, Any }` must therefore keep `multi_target: None` — no
+/// `up_to(2)` may leak onto it from the ctx side channel.
+#[test]
+fn drakuseth_primary_damage_clause_gains_no_multi_target() {
+    let parsed = parse_oracle_text(
+        "Flying\nWhenever Drakuseth attacks, it deals 4 damage to any target and 3 damage to \
+         each of up to two other targets.",
+        "Drakuseth, Maw of Flames",
+        &["Flying".to_string()],
+        &["Legendary".to_string(), "Creature".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("Drakuseth's attack trigger must carry an execute body");
+    // Reach-guard: the primary clause DID parse to real damage, so the `None`
+    // below is not a vacuous parse failure.
+    assert!(
+        matches!(
+            &*execute.effect,
+            Effect::DealDamage {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "reach-guard: the primary clause must still be DealDamage to Any, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.multi_target, None,
+        "no announced count may leak onto Drakuseth's single-target primary clause"
+    );
+}
+
+/// Claim 4.1 — MULTI-AUTHORITY hostile fixture. Dire-Strain Anarchist reaches
+/// the seam AND is reachable by the fallback text extractor, so both authorities
+/// can produce a spec. The result must still be exactly `up_to(1)`.
+#[test]
+fn dire_strain_anarchist_multi_authority_still_yields_up_to_one() {
+    let parsed = parse_oracle_text(
+        "Whenever this creature enters or attacks, it deals 3 damage to each of up to one \
+         target creature and up to one target player.",
+        "Dire-Strain Anarchist",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let execute = parsed
+        .triggers
+        .iter()
+        .find_map(|t| t.execute.as_deref())
+        .expect("the trigger must carry an execute body");
+    assert!(
+        matches!(&*execute.effect, Effect::DealDamage { .. }),
+        "reach-guard: must still be DealDamage, got {:?}",
+        execute.effect
+    );
+    assert_eq!(
+        execute.multi_target,
+        Some(MultiTargetSpec::up_to(fixed_qty(1))),
+        "the two authorities must agree on up_to(1)"
+    );
+}
+
+/// Claim 4.3 — CROSS-CHUNK LEAK, the test that fails if the reset at the top of
+/// `lower_imperative_clause` is omitted.
+///
+/// Sentence 1 is a DAMAGE COMPOUND. `try_split_damage_compound` runs the
+/// "each of two target creatures" head (setting `ctx.pending_damage_multi_target`)
+/// and then EARLY-RETURNS, so `lower_imperative_clause` never reaches its
+/// `take()`. The announced count is therefore left dangling on the shared
+/// `ParseContext` — this is the residual named in the plan's blast radius, and
+/// it is exactly the state the reset exists to clear.
+///
+/// Sentence 2 is a plain single-target `DealDamage`. Its `multi_target` must be
+/// `None`: without the reset it would inherit sentence 1's `exact(2)` and
+/// silently become a two-target spell.
+///
+/// Anti-vacuity: the two reach-guards below prove (a) the seam DID run in
+/// sentence 1 — `parse_each_of_up_to_damage_target` is the only producer of a
+/// `DealDamage` to a typed creature filter from an "each of" head, and it sets
+/// the side channel unconditionally — and (b) sentence 1's own `multi_target` is
+/// `None`, which is the observable signature of the early-return path (the
+/// `take()` never ran), i.e. the spec really was left dangling.
+#[test]
+fn each_of_count_head_does_not_leak_onto_a_later_sibling_clause() {
+    let parsed = parse_oracle_text(
+        "Leak Probe deals 2 damage to each of two target creatures and 3 damage to each \
+         player. Leak Probe deals 1 damage to any target.",
+        "Leak Probe",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let mut chain: Vec<&AbilityDefinition> = Vec::new();
+    let mut cursor = parsed
+        .abilities
+        .first()
+        .expect("the sorcery must produce an ability");
+    loop {
+        chain.push(cursor);
+        match cursor.sub_ability.as_deref() {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+
+    // Reach-guard (a): the "each of two target creatures" head DID parse, so the
+    // side channel was written.
+    let each_of_clause = chain
+        .iter()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::DealDamage {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            )
+        })
+        .expect("reach-guard: sentence 1's `each of two target creatures` head must parse");
+    // Reach-guard (b): the compound splitter early-returned, so this clause's
+    // own `take()` never ran and the spec was left dangling on the ctx.
+    assert_eq!(
+        each_of_clause.multi_target, None,
+        "reach-guard: the compound early-return path must leave the spec unconsumed \
+         (if this is Some, pick a fixture that actually exercises the early return)"
+    );
+
+    // The assertion under test: sentence 2 must not inherit the dangling count.
+    let any_target_clause = chain
+        .iter()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::DealDamage {
+                    target: TargetFilter::Any,
+                    ..
+                }
+            )
+        })
+        .expect("reach-guard: sentence 2 must lower to a plain any-target DealDamage");
+    assert_eq!(
+        any_target_clause.multi_target, None,
+        "sentence 1's announced count must NOT leak onto sentence 2"
+    );
+}

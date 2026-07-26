@@ -14686,6 +14686,18 @@ fn try_parse_for_each_counter_kind_adjust_target(text: &str) -> Option<ParsedEff
 }
 
 fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // CR 601.2c: the announced target count for a "… to each of ⟨N⟩ …" head is a
+    // property of THIS clause only. `parse_imperative_effect` is also reached
+    // from sites that never consume this field (the shared-`ctx`
+    // `try_parse_reanimate_self_and_target` sub-parse) and from speculative
+    // sub-parses that mutate `ctx` and then discard their result (the
+    // radiance / multi-target-chain / general damage-compound splitters). Reset
+    // here — the very first statement, above every early-return guard — so a
+    // stale spec can never attach to a later, unrelated DealDamage. Same
+    // discipline as the `ctx.target_chooser = None;` resets in the damage-chain
+    // splitter.
+    ctx.pending_damage_multi_target = None;
+
     if let Some(effect) = try_parse_drawn_this_turn_choice(text) {
         return parsed_clause(effect);
     }
@@ -14819,6 +14831,11 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
 
     let (stripped, duration) = strip_trailing_duration(text);
     let mut clause = parse_imperative_effect(stripped, ctx);
+    // CR 601.2c: paired with the reset at the top of this function. The count is
+    // produced by the same parse that produced the target filter
+    // (`parse_each_of_target_distribution`), so it is the primary authority for
+    // the DealDamage fixup below.
+    let pending_damage_multi_target = ctx.pending_damage_multi_target.take();
     if clause.duration.is_none() {
         clause.duration = duration;
     }
@@ -14839,8 +14856,14 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
             .or_else(|| extract_bounded_target_multi_target(text))
             .or_else(|| extract_optional_target_multi_target(text));
     }
+    // CR 601.2c + CR 115.4: the announced target count for a
+    // "⟨source⟩ deals N damage to each of ⟨count⟩ ⟨noun⟩" head comes from the
+    // SAME parse that produced the target filter, so the ctx value is the
+    // primary authority here. The text-scanning extractor stays as a fallback
+    // for the shapes that combinator does not reach.
     if matches!(clause.effect, Effect::DealDamage { .. }) && clause.multi_target.is_none() {
-        clause.multi_target = extract_deal_damage_multi_target(text);
+        clause.multi_target =
+            pending_damage_multi_target.or_else(|| extract_deal_damage_multi_target(text));
     }
     // CR 115.1d: Post-parse fixup for SwitchPT prepositional form. The
     // imperative parser strips "any number of" / "each of" to keep `parse_target`

@@ -5,7 +5,7 @@
 
 use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
+    ControllerRef, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetFilter,
     TargetSelectionMode,
 };
 use crate::types::zones::Zone;
@@ -76,6 +76,25 @@ pub(crate) struct ParseContext {
     /// resolver's outermost-repeat driver. Set and consumed within a single
     /// chunk parse; never serialized.
     pub pending_repeat_for: Option<QuantityExpr>,
+    /// CR 601.2c + CR 115.4: The announced target count recovered by
+    /// `parse_each_of_target_distribution` for a "… damage to each of ⟨N⟩
+    /// ⟨noun⟩" head, produced by the SAME parse that produced the target
+    /// filter. CR 601.2c fixes the count; CR 115.4 fixes the class for the
+    /// bare-plural `targets` noun.
+    ///
+    /// Single authority for that seam, with an explicit set/reset lifecycle:
+    /// `lower_imperative_clause` clears this as the very first statement of its
+    /// body and `take()`s it immediately after `parse_imperative_effect`, so it
+    /// never outlives one clause and can never attach to an unrelated
+    /// `DealDamage`. The reset is required because `parse_imperative_effect` is
+    /// also called from sites that never consume this field (the shared-`ctx`
+    /// `try_parse_reanimate_self_and_target` sub-parse) and from speculative
+    /// sub-parses that mutate `ctx` and then discard their result (the
+    /// radiance/chain/general damage-compound splitters). The compound
+    /// *continuation* sites are not a leak risk — they parse into a cloned
+    /// `ParseContext`, so a spec set there is dropped, not propagated.
+    /// Set and consumed within a single chunk parse; never serialized.
+    pub pending_damage_multi_target: Option<MultiTargetSpec>,
     /// CR 608.2c + CR 109.4: Count of `Effect::Choose { choice_type: Player }`
     /// clauses emitted so far in the current effect chain. Each "choose a
     /// player" / "choose a [second|third] player" clause increments this; the

@@ -626,6 +626,7 @@ mod issue_desperate_gambit_choose_damage_source;
 mod issue_haze_frog_other_creature_prevention;
 mod ivory_gargoyle_temporal_and_skip_tail;
 mod jace_wielder_empty_library_win;
+mod jagged_lightning_each_of_two_targets;
 mod jaws_of_defeat;
 mod json_smoke_test;
 mod judgment_bolt_where_x_damage_runtime;
