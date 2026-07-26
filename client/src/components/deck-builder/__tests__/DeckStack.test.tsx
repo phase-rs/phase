@@ -87,6 +87,7 @@ describe("DeckStack", () => {
           ])
         }
         onAddCard={vi.fn()}
+        canAddCard={() => true}
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
@@ -139,6 +140,7 @@ describe("DeckStack", () => {
           ])
         }
         onAddCard={vi.fn()}
+        canAddCard={() => true}
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
@@ -182,6 +184,7 @@ describe("DeckStack", () => {
           ])
         }
         onAddCard={vi.fn()}
+        canAddCard={() => true}
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
@@ -201,6 +204,7 @@ describe("DeckStack", () => {
           new Map([["Seven Dwarves", makeCard("Seven Dwarves", "Creature — Dwarf", 4)]])
         }
         onAddCard={vi.fn()}
+        canAddCard={() => true}
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
@@ -223,6 +227,7 @@ describe("DeckStack", () => {
         }
         format="Commander"
         onAddCard={vi.fn()}
+        canAddCard={() => true}
         onRemoveCard={vi.fn()}
         onMoveCard={vi.fn()}
         onRemoveCommander={vi.fn()}
@@ -251,6 +256,7 @@ describe("DeckStack", () => {
           ])
         }
         onAddCard={vi.fn()}
+        canAddCard={() => true}
         onRemoveCard={vi.fn()}
         onMoveCard={onMoveCard}
         onRemoveCommander={vi.fn()}

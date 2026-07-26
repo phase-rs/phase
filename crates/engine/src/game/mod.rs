@@ -200,7 +200,7 @@ pub use deck_loading::{
 };
 pub use deck_validation::{
     can_pair_commanders, companion_candidates, deck_copy_limit_for, evaluate_deck_compatibility,
-    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible,
+    is_brawl_commander_eligible, is_commander_eligible, is_tiny_leader_eligible, max_deck_copies,
     signature_spell_selection_policy, validate_deck_for_format, validate_name_deck_for_format,
     validate_name_deck_for_format_full, CompatibilityCheck, DeckCompatibilityRequest,
     DeckCompatibilityResult, DeckCoverage, SignatureSpellSelectionPolicy, UnsupportedCard,
