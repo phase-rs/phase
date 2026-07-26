@@ -2083,6 +2083,33 @@ fn filter_population_anchor_ids(state: &GameState, filter: &TargetFilter) -> Opt
     Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
 }
 
+/// Return the population declared by a conjunction's population-bearing terms.
+///
+/// A positive population inside `And` supplies the objects against which its
+/// sibling predicates are evaluated. Multiple such terms intersect. This is
+/// intentionally limited to conjunctions: a naked `Not(TrackedSet)` is an
+/// exclusion from a broader universe, whereas `Not(And(TrackedSet, predicate))`
+/// complements the predicate within the tracked-set domain.
+fn conjunctive_filter_population_ids(
+    state: &GameState,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    let TargetFilter::And { filters } = filter else {
+        return None;
+    };
+    let mut populations = filters.iter().filter_map(|filter| {
+        conjunctive_filter_population_ids(state, filter)
+            .or_else(|| filter_population_anchor_ids(state, filter))
+    });
+    let mut ids = populations.next()?;
+    for population in populations {
+        let population: HashSet<ObjectId> = population.into_iter().collect();
+        ids.retain(|id| population.contains(id));
+    }
+    let mut seen = HashSet::new();
+    Some(ids.into_iter().filter(|id| seen.insert(*id)).collect())
+}
+
 /// Match object ids within the population declared by `filter`.
 ///
 /// Disjunctive branches own independent populations: an unzoned branch
@@ -4680,6 +4707,24 @@ pub(crate) fn distinct_counter_kinds_among(
                 crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
             })
             .unwrap_or_default(),
+        // CR 608.2c + CR 122.1: A complement preserves an explicitly declared
+        // tracked, ledger, or zoned population from its operand. In particular,
+        // `Not(And(TrackedSet, predicate))` means the nonmatching members of
+        // that tracked set, not every unrelated object on the battlefield.
+        TargetFilter::Not { filter: inner } => {
+            if let Some(population) = conjunctive_filter_population_ids(state, inner) {
+                let excluded: HashSet<ObjectId> =
+                    matching_object_ids_in_filter_universe(state, inner, filter_ctx)
+                        .into_iter()
+                        .collect();
+                population
+                    .into_iter()
+                    .filter(|id| !excluded.contains(id))
+                    .collect()
+            } else {
+                matching_object_ids_in_filter_universe(state, filter, filter_ctx)
+            }
+        }
         _ => matching_object_ids_in_filter_universe(state, filter, filter_ctx),
     };
     for id in object_ids {
@@ -7304,6 +7349,97 @@ mod tests {
         assert_eq!(
             conjunctive_wrapper, standalone_negation,
             "an outer conjunction must preserve a disjunct's population boundary"
+        );
+    }
+
+    /// CR 608.2c + CR 122.1: complementing a predicate inside a tracked-set
+    /// domain stays bounded to that set. An unrelated battlefield object must
+    /// not contribute its counter kind merely because the outer filter is
+    /// negated.
+    #[test]
+    fn distinct_counter_kinds_among_bounds_negation_to_tracked_set() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let excluded_member = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Excluded Member".to_string(),
+            Zone::Exile,
+        );
+        let included_member = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Included Member".to_string(),
+            Zone::Exile,
+        );
+        let battlefield_nonmember = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Battlefield Nonmember".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.objects.get_mut(&excluded_member).unwrap().color = vec![ManaColor::Red];
+        state
+            .objects
+            .get_mut(&excluded_member)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.objects.get_mut(&included_member).unwrap().color = vec![ManaColor::Green];
+        state
+            .objects
+            .get_mut(&included_member)
+            .unwrap()
+            .counters
+            .insert(CounterType::Lore, 1);
+        state
+            .objects
+            .get_mut(&battlefield_nonmember)
+            .unwrap()
+            .counters
+            .insert(CounterType::Stun, 1);
+
+        let tracked = TrackedSetId(1);
+        state
+            .tracked_object_sets
+            .insert(tracked, vec![excluded_member, included_member]);
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::TrackedSet { id: tracked },
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        FilterProp::HasColor {
+                            color: ManaColor::Red,
+                        },
+                    ])),
+                ],
+            }),
+        };
+        let ctx = FilterContext::from_source_with_controller(source, PlayerId(0));
+
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &filter, &ctx),
+            vec![CounterType::Lore],
+            "only the nonmatching tracked member contributes a counter kind"
+        );
+
+        let naked_exclusion = TargetFilter::Not {
+            filter: Box::new(TargetFilter::TrackedSet { id: tracked }),
+        };
+        assert_eq!(
+            distinct_counter_kinds_among(&state, &naked_exclusion, &ctx),
+            vec![CounterType::Stun],
+            "a naked tracked-set negation remains an exclusion from the broader universe"
         );
     }
 
