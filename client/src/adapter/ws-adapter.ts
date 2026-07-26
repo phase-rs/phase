@@ -275,7 +275,28 @@ export class WebSocketAdapter implements EngineAdapter {
     private readonly displayName = "Player",
     private readonly options: WebSocketAdapterOptions = {},
   ) {
-    this.maxReconnectAttempts = options.nativeAi || options.nativePregame ? 0 : 8;
+    // 0 is terminal, not "retry once": `attemptReconnect` compares
+    // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 is true on the
+    // very first attempt — it emits `reconnectFailed` and returns without
+    // ever emitting `reconnecting`, incrementing, or scheduling a timer. Any
+    // socket drop is instantly fatal.
+    //
+    // `nativeAi` no longer takes that. The sidecar runs `--single-user`, so
+    // its reconnect grace period is effectively unbounded and sessions are
+    // never stale-purged; a transient drop against a live sidecar is exactly
+    // the recoverable case, and 8 attempts is the same budget `online` gets.
+    //
+    // Not purely additive: a genuinely DEAD sidecar now spends ~27s of
+    // `reconnecting` UI (capped exponential backoff, 1+2+4+5+5+5+5+5) before
+    // `reconnectFailed`, where today it fails instantly. That is the right
+    // trade — the common case goes from fatal to recovered — but it is a
+    // user-visible latency regression on the most likely desktop failure.
+    //
+    // `nativePregame` keeps 0, and that is out of scope rather than endorsed:
+    // a pregame drop is recoverable by re-entering the lobby (no game has
+    // been invested yet), and that path has adapter-level special-casing of
+    // `options.nativePregame` that has NOT been analysed here.
+    this.maxReconnectAttempts = options.nativePregame ? 0 : 8;
   }
 
   get gameCode(): string | null {

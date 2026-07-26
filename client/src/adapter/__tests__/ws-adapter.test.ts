@@ -203,6 +203,118 @@ describe("WebSocketAdapter", () => {
       await initPromise;
     });
 
+    // A dropped socket used to be instantly fatal for desktop solo:
+    // `maxReconnectAttempts` was 0, and `attemptReconnect` compares
+    // `reconnectAttempt >= maxReconnectAttempts`, so 0 >= 0 short-circuits to
+    // `reconnectFailed` before the `reconnecting` emit at all. The sidecar
+    // runs `--single-user`, so its reconnect window is effectively unbounded
+    // and the session is still there to reconnect to.
+    it("retries a dropped native-ai socket instead of failing on first drop", async () => {
+      MockWebSocket.last = null;
+      const nativeAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Player",
+        nativeAiOptions(
+          () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+        ),
+      );
+
+      const initPromise = nativeAdapter.initialize();
+      await Promise.resolve();
+      const nativeSocket = MockWebSocket.last!;
+      nativeSocket.dispatchSynthetic("message", SERVER_HELLO);
+      await Promise.resolve();
+      await Promise.resolve();
+      // A live session is the first branch `attemptReconnect` reaches: with no
+      // game code / player token it short-circuits to `reconnectFailed`
+      // regardless of the cap, so the fixture must establish one or the test
+      // measures the wrong branch.
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameCreated",
+          data: { game_code: "ABCD", player_token: "tok" },
+        }),
+      );
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "GameStarted",
+          data: { state: createMockState(), your_player: 0 },
+        }),
+      );
+      await initPromise;
+
+      const listener = vi.fn();
+      nativeAdapter.onEvent(listener);
+      nativeSocket.dispatchSynthetic("close");
+
+      // Presently unsatisfiable on the old code: `attemptReconnect` returned
+      // before the `reconnecting` emit, so this event was NEVER produced for
+      // a native-ai adapter.
+      expect(listener).toHaveBeenCalledWith({
+        type: "reconnecting",
+        attempt: 1,
+        maxAttempts: 8,
+      });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "reconnectFailed" }),
+      );
+
+      nativeAdapter.dispose();
+    });
+
+    // Scope guard: this asserts a property of the DIFF (the change was scoped
+    // to `nativeAi` and did not widen to both options), not that 0 is the
+    // right answer for pregame — that path is explicitly not analysed.
+    it("leaves the native pregame transport failing on first drop", async () => {
+      MockWebSocket.last = null;
+      const pregameAdapter = new WebSocketAdapter(
+        "native-engine",
+        "host",
+        { main_deck: [], sideboard: [] },
+        undefined,
+        undefined,
+        undefined,
+        "Host",
+        {
+          nativePregame: {
+            kind: "host",
+            socketFactory: () => new MockWebSocket("native-engine") as unknown as PhaseSocketTransport,
+            playerCount: 2,
+            aiSeats: [],
+          },
+        },
+      );
+
+      const attached = pregameAdapter.initializePregame();
+      const nativeSocket = await completeHandshake(pregameAdapter);
+      nativeSocket.dispatchSynthetic(
+        "message",
+        JSON.stringify({
+          type: "SessionAttached",
+          data: { game_code: "WXYZ", player_id: 0, player_token: "tok" },
+        }),
+      );
+      await attached;
+
+      const listener = vi.fn();
+      pregameAdapter.onEvent(listener);
+      nativeSocket.dispatchSynthetic("close");
+
+      expect(listener).toHaveBeenCalledWith({ type: "reconnectFailed" });
+      expect(listener).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "reconnecting" }),
+      );
+
+      pregameAdapter.dispose();
+    });
+
     it("rejects a release version mismatch before creating a game", async () => {
       MockWebSocket.last = null;
       const nativeAdapter = new WebSocketAdapter(
