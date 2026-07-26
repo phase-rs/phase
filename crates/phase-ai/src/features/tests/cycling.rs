@@ -163,3 +163,20 @@ fn commitment_clamps_to_one() {
     let deck = vec![entry(cycler("Cyc"), 40), entry(engine("Astral Drift"), 20)];
     assert!(detect(&deck).commitment <= 1.0);
 }
+
+/// Boundary: a non-empty all-land deck (including cycling lands) has
+/// `total_nonland == 0`. `commitment::density_per_60` guards that to `0.0`, so
+/// commitment is a clean `0.0` — never `NaN`, which (since `NaN < FLOOR` is
+/// false) would otherwise slip past `CyclingPayoffPolicy::activation`.
+#[test]
+fn all_land_deck_is_zero_not_nan() {
+    let mut cycling_land = face("Desert of the True", CoreType::Land);
+    cycling_land.keywords = vec![Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(2)))];
+    let deck = vec![
+        entry(cycling_land, 20),
+        entry(face("Plains", CoreType::Land), 20),
+    ];
+    let commitment = detect(&deck).commitment;
+    assert!(!commitment.is_nan(), "all-land deck must not produce NaN");
+    assert_eq!(commitment, 0.0);
+}
