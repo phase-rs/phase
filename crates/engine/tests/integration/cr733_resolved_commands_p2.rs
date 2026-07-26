@@ -130,6 +130,9 @@ fn apply_semantic_command(state: &mut GameState, command: &ResolvedRulesCommand)
         ResolvedRulesCommand::TriggerCollection(command) => {
             engine::game::triggers::apply_resolved_trigger_collection(state, command).unwrap();
         }
+        ResolvedRulesCommand::StackPush(command) => {
+            engine::game::stack::apply_resolved_stack_push(state, command.as_ref()).unwrap();
+        }
     }
 }
 
@@ -230,9 +233,8 @@ fn exact_mana_spend_rejects_a_second_removal() {
             | ResolvedRulesCommand::ZoneChange(_)
             | ResolvedRulesCommand::Information(_)
             | ResolvedRulesCommand::FrameTransition(_)
-            | ResolvedRulesCommand::TriggerCollection(_) => {
-                apply_semantic_command(&mut replay, command)
-            }
+            | ResolvedRulesCommand::TriggerCollection(_)
+            | ResolvedRulesCommand::StackPush(_) => apply_semantic_command(&mut replay, command),
         }
     }
     assert!(
