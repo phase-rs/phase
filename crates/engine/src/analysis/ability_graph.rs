@@ -909,6 +909,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::Reveal { .. }
         | Effect::RevealTop { .. }
         | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
         | Effect::SwapChosenLabels { .. }

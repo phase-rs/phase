@@ -981,6 +981,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // mutable permission list is casting-time authorization, not
             // resolution-time cast metadata.
             if let Some(obj) = state.objects.get(&entry.id) {
+                // CR 107.3m + CR 707.10: a resolving copied spell has no new
+                // payment snapshot, but inherits the original spell's chosen
+                // X on its stack object. Off-stack entry paths pass `None`.
+                let resolving_spell_x = paid_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.x_value)
+                    .or(obj.cost_x_paid);
                 let cast_transformed = paid_snapshot
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.cast_transformed);
@@ -1005,11 +1012,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 // replacement pipeline sees the correct counter count.
                 let intrinsic = match (cast_transformed, obj.back_face.as_ref()) {
                     (true, Some(back)) => super::printed_cards::intrinsic_entry_counters_for_face(
+                        back.printed_loyalty,
                         back.loyalty,
+                        resolving_spell_x,
                         back.defense,
                         &back.card_types,
                     ),
-                    _ => super::printed_cards::intrinsic_etb_counters(obj),
+                    _ => super::printed_cards::intrinsic_etb_counters(obj, resolving_spell_x),
                 };
                 if !intrinsic.is_empty() {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -4023,6 +4032,7 @@ mod tests {
             power: None,
             toughness: None,
             loyalty,
+            printed_loyalty: None,
             defense,
             card_types,
             mana_cost: Default::default(),

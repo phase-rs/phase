@@ -48,6 +48,7 @@ pub fn resolve(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: surveil_player,
         action: PlayerActionKind::Surveil,
+        look_count: None,
     });
 
     let cards: Vec<_> = player
@@ -119,6 +120,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::Surveil,
+                ..
             } if *player_id == PlayerId(0)
         )));
 

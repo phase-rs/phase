@@ -232,6 +232,13 @@ pub struct DerivedViews {
     /// Keyed by recipient ObjectId; absent when no such grant is active.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub temporary_cant_be_blocked: HashMap<ObjectId, Option<ObjectId>>,
+    /// CR 509.1g: public blocker-to-attacker relationships, flattened as
+    /// `(blocker, attacker)` pairs for combat-line rendering. This is sorted
+    /// deterministically so equivalent combat states have stable wire output.
+    /// The filtered-view projection is explicitly derived from authoritative
+    /// combat state because a transport filter may clear raw combat details.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_assignment_pairs: Vec<(ObjectId, ObjectId)>,
 
     /// CR 613.2a + CR 707.2: battlefield permanents whose copiable values are
     /// currently supplied by a copy effect (Layer 1a) — Clone, Phantasmal
@@ -582,6 +589,7 @@ fn temporary_cant_be_blocked_source(
 pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews {
     let mut views = DerivedViews {
         unique_authorized_submitter: unique_authorized_submitter(state),
+        blocker_assignment_pairs: blocker_assignment_pairs(state),
         ..DerivedViews::default()
     };
 
@@ -791,7 +799,47 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 509.1g: blocking relationships are public information. Preserve this
+    // display projection even when a viewer-safe state intentionally omits raw
+    // combat records unrelated to rendering.
+    views.blocker_assignment_pairs = blocker_assignment_pairs(authoritative_state);
     views
+}
+
+/// CR 509.1g: flatten each blocking creature's chosen attacking creatures into
+/// stable public display pairs. One blocker may legitimately appear more than
+/// once when an effect permits it to block multiple attackers.
+fn blocker_assignment_pairs(state: &GameState) -> Vec<(ObjectId, ObjectId)> {
+    let mut pairs = state
+        .combat
+        .as_ref()
+        .into_iter()
+        .flat_map(|combat| {
+            combat
+                .blocker_to_attacker
+                .iter()
+                .flat_map(|(&blocker, attackers)| {
+                    attackers
+                        .iter()
+                        .copied()
+                        .map(move |attacker| (blocker, attacker))
+                })
+        })
+        .filter(|&(blocker, attacker)| {
+            is_live_battlefield_object(state, blocker)
+                && is_live_battlefield_object(state, attacker)
+        })
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    pairs
+}
+
+fn is_live_battlefield_object(state: &GameState, object_id: ObjectId) -> bool {
+    state.battlefield.contains(&object_id)
+        && state
+            .objects
+            .get(&object_id)
+            .is_some_and(|object| object.zone == Zone::Battlefield)
 }
 
 fn unique_authorized_submitter(state: &GameState) -> Option<PlayerId> {
@@ -1370,6 +1418,7 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::combat::CombatState;
     use crate::game::game_object::DisplaySource;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -1387,6 +1436,7 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::statics::ActivationExemption;
     use crate::types::zones::Zone;
+    use std::collections::HashMap;
 
     fn setup_commander_game(num_players: u8) -> GameState {
         let mut state = GameState::new(FormatConfig::commander(), num_players, 42);
@@ -1424,6 +1474,120 @@ mod tests {
             views.commander_damage_by_attacker.is_empty(),
             "non-Commander format must short-circuit regardless of stored damage entries"
         );
+    }
+
+    #[test]
+    fn blocker_assignment_pairs_are_sorted_and_exclude_stale_objects() {
+        let mut state = GameState::new_two_player(42);
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let first_attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "First Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let second_attacker = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Second Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        let stale_blocker = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Stale Blocker".to_string(),
+            Zone::Graveyard,
+        );
+        let stale_attacker = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Stale Attacker".to_string(),
+            Zone::Graveyard,
+        );
+        let absorbed_component = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Absorbed Component".to_string(),
+            Zone::Battlefield,
+        );
+        state.battlefield.retain(|&id| id != absorbed_component);
+        state.combat = Some(CombatState {
+            blocker_to_attacker: HashMap::from([
+                (
+                    blocker,
+                    vec![second_attacker, stale_attacker, first_attacker],
+                ),
+                (stale_blocker, vec![first_attacker]),
+                (absorbed_component, vec![second_attacker]),
+            ]),
+            ..CombatState::default()
+        });
+        let expected = vec![(blocker, first_attacker), (blocker, second_attacker)];
+
+        let views = derive_views(&state, Some(PlayerId(0)));
+        assert_eq!(views.blocker_assignment_pairs, expected);
+    }
+
+    #[test]
+    fn blocker_assignment_pairs_survive_filtered_client_wire_serialization() {
+        let mut state = GameState::new_two_player(42);
+        let blocker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Blocker".to_string(),
+            Zone::Battlefield,
+        );
+        let attacker = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+        state.combat = Some(CombatState {
+            blocker_to_attacker: HashMap::from([(blocker, vec![attacker])]),
+            ..CombatState::default()
+        });
+
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, PlayerId(0));
+        let json = serde_json::to_string(&ClientGameStateRef::wrap_filtered(
+            &state,
+            &filtered,
+            Some(PlayerId(0)),
+        ))
+        .expect("serialize filtered client state");
+        let client: ClientGameState =
+            serde_json::from_str(&json).expect("deserialize filtered client state");
+        assert_eq!(
+            client.derived.blocker_assignment_pairs,
+            vec![(blocker, attacker)],
+            "the authoritative public blocking pair survives the filtered viewer wire path"
+        );
+    }
+
+    #[test]
+    fn empty_blocker_assignment_pairs_omit_the_wire_key() {
+        let empty_json =
+            serde_json::to_string(&DerivedViews::default()).expect("empty derived views serialize");
+        assert!(
+            !empty_json.contains("blocker_assignment_pairs"),
+            "empty blocker pairs omit their wire key"
+        );
+        let empty_round_trip: DerivedViews =
+            serde_json::from_str(&empty_json).expect("empty derived views deserialize");
+        assert!(empty_round_trip.blocker_assignment_pairs.is_empty());
     }
 
     #[test]

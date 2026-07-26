@@ -2054,6 +2054,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal
         | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::ObjectCount { .. }
         | QuantityRef::ObjectCountDistinct { .. }
@@ -2949,6 +2950,15 @@ fn legacy_effect(x: &Effect) -> bool {
             player: target,
             ..
         } => legacy_quantity_expr(count) || legacy_target_filter(target),
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            legacy_quantity_expr(count)
+                || legacy_target_filter(object)
+                || legacy_target_filter(player)
+        }
 
         // ---- `count`-only (QuantityExpr) ----
         Effect::Monstrosity { count }
@@ -4546,6 +4556,22 @@ fn rw_effect(
             p.merge(rw_quantity_expr(count));
             (p, None)
         }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_external.set(StateKind::HandLibrary);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            p.merge(rw_quantity_expr(count));
+            p.merge(rw_target_filter(object));
+            p.merge(rw_target_filter(player));
+            flag_legacy_write_target(&mut p, object);
+            flag_member_bound_write_target(&mut p, object);
+            (p, None)
+        }
         Effect::ExileFromTopUntil {
             player: _,
             until: _,
@@ -5712,6 +5738,13 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
         QuantityRef::TriggeringDiscoverValue => RwProfile::empty(),
+        // CR 701.22a + CR 603.2c: reads the CURRENT trigger's preserved event
+        // (`state.current_trigger_event`, the scry's own `PlayerPerformedAction`
+        // carrying its effective look count) — a per-event dependency, NOT a
+        // global scalar. Event-live like the EventContextSourceModesChosen /
+        // TimesCostPaidThisResolution twins, and like them NOT a frozen D5
+        // carrier (the legacy-12 set is closed), so no `legacy_batch_prompt`.
+        QuantityRef::TriggeringScryLookCount => reads_event_live(),
         QuantityRef::GraveyardSize { .. } => reads_zone_membership(),
         QuantityRef::ObjectCount { filter }
         | QuantityRef::ObjectCountDistinct { filter, .. }
@@ -8135,5 +8168,33 @@ mod tests {
             ability_rw_profile(&ra(bounce(creature()))).writes_player_span,
             PlayerSpan::None
         );
+    }
+    // ---- PR #5872 blocker-2 regression: scry look count is event-live ----
+
+    /// CR 701.22a + CR 603.2c: "the number of cards looked at while scrying
+    /// this way" (Elrond, Master of Healing) resolves from the CURRENT
+    /// trigger's preserved scry event. It must classify as an event-live read
+    /// — mirroring its EventContextSourceModesChosen /
+    /// TimesCostPaidThisResolution twins, NOT the inert empty profile of a
+    /// transient global scalar — while staying OUT of the frozen D5 legacy-12
+    /// set (no `legacy_batch_prompt`, unlike `EventContextAmount`).
+    #[test]
+    fn triggering_scry_look_count_classifies_event_live() {
+        let p = rw_quantity_ref(&QuantityRef::TriggeringScryLookCount);
+        assert!(
+            p.reads_event_live,
+            "TriggeringScryLookCount reads the current trigger's live event"
+        );
+        assert!(
+            !p.legacy_batch_prompt(),
+            "not one of the 12 frozen D5 event-context tags"
+        );
+        // The whole-ability profile carries the read through the effect walk.
+        let a = ra(gain_life(qref(QuantityRef::TriggeringScryLookCount)));
+        assert!(ability_rw_profile(&a).reads_event_live);
+        // Twin parity: identical classification to the event-live group.
+        let twin = rw_quantity_ref(&QuantityRef::EventContextSourceModesChosen);
+        assert_eq!(p.reads_event_live, twin.reads_event_live);
+        assert_eq!(p.legacy_batch_prompt(), twin.legacy_batch_prompt());
     }
 }

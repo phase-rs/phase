@@ -785,6 +785,30 @@ fn parse_excess_damage_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// CR 701.22a + CR 701.22d: "the number of cards looked at while scrying this
+/// way" — the effective (post-clamp) look count of the scry that fired the
+/// enclosing "whenever you scry" trigger (Elrond, Master of Healing: "put a
+/// +1/+1 counter on each of up to X target creatures, where X is the number
+/// of cards looked at while scrying this way"). Composed grammar axes rather
+/// than a one-card literal: the count-of-cards subject, the "looked at"
+/// participle, the "while scrying" action qualifier, and the reflexive
+/// "this way" suffix that scopes the reference to the triggering event. The
+/// runtime reads the value per-trigger from the trigger's own preserved
+/// `PlayerPerformedAction::Scry` event (`game/quantity.rs`), never from a
+/// shared global.
+pub fn parse_scry_look_count_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::TriggeringScryLookCount,
+        (
+            tag("the number of cards "),
+            tag("looked at "),
+            tag("while scrying "),
+            tag("this way"),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 107.3: "the chosen number" — the number a player named for this object
 /// (Liquid Fire's additional cost; Fluros of Myra's Marvels' as-enters choice).
 /// `QuantityRef::ChosenNumber` reads `ChosenAttribute::Number` off the source
@@ -804,6 +828,10 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             // "excess" channel wins over a plain damage reading.
             parse_excess_damage_ref,
         )),
+        // CR 701.22a: must precede the generic `parse_the_number_of` so the
+        // scry-context "number of cards looked at …" reading wins over a
+        // plain object-count reading.
+        parse_scry_look_count_ref,
         parse_the_number_of,
         parse_object_property_aggregate_ref,
         parse_distinct_card_types_exiled_with_source,

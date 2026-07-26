@@ -1300,6 +1300,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
+        QuantityRef::TriggeringScryLookCount => {
+            "the number of cards looked at while scrying this way".into()
+        }
         QuantityRef::Speed { player } => {
             format!("speed ({})", fmt_player_scope(player))
         }
@@ -2300,6 +2303,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             if *face_down {
                 d.push(("face_down".into(), "true".into()));
             }
+        }
+        Effect::ExileFaceDownPile {
+            object,
+            player,
+            count,
+        } => {
+            d.push(("object".into(), fmt_target(object)));
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), fmt_quantity(count)));
         }
         Effect::Pump {
             power,
@@ -7438,6 +7450,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
+        QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
         QuantityRef::Speed { .. } => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
         QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),

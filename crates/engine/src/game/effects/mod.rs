@@ -12,7 +12,7 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardPlayMode, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, EachDamageRecipient, Effect, EffectError,
     EffectKind, EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
+    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
     SharedQualityRelation, SiblingCondition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
     TargetFilter, TargetRef, ThisWayCause,
@@ -115,6 +115,7 @@ pub mod exchange_control;
 pub mod cloak;
 pub mod exchange_life;
 pub mod exchange_life_totals;
+pub mod exile_face_down_pile;
 pub mod exile_from_top_until;
 pub mod exile_top;
 pub mod exploit;
@@ -4049,6 +4050,7 @@ pub fn resolve_effect(
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
         Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
+        Effect::ExileFaceDownPile { .. } => exile_face_down_pile::resolve(state, ability, events),
         // CR 608.2c: `TargetOnly` is the "choose <filter>" step — targeting is
         // established at selection time, so there is nothing to mutate here. But
         // inside a `player_scope` fan-out iteration ("starting with you, each
@@ -4384,47 +4386,36 @@ fn ability_or_branch_references_tracked_set(ability: &ResolvedAbility) -> bool {
 /// class (GainLife, DealDamage, Token, Mill, Draw, PutCounter, GrantCastingPermission, …)
 /// without enumerating variants.
 fn effect_references_tracked_set(effect: &Effect) -> bool {
-    // Quantity positions — walk every QuantityExpr field on the effect.
-    let quantity_hits_tracked = |qty: &QuantityExpr| quantity_expr_references_tracked_set(qty);
-    let has_quantity_hit = match effect {
-        Effect::DealDamage { amount, .. } => quantity_hits_tracked(amount),
-        Effect::DamageAll { amount, .. } => quantity_hits_tracked(amount),
-        Effect::DamageEachPlayer { amount, .. } => quantity_hits_tracked(amount),
-        Effect::Draw { count, .. } => quantity_hits_tracked(count),
-        Effect::Mill { count, .. } => quantity_hits_tracked(count),
-        Effect::Scry { count, .. } => quantity_hits_tracked(count),
-        Effect::ArrangePlanarDeckTop { count, keep_on_top } => {
-            quantity_hits_tracked(count) || quantity_hits_tracked(keep_on_top)
-        }
-        Effect::Dig { count, .. } => quantity_hits_tracked(count),
-        Effect::Surveil { count, .. } => quantity_hits_tracked(count),
-        Effect::GainLife { amount, .. } => quantity_hits_tracked(amount),
-        Effect::LoseLife { amount, .. } => quantity_hits_tracked(amount),
-        Effect::ChangeSpeed { amount, .. } => quantity_hits_tracked(amount),
-        Effect::PutCounter { count, .. } => quantity_hits_tracked(count),
-        Effect::PutCounterAll { count, .. } => quantity_hits_tracked(count),
-        // CR 608.2c + CR 701.21a: an `ExileTop` whose count reduces the chain
-        // tracked set is a CONSUMER of that set, so the preceding producer must
-        // publish it. Kylox, Visionary Inventor ("sacrifice any number of other
-        // creatures, then exile the top X cards of your library, where X is
-        // their total power") is exactly this shape: without this arm
-        // `next_sub_needs_tracked_set` returned false, the sacrifice never
-        // published its affected ids, and the `TrackedSetAggregate` reduced an
-        // empty set to 0 — a fully-supported-looking card that exiles nothing.
-        Effect::ExileTop { count, .. } => quantity_hits_tracked(count),
-        Effect::Incubate { count } => quantity_hits_tracked(count),
-        Effect::Token {
-            count,
-            power,
-            toughness,
-            ..
-        } => {
-            quantity_hits_tracked(count)
-                || pt_value_references_tracked_set(power)
-                || pt_value_references_tracked_set(toughness)
-        }
-        _ => false,
-    };
+    // Quantity positions — `Effect::for_each_quantity_expr` is the exhaustive
+    // authority over EVERY `QuantityExpr` an effect carries, including the
+    // secondary slots that `count_expr()` (the primary count/amount accessor)
+    // does not expose: `Token::enter_with_counters` entry-counter quantities,
+    // `Dig::keep_count_expr`, dynamic `PtValue::Quantity` power/toughness, etc.
+    //
+    // Any of those slots reducing the chain tracked set makes the effect a
+    // CONSUMER of that set, so the preceding producer must publish it.
+    // Concrete instances of this class:
+    // - CR 608.2c + CR 701.21a: Kylox, Visionary Inventor ("sacrifice any
+    //   number of other creatures, then exile the top X cards of your library,
+    //   where X is their total power") — `ExileTop::count`. Without the
+    //   consumer classification, `next_sub_needs_tracked_set` returned false,
+    //   the sacrifice never published its affected ids, and the
+    //   `TrackedSetAggregate` reduced an empty set to 0 — a fully-supported-
+    //   looking card that exiles nothing.
+    // - CR 608.2c + CR 701.9a (discard) + CR 701.21a (sacrifice): Malfegor
+    //   ("each opponent sacrifices a creature of their choice for each card
+    //   discarded this way", issue #5991) — `Sacrifice::count`. Same failure
+    //   shape: the discard never published, so `FilteredTrackedSetSize
+    //   { caused_by: Discarded }` resolved to 0 and no sacrifice happened.
+    // - CR 608.2c + CR 122.6: a token entering "with a +1/+1 counter for each
+    //   card <verbed> this way" — `Token::enter_with_counters`, a secondary
+    //   quantity slot no primary-count shortcut can see.
+    // (Same class as the `repeat_for` check in
+    // `ability_or_branch_references_tracked_set` — Seasoned Pyromancer, #740.)
+    let mut has_quantity_hit = false;
+    effect.for_each_quantity_expr(&mut |qty| {
+        has_quantity_hit |= quantity_expr_references_tracked_set(qty);
+    });
     if has_quantity_hit {
         return true;
     }
@@ -4526,13 +4517,6 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         }
     }
     false
-}
-
-fn pt_value_references_tracked_set(value: &PtValue) -> bool {
-    match value {
-        PtValue::Fixed(_) | PtValue::Variable(_) => false,
-        PtValue::Quantity(expr) => quantity_expr_references_tracked_set(expr),
-    }
 }
 
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
@@ -9236,7 +9220,10 @@ fn resolve_chain_body(
     // `last_zone_changed_ids`: "searched this way" keys off the player action
     // even when the search finds no card.
     for event in &events[events_before..] {
-        if let GameEvent::PlayerPerformedAction { player_id, action } = event {
+        if let GameEvent::PlayerPerformedAction {
+            player_id, action, ..
+        } = event
+        {
             state.player_actions_this_way.insert((*player_id, *action));
             state.player_actions_this_turn.push((*player_id, *action));
         }
@@ -12331,6 +12318,72 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 122.6: a token with FIXED count and FIXED P/T whose
+    /// `enter_with_counters` quantity is `TrackedSetSize` is still a tracked-set
+    /// CONSUMER — the entry-counter slot is a secondary quantity position that
+    /// the primary `count_expr()` accessor does not expose. This is the exact
+    /// matcher-boundary gap from the #5991 review: with the shortcut
+    /// classification, the preceding producer never published its set and the
+    /// token entered with zero counters.
+    ///
+    /// Revert discriminator: replacing the `for_each_quantity_expr` walk in
+    /// `effect_references_tracked_set` with a `count`/`power`/`toughness`-only
+    /// inspection makes this assertion fail.
+    #[test]
+    fn token_tracked_entry_counter_marks_ability_as_referencing_tracked_set() {
+        let ability = ResolvedAbility::new(
+            Effect::Token {
+                name: "Zombie".to_string(),
+                power: PtValue::Fixed(2),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string(), "Zombie".to_string()],
+                colors: vec![ManaColor::Black],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![(
+                    crate::types::counter::CounterType::Plus1Plus1,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    },
+                )],
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        assert!(
+            ability_or_branch_references_tracked_set(&ability),
+            "a TrackedSetSize entry-counter quantity must publish the chain tracked set"
+        );
+    }
+
+    /// CR 608.2c: a continuation that exiles a face-down pile must receive the
+    /// preceding instruction's tracked set when its top-library count is dynamic.
+    /// `ExileFaceDownPile::count` is carried by the exhaustive quantity visitor,
+    /// rather than by a one-off predicate arm.
+    #[test]
+    fn exile_face_down_pile_tracked_count_marks_effect_as_referencing_tracked_set() {
+        let effect = Effect::ExileFaceDownPile {
+            object: TargetFilter::SelfRef,
+            player: TargetFilter::Controller,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            },
+        };
+
+        assert!(
+            effect_references_tracked_set(&effect),
+            "a tracked face-down-pile count must make the continuation consume the chain tracked set"
+        );
+    }
+
     /// CR 118.1 + CR 603.12a: the repeated-optional-payment driver pays each
     /// iteration in line and reads the failure flag immediately, so it must admit
     /// ONLY a pure, static mana `PayCost` (Hawkeye's `{1}`). A PayCost whose cost
@@ -12988,6 +13041,7 @@ mod tests {
         state.current_trigger_event = Some(GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
+            look_count: None,
         });
         let ability = ResolvedAbility::new(
             Effect::Draw {

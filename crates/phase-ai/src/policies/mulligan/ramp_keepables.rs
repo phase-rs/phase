@@ -17,7 +17,7 @@ use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
 
-use super::{MulliganPolicy, MulliganScore, TurnOrder};
+use super::{is_land_only_source, is_land_source, MulliganPolicy, MulliganScore, TurnOrder};
 
 /// Commitment threshold below which this policy opts out. Matches the
 /// plan-mandated 0.3 boundary — fewer than ~2-3 ramp pieces doesn't warrant
@@ -50,6 +50,7 @@ impl MulliganPolicy for RampKeepablesMulligan {
         }
 
         let mut land_count: i64 = 0;
+        let mut land_only_count: i64 = 0;
         let mut ramp_count: i64 = 0;
 
         // Classify each hand card structurally using the same parts-based
@@ -61,8 +62,13 @@ impl MulliganPolicy for RampKeepablesMulligan {
             let Some(obj) = state.objects.get(&oid) else {
                 continue;
             };
-            if obj.card_types.core_types.contains(&CoreType::Land) {
+            if is_land_source(obj) {
                 land_count += 1;
+            }
+            if is_land_only_source(obj) {
+                land_only_count += 1;
+            }
+            if obj.card_types.core_types.contains(&CoreType::Land) {
                 continue;
             }
             if is_ramp_piece_parts(
@@ -96,11 +102,11 @@ impl MulliganPolicy for RampKeepablesMulligan {
         }
 
         // Many lands but no ramp pieces in hand undermines a ramp deck's plan.
-        if ramp_count == 0 && land_count >= 3 {
+        if ramp_count == 0 && land_only_count >= 3 {
             return MulliganScore::Score {
                 delta: -0.5,
                 reason: PolicyReason::new("ramp_no_ramp_in_hand")
-                    .with_fact("land_count", land_count)
+                    .with_fact("land_count", land_only_count)
                     .with_fact("commitment_x1000", (commitment * 1000.0) as i64),
             };
         }
@@ -120,11 +126,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use engine::game::printed_cards::snapshot_object_face;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
         ManaProduction, QuantityExpr, TargetFilter, TypedFilter,
     };
+    use engine::types::card::LayoutKind;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::GameState;
     use engine::types::identifiers::CardId;
@@ -267,6 +275,19 @@ mod tests {
         (state, hand)
     }
 
+    fn add_modal_spell_face(state: &mut GameState, object_id: ObjectId) {
+        let object = state.objects.get_mut(&object_id).expect("hand card");
+        let mut back_face = snapshot_object_face(object);
+        back_face.card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Sorcery],
+            subtypes: Vec::new(),
+        };
+        back_face.mana_cost = ManaCost::generic(2);
+        back_face.layout_kind = Some(LayoutKind::Modal);
+        object.back_face = Some(back_face);
+    }
+
     #[test]
     fn opts_out_when_commitment_low() {
         let features = features_with_commitment(0.1);
@@ -364,6 +385,30 @@ mod tests {
             }
             _ => panic!("expected penalty Score"),
         }
+    }
+
+    #[test]
+    fn flexible_modal_lands_do_not_trigger_ramp_no_ramp_penalty() {
+        let features = features_with_commitment(0.9);
+        let (mut state, hand) = make_hand(vec![
+            Card::Land,
+            Card::Land,
+            Card::Land,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
+        for &modal in hand.iter().take(3) {
+            add_modal_spell_face(&mut state, modal);
+        }
+
+        let score =
+            RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
+        assert!(matches!(
+            score,
+            MulliganScore::Score { reason, .. } if reason.kind == "ramp_defer_to_baseline"
+        ));
     }
 
     #[test]

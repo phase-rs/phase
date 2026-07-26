@@ -3237,6 +3237,11 @@ pub struct PendingZoneChangeDelivery {
     /// as-enters prompt is unresolved.
     pub terminal_completion: Option<ZoneMoveCompletion>,
     pub count: PausedZoneChangeDeliveryCount,
+    /// CR 406.3: A batch delivery requested concealment on an Exile landing.
+    /// It survives the replacement-choice pause so the settled member is hidden
+    /// before the next batch member is attempted.
+    #[serde(default)]
+    pub face_down_in_exile: bool,
 }
 
 impl PendingZoneChangeDelivery {
@@ -3247,6 +3252,7 @@ impl PendingZoneChangeDelivery {
             delivery_events: Vec::new(),
             terminal_completion: None,
             count: PausedZoneChangeDeliveryCount::NeedsCount,
+            face_down_in_exile: false,
         }
     }
 
@@ -4521,6 +4527,8 @@ pub struct PendingBatchZoneMoveRequest {
     pub exile_tracking: ZoneDeliveryExileTracking,
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub face_down_in_exile: bool,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -4570,6 +4578,18 @@ pub enum BatchCompletion {
         #[serde(default)]
         enters_under: Option<PlayerId>,
     },
+    /// CR 406.3 + CR 608.2c + CR 701.24a: A face-down pile's proposed exile
+    /// delivery settled. The exact member list is retained so the "If you do"
+    /// completion can return precisely that full pile, and never a partial one.
+    ExileFaceDownPileDeliveryComplete {
+        player: PlayerId,
+        source_id: ObjectId,
+        members: Vec<ObjectId>,
+        required_member_count: usize,
+    },
+    /// CR 406.3 + CR 608.2c: The successful pile's replacement-aware return to
+    /// library settled; emit the original effect's completion exactly once.
+    ExileFaceDownPileReturnComplete { source_id: ObjectId },
     /// CR 614.1 + CR 616.1 + CR 611.2a: A `CastFromZone` current-zone-to-Exile
     /// batch settled. Keep the resolved ability and its two target partitions
     /// so the permission is recorded only after the exile delivery, while
@@ -9880,69 +9900,6 @@ impl WaitingFor {
                 WaitingFor::ManaPayment { .. } | WaitingFor::PhyrexianPayment { .. }
             )
     }
-
-    /// Look-at-top-N states whose legal selections cannot be captured by the
-    /// candidate enumerator (it lists only {empty, full-in-original-order,
-    /// singletons}), so the multiplayer legality gate would wrongly reject a
-    /// legal reordered or partial selection. For these, `apply()` is the real
-    /// validation boundary and validates the submitted selection structurally
-    /// (see handle_resolution_choice); the server bypasses its enumeration gate.
-    ///
-    /// - CR 701.22a / CR 701.25a: scry/surveil keep the chosen cards on top
-    ///   "in any order" — any duplicate-free subset, in any order, is legal.
-    /// - Dig (look at N, keep some): the handler enforces the keep_count /
-    ///   up_to constraint, uniqueness, and the selectable-cards filter, and
-    ///   preserves the chosen order for library-destined keeps.
-    pub fn accepts_freeform_card_selection(&self) -> bool {
-        matches!(
-            self,
-            WaitingFor::ScryChoice { .. }
-                | WaitingFor::ArrangePlanarDeckTopChoice { .. }
-                | WaitingFor::SurveilChoice { .. }
-                | WaitingFor::DigChoice { .. }
-        )
-    }
-
-    pub fn accepts_freeform_counter_move_distribution(&self) -> bool {
-        matches!(self, WaitingFor::MoveCountersDistribution { .. })
-    }
-
-    /// CR 107.1c: "Remove any number of counters" has a combinatorial legal
-    /// space (any per-type subset 0..=available, including the empty set) that
-    /// the coarse AI candidate enumerator (`counter_removal_candidates`, which
-    /// offers only "remove all" and "remove none") cannot fully cover. The
-    /// server bypasses its enumeration gate for this state so a human's
-    /// intermediate submission (e.g. "remove 2 of 3") is not wrongly rejected;
-    /// `apply()` (the `RemoveCountersChoice` handler) is the real validation
-    /// boundary via `validate_counter_selection`.
-    pub fn accepts_freeform_counter_removal(&self) -> bool {
-        matches!(self, WaitingFor::RemoveCountersChoice { .. })
-    }
-
-    /// Combat-damage assignment whose legal divisions cannot be captured by the
-    /// candidate enumerator. `candidates.rs` lists exactly one
-    /// `AssignCombatDamage` candidate (the greedy trample-through split), so the
-    /// multiplayer legality gate would wrongly reject every other legal division
-    /// — e.g. keeping excess on the blocker instead of trampling it through
-    /// (CR 702.19b), or any of the freely-chosen splits across multiple blockers
-    /// (CR 510.1c/d). The combinatorial space of legal divisions is too large to
-    /// enumerate, so `apply()` (handle_assign_combat_damage) is the real
-    /// validation boundary: it enforces total conservation, blocker membership,
-    /// and the CR 702.19b lethal-before-excess precondition, and rejects illegal
-    /// submissions. The server bypasses its enumeration gate for these.
-    pub fn accepts_freeform_combat_damage_assignment(&self) -> bool {
-        matches!(self, WaitingFor::AssignCombatDamage { .. })
-    }
-
-    /// CR 510.1d + CR 702.22k: A blocker's free division of its combat damage
-    /// among the attackers it blocks cannot be captured by the candidate
-    /// enumerator (the combinatorial space of legal divisions is too large to
-    /// enumerate), so the server bypasses its enumeration gate for this state
-    /// and `apply()` (handle_assign_blocker_damage) is the real validation
-    /// boundary: it enforces total conservation and blocked-attacker membership.
-    pub fn accepts_freeform_blocker_damage_assignment(&self) -> bool {
-        matches!(self, WaitingFor::AssignBlockerDamage { .. })
-    }
 }
 
 /// CR 102.1 + CR 500.1: which turn boundary ends an auto-pass session.
@@ -15178,16 +15135,33 @@ impl GameState {
         delivery_events: &[GameEvent],
         terminal_completion: ZoneMoveCompletion,
     ) -> bool {
+        let settled_in_exile = delivery_events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    object_id,
+                    to: Zone::Exile,
+                    ..
+                } if *object_id == member.object_id
+            )
+        });
         if let Some(paused) = self
             .active_change_zone_frame_mut()
             .and_then(|frame| frame.pending.as_mut())
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
+            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            if conceal {
+                self.objects
+                    .get_mut(&member.object_id)
+                    .expect("settled paused pile member exists")
+                    .face_down = true;
+            }
             return true;
         }
         if let Some(paused) = self
@@ -15196,10 +15170,17 @@ impl GameState {
             .and_then(|owner| owner.paused_current.as_mut())
             .filter(|paused| paused.captures(member, expected_event))
         {
+            let conceal = paused.face_down_in_exile && settled_in_exile;
             paused.append_delivery_events(delivery_events);
             paused
                 .record_terminal_completion(terminal_completion)
                 .expect("one paused zone-change delivery has one terminal completion");
+            if conceal {
+                self.objects
+                    .get_mut(&member.object_id)
+                    .expect("settled paused pile member exists")
+                    .face_down = true;
+            }
             return true;
         }
         false
@@ -15787,6 +15768,16 @@ impl GameState {
                 .begin_proposal()
                 .expect("resolved-rules journal proposal ordinal overflow")
         })
+    }
+
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game, so every mutation the leave sweep performs is attributed to the
+    /// leave rather than to whatever rules work was in flight when the
+    /// state-based action fired.
+    pub(crate) fn begin_player_leave_journal_node(&mut self) -> RulesExecutionNodeRef {
+        self.resolved_rules_journal
+            .begin_player_leave()
+            .expect("resolved-rules journal command ordinal overflow")
     }
 
     /// CR 605.3b: Begin the distinct, immediate execution node for one
@@ -19358,6 +19349,7 @@ mod tests {
             power: Some(1),
             toughness: Some(1),
             loyalty: None,
+            printed_loyalty: None,
             keywords: vec![],
             abilities: std::sync::Arc::default(),
             trigger_definitions: std::sync::Arc::default(),
@@ -20185,90 +20177,6 @@ mod tests {
     fn default_creates_two_player_game() {
         let state = GameState::default();
         assert_eq!(state.players.len(), 2);
-    }
-
-    #[test]
-    fn accepts_freeform_card_selection_for_scry_surveil_and_dig() {
-        // CR 701.22a / CR 701.25a: scry and surveil keep-on-top are freeform.
-        assert!(WaitingFor::ScryChoice {
-            player: PlayerId(0),
-            cards: vec![],
-        }
-        .accepts_freeform_card_selection());
-        assert!(WaitingFor::SurveilChoice {
-            player: PlayerId(0),
-            cards: vec![],
-        }
-        .accepts_freeform_card_selection());
-        // Dig: legal selections (count-constrained / reordered) also can't be
-        // enumerated; apply() validates them structurally.
-        assert!(WaitingFor::DigChoice {
-            player: PlayerId(0),
-            library_owner: PlayerId(0),
-            cards: vec![],
-            keep_count: 1,
-            up_to: false,
-            selectable_cards: vec![],
-            kept_destination: None,
-            rest_destination: None,
-            source_id: None,
-            enter_tapped: false,
-        }
-        .accepts_freeform_card_selection());
-
-        // A sampling of other selection/decision states must NOT be freeform —
-        // they remain validated by candidate enumeration.
-        assert!(!WaitingFor::Priority {
-            player: PlayerId(0),
-        }
-        .accepts_freeform_card_selection());
-        assert!(!WaitingFor::RevealChoice {
-            player: PlayerId(0),
-            cards: vec![],
-            filter: TargetFilter::Any,
-            optional: false,
-            decline_runs_continuation: false,
-        }
-        .accepts_freeform_card_selection());
-        assert!(!WaitingFor::ManifestDreadChoice {
-            player: PlayerId(0),
-            cards: vec![],
-            source_id: ObjectId(1),
-        }
-        .accepts_freeform_card_selection());
-    }
-
-    #[test]
-    fn accepts_freeform_combat_damage_assignment_for_assign_combat_damage() {
-        // CR 510.1c/d + CR 702.19b: legal damage divisions (e.g. keeping excess
-        // on the blocker rather than trampling through) cannot be enumerated as
-        // candidate actions, so the multiplayer gate must bypass exact-match and
-        // let apply() validate the submitted division.
-        assert!(WaitingFor::AssignCombatDamage {
-            player: PlayerId(0),
-            attacker_id: ObjectId(1),
-            total_damage: 3,
-            blockers: vec![],
-            assignment_modes: vec![],
-            trample: None,
-            defending_player: PlayerId(1),
-            attack_target: crate::game::combat::AttackTarget::Player(PlayerId(1)),
-            pw_loyalty: None,
-            pw_controller: None,
-        }
-        .accepts_freeform_combat_damage_assignment());
-
-        // Other states must NOT be freeform for combat damage — they remain
-        // validated by candidate enumeration.
-        assert!(!WaitingFor::Priority {
-            player: PlayerId(0),
-        }
-        .accepts_freeform_combat_damage_assignment());
-        assert!(!WaitingFor::ScryChoice {
-            player: PlayerId(0),
-            cards: vec![],
-        }
-        .accepts_freeform_combat_damage_assignment());
     }
 
     #[test]

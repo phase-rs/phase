@@ -16,7 +16,7 @@
 use crate::types::ability::ManaSpendRestriction;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, SacrificeCost, SacrificeRequirement, TargetFilter,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SacrificeCost, SacrificeRequirement, TargetFilter,
     TriggerDefinition, TriggerDefinitionRef, TypedFilter,
 };
 use crate::types::actions::GameAction;
@@ -40,6 +40,16 @@ use super::restrictions;
 use super::triggers::trigger_source_context_for_latch;
 
 pub use crate::types::mana::ManaSourcePenalty;
+
+/// One concrete mana unit a currently legal land-mana selection would produce.
+///
+/// This is a read-only projection, not a `ManaUnit`: no pool identity, source
+/// bookkeeping, or spend grants exist until the activation resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LiveManaOutputUnit {
+    pub mana_type: ManaType,
+    pub restrictions: Vec<ManaRestriction>,
+}
 
 impl ManaSourcePenalty {
     /// High-order auto-tap bucket. **Lower = preferred.** The sort caller
@@ -329,6 +339,165 @@ pub(crate) fn live_land_mana_option_for_selection(
         ));
     }
     Ok(option)
+}
+
+/// Resolve the exact output of an already revalidated land-mana option without
+/// mutating game state. This mirrors activation's resolved-ability and
+/// `ProductionOverride` path rather than reading planner metadata such as
+/// `atomic_combination`.
+///
+/// CR 605.1b + CR 605.3b: Coupled `TapsForMana` triggered mana abilities are
+/// distinct immediate resolutions. Their own live effects and restrictions are
+/// appended after the base activated ability's output.
+pub(crate) fn live_mana_output_for_option(
+    state: &GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+) -> Vec<LiveManaOutputUnit> {
+    let mut output = live_base_mana_output(state, player, option);
+    for (trigger_ref, production_override) in &option.taps_for_mana_overrides {
+        output.extend(live_taps_for_mana_output(
+            state,
+            trigger_ref,
+            production_override,
+        ));
+    }
+    output
+}
+
+fn live_base_mana_output(
+    state: &GameState,
+    player: PlayerId,
+    option: &ManaSourceOption,
+) -> Vec<LiveManaOutputUnit> {
+    let Some(ability_index) = option.ability_index else {
+        return vec![LiveManaOutputUnit {
+            mana_type: option.mana_type,
+            restrictions: option.restrictions.clone(),
+        }];
+    };
+    let Some(ability_def) = state
+        .objects
+        .get(&option.object_id)
+        .and_then(|object| object.abilities.get(ability_index))
+    else {
+        return Vec::new();
+    };
+    let ability =
+        resolved_mana_ability_for_live_output(state, option.object_id, player, ability_def);
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    let production_override =
+        super::casting_costs::production_override_for_option(ability_def, option);
+    live_mana_output_units(
+        state,
+        &ability,
+        produced,
+        restrictions,
+        production_override.as_ref(),
+        option.object_id,
+    )
+}
+
+fn live_taps_for_mana_output(
+    state: &GameState,
+    trigger_ref: &TriggerDefinitionRef,
+    production_override: &ProductionOverride,
+) -> Vec<LiveManaOutputUnit> {
+    let Some(source) = state.objects.get(&trigger_ref.source.object_id) else {
+        return Vec::new();
+    };
+    if crate::types::identifiers::ObjectIncarnationRef::from_object(source) != trigger_ref.source {
+        return Vec::new();
+    }
+    let Some(active) = super::functioning_abilities::active_trigger_definitions(state, source)
+        .find(|active| active.definition_ref == *trigger_ref)
+    else {
+        return Vec::new();
+    };
+    let source_context = trigger_source_context_for_latch(state, source);
+    let ability = super::triggers::build_triggered_ability_from_context(
+        state,
+        active.definition,
+        &source_context,
+        Some(trigger_ref),
+    );
+    let ability = mana_abilities::apply_condition_instead_mana_swap(state, &ability);
+    let Effect::Mana {
+        produced,
+        restrictions,
+        ..
+    } = &ability.effect
+    else {
+        return Vec::new();
+    };
+    live_mana_output_units(
+        state,
+        &ability,
+        produced,
+        restrictions,
+        Some(production_override),
+        ability.source_id,
+    )
+}
+
+fn resolved_mana_ability_for_live_output(
+    state: &GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+) -> ResolvedAbility {
+    let ability = super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
+    mana_abilities::apply_condition_instead_mana_swap(state, &ability)
+}
+
+fn live_mana_output_units(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    produced: &ManaProduction,
+    restrictions: &[ManaSpendRestriction],
+    production_override: Option<&ProductionOverride>,
+    restriction_source_id: ObjectId,
+) -> Vec<LiveManaOutputUnit> {
+    let mana_types = match production_override {
+        Some(ProductionOverride::SingleColor(color)) => {
+            // Match activation's override semantics: resolve the production
+            // count through the effect, then replace every produced unit's
+            // type with the selected color.
+            let mut count_state = state.clone();
+            if matches!(produced, ManaProduction::ChosenColor { .. }) {
+                let Some(color) = mana_type_to_color(*color) else {
+                    return Vec::new();
+                };
+                count_state.last_named_choice =
+                    Some(crate::types::ability::ChoiceValue::Color(color));
+            }
+            let count = super::effects::mana::resolve_mana_types_for_ability(
+                produced,
+                &count_state,
+                ability,
+            )
+            .len();
+            vec![*color; count]
+        }
+        Some(ProductionOverride::Combination(types)) => types.clone(),
+        None => super::effects::mana::resolve_mana_types_for_ability(produced, state, ability),
+    };
+    let restrictions =
+        super::effects::mana::resolve_restrictions(restrictions, state, restriction_source_id);
+    mana_types
+        .into_iter()
+        .map(|mana_type| LiveManaOutputUnit {
+            mana_type,
+            restrictions: restrictions.clone(),
+        })
+        .collect()
 }
 
 /// Pure action-boundary validation for semantic land-mana submissions. It is

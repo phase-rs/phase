@@ -256,6 +256,7 @@ fn complete_cost_payment(
     events.push(GameEvent::PlayerPerformedAction {
         player_id: player,
         action: PlayerActionKind::CollectEvidence,
+        look_count: None,
     });
 
     match resume {
@@ -491,6 +492,7 @@ mod tests {
             GameEvent::PlayerPerformedAction {
                 player_id,
                 action: PlayerActionKind::CollectEvidence,
+                ..
             } if *player_id == PlayerId(0)
         )));
     }

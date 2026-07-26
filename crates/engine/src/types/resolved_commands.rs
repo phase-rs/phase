@@ -7,15 +7,18 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::game::game_object::AttachTarget;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
 use super::ability::TriggerDefinitionRef;
+use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
 use super::game_state::{SpellCastRecord, ZoneChangeRecord};
 use super::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
+use super::proposed_event::TokenSpec;
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
 use super::zones::Zone;
 
@@ -142,6 +145,283 @@ pub struct ResolvedObjectCounterCommand {
     pub expected_old: u32,
     pub edit: ResolvedObjectCounterEdit,
     pub cause: RulesExecutionNodeRef,
+}
+
+/// One exact CR 701.27a transform of a double-faced permanent.
+///
+/// CR 613.7g: a permanent that transforms receives a NEW timestamp, which
+/// orders it against continuous effects in the layer system. Replay installs
+/// the exact recorded timestamp instead of re-drawing one from
+/// `GameState::next_timestamp` — mirroring the zone-change family's
+/// `entry_timestamp` — so a retained-prefix replay cannot silently reorder
+/// layer application. The face payloads are not recorded: swapping the stashed
+/// `back_face` with the displayed face is a structural operation over data the
+/// object already carries, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectTransformCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_transformed: bool,
+    pub resulting_transformed: bool,
+    pub resulting_timestamp: u64,
+    /// CR 701.27f: the post-transform count used to ignore stale self-transform
+    /// instructions from abilities already on the stack.
+    pub resulting_transformation_count: u32,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved transform.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectTransformReplayInvariantError {
+    #[error("transform command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("transform occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("transform precondition mismatch: expected transformed {expected}, found {found}")]
+    TransformedPreconditionMismatch { expected: bool, found: bool },
+    #[error("transform command object {0:?} has no back face to swap")]
+    MissingBackFace(ObjectId),
+}
+
+/// One exact CR 701.3 attachment-graph edit.
+///
+/// The three production authorities — `attach_to`, `attach_to_player`, and
+/// `unattach` — perform the same graph mutation parameterized by the resulting
+/// host, so they share one command instead of three sibling variants:
+/// `Some(Object)` (CR 301.5 / CR 303.4f), `Some(Player)` (CR 303.4), and `None`
+/// (CR 701.3d unattach) are leaf values of the `Option<AttachTarget>` the object
+/// already stores.
+///
+/// CR 613.7e + CR 701.3c: attaching to a DIFFERENT host draws a new timestamp,
+/// which orders the attachment against continuous effects in the layer system; a
+/// same-host re-attach (CR 701.3b) and an unattach draw none. `resulting_timestamp`
+/// is therefore `Some` exactly when the authority drew one, and replay installs
+/// that value — mirroring the transform and zone-change families — instead of
+/// re-drawing from `GameState::next_timestamp` and silently reordering layers.
+///
+/// The host-side `attachments` list is not recorded: removing the attachment from
+/// its old host and pushing it onto the new one is a structural consequence of the
+/// recorded host transition, not a re-selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAttachmentCommand {
+    pub attachment: ObjectIncarnationRef,
+    pub expected_old_host: Option<AttachTarget>,
+    pub resulting_host: Option<AttachTarget>,
+    pub resulting_timestamp: Option<u64>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved attachment edit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedAttachmentReplayInvariantError {
+    #[error("attachment command references an unknown object {0:?}")]
+    UnknownAttachment(ObjectId),
+    #[error("attachment occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleAttachment {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("attachment host precondition mismatch: expected {expected:?}, found {found:?}")]
+    HostPreconditionMismatch {
+        expected: Option<AttachTarget>,
+        found: Option<AttachTarget>,
+    },
+    #[error("attachment command references an unknown host object {0:?}")]
+    UnknownHost(ObjectId),
+}
+
+/// One exact CR 110.2a + CR 603.6a "under your control" battlefield-entry
+/// controller override.
+///
+/// The override retags the live object AND the two turn-record snapshots the
+/// entry created, so a replay that installed only the object's controller would
+/// leave "entered under whose control" look-back queries answering with the
+/// pre-override controller.
+///
+/// The record positions are RECORDED rather than re-found at replay time,
+/// mirroring `ResolvedZoneChangeCommand::turn_zone_change_index`: the resolve-time
+/// authority knows exactly which snapshot it retagged, and re-running a
+/// last-match scan against a replayed board could land on a different entry when
+/// the same object entered twice in one turn. They are `Option` because the
+/// override also runs for entries whose snapshots are absent (CR 603.6a
+/// leaves-the-battlefield reconstruction, and the elimination path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedControllerOverrideCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_base_controller: Option<PlayerId>,
+    pub expected_old_controller: PlayerId,
+    pub resulting_controller: PlayerId,
+    pub zone_change_index: Option<usize>,
+    pub battlefield_entry_index: Option<usize>,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved controller override.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedControllerOverrideReplayInvariantError {
+    #[error("controller-override command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("controller-override occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("controller-override base-controller precondition mismatch: expected {expected:?}, found {found:?}")]
+    BaseControllerPreconditionMismatch {
+        expected: Option<PlayerId>,
+        found: Option<PlayerId>,
+    },
+    #[error("controller-override controller precondition mismatch: expected {expected:?}, found {found:?}")]
+    ControllerPreconditionMismatch { expected: PlayerId, found: PlayerId },
+    #[error("controller-override references a missing zone-change record at {0}")]
+    MissingZoneChangeRecord(usize),
+    #[error("controller-override references a missing battlefield-entry record at {0}")]
+    MissingBattlefieldEntryRecord(usize),
+}
+
+/// One exact CR 603.6a battlefield-entry provenance stamp.
+///
+/// The entering permanent records which ability put it there so anti-recursion
+/// intervening-ifs ("if it wasn't put onto the battlefield with this ability")
+/// can exclude the permanents that very ability placed. A replay that dropped the
+/// stamp would let those abilities re-trigger off their own output.
+///
+/// `resulting_source` is not an `Option`: the delivery tail stamps only
+/// ability-driven entries, and `reset_for_battlefield_entry` has already cleared
+/// the field, so a recorded stamp always installs a concrete source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEntryProvenanceCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_old_source: Option<ObjectId>,
+    pub resulting_source: ObjectId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved entry-provenance stamp.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedEntryProvenanceReplayInvariantError {
+    #[error("entry-provenance command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("entry-provenance occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("entry-provenance precondition mismatch: expected {expected:?}, found {found:?}")]
+    SourcePreconditionMismatch {
+        expected: Option<ObjectId>,
+        found: Option<ObjectId>,
+    },
+}
+
+/// One exact CR 704.5d / CR 704.5e cease-to-exist removal.
+///
+/// Ceasing to exist is NOT a zone change (CR 400.7) — no event is emitted and no
+/// "whenever exiled" trigger fires — so it cannot ride the zone-change family. It
+/// is the only production path that deletes an object outright, and a replay that
+/// omitted it would leave a token alive in a zone the rules already swept it from.
+///
+/// No characteristics are recorded: replay removes the object the retained prefix
+/// already reconstructed rather than rebuilding a deleted one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedObjectCeaseCommand {
+    pub object: ObjectIncarnationRef,
+    pub expected_zone: Zone,
+    pub owner: PlayerId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved cease-to-exist removal.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedObjectCeaseReplayInvariantError {
+    #[error("cease command references an unknown object {0:?}")]
+    UnknownObject(ObjectId),
+    #[error("cease occurrence mismatch: expected {expected:?}, found {found:?}")]
+    StaleObject {
+        expected: ObjectIncarnationRef,
+        found: ObjectIncarnationRef,
+    },
+    #[error("cease zone mismatch: expected {expected:?}, found {found:?}")]
+    ZoneMismatch { expected: Zone, found: Zone },
+    #[error("cease owner mismatch: expected {expected:?}, found {found:?}")]
+    OwnerMismatch { expected: PlayerId, found: PlayerId },
+}
+
+/// One exact CR 800.4 player departure.
+///
+/// The departure itself is two writes — the player's `is_eliminated` flag and
+/// their append to `eliminated_players` — that always move together, so they are
+/// one command rather than two. Everything the CR 800.4 sweep does afterwards
+/// (exiling owned objects, reverting control effects, clearing the stack)
+/// already journals through its own family; this command carries the departure,
+/// and the surrounding `PlayerLeave` node carries the causal grouping.
+///
+/// There is no `expected_old` field: "was still in the game" is the precondition,
+/// and a stored copy could only ever hold one value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedPlayerLeaveCommand {
+    pub player: PlayerId,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved player departure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedPlayerLeaveReplayInvariantError {
+    #[error("player-leave command references an unknown player {0:?}")]
+    UnknownPlayer(PlayerId),
+    #[error("player-leave command re-eliminates player {0:?}, who had already left")]
+    AlreadyEliminated(PlayerId),
+}
+
+/// One exact CR 111.1 token creation.
+///
+/// This is the first family whose replay MATERIALIZES an object rather than
+/// verifying and installing into one that already exists, so its precondition is
+/// inverted: the applier requires the id to be ABSENT.
+///
+/// Two allocator draws are recorded because both would otherwise be re-drawn:
+/// the `ObjectId` (from `next_object_id`) and the CR 613.7d entry timestamp.
+///
+/// SCOPE: ordinary `TokenSpec` births only. Copy tokens (CR 707.2) and meld
+/// births go through the liminal-entry path, whose `LiminalEntry` carries no
+/// body spec — `LiminalEntryKind` distinguishes Token from Meld, not Spec from
+/// Copy — so wiring them needs a new field on that shared serialized struct.
+/// They remain unjournaled for now. When they land, this struct's `spec` +
+/// `token_image_ref` pair becomes a `ResolvedTokenBody::{Spec, Copy}` payload on
+/// the SAME command: both are the CR 111.1 axis (an object came into existence
+/// and its id and timestamp were drawn), and CR 707.2 governs only how the copy
+/// body was derived upstream of this seam.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedTokenCreationCommand {
+    pub object: ObjectIncarnationRef,
+    pub owner: PlayerId,
+    pub entry_timestamp: u64,
+    /// The effect's token spec — the existing replacement-visible payload type
+    /// rather than a hand-rolled field list.
+    pub spec: Box<TokenSpec>,
+    /// `token_presets::find_exact_token_ref` READS game state to resolve this, so
+    /// it is a re-derivation rather than a spec field and must be recorded.
+    pub token_image_ref: Option<TokenImageRef>,
+    /// CR 614.1: the post-replacement tapped state the token actually entered
+    /// with, not the spec's pre-replacement request.
+    pub resulting_tapped: bool,
+    /// The `next_object_id` high-water after this token's id was drawn, so a
+    /// replay resuming from a shorter prefix cannot hand the same id out twice.
+    pub resulting_next_object_id: u64,
+    pub cause: RulesExecutionNodeRef,
+}
+
+/// Typed failure while applying one already-resolved token creation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResolvedTokenCreationReplayInvariantError {
+    #[error("token-creation command would overwrite live object {0:?}")]
+    ObjectAlreadyExists(ObjectId),
+    #[error("token-creation command references an unknown owner {0:?}")]
+    UnknownOwner(PlayerId),
+    #[error("token-creation id {id:?} is not below its recorded high-water {high_water}")]
+    IdAboveHighWater { id: ObjectId, high_water: u64 },
 }
 
 /// The audience that received one exact revealed-card fact.
@@ -388,6 +668,13 @@ pub enum ResolvedRulesCommand {
     PlayerEdit(ResolvedPlayerEditCommand),
     ObjectStatus(ResolvedObjectStatusCommand),
     ObjectCounter(ResolvedObjectCounterCommand),
+    ObjectTransform(ResolvedObjectTransformCommand),
+    Attachment(ResolvedAttachmentCommand),
+    ControllerOverride(ResolvedControllerOverrideCommand),
+    EntryProvenance(ResolvedEntryProvenanceCommand),
+    ObjectCease(ResolvedObjectCeaseCommand),
+    PlayerLeave(ResolvedPlayerLeaveCommand),
+    TokenCreation(Box<ResolvedTokenCreationCommand>),
     Information(ResolvedInformationCommand),
     LedgerEdit(ResolvedLedgerEditCommand),
     LibraryShuffle(ResolvedLibraryShuffleCommand),
@@ -1063,6 +1350,42 @@ impl ResolvedRulesJournal {
         Ok(identity)
     }
 
+    /// CR 800.4: Begin the distinct execution node for one player leaving the
+    /// game.
+    ///
+    /// A leave is not a proposal: every mutation the CR 800.4 sweep performs —
+    /// the owned-object exiles, the control-effect reversions, the stack
+    /// removals — is caused by the leave itself, not by whatever rules work
+    /// happened to be in flight when the state-based action fired. Giving the
+    /// leave its own node keeps those commands attributed to it, so a replay can
+    /// identify the sweep as one causal unit.
+    pub fn begin_player_leave(
+        &mut self,
+    ) -> Result<RulesExecutionNodeRef, ResolvedRulesJournalError> {
+        self.ensure_command_capacity()?;
+        self.ensure_node_capacity()?;
+        let command = self.allocate_command();
+        let ordinal = self.allocate_node();
+        let identity = RulesExecutionNodeRef::PlayerLeave(command);
+        self.entries.push(ResolvedCommandJournalEntry {
+            ordinal: command,
+            node: identity,
+            command: None,
+        });
+        self.nodes.push(SettlementNode {
+            ordinal,
+            identity,
+            kind: RulesExecutionNodeKind::PlayerLeave,
+            caused_by: None,
+            depends_on: Vec::new(),
+            bundle_parent: None,
+            produced_pips: Vec::new(),
+            spent_pips: Vec::new(),
+            journal_ordinals: vec![command],
+        });
+        Ok(identity)
+    }
+
     pub fn begin_activated_mana(
         &mut self,
         source: ObjectIncarnationRef,
@@ -1276,6 +1599,74 @@ impl ResolvedRulesJournal {
         self.append_command(
             command.cause,
             ResolvedRulesCommand::ZoneChange(Box::new(command)),
+        )
+    }
+
+    /// Records one exact CR 701.27a transform under its causal node.
+    pub fn record_object_transform(
+        &mut self,
+        command: ResolvedObjectTransformCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ObjectTransform(command),
+        )
+    }
+
+    /// Records one exact CR 701.3 attachment-graph edit under its causal node.
+    pub fn record_attachment(
+        &mut self,
+        command: ResolvedAttachmentCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::Attachment(command))
+    }
+
+    /// Records one exact CR 110.2a controller override under its causal node.
+    pub fn record_controller_override(
+        &mut self,
+        command: ResolvedControllerOverrideCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::ControllerOverride(command),
+        )
+    }
+
+    /// Records one exact CR 603.6a entry-provenance stamp under its causal node.
+    pub fn record_entry_provenance(
+        &mut self,
+        command: ResolvedEntryProvenanceCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::EntryProvenance(command),
+        )
+    }
+
+    /// Records one exact CR 704.5d cease-to-exist removal under its causal node.
+    pub fn record_object_cease(
+        &mut self,
+        command: ResolvedObjectCeaseCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::ObjectCease(command))
+    }
+
+    /// Records one exact CR 800.4 player departure under its causal node.
+    pub fn record_player_leave(
+        &mut self,
+        command: ResolvedPlayerLeaveCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(command.cause, ResolvedRulesCommand::PlayerLeave(command))
+    }
+
+    /// Records one exact CR 111.1 token creation under its causal node.
+    pub fn record_token_creation(
+        &mut self,
+        command: ResolvedTokenCreationCommand,
+    ) -> Result<ResolvedCommandOrdinal, ResolvedRulesJournalError> {
+        self.append_command(
+            command.cause,
+            ResolvedRulesCommand::TokenCreation(Box::new(command)),
         )
     }
 
@@ -1499,6 +1890,13 @@ impl ResolvedRulesJournal {
                 ResolvedRulesCommand::PlayerEdit(_)
                 | ResolvedRulesCommand::ObjectStatus(_)
                 | ResolvedRulesCommand::ObjectCounter(_)
+                | ResolvedRulesCommand::ObjectTransform(_)
+                | ResolvedRulesCommand::Attachment(_)
+                | ResolvedRulesCommand::ControllerOverride(_)
+                | ResolvedRulesCommand::EntryProvenance(_)
+                | ResolvedRulesCommand::ObjectCease(_)
+                | ResolvedRulesCommand::PlayerLeave(_)
+                | ResolvedRulesCommand::TokenCreation(_)
                 | ResolvedRulesCommand::Information(_)
                 | ResolvedRulesCommand::LedgerEdit(_)
                 | ResolvedRulesCommand::LibraryShuffle(_)
@@ -1740,6 +2138,104 @@ impl ResolvedRulesJournal {
                 if entry.node != command.cause || zone_change_command_is_invalid(command) {
                     return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
                         "zone-change command has an invalid occurrence, receipt, or unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectTransform(command) => {
+                // CR 701.27a: a transform turns the permanent to its OTHER face,
+                // so a recorded transform that leaves `transformed` unchanged is
+                // not a transform that ever happened.
+                if entry.node != command.cause
+                    || command.expected_old_transformed == command.resulting_transformed
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "transform command does not change the displayed face, or has an \
+                         unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::Attachment(command) => {
+                // CR 701.3b: re-attaching to the host it is already attached to
+                // does nothing, so a recorded edit that leaves the host unchanged
+                // is not an edit that ever happened.
+                // CR 613.7e + CR 701.3c/d: a move to a new host draws a timestamp
+                // and an unattach does not, so the drawn value is present on
+                // exactly the commands that installed a host.
+                if entry.node != command.cause
+                    || command.expected_old_host == command.resulting_host
+                    || command.resulting_timestamp.is_some() != command.resulting_host.is_some()
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "attachment command does not change the host, mismatches its timestamp \
+                         draw, or has an unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ControllerOverride(command) => {
+                // CR 110.2a: an override that leaves both the derived and the
+                // pinned controller exactly as they were retagged nothing, so it
+                // is not an override that ever happened.
+                if entry.node != command.cause
+                    || (command.expected_old_base_controller == Some(command.resulting_controller)
+                        && command.expected_old_controller == command.resulting_controller)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "controller-override command changes no controller, or has an unrelated \
+                         cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::EntryProvenance(command) => {
+                // CR 603.6a: a stamp that names the source the object was already
+                // stamped with recorded nothing.
+                if entry.node != command.cause
+                    || command.expected_old_source == Some(command.resulting_source)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "entry-provenance command re-stamps the same source, or has an unrelated \
+                         cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::ObjectCease(command) => {
+                // CR 704.5d/e: only a token or a copy of a card ceases to exist,
+                // and never from the battlefield or the stack.
+                if entry.node != command.cause
+                    || matches!(command.expected_zone, Zone::Battlefield | Zone::Stack)
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "cease command names a zone objects never cease from, or has an \
+                         unrelated cause"
+                            .to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::PlayerLeave(command) => {
+                // CR 800.4: a departure is caused by the leave node opened for
+                // it, never by an unrelated proposal that happened to be live.
+                if entry.node != command.cause
+                    || !matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_))
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "player-leave command is not attributed to a player-leave node".to_string(),
+                    ));
+                }
+            }
+            ResolvedRulesCommand::TokenCreation(command) => {
+                // CR 111.1: the token's id must be below the high-water its own
+                // draw established, or the record cannot describe an allocation
+                // that actually happened.
+                if entry.node != command.cause
+                    || command.object.object_id.0 >= command.resulting_next_object_id
+                {
+                    return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                        "token-creation command has an impossible id high-water, or an \
+                         unrelated cause"
                             .to_string(),
                     ));
                 }

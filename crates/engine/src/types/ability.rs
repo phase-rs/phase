@@ -7,7 +7,7 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use super::card::{PrintedCardRef, TokenImageRef};
+use super::card::{PrintedCardRef, PrintedLoyalty, TokenImageRef};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
@@ -1103,6 +1103,23 @@ pub enum DieRollModifier {
     Subtract { value: QuantityExpr },
 }
 
+impl DieRollModifier {
+    /// Visits every `QuantityExpr` carried by this modifier. Composed into
+    /// `Effect::for_each_quantity_expr` (the exhaustive authority over every
+    /// quantity an effect resolves in the current chain): the modifier's
+    /// quantity is resolved live during `Effect::RollDie` resolution
+    /// (`game/effects/roll_die.rs`), so it must be visible to callers such as
+    /// the tracked-set consumer classifier.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified here.
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        match self {
+            DieRollModifier::Add { value } | DieRollModifier::Subtract { value } => f(value),
+        }
+    }
+}
+
 impl std::str::FromStr for Parity {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, ()> {
@@ -2036,6 +2053,45 @@ pub enum ManaProduction {
     /// `state.current_trigger_event` at resolution time; emits no mana if the
     /// current trigger event is absent or not a `ManaAdded` event (CR 106.5).
     TriggerEventManaType,
+}
+
+impl ManaProduction {
+    /// Visits every `QuantityExpr` carried by this production descriptor.
+    /// Composed into `Effect::for_each_quantity_expr` (the exhaustive
+    /// authority over every quantity an effect resolves in the current
+    /// chain): each dynamic-count variant's `count` is resolved live during
+    /// `Effect::Mana` resolution (`resolve_count` in `game/effects/mana.rs`),
+    /// so those slots must be visible to callers such as the tracked-set
+    /// consumer classifier — "add {C} for each card discarded this way"
+    /// makes the mana effect a consumer of the preceding producer's set.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified here rather than silently reporting no
+    /// quantities.
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        match self {
+            // --- Dynamic-count productions: `count` resolves at effect
+            // --- resolution time.
+            ManaProduction::Colorless { count }
+            | ManaProduction::AnyOneColor { count, .. }
+            | ManaProduction::AnyCombination { count, .. }
+            | ManaProduction::ChosenColor { count, .. }
+            | ManaProduction::OpponentLandColors { count }
+            | ManaProduction::AnyCombinationOfObjectColors { count, .. }
+            | ManaProduction::AnyTypeProduceableBy { count, .. }
+            | ManaProduction::AnyInCommandersColorIdentity { count, .. }
+            | ManaProduction::AnyOneColorAmongPermanents { count, .. } => f(count),
+            // --- Quantity-free productions: fixed color lists, fixed `u32`
+            // --- counts (`Mixed::colorless_count`), or amounts derived
+            // --- entirely from board/trigger state with no `QuantityExpr`.
+            ManaProduction::Fixed { .. }
+            | ManaProduction::Mixed { .. }
+            | ManaProduction::ChoiceAmongExiledColors { .. }
+            | ManaProduction::ChoiceAmongCombinations { .. }
+            | ManaProduction::DistinctColorsAmongPermanents { .. }
+            | ManaProduction::TriggerEventManaType => {}
+        }
+    }
 }
 
 /// CR 607.2a + CR 406.6 + CR 610.3: Which exile-link relation a mana ability reads
@@ -5404,6 +5460,18 @@ pub enum QuantityRef {
     /// again for the same value". Resolves to 0 outside a discover-trigger
     /// context (fail-safe; no card references it elsewhere).
     TriggeringDiscoverValue,
+    /// CR 701.22a + CR 701.22d: The number of cards actually looked at by
+    /// the scry that fired the current "whenever you scry" trigger — read
+    /// from the trigger's OWN preserved `PlayerPerformedAction::Scry` event
+    /// (`look_count`), so each of several triggers queued by a multi-scry
+    /// resolution exposes its own scry's count. This is the *effective*
+    /// count after the engine clamps the requested amount to library size
+    /// (scrying N with fewer than N cards left looks at fewer than N cards),
+    /// not the requested scry amount. Elrond, Master of Healing: "put a
+    /// +1/+1 counter on each of up to X target creatures, where X is the
+    /// number of cards looked at while scrying this way". Resolves to 0
+    /// outside a scry-trigger context (fail-safe).
+    TriggeringScryLookCount,
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
@@ -8477,6 +8545,70 @@ pub enum CostCategory {
 }
 
 impl AbilityCost {
+    /// Visits every `QuantityExpr` carried by this cost, recursing through
+    /// the compositional forms (`Composite`, `OneOf`, `PerCounter`) and into
+    /// the embedded effect of `EffectCost` (whose body resolves on the source
+    /// as part of paying the cost, so its quantities are live in the current
+    /// chain). Composed into `Effect::for_each_quantity_expr` (the exhaustive
+    /// authority over every quantity an effect resolves in the current
+    /// chain): a resolution-time `Effect::PayCost` resolves each of these
+    /// dynamic values when the cost is paid
+    /// (`costs::pay_ability_cost_for_resolution`), so they must be visible to
+    /// callers such as the tracked-set consumer classifier — "pay 1 life for
+    /// each card discarded this way" makes the payment a consumer of the
+    /// preceding producer's set.
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added variant must be
+    /// explicitly classified here rather than silently reporting no
+    /// quantities.
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        match self {
+            // --- Direct `QuantityExpr` carriers ---
+            AbilityCost::ManaDynamic { quantity } => f(quantity),
+            AbilityCost::PayLife { amount }
+            | AbilityCost::PayEnergy { amount }
+            | AbilityCost::PaySpeed { amount } => f(amount),
+            AbilityCost::Discard { count, .. } => f(count),
+            // --- Recursive forms: every nested cost's quantities are part of
+            // --- paying THIS cost, so recurse.
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                for cost in costs {
+                    cost.for_each_quantity_expr(f);
+                }
+            }
+            AbilityCost::PerCounter { base, .. } => base.for_each_quantity_expr(f),
+            // CR 118.3: the cost's effect body resolves on the source before
+            // the ability's own effect — its quantity slots are live.
+            AbilityCost::EffectCost { effect } => effect.for_each_quantity_expr(f),
+            // --- Quantity-free costs: static mana pips, fixed `u32`/`i32`
+            // --- counts and aggregate thresholds, or purely structural
+            // --- payments with no `QuantityExpr` field.
+            AbilityCost::Mana { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::Unimplemented { .. } => {}
+        }
+    }
+
     /// CR 605.3a + CR 106.12 + CR 107.6: True iff every component of this cost is
     /// conclusively decided by the non-simulating mana-ability cheap gate
     /// (`mana_ability_ready_without_simulation`) — i.e. the cost is built solely
@@ -11421,6 +11553,22 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         face_down: bool,
     },
+    /// CR 406.3 + CR 608.2c: Exile one explicit object and the top `count`
+    /// cards of `player`'s library face down as one pile. The resolver keeps the
+    /// exact proposed member list through replacement resolution: the pile is
+    /// shuffled and returned only when every member actually reached exile.
+    /// This models the Triumph of Saint Katherine class's "If you do" rider
+    /// without allowing a partial pile to be returned.
+    ExileFaceDownPile {
+        /// The non-library member of the pile (normally the triggering source
+        /// in its owner's graveyard).
+        object: TargetFilter,
+        /// The player whose library supplies the top cards and receives the
+        /// completed pile back on top.
+        player: TargetFilter,
+        /// Number of top-library cards required in addition to `object`.
+        count: QuantityExpr,
+    },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
     /// solely to designate a target referenced by subsequent sentences via "that creature".
@@ -14321,6 +14469,7 @@ impl Effect {
 
             Effect::Dig { player, .. }
             | Effect::ExileTop { player, .. }
+            | Effect::ExileFaceDownPile { player, .. }
             | Effect::ExchangeLifeWithStat { player, .. }
             | Effect::ExileFromTopUntil { player, .. }
             // CR 119.3: `GainLife.player` is a TargetFilter. `extract_target_filter_from_effect`
@@ -14694,6 +14843,627 @@ impl Effect {
         }
     }
 
+    /// Visits every `QuantityExpr` carried by this effect —
+    /// including the secondary quantity slots that `count_expr()` (the
+    /// PRIMARY count/amount accessor) intentionally does not expose, such as
+    /// `Token::enter_with_counters` entry-counter quantities,
+    /// `Dig::keep_count_expr`, `PutSticker::max_ticket_cost`, dynamic
+    /// `PtValue::Quantity` power/toughness, and `ChangeZone`'s
+    /// (conditional) entry counters — and recurses through variants that
+    /// embed another `Effect`/`ResolvedAbility` (`CreateDrawReplacement`,
+    /// `CreatePlaneswalkReplacement`, `EpicCopy`).
+    ///
+    /// Nested domain types that carry their own quantities are walked
+    /// through composed exhaustive sub-visitors (each a no-wildcard match on
+    /// its own type): `ManaProduction::for_each_quantity_expr` for
+    /// `Effect::Mana`'s dynamic production counts,
+    /// `AbilityCost::for_each_quantity_expr` for `Effect::PayCost`'s dynamic
+    /// cost values (recursing through `Composite`/`OneOf`/`PerCounter` and
+    /// into `EffectCost`'s embedded effect), and
+    /// `DieRollModifier::for_each_quantity_expr` for `Effect::RollDie`'s
+    /// roll modifier. Smaller nested carriers are walked inline with the
+    /// same no-wildcard discipline: `LibraryPosition`'s dynamic slots
+    /// (`ChangeZoneAll`/`PutAtLibraryPosition`/`Conjure`/`Counter`'s
+    /// countered-spell destination), `UntilCondition::CumulativeThreshold`
+    /// (`ExileFromTopUntil`), `GuessSubject::Proposition` (`OpponentGuess`),
+    /// `KeeperConstraint::ExactCount` (`ChooseAndSacrificeRest`), and each
+    /// `ConjureCard::count`.
+    ///
+    /// Deliberately NOT walked: quantities inside deferred definition
+    /// payloads (`AbilityDefinition` — including `RollDie::results` branch
+    /// bodies, which resolve through their own `resolve_ability_chain`
+    /// entry — `ContinuousModification`, `DamageModification`,
+    /// `CastingPermission`, …). Those are evaluated in
+    /// their own later resolution context, not the currently resolving
+    /// chain's; where such a payload consumes the CURRENT chain's tracked
+    /// set, that is signalled by an explicit flag instead
+    /// (`CreateDelayedTrigger { uses_tracked_set }`).
+    ///
+    /// Exhaustive match — no wildcard arm — so a newly added Effect variant
+    /// must be explicitly classified here rather than silently reporting no
+    /// quantities (same convention as `count_expr()`/`target_filter()`).
+    pub fn for_each_quantity_expr<'a>(&'a self, f: &mut dyn FnMut(&'a QuantityExpr)) {
+        fn visit_pt<'a>(value: &'a PtValue, f: &mut dyn FnMut(&'a QuantityExpr)) {
+            match value {
+                PtValue::Fixed(_) | PtValue::Variable(_) => {}
+                PtValue::Quantity(expr) => f(expr),
+            }
+        }
+        // CR 401.7: dynamic library slots (`BeneathTop::depth`,
+        // `RandomWithinTop::n`) are resolved at effect-resolution time by the
+        // library-insertion authority; the fixed slots carry no quantity.
+        fn visit_library_position<'a>(
+            position: &'a LibraryPosition,
+            f: &mut dyn FnMut(&'a QuantityExpr),
+        ) {
+            match position {
+                LibraryPosition::Top
+                | LibraryPosition::Bottom
+                | LibraryPosition::NthFromTop { .. } => {}
+                LibraryPosition::BeneathTop { depth } => f(depth),
+                LibraryPosition::RandomWithinTop { n } => f(n),
+            }
+        }
+        fn visit_resolved_ability<'a>(
+            ability: &'a ResolvedAbility,
+            f: &mut dyn FnMut(&'a QuantityExpr),
+        ) {
+            ability.effect.for_each_quantity_expr(f);
+            if let Some(repeat_for) = ability.repeat_for.as_ref() {
+                f(repeat_for);
+            }
+            if let Some(sub) = ability.sub_ability.as_deref() {
+                visit_resolved_ability(sub, f);
+            }
+            if let Some(else_branch) = ability.else_ability.as_deref() {
+                visit_resolved_ability(else_branch, f);
+            }
+        }
+        match self {
+            Effect::ChangeSpeed { amount, .. } => {
+                f(amount);
+            }
+            Effect::DealDamage { amount, .. } => {
+                f(amount);
+            }
+            Effect::EachSourceDealsDamage { amount, .. } => {
+                f(amount);
+            }
+            Effect::Draw { count, .. } => {
+                f(count);
+            }
+            Effect::Pump {
+                power, toughness, ..
+            } => {
+                visit_pt(power, f);
+                visit_pt(toughness, f);
+            }
+            Effect::Token {
+                power,
+                toughness,
+                count,
+                enter_with_counters,
+                ..
+            } => {
+                visit_pt(power, f);
+                visit_pt(toughness, f);
+                f(count);
+                for (_, q) in enter_with_counters {
+                    f(q);
+                }
+            }
+            Effect::GainLife { amount, .. } => {
+                f(amount);
+            }
+            Effect::LoseLife { amount, .. } => {
+                f(amount);
+            }
+            Effect::RemoveCounter { count, .. } => {
+                f(count);
+            }
+            Effect::Sacrifice { count, .. } => {
+                f(count);
+            }
+            Effect::Mill { count, .. } => {
+                f(count);
+            }
+            Effect::Scry { count, .. } => {
+                f(count);
+            }
+            Effect::PumpAll {
+                power, toughness, ..
+            } => {
+                visit_pt(power, f);
+                visit_pt(toughness, f);
+            }
+            Effect::DamageAll { amount, .. } => {
+                f(amount);
+            }
+            Effect::DamageEachPlayer { amount, .. } => {
+                f(amount);
+            }
+            Effect::ChangeZone {
+                enter_with_counters,
+                conditional_enter_with_counters,
+                ..
+            } => {
+                for (_, q) in enter_with_counters {
+                    f(q);
+                }
+                for (_, _, q) in conditional_enter_with_counters {
+                    f(q);
+                }
+            }
+            Effect::ChangeZoneAll {
+                enter_with_counters,
+                library_position,
+                ..
+            } => {
+                for (_, q) in enter_with_counters {
+                    f(q);
+                }
+                if let Some(position) = library_position {
+                    visit_library_position(position, f);
+                }
+            }
+            Effect::Dig {
+                count,
+                keep_count_expr,
+                ..
+            } => {
+                f(count);
+                if let Some(q) = keep_count_expr {
+                    f(q);
+                }
+            }
+            Effect::Surveil { count, .. } => {
+                f(count);
+            }
+            Effect::BounceAll { count, .. } => {
+                if let Some(q) = count {
+                    f(q);
+                }
+            }
+            Effect::EpicCopy { spell, .. } => {
+                // The epic copy is a full `ResolvedAbility` chain; walk its
+                // effect (and continuation branches) so its quantity slots
+                // are not invisible to callers.
+                visit_resolved_ability(spell, f);
+            }
+            Effect::CastCopyOfCard { count, .. } => {
+                if let Some(q) = count {
+                    f(q);
+                }
+            }
+            Effect::CopyTokenOf { count, .. } => {
+                f(count);
+            }
+            Effect::CreateTokenCopyFromPool {
+                mv_bound, count, ..
+            } => {
+                f(mv_bound);
+                f(count);
+            }
+            Effect::PutCounter { count, .. } => {
+                f(count);
+            }
+            Effect::PutChosenCounter { count, .. } => {
+                f(count);
+            }
+            Effect::PutCounterAll { count, .. } => {
+                f(count);
+            }
+            Effect::ChooseCounterAdjustment { count, .. } => {
+                f(count);
+            }
+            Effect::MoveCounters { count, .. } => {
+                if let Some(q) = count {
+                    f(q);
+                }
+            }
+            Effect::Animate {
+                power, toughness, ..
+            } => {
+                if let Some(v) = power {
+                    visit_pt(v, f);
+                }
+                if let Some(v) = toughness {
+                    visit_pt(v, f);
+                }
+            }
+            Effect::Discard { count, .. } => {
+                f(count);
+            }
+            Effect::SearchLibrary { count, .. } => {
+                f(count);
+            }
+            Effect::SearchOutsideGame { count, .. } => {
+                f(count);
+            }
+            Effect::RevealHand { count, .. } => {
+                if let Some(q) = count {
+                    f(q);
+                }
+            }
+            Effect::ExileTop { count, .. } => {
+                f(count);
+            }
+            Effect::ExileFaceDownPile { count, .. } => {
+                f(count);
+            }
+            Effect::Connive { count, .. } => {
+                f(count);
+            }
+            Effect::AddPendingETBCounters { count, .. } => {
+                f(count);
+            }
+            Effect::PayCost { cost, scale, .. } => {
+                // The cost's own dynamic values (ManaDynamic, PayLife,
+                // Discard, PayEnergy/PaySpeed, and the recursive
+                // Composite/OneOf/EffectCost/PerCounter forms) resolve when
+                // the cost is paid during THIS effect's resolution.
+                cost.for_each_quantity_expr(f);
+                if let Some(q) = scale {
+                    f(q);
+                }
+            }
+            Effect::PreventDamage { amount_dynamic, .. } => {
+                if let Some(q) = amount_dynamic {
+                    f(q);
+                }
+            }
+            Effect::CreateDrawReplacement {
+                replacement_effect, ..
+            } => {
+                replacement_effect.for_each_quantity_expr(f);
+            }
+            Effect::CreatePlaneswalkReplacement {
+                replacement_effect, ..
+            } => {
+                replacement_effect.for_each_quantity_expr(f);
+            }
+            Effect::RollDie {
+                count, modifier, ..
+            } => {
+                f(count);
+                // CR 706.2: the (optional) Add/Subtract modifier quantity is
+                // resolved against each natural roll during THIS effect's
+                // resolution (`game/effects/roll_die.rs`).
+                if let Some(m) = modifier {
+                    m.for_each_quantity_expr(f);
+                }
+            }
+            Effect::FlipCoins { count, .. } => {
+                f(count);
+            }
+            Effect::Mana { produced, .. } => {
+                // The production descriptor's dynamic `count` slots (Colorless,
+                // AnyOneColor, AnyOneColorAmongPermanents, …) resolve during
+                // THIS effect's resolution (`resolve_count` in
+                // `game/effects/mana.rs`).
+                produced.for_each_quantity_expr(f);
+            }
+            // CR 401.7: the countered spell's replacement destination may be a
+            // dynamic library slot, resolved when the counter moves the spell
+            // (`game/effects/counter.rs`).
+            Effect::Counter {
+                countered_spell_zone,
+                ..
+            } => match countered_spell_zone {
+                Some(SpellStackToGraveyardReplacement::Library { position }) => {
+                    visit_library_position(position, f);
+                }
+                Some(
+                    SpellStackToGraveyardReplacement::Exile
+                    | SpellStackToGraveyardReplacement::Hand,
+                )
+                | None => {}
+            },
+            // CR 202.3 + CR 107.3e: the cumulative-threshold quantity is
+            // resolved up-front when the until-loop starts
+            // (`game/effects/exile_from_top_until.rs`).
+            Effect::ExileFromTopUntil { until, .. } => match until {
+                UntilCondition::NextMatches { .. } => {}
+                UntilCondition::CumulativeThreshold { threshold, .. } => f(threshold),
+            },
+            // A proposition guess resolves both comparison sides live
+            // (`game/effects/opponent_guess.rs`).
+            Effect::OpponentGuess { subject, .. } => match &**subject {
+                GuessSubject::CommittedChoice { .. } => {}
+                GuessSubject::Proposition { lhs, rhs, .. } => {
+                    f(lhs);
+                    f(rhs);
+                }
+            },
+            // Each conjured card's count — and the optional dynamic library
+            // slot — resolve during conjure resolution
+            // (`game/effects/conjure.rs`).
+            Effect::Conjure {
+                cards,
+                library_position,
+                ..
+            } => {
+                for card in cards {
+                    f(&card.count);
+                }
+                if let Some(position) = library_position {
+                    visit_library_position(position, f);
+                }
+            }
+            Effect::ArrangePlanarDeckTop {
+                count, keep_on_top, ..
+            } => {
+                f(count);
+                f(keep_on_top);
+            }
+            Effect::AssembleContraptions { count, .. } => {
+                f(count);
+            }
+            Effect::PutSticker {
+                count,
+                max_ticket_cost,
+                ..
+            } => {
+                f(count);
+                if let Some(q) = max_ticket_cost {
+                    f(q);
+                }
+            }
+            Effect::ChooseAndSacrificeRest {
+                total_power_cap,
+                keeper_constraint,
+                ..
+            } => {
+                if let Some(q) = total_power_cap {
+                    f(q);
+                }
+                // CR 101.4 + CR 701.21a: the keeper cardinality is resolved
+                // live when the chooser prompt is built.
+                if let Some(constraint) = keeper_constraint {
+                    match constraint {
+                        KeeperConstraint::ExactCount { count } => f(count),
+                    }
+                }
+            }
+            Effect::GainEnergy { amount, .. } => {
+                f(amount);
+            }
+            Effect::GivePlayerCounter { count, .. } => {
+                f(count);
+            }
+            Effect::RevealUntil { count, .. } => {
+                f(count);
+            }
+            Effect::Discover {
+                mana_value_limit, ..
+            } => {
+                f(mana_value_limit);
+            }
+            Effect::PutAtLibraryPosition {
+                count, position, ..
+            } => {
+                f(count);
+                visit_library_position(position, f);
+            }
+            Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                count,
+                life_payment,
+                ..
+            } => {
+                f(count);
+                f(life_payment);
+            }
+            Effect::Manifest { count, .. } => {
+                f(count);
+            }
+            Effect::Cloak { count, .. } => {
+                f(count);
+            }
+            Effect::GrantExtraLoyaltyActivations { amount, .. } => {
+                f(amount);
+            }
+            Effect::SkipNextTurn { count, .. } => {
+                f(count);
+            }
+            Effect::SkipNextStep { count, .. } => {
+                f(count);
+            }
+            Effect::AdditionalPhase { count, .. } => {
+                f(count);
+            }
+            Effect::Incubate { count, .. } => {
+                f(count);
+            }
+            Effect::Amass { count, .. } => {
+                f(count);
+            }
+            Effect::Monstrosity { count, .. } => {
+                f(count);
+            }
+            Effect::Renown { count, .. } => {
+                f(count);
+            }
+            Effect::Bolster { count, .. } => {
+                f(count);
+            }
+            Effect::Adapt { count, .. } => {
+                f(count);
+            }
+            Effect::Endure { amount, .. } => {
+                f(amount);
+            }
+            Effect::Seek { count, .. } => {
+                f(count);
+            }
+            Effect::SetLifeTotal { amount, .. } => {
+                f(amount);
+            }
+            Effect::Intensify { amount, .. } => {
+                f(amount);
+            }
+            Effect::ForEachCategory { action, .. } => {
+                // CR 608.2c: the per-member terminal action runs inside THIS
+                // resolution, so its counter quantity is a live slot.
+                match action {
+                    ForEachCategoryAction::ExileFromPool { .. } => {}
+                    ForEachCategoryAction::PutCounter { count, .. } => f(count),
+                }
+            }
+            Effect::StartYourEngines { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::PairWith { .. }
+            | Effect::Destroy { .. }
+            | Effect::Regenerate { .. }
+            | Effect::RemoveAllDamage { .. }
+            | Effect::CounterAll { .. }
+            | Effect::SetTapState { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::GainControl { .. }
+            | Effect::GainControlAll { .. }
+            | Effect::ControlNextTurn { .. }
+            | Effect::Attach { .. }
+            | Effect::UnattachAll { .. }
+            | Effect::Fight { .. }
+            | Effect::Bounce { .. }
+            | Effect::Explore
+            | Effect::ExploreAll { .. }
+            | Effect::Investigate
+            | Effect::Tribute { .. }
+            | Effect::TimeTravel
+            | Effect::BecomeMonarch
+            | Effect::NoOp
+            | Effect::Proliferate
+            | Effect::ProliferateTarget { .. }
+            | Effect::Populate
+            | Effect::Clash
+            | Effect::Behold { .. }
+            | Effect::EndTheTurn
+            | Effect::EndCombatPhase
+            | Effect::Vote { .. }
+            | Effect::SeparateIntoPiles { .. }
+            | Effect::SwitchPT { .. }
+            | Effect::CopySpell { .. }
+            | Effect::Myriad
+            | Effect::Encore
+            | Effect::CombineHost { .. }
+            | Effect::ChooseAugmentAndCombineWithHost { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::CopyTokenBlockingAttacker { .. }
+            | Effect::BecomeCopy { .. }
+            | Effect::ChoosePermanent { .. }
+            | Effect::GainActivatedAbilitiesOfTarget { .. }
+            | Effect::ChooseCard { .. }
+            | Effect::ChooseCounterKind { .. }
+            | Effect::MultiplyCounter { .. }
+            | Effect::DoublePT { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::RegisterBending { .. }
+            | Effect::GenericEffect { .. }
+            | Effect::Cleanup { .. }
+            | Effect::Shuffle { .. }
+            | Effect::Transform { .. }
+            | Effect::FlipPermanent { .. }
+            | Effect::RevealFromHand { .. }
+            | Effect::Reveal { .. }
+            | Effect::RevealTop { .. }
+            | Effect::TargetOnly { .. }
+            | Effect::Choose { .. }
+            | Effect::SwapChosenLabels { .. }
+            | Effect::ChooseDamageSource { .. }
+            | Effect::Suspect { .. }
+            | Effect::Unsuspect { .. }
+            | Effect::PhaseOut { .. }
+            | Effect::PhaseIn { .. }
+            | Effect::ForceBlock { .. }
+            | Effect::ForceAttack { .. }
+            | Effect::SolveCase
+            | Effect::BecomePrepared { .. }
+            | Effect::BecomeUnprepared { .. }
+            | Effect::BecomeSaddled { .. }
+            | Effect::SetClassLevel { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddTargetReplacement { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
+            | Effect::AddPendingEntersModifications { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::FreeCastFromZones { .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+            | Effect::CreateDamageReplacement { .. }
+            | Effect::LoseTheGame { .. }
+            | Effect::WinTheGame { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::RingTemptsYou
+            | Effect::VentureIntoDungeon
+            | Effect::VentureInto { .. }
+            | Effect::TakeTheInitiative
+            | Effect::Planeswalk
+            | Effect::ChaosEnsues
+            | Effect::ReverseTurnOrder
+            | Effect::RedistributeLifeTotals
+            | Effect::OpenAttractions { .. }
+            | Effect::RollToVisitAttractions
+            | Effect::AssembleContraptionsFromRollDifference
+            | Effect::CrankContraptions { .. }
+            | Effect::ReassembleContraption { .. }
+            | Effect::AssembleContraptionOnSprocket { .. }
+            | Effect::ReassembleContraptionOnSprocket { .. }
+            | Effect::ApplySticker { .. }
+            | Effect::ProcessRadCounters
+            | Effect::GrantCastingPermission { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::RememberCard { .. }
+            | Effect::ChooseObjectsIntoTrackedSet { .. }
+            | Effect::EachPlayerCopyChosen { .. }
+            | Effect::Exploit { .. }
+            | Effect::LoseAllPlayerCounters { .. }
+            | Effect::Heist { .. }
+            | Effect::HeistExile
+            | Effect::Cascade
+            | Effect::Ripple { .. }
+            | Effect::MiracleCast { .. }
+            | Effect::MadnessCast { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::Goad { .. }
+            | Effect::GoadAll { .. }
+            | Effect::Detain { .. }
+            | Effect::SetRoomDoorLock { .. }
+            | Effect::ExchangeControl { .. }
+            | Effect::ChangeTargets { .. }
+            | Effect::ManifestDread
+            | Effect::TurnFaceUp { .. }
+            | Effect::TurnFaceDown { .. }
+            | Effect::ExtraTurn { .. }
+            | Effect::Double { .. }
+            | Effect::RuntimeHandled { .. }
+            | Effect::Specialize
+            | Effect::Learn
+            | Effect::Forage
+            | Effect::Harness
+            | Effect::CollectEvidence { .. }
+            | Effect::BlightEffect { .. }
+            | Effect::ExchangeLifeWithStat { .. }
+            | Effect::ExchangeLifeTotals { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::GiveControl { .. }
+            | Effect::RemoveFromCombat { .. }
+            | Effect::BecomeBlocked { .. }
+            | Effect::ApplyPerpetual { .. }
+            | Effect::DraftFromSpellbook { .. }
+            | Effect::ChooseOneOf { .. }
+            | Effect::Unimplemented { .. } => {}
+        }
+    }
+
     /// CR 107.3 + CR 608.2c: Returns the `QuantityExpr` carrying this effect's
     /// primary count/amount, for the full class of count- and amount-bearing
     /// effects (token creation, counters, draws, damage, mill, discard, etc.).
@@ -14728,6 +15498,7 @@ impl Effect {
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
             | Effect::ExileTop { count, .. }
+            | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
             | Effect::FlipCoins { count, .. }
@@ -14984,6 +15755,7 @@ impl Effect {
             | Effect::SearchLibrary { count, .. }
             | Effect::SearchOutsideGame { count, .. }
             | Effect::ExileTop { count, .. }
+            | Effect::ExileFaceDownPile { count, .. }
             | Effect::AddPendingETBCounters { count, .. }
             | Effect::RollDie { count, .. }
             | Effect::FlipCoins { count, .. }
@@ -15325,6 +16097,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Reveal { .. } => "Reveal",
         Effect::RevealTop { .. } => "RevealTop",
         Effect::ExileTop { .. } => "ExileTop",
+        Effect::ExileFaceDownPile { .. } => "ExileFaceDownPile",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::OpponentGuess { .. } => "OpponentGuess",
@@ -15644,6 +16417,7 @@ pub enum EffectKind {
     GivePlayerCounter,
     LoseAllPlayerCounters,
     ExileFromTopUntil,
+    ExileFaceDownPile,
     RevealUntil,
     Discover,
     Heist,
@@ -15922,6 +16696,7 @@ impl From<&Effect> for EffectKind {
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
             Effect::LoseAllPlayerCounters { .. } => EffectKind::LoseAllPlayerCounters,
             Effect::ExileFromTopUntil { .. } => EffectKind::ExileFromTopUntil,
+            Effect::ExileFaceDownPile { .. } => EffectKind::ExileFaceDownPile,
             Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::Heist { .. } => EffectKind::Heist,
@@ -20146,13 +20921,32 @@ pub enum DamageModification {
     /// Talent +2); a `Ref` carries a live game quantity ("...plus X, where X is
     /// ~'s power" — Hawkeye, Young Avenger).
     Plus { value: QuantityExpr },
-    /// amount.saturating_sub(value) (e.g. Benevolent Unicorn, -1).
-    /// CR 615.1 + CR 614.1a: Continuous prevention statics ("prevent that damage")
-    /// emit `Minus { value: u32::MAX }` — saturating-subtraction yields 0 for any
-    /// amount, and the replacement is not consumed (continuous, not shield-style).
-    /// This is distinct from `ShieldKind::Prevention { All }` (one-shot consumed
-    /// shield); the saturating-max sentinel covers the continuous case.
+    /// CR 614.1a: plain arithmetic subtraction — amount.saturating_sub(value)
+    /// (e.g. Benevolent Unicorn, "that much damage minus 1 instead"). This is
+    /// NOT prevention: no damage is "prevented" in the CR 615 sense, so the
+    /// applier emits no `DamagePrevented` bookkeeping and fires no prevention
+    /// riders for it. For the CR 615 prevention class that shares this exact
+    /// subtraction formula, see `PreventionMinus` — the two variants are typed
+    /// provenance over ONE shared applier subtraction arm, not two subtraction
+    /// authorities.
     Minus { value: u32 },
+    /// CR 615.1a + CR 702.64b: continuous per-event damage PREVENTION carrying
+    /// the same saturating subtraction as `Minus` — "prevent N of that damage"
+    /// (Heart-Shaped Herb, Sphere of Purity, Orbs of Warding) and the CR 702.64
+    /// Absorb synthesis. The variant tag is the typed prevention provenance
+    /// threaded from the producer (parser / keyword synthesis) through the
+    /// shared `Minus` applier arm: subtraction is applied by the SAME match arm
+    /// as `Minus`, and only this provenance additionally emits `DamagePrevented`
+    /// bookkeeping plus the CR 615.5 prevented-amount handoff for
+    /// "damage prevented this way" continuations. A `value` of `u32::MAX` is
+    /// the continuous prevent-all sentinel (saturating-subtraction yields 0 for
+    /// any amount; the replacement is not consumed — continuous, not
+    /// shield-style, distinct from `ShieldKind::Prevention { All }`).
+    ///
+    /// Provenance is a sibling variant rather than a field on `Minus` because
+    /// the dormant, contributor-frozen `crates/mtgish-import` constructs
+    /// `Minus { value }` literals that a new mandatory field would break.
+    PreventionMinus { value: u32 },
     /// CR 614.1a: Conditional — if amount < source's power, set amount = source's power.
     /// References the replacement source's (not the damage source's) current post-layer power.
     /// Used by Ojer Axonil: "deals damage equal to ~'s power instead."
@@ -20897,6 +21691,8 @@ pub struct CopiableValues {
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     pub loyalty: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed_loyalty: Option<PrintedLoyalty>,
     pub keywords: Vec<Keyword>,
     /// Ability-set fields are `Arc<Vec<_>>` so copy-effect propagation from
     /// source to target uses refcount sharing rather than deep clones.

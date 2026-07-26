@@ -273,6 +273,7 @@ mod tests {
                     power: None,
                     toughness: None,
                     loyalty: None,
+                    printed_loyalty: None,
                     keywords: vec![],
                     abilities: Default::default(),
                     trigger_definitions: Default::default(),

@@ -6,10 +6,11 @@ use crate::game::game_object::GameObject;
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;
-use crate::types::ability::TargetRef;
+use crate::types::ability::{ShieldKind, TargetRef};
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{CombatDamageAssignmentMode, DamageSlot, GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent};
@@ -298,6 +299,241 @@ pub fn participates_in_pending_combat_damage_substep(
     };
     deals_in_substep(object, sub_step, &first_strike_participants)
         && combat_damage_amount(object) > 0
+}
+
+/// Damage amounts fixed by an ordinary one-on-one combat exchange.
+///
+/// This deliberately describes only damage marked on each combatant; it does
+/// not imply that either combatant survives state-based actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedCombatDamage {
+    pub attacker_to_blocker: u32,
+    pub blocker_to_attacker: u32,
+}
+
+/// Survival facts derived from a [`FixedCombatDamage`] exchange.
+///
+/// This is separate from the damage fact because damage can be fixed while
+/// survival is not once destruction replacements or other post-damage effects
+/// are relevant. `assess_combat_impact` reports this only when both are fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FixedCombatSurvival {
+    pub attacker_survives: bool,
+    pub blocker_survives: bool,
+}
+
+/// Conservative assessment of a bound attacker/blocker pair's next combat-damage exchange.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombatImpact {
+    Fixed {
+        damage: FixedCombatDamage,
+        survival: FixedCombatSurvival,
+    },
+    Indeterminate,
+}
+
+#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
+fn combatant_has_regeneration_shield(object: &GameObject) -> bool {
+    object
+        .replacement_definitions
+        .iter_all()
+        .any(|replacement| replacement.shield_kind == ShieldKind::Regeneration)
+}
+
+#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
+fn damage_is_not_fixed(
+    state: &GameState,
+    context: &DamageContext,
+    target: &TargetRef,
+    amount: u32,
+) -> bool {
+    if amount == 0 {
+        return false;
+    }
+
+    let mut discarded_events = Vec::new();
+    let Some(proposed) =
+        pre_replacement_damage_gate(state, context, target, amount, true, &mut discarded_events)
+    else {
+        return true;
+    };
+
+    !replacement::find_applicable_replacements(
+        state,
+        &proposed,
+        replacement::replacement_registry(),
+    )
+    .is_empty()
+}
+
+#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
+fn lethal_destruction_is_not_fixed(state: &GameState, object_id: ObjectId) -> bool {
+    let proposed = ProposedEvent::Destroy {
+        object_id,
+        source: None,
+        cant_regenerate: false,
+        applied: Default::default(),
+    };
+    !replacement::find_applicable_replacements(
+        state,
+        &proposed,
+        replacement::replacement_registry(),
+    )
+    .is_empty()
+}
+
+#[allow(dead_code)] // Reachable only through the deferred crate-visible assessment API.
+fn survives_marked_damage(object: &GameObject, incoming_damage: u32) -> Option<bool> {
+    let toughness = object.toughness?.max(0) as u32;
+    Some(object.damage_marked.saturating_add(incoming_damage) < toughness)
+}
+
+/// Assess the next combat-damage exchange for a currently bound attacker/blocker pair.
+///
+/// This deliberately fails closed: it only returns fixed facts for an ordinary,
+/// one-on-one, simultaneous exchange with no applicable damage replacement or
+/// pre-replacement prevention gate. It never runs the replacement pipeline,
+/// applies damage, clones state, or rebuilds the replacement index.
+///
+/// CR 510.2: Combat damage is dealt simultaneously. CR 614.1 + CR 615.1:
+/// replacement and prevention effects must be resolved before that damage is dealt.
+pub(crate) fn assess_combat_impact(
+    state: &GameState,
+    attacker: ObjectIncarnationRef,
+    blocker: ObjectIncarnationRef,
+) -> CombatImpact {
+    let Some(combat) = state.combat.as_ref() else {
+        return CombatImpact::Indeterminate;
+    };
+    if combat.first_strike_done
+        || combat.regular_damage_done
+        || combat.damage_step_index.is_some()
+        || !combat.pending_damage.is_empty()
+        || !combat.damage_assignments.is_empty()
+        || matches!(
+            &state.waiting_for,
+            WaitingFor::AssignCombatDamage { .. } | WaitingFor::AssignBlockerDamage { .. }
+        )
+    {
+        return CombatImpact::Indeterminate;
+    }
+
+    let Some(attacker_object) = state.objects.get(&attacker.object_id) else {
+        return CombatImpact::Indeterminate;
+    };
+    let Some(blocker_object) = state.objects.get(&blocker.object_id) else {
+        return CombatImpact::Indeterminate;
+    };
+    if ObjectIncarnationRef::from_object(attacker_object) != attacker
+        || ObjectIncarnationRef::from_object(blocker_object) != blocker
+        || attacker.object_id == blocker.object_id
+        || attacker_object.zone != crate::types::zones::Zone::Battlefield
+        || blocker_object.zone != crate::types::zones::Zone::Battlefield
+        || !attacker_object
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+        || !blocker_object
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+    {
+        return CombatImpact::Indeterminate;
+    }
+
+    let Some(attacker_info) = combat
+        .attackers
+        .iter()
+        .find(|entry| entry.object_id == attacker.object_id)
+    else {
+        return CombatImpact::Indeterminate;
+    };
+    if !attacker_info.blocked
+        || attacker_info.band_id.is_some()
+        || combat
+            .blocker_assignments
+            .get(&attacker.object_id)
+            .is_none_or(|blockers| blockers.as_slice() != [blocker.object_id])
+        || combat
+            .blocker_to_attacker
+            .get(&blocker.object_id)
+            .is_none_or(|attackers| attackers.as_slice() != [attacker.object_id])
+        || combat
+            .first_strike_participants
+            .as_ref()
+            .is_some_and(|participants| !participants.is_empty())
+        || !combat_first_strike_participants(state, combat).is_empty()
+    {
+        return CombatImpact::Indeterminate;
+    }
+
+    let attacker_context = DamageContext::from_source(state, attacker.object_id);
+    let blocker_context = DamageContext::from_source(state, blocker.object_id);
+    let (Some(attacker_context), Some(blocker_context)) = (attacker_context, blocker_context)
+    else {
+        return CombatImpact::Indeterminate;
+    };
+    if attacker_context.has_deathtouch
+        || blocker_context.has_deathtouch
+        || attacker_context.has_wither
+        || blocker_context.has_wither
+        || attacker_context.has_infect
+        || blocker_context.has_infect
+        || attacker_object.assigns_damage_as_though_unblocked
+        || blocker_object.assigns_damage_as_though_unblocked
+        || crate::game::combat::has_banding(state, attacker.object_id)
+        || crate::game::combat::has_banding(state, blocker.object_id)
+        || attacker_object.has_keyword(&Keyword::Trample)
+        || attacker_object.has_keyword(&Keyword::TrampleOverPlaneswalkers)
+        || blocker_object.has_keyword(&Keyword::Trample)
+        || blocker_object.has_keyword(&Keyword::TrampleOverPlaneswalkers)
+        || attacker_object.has_keyword(&Keyword::Indestructible)
+        || blocker_object.has_keyword(&Keyword::Indestructible)
+        || attacker_object.counters.contains_key(&CounterType::Shield)
+        || blocker_object.counters.contains_key(&CounterType::Shield)
+        || combatant_has_regeneration_shield(attacker_object)
+        || combatant_has_regeneration_shield(blocker_object)
+    {
+        return CombatImpact::Indeterminate;
+    }
+
+    let damage = FixedCombatDamage {
+        attacker_to_blocker: combat_damage_amount(attacker_object),
+        blocker_to_attacker: combat_damage_amount(blocker_object),
+    };
+    if damage_is_not_fixed(
+        state,
+        &attacker_context,
+        &TargetRef::Object(blocker.object_id),
+        damage.attacker_to_blocker,
+    ) || damage_is_not_fixed(
+        state,
+        &blocker_context,
+        &TargetRef::Object(attacker.object_id),
+        damage.blocker_to_attacker,
+    ) {
+        return CombatImpact::Indeterminate;
+    }
+
+    let (Some(attacker_survives), Some(blocker_survives)) = (
+        survives_marked_damage(attacker_object, damage.blocker_to_attacker),
+        survives_marked_damage(blocker_object, damage.attacker_to_blocker),
+    ) else {
+        return CombatImpact::Indeterminate;
+    };
+    if (!attacker_survives && lethal_destruction_is_not_fixed(state, attacker.object_id))
+        || (!blocker_survives && lethal_destruction_is_not_fixed(state, blocker.object_id))
+    {
+        return CombatImpact::Indeterminate;
+    }
+
+    CombatImpact::Fixed {
+        damage,
+        survival: FixedCombatSurvival {
+            attacker_survives,
+            blocker_survives,
+        },
+    }
 }
 
 /// Drain pending_damage from CombatState, resetting it to empty.
@@ -1228,14 +1464,15 @@ mod tests {
     use crate::game::combat::{AttackerInfo, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, Comparator, ContinuousModification, ControllerRef, Effect, QuantityExpr,
-        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
-        TypedFilter,
+        AbilityDefinition, Comparator, ContinuousModification, ControllerRef, DamageModification,
+        Effect, QuantityExpr, QuantityRef, ReplacementDefinition, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::identifiers::{CardId, TrackedSetId};
+    use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
     use std::sync::Arc;
@@ -1302,6 +1539,270 @@ mod tests {
             combat.blocker_assignments.insert(attacker_id, blockers);
         }
         state.combat = Some(combat);
+    }
+
+    fn current_incarnation(state: &GameState, object_id: ObjectId) -> ObjectIncarnationRef {
+        ObjectIncarnationRef::from_object(&state.objects[&object_id])
+    }
+
+    #[test]
+    fn assess_combat_impact_reports_fixed_damage_and_survival_without_mutation() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        let attacker_ref = current_incarnation(&state, attacker);
+        let blocker_ref = current_incarnation(&state, blocker);
+        let state_before = state.clone();
+        let index_before = (
+            state.replacement_index.initialized,
+            state.replacement_index.dirty,
+            state.replacement_index.pipeline_active,
+            state.replacement_index.by_event.clone(),
+        );
+
+        assert_eq!(
+            assess_combat_impact(&state, attacker_ref, blocker_ref),
+            CombatImpact::Fixed {
+                damage: FixedCombatDamage {
+                    attacker_to_blocker: 3,
+                    blocker_to_attacker: 2,
+                },
+                survival: FixedCombatSurvival {
+                    attacker_survives: true,
+                    blocker_survives: false,
+                },
+            }
+        );
+        assert_eq!(
+            state, state_before,
+            "assessment must not apply damage or mutate state"
+        );
+        assert_eq!(
+            (
+                state.replacement_index.initialized,
+                state.replacement_index.dirty,
+                state.replacement_index.pipeline_active,
+                state.replacement_index.by_event.clone(),
+            ),
+            index_before,
+            "assessment must not prepare or rebuild the replacement index"
+        );
+    }
+
+    #[test]
+    fn assess_combat_impact_is_indeterminate_when_damage_has_a_replacement() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .damage_modification(DamageModification::Double),
+            );
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        let attacker_ref = current_incarnation(&state, attacker);
+        let blocker_ref = current_incarnation(&state, blocker);
+        let state_before = state.clone();
+
+        assert_eq!(
+            assess_combat_impact(&state, attacker_ref, blocker_ref),
+            CombatImpact::Indeterminate
+        );
+        assert_eq!(
+            state, state_before,
+            "candidate scanning must not consume or apply the replacement"
+        );
+    }
+
+    #[test]
+    fn assess_combat_impact_rejects_stale_bound_combatant() {
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 3, 3);
+        let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        let stale_attacker = current_incarnation(&state, attacker);
+        state.objects.get_mut(&attacker).unwrap().bump_incarnation();
+
+        assert_eq!(
+            assess_combat_impact(&state, stale_attacker, current_incarnation(&state, blocker)),
+            CombatImpact::Indeterminate
+        );
+    }
+
+    #[test]
+    fn assess_combat_impact_fails_closed_for_complex_combat() {
+        let mut multi_block_state = setup();
+        let attacker = create_creature(&mut multi_block_state, PlayerId(0), "Attacker", 3, 3);
+        let blocker_a = create_creature(&mut multi_block_state, PlayerId(1), "Blocker A", 2, 2);
+        let blocker_b = create_creature(&mut multi_block_state, PlayerId(1), "Blocker B", 2, 2);
+        setup_combat(
+            &mut multi_block_state,
+            vec![attacker],
+            vec![(attacker, vec![blocker_a, blocker_b])],
+        );
+        assert_eq!(
+            assess_combat_impact(
+                &multi_block_state,
+                current_incarnation(&multi_block_state, attacker),
+                current_incarnation(&multi_block_state, blocker_a),
+            ),
+            CombatImpact::Indeterminate,
+            "multiple blockers require a damage-assignment decision"
+        );
+
+        let mut keyword_state = setup();
+        let keyword_attacker = create_creature(&mut keyword_state, PlayerId(0), "Attacker", 3, 3);
+        let keyword_blocker = create_creature(&mut keyword_state, PlayerId(1), "Blocker", 2, 2);
+        keyword_state
+            .objects
+            .get_mut(&keyword_attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        setup_combat(
+            &mut keyword_state,
+            vec![keyword_attacker],
+            vec![(keyword_attacker, vec![keyword_blocker])],
+        );
+        assert_eq!(
+            assess_combat_impact(
+                &keyword_state,
+                current_incarnation(&keyword_state, keyword_attacker),
+                current_incarnation(&keyword_state, keyword_blocker),
+            ),
+            CombatImpact::Indeterminate,
+            "first strike creates a separate combat-damage substep"
+        );
+
+        for keyword in [
+            Keyword::DoubleStrike,
+            Keyword::Deathtouch,
+            Keyword::Wither,
+            Keyword::Infect,
+            Keyword::Trample,
+        ] {
+            let mut state = setup();
+            let attacker = create_creature(&mut state, PlayerId(0), "Attacker", 3, 3);
+            let blocker = create_creature(&mut state, PlayerId(1), "Blocker", 2, 2);
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .keywords
+                .push(keyword.clone());
+            setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+            assert_eq!(
+                assess_combat_impact(
+                    &state,
+                    current_incarnation(&state, attacker),
+                    current_incarnation(&state, blocker),
+                ),
+                CombatImpact::Indeterminate,
+                "{keyword:?} changes damage timing, assignment, or survival semantics"
+            );
+        }
+
+        let mut shield_state = setup();
+        let shield_attacker = create_creature(&mut shield_state, PlayerId(0), "Attacker", 3, 3);
+        let shield_blocker = create_creature(&mut shield_state, PlayerId(1), "Blocker", 2, 2);
+        shield_state
+            .objects
+            .get_mut(&shield_blocker)
+            .unwrap()
+            .counters
+            .insert(CounterType::Shield, 1);
+        setup_combat(
+            &mut shield_state,
+            vec![shield_attacker],
+            vec![(shield_attacker, vec![shield_blocker])],
+        );
+        assert_eq!(
+            assess_combat_impact(
+                &shield_state,
+                current_incarnation(&shield_state, shield_attacker),
+                current_incarnation(&shield_state, shield_blocker),
+            ),
+            CombatImpact::Indeterminate,
+            "a shield counter replaces combat damage"
+        );
+
+        let mut regeneration_state = setup();
+        let regeneration_attacker =
+            create_creature(&mut regeneration_state, PlayerId(0), "Attacker", 3, 3);
+        let regeneration_blocker =
+            create_creature(&mut regeneration_state, PlayerId(1), "Blocker", 2, 2);
+        regeneration_state
+            .objects
+            .get_mut(&regeneration_blocker)
+            .unwrap()
+            .replacement_definitions
+            .push(ReplacementDefinition::new(ReplacementEvent::Destroy).regeneration_shield());
+        setup_combat(
+            &mut regeneration_state,
+            vec![regeneration_attacker],
+            vec![(regeneration_attacker, vec![regeneration_blocker])],
+        );
+        assert_eq!(
+            assess_combat_impact(
+                &regeneration_state,
+                current_incarnation(&regeneration_state, regeneration_attacker),
+                current_incarnation(&regeneration_state, regeneration_blocker),
+            ),
+            CombatImpact::Indeterminate,
+            "a regeneration shield changes post-damage survival"
+        );
+
+        let mut assignment_state = setup();
+        let assignment_attacker =
+            create_creature(&mut assignment_state, PlayerId(0), "Attacker", 3, 3);
+        let assignment_blocker =
+            create_creature(&mut assignment_state, PlayerId(1), "Blocker", 2, 2);
+        setup_combat(
+            &mut assignment_state,
+            vec![assignment_attacker],
+            vec![(assignment_attacker, vec![assignment_blocker])],
+        );
+        assignment_state.combat.as_mut().unwrap().damage_step_index = Some(0);
+        assert_eq!(
+            assess_combat_impact(
+                &assignment_state,
+                current_incarnation(&assignment_state, assignment_attacker),
+                current_incarnation(&assignment_state, assignment_blocker),
+            ),
+            CombatImpact::Indeterminate,
+            "an in-progress assignment cannot be reassessed as a fresh exchange"
+        );
+
+        let mut resilience_state = setup();
+        let resilience_attacker =
+            create_creature(&mut resilience_state, PlayerId(0), "Attacker", 3, 3);
+        let resilience_blocker =
+            create_creature(&mut resilience_state, PlayerId(1), "Blocker", 2, 2);
+        resilience_state
+            .objects
+            .get_mut(&resilience_blocker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Indestructible);
+        setup_combat(
+            &mut resilience_state,
+            vec![resilience_attacker],
+            vec![(resilience_attacker, vec![resilience_blocker])],
+        );
+        assert_eq!(
+            assess_combat_impact(
+                &resilience_state,
+                current_incarnation(&resilience_state, resilience_attacker),
+                current_incarnation(&resilience_state, resilience_blocker),
+            ),
+            CombatImpact::Indeterminate,
+            "indestructibility separates fixed damage from fixed survival"
+        );
     }
 
     fn add_wolf_subtype(state: &mut GameState, id: ObjectId) {

@@ -2410,7 +2410,10 @@ pub(super) fn match_player_action(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    let GameEvent::PlayerPerformedAction { player_id, action } = event else {
+    let GameEvent::PlayerPerformedAction {
+        player_id, action, ..
+    } = event
+    else {
         return false;
     };
     if !valid_player_matches(trigger, state, *player_id, source_context) {
@@ -3016,6 +3019,7 @@ pub(super) fn match_shuffled(
     let GameEvent::PlayerPerformedAction {
         player_id,
         action: PlayerActionKind::ShuffledLibrary,
+        ..
     } = event
     else {
         return false;
@@ -7709,6 +7713,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7735,6 +7740,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7761,6 +7767,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7787,6 +7794,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::Surveil,
+            look_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -7813,6 +7821,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::SearchedLibrary,
+            look_count: None,
         };
         assert!(!match_player_action(
             &event,
@@ -7839,6 +7848,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::Proliferate,
+            look_count: None,
         };
         assert!(match_player_action(
             &event,
@@ -10941,6 +10951,7 @@ mod tests {
         let event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
         };
         let trigger = make_trigger(TriggerMode::Shuffled);
         assert!(match_shuffled(
@@ -10971,6 +10982,7 @@ mod tests {
         let opp_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(1),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
         };
         assert!(match_shuffled(
             &opp_event,
@@ -10983,6 +10995,7 @@ mod tests {
         let self_event = GameEvent::PlayerPerformedAction {
             player_id: PlayerId(0),
             action: PlayerActionKind::ShuffledLibrary,
+            look_count: None,
         };
         assert!(!match_shuffled(
             &self_event,
