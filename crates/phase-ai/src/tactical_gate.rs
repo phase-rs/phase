@@ -1158,4 +1158,142 @@ mod tests {
         assert_ne!(gate_for(8, 7), GateDecision::Reject);
         assert_ne!(gate_for(4, 3), GateDecision::Reject);
     }
+
+    /// CR 702.21a + CR 104.3d: a Ward payment that would push the AI to ten
+    /// or more poison counters must reject the target — the AI must never
+    /// treat ending its own game as an ordinary payable ward cost.
+    #[test]
+    fn rejects_targeting_ward_that_would_be_lethal_poison() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.players[P0.0 as usize].poison_counters = 5;
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// A poison Ward payment that stays below the ten-poison threshold does
+    /// not gate the target out — mirrors `allows_targeting_payable_ward`.
+    #[test]
+    fn allows_targeting_ward_with_nonlethal_poison_payment() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        // P0 starts at 0 poison — 0 + 5 = 5, well below the 10-poison SBA.
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a + CR 104.3d: two individually-nonlethal poison sub-costs in
+    /// a `Compound` Ward can be jointly lethal — the aggregate across every
+    /// sub-cost must be checked, not each sub-cost against the same
+    /// unchanged starting total.
+    #[test]
+    fn rejects_targeting_ward_with_jointly_lethal_compound_poison() {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count: 3,
+                },
+                WardCost::GetPlayerCounters {
+                    counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                    count: 3,
+                },
+            ])))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        // 4 existing + 3 + 3 = 10 (lethal), but 4 + 3 = 7 alone is not — a
+        // per-sub-cost check against the same starting total would wrongly
+        // allow this.
+        state.players[P0.0 as usize].poison_counters = 4;
+        let decision = damage_target_decision(creature, 3);
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// CR 702.21a: the ward-affordability gate applies to any targetable
+    /// permanent, not just creatures — a lethal poison Ward on a noncreature
+    /// permanent must be rejected identically.
+    #[test]
+    fn rejects_targeting_noncreature_ward_that_would_be_lethal_poison() {
+        let mut scenario = GameScenario::new();
+        let artifact = scenario
+            .add_creature(P1, "Warded Artifact", 0, 0)
+            .as_artifact()
+            .with_keyword(Keyword::Ward(WardCost::GetPlayerCounters {
+                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                count: 5,
+            }))
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.players[P0.0 as usize].poison_counters = 5;
+        let decision = damage_target_decision(artifact, 3);
+        let candidate = choose_target_candidate(artifact);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_eq!(assess_candidate(&ctx), GateDecision::Reject);
+    }
 }

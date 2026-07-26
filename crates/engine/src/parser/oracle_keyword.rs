@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::parser::oracle_nom::error::OracleError;
+use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::{alpha1, space0, space1};
@@ -700,6 +700,34 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
     Some(Keyword::Ward(cost))
 }
 
+/// CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" / "get a/an
+/// <kind> counter" — the single grammatical authority for this ward-cost
+/// family. Composes the count/article, kind, and singular/plural axes as
+/// independent nom combinators (this repo's mandated style) rather than
+/// enumerating their product as ad-hoc string dispatch.
+fn parse_get_player_counters_ward_cost(input: &str) -> OracleResult<'_, WardCost> {
+    all_consuming(|i| {
+        let (rest, _) = tag::<_, _, OracleError<'_>>("get ").parse(i)?;
+        let (rest, count) = alt((
+            nom_primitives::parse_number,
+            value(1u32, nom_primitives::parse_article),
+        ))
+        .parse(rest)?;
+        let (rest, _) = space0.parse(rest)?;
+        let (rest, counter_kind) = nom_primitives::parse_player_counter_kind.parse(rest)?;
+        let (rest, _) = tag(" counter").parse(rest)?;
+        let (rest, _) = opt(tag("s")).parse(rest)?;
+        Ok((
+            rest,
+            WardCost::GetPlayerCounters {
+                counter_kind,
+                count,
+            },
+        ))
+    })
+    .parse(input)
+}
+
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     // CR 702.21a + CR 608.2h + CR 113.7a: Ward's life cost reads the source's
@@ -755,37 +783,23 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     // counters."). MUST run before the mana-cost fallback below, which
     // otherwise silently parses unrecognized cost text with no mana
     // symbols/braces as a free, always-paid Ward (phase-rs/phase#6640).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("get ").parse(lower) {
-        if let Some(before_counter) = rest
-            .strip_suffix(" counters")
-            .or_else(|| rest.strip_suffix(" counter"))
-        {
-            let parsed = nom_primitives::parse_number
-                .parse(before_counter)
-                .map(|(kind_word, n)| (n, kind_word.trim()))
-                .or_else(|_: nom::Err<OracleError<'_>>| {
-                    nom_primitives::parse_article
-                        .parse(before_counter)
-                        .map(|(kind_word, ())| (1, kind_word.trim()))
-                });
-            if let Ok((count, kind_word)) = parsed {
-                if let Ok((_, counter_kind)) =
-                    all_consuming(nom_primitives::parse_player_counter_kind).parse(kind_word)
-                {
-                    return Some(WardCost::GetPlayerCounters {
-                        counter_kind,
-                        count,
-                    });
-                }
-            }
-            // CR 702.21a: recognized as counter-shaped ("get ... counter(s)")
-            // but the count or counter kind didn't parse — fail closed rather
-            // than falling through to the mana-cost fallback below, which
-            // would otherwise silently produce a free, always-paid Ward for
-            // unsupported/malformed counter text (phase-rs/phase#6640's exact
-            // bug class, for different malformed input).
-            return None;
-        }
+    //
+    // One grammatical authority over the count/article, kind, and
+    // singular/plural axes — composed nom combinators, not string-suffix
+    // dispatch — so this parser family has a single production to extend
+    // rather than ad-hoc per-branch string handling.
+    if tag::<_, _, OracleError<'_>>("get ").parse(lower).is_ok() {
+        return match parse_get_player_counters_ward_cost(lower) {
+            Ok((_, cost)) => Some(cost),
+            // CR 702.21a: recognized as counter-shaped ("get ...") but the
+            // count, kind, or "counter(s)" tail didn't parse in full — fail
+            // closed rather than falling through to the mana-cost fallback
+            // below, which would otherwise silently produce a free,
+            // always-paid Ward for unsupported/malformed counter text
+            // (phase-rs/phase#6640's exact bug class, for different
+            // malformed input).
+            Err(_) => None,
+        };
     }
 
     // Fall back to mana cost parsing

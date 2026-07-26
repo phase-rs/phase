@@ -733,6 +733,24 @@ pub(crate) fn available_mana_after_spell(ctx: &PolicyContext<'_>) -> u32 {
     sources.saturating_sub(spell_cost)
 }
 
+/// CR 104.3d: total poison counters `ward` would give the payer, summed
+/// across every `GetPlayerCounters { Poison, .. }` sub-cost in the whole
+/// tree — a `Compound` cost's sub-costs are all paid together (CR 702.21a:
+/// "every conjoined sub-cost must be payable"), not independently, so two
+/// individually-nonlethal poison sub-costs can be jointly lethal and must be
+/// checked against their COMBINED total, not each against the same
+/// unchanged starting count.
+fn total_poison_from_ward_cost(ward: &WardCost) -> u32 {
+    match ward {
+        WardCost::GetPlayerCounters {
+            counter_kind: engine::types::player::PlayerCounterKind::Poison,
+            count,
+        } => *count,
+        WardCost::Compound(costs) => costs.iter().map(total_poison_from_ward_cost).sum(),
+        _ => 0,
+    }
+}
+
 /// CR 702.21a: Whether the AI can pay `ward` after committing to the spell it is
 /// casting. Mana / Waterbend costs use the post-spell mana estimate; non-mana
 /// costs check the corresponding resource (life, a spare card, sacrificeable
@@ -743,6 +761,19 @@ pub(crate) fn can_pay_ward_cost(
     ward: &WardCost,
     warded: &GameObject,
 ) -> bool {
+    // CR 104.3d: reject up front if the AGGREGATE poison this cost would
+    // give (direct or across every Compound sub-cost) reaches or crosses
+    // `LETHAL_POISON` — checked once, against the combined total, before any
+    // per-variant mechanical-affordability logic below. The AI must never
+    // treat ending its own game as an ordinary payable cost, for direct or
+    // compound Ward alike.
+    let total_poison = total_poison_from_ward_cost(ward);
+    if total_poison > 0 {
+        let current = ctx.state.players[ctx.ai_player.0 as usize].poison_counters;
+        if current.saturating_add(total_poison) >= crate::features::poison::LETHAL_POISON {
+            return false;
+        }
+    }
     match ward {
         WardCost::Mana(cost) | WardCost::Waterbend(cost) => {
             available_mana_after_spell(ctx) >= cost.mana_value()
@@ -780,9 +811,10 @@ pub(crate) fn can_pay_ward_cost(
                 .count();
             matching as u32 >= *count
         }
-        // CR 702.21a + CR 122.1: no affordability limit — a player can always
-        // choose to accept more counters (mirrors the engine's own
-        // `can_pay_resolution` for this cost).
+        // CR 702.21a + CR 122.1: mechanically always payable — no resource
+        // limit on giving yourself more counters (mirrors the engine's own
+        // `can_pay_resolution`). Lethal poison is already rejected by the
+        // aggregate check above, for direct and compound costs alike.
         WardCost::GetPlayerCounters { .. } => true,
         // CR 702.21a: every conjoined sub-cost must be payable. Mana contention
         // between multiple mana sub-costs is approximated (each checked against

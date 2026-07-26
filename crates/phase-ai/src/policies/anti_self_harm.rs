@@ -772,112 +772,6 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 }
             }
 
-            // Price the cost of an *affordable* ward (must pay an extra cost).
-            // An unaffordable ward is hard-rejected upstream by `tactical_gate`
-            // (CR 702.21a — the spell would just be countered), so this judgment
-            // layer never double-scores that case.
-            for keyword in &object.keywords {
-                if let Keyword::Ward(ward_cost) = keyword {
-                    if !can_pay_ward_cost(ctx, ward_cost, object) {
-                        break;
-                    }
-                    let severity = match ward_cost {
-                        WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                        WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
-                        WardCost::PayLifeEqualToPower => {
-                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                        }
-                        WardCost::DiscardCard => 1.5,
-                        WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                        WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
-                        // CR 702.21a + CR 122.1 + CR 104.3d: giving yourself
-                        // player counters is only a real cost for poison,
-                        // which progresses toward an unconditional loss at 10
-                        // (`LETHAL_POISON`) — a payment that would reach or
-                        // cross that threshold must never be scored as an
-                        // ordinary affordable, low-severity ward cost, so it
-                        // gets the same prohibitive magnitude as the
-                        // protection-prevents-targeting case above. Below the
-                        // threshold it scales linearly like Sacrifice. Other
-                        // counter kinds (experience/rad/ticket) carry no loss
-                        // condition, so receiving them is not a self-harm
-                        // signal.
-                        WardCost::GetPlayerCounters {
-                            counter_kind: engine::types::player::PlayerCounterKind::Poison,
-                            count,
-                        } => {
-                            let current =
-                                ctx.state.players[ctx.ai_player.0 as usize].poison_counters;
-                            if current.saturating_add(*count)
-                                >= crate::features::poison::LETHAL_POISON
-                            {
-                                100.0
-                            } else {
-                                *count as f64 * 3.0
-                            }
-                        }
-                        WardCost::GetPlayerCounters { .. } => 0.0,
-                        // CR 702.21a: Compound costs sum severity of components.
-                        // A lethal poison sub-cost must bypass the ordinary
-                        // sum's `.min(4.0)` cap — otherwise it would be
-                        // clamped down to an ordinary-looking severity,
-                        // exactly the outcome the top-level arm above exists
-                        // to prevent.
-                        WardCost::Compound(costs) => {
-                            let has_lethal_poison = costs.iter().any(|c| {
-                                matches!(
-                                    c,
-                                    WardCost::GetPlayerCounters {
-                                        counter_kind:
-                                            engine::types::player::PlayerCounterKind::Poison,
-                                        count,
-                                    } if ctx.state.players[ctx.ai_player.0 as usize]
-                                        .poison_counters
-                                        .saturating_add(*count)
-                                        >= crate::features::poison::LETHAL_POISON
-                                )
-                            });
-                            if has_lethal_poison {
-                                100.0
-                            } else {
-                                costs
-                                    .iter()
-                                    .map(|c| match c {
-                                        WardCost::Mana(cost) => {
-                                            (cost.mana_value() as f64 / 2.0).min(2.0)
-                                        }
-                                        WardCost::PayLife(amount) => {
-                                            (*amount as f64 / 3.0).min(2.0)
-                                        }
-                                        WardCost::PayLifeEqualToPower => {
-                                            (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
-                                        }
-                                        WardCost::DiscardCard => 1.5,
-                                        WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
-                                        WardCost::Waterbend(cost) => {
-                                            (cost.mana_value() as f64 / 2.0).min(2.0)
-                                        }
-                                        // Non-lethal poison payments scale like
-                                        // the top-level arm; non-poison kinds
-                                        // carry no self-harm signal.
-                                        WardCost::GetPlayerCounters {
-                                            counter_kind:
-                                                engine::types::player::PlayerCounterKind::Poison,
-                                            count,
-                                        } => *count as f64 * 3.0,
-                                        WardCost::GetPlayerCounters { .. } => 0.0,
-                                        WardCost::Compound(_) => 2.0,
-                                    })
-                                    .sum::<f64>()
-                                    .min(4.0)
-                            }
-                        }
-                    };
-                    score += ctx.penalties().ward_cost_penalty_base * severity;
-                    break;
-                }
-            }
-
             // Removal quality mismatch: penalize premium removal on cheap targets
             if let Some(source) = ctx.source_object() {
                 let spell_mv = source.mana_cost.mana_value();
@@ -946,6 +840,102 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             (object.mana_cost.mana_value() as f64).min(6.0)
         };
         score += controller_delta * noncreature_value;
+    }
+
+    // Price the cost of an *affordable* ward (must pay an extra cost). Applies to every
+    // permanent type, not just creatures — a Ward-bearing artifact/enchantment/planeswalker
+    // is exactly as real a target-choice cost as a Ward-bearing creature. An unaffordable ward
+    // is hard-rejected upstream by `tactical_gate` (CR 702.21a — the spell would just be
+    // countered), so this judgment layer never double-scores that case.
+    if !beneficial {
+        for keyword in &object.keywords {
+            if let Keyword::Ward(ward_cost) = keyword {
+                if !can_pay_ward_cost(ctx, ward_cost, object) {
+                    break;
+                }
+                let severity = match ward_cost {
+                    WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                    WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                    WardCost::PayLifeEqualToPower => {
+                        (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                    }
+                    WardCost::DiscardCard => 1.5,
+                    WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                    WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                    // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
+                    // player counters has an explicit, kind-specific
+                    // valuation — no wildcard fallback, so a future
+                    // supported counter kind forces a deliberate
+                    // decision here. A lethal poison payment never
+                    // reaches this scoring at all — `can_pay_ward_cost`
+                    // above already rejects it (reframed as "can't
+                    // rationally pay"), so the Poison arm only ever sees
+                    // sub-lethal, ordinary-severity payments.
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                        count,
+                    } => *count as f64 * 3.0,
+                    // CR 728.1: each rad counter mills a card and, if that
+                    // card is nonland, costs 1 life. Real cost, not
+                    // harmless — approximated as PayLife's per-life
+                    // severity (amount/3.0) scaled by ~0.6 (typical
+                    // nonland fraction of a deck), i.e. ~0.2 per counter.
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                        count,
+                    } => (*count as f64 * 0.2).min(2.0),
+                    // Experience/ticket counters carry no loss-condition
+                    // or resource-drain risk — purely beneficial or
+                    // neutral to receive.
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                        ..
+                    } => 0.0,
+                    WardCost::GetPlayerCounters {
+                        counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                        ..
+                    } => 0.0,
+                    // CR 702.21a: Compound costs sum severity of components.
+                    // A Compound containing a lethal poison sub-cost is
+                    // also already rejected upstream by `can_pay_ward_cost`
+                    // (which requires every sub-cost payable), so this
+                    // fold only ever sees payable compounds.
+                    WardCost::Compound(costs) => costs
+                        .iter()
+                        .map(|c| match c {
+                            WardCost::Mana(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                            WardCost::PayLife(amount) => (*amount as f64 / 3.0).min(2.0),
+                            WardCost::PayLifeEqualToPower => {
+                                (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
+                            }
+                            WardCost::DiscardCard => 1.5,
+                            WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
+                            WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Poison,
+                                count,
+                            } => *count as f64 * 3.0,
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Rad,
+                                count,
+                            } => (*count as f64 * 0.2).min(2.0),
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Experience,
+                                ..
+                            } => 0.0,
+                            WardCost::GetPlayerCounters {
+                                counter_kind: engine::types::player::PlayerCounterKind::Ticket,
+                                ..
+                            } => 0.0,
+                            WardCost::Compound(_) => 2.0,
+                        })
+                        .sum::<f64>()
+                        .min(4.0),
+                };
+                score += ctx.penalties().ward_cost_penalty_base * severity;
+                break;
+            }
+        }
     }
 
     score
