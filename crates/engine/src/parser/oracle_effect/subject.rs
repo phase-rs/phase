@@ -3646,6 +3646,32 @@ fn build_continuous_clause(
         duration
     };
 
+    // CR 611.2a + CR 301.5 + CR 303.4: an animate-then-attach grant — the source
+    // itself "becomes an Aura enchantment with enchant creature" (all 12 Licids)
+    // or an Equipment — states no duration, and CR 611.2a says a continuous
+    // effect with no stated duration lasts until the end of the game. Left at
+    // `None` it would flip to `UntilEndOfTurn` in `effect.rs::resolve`, and at
+    // cleanup the source would stop being an Aura while STAYING attached: no SBA
+    // unattaches a non-Aura (CR 704.5p is unimplemented), and the source's
+    // "Enchanted creature can't attack" static keys purely on `attached_to`, so
+    // the victim would be locked down permanently. Gated on the affected set
+    // being the source itself, so an Aura that grants the Aura/Equipment subtype
+    // to some OTHER permanent keeps its parsed/default duration. Mirrors the
+    // Suspend and "in addition to its other types" default-permanent precedents
+    // above rather than flipping the global `effect.rs` fallback, which is
+    // deliberately overloaded at that seam.
+    let duration = if duration.is_none()
+        && matches!(
+            static_affected_for_application(&application),
+            TargetFilter::SelfRef
+        )
+        && super::modifications_grant_attachable_subtype(&modifications)
+    {
+        Some(Duration::Permanent)
+    } else {
+        duration
+    };
+
     if let Some((power, toughness)) = extract_pump_modifiers(&modifications) {
         let effect = build_pump_effect(&application, power, toughness);
         return Some(ParsedEffectClause {

@@ -599,6 +599,7 @@ mod issue_5997_malcolm_treasure_trigger;
 mod issue_5999_aura_exile_host;
 mod issue_6002_neera_wild_mage_bottom_of_library;
 mod issue_6006_aminatou_veil_piercer_own_turn_miracle;
+mod issue_605_calming_licid;
 mod issue_6091_grindstone;
 mod issue_6092_ability_block_reason;
 mod issue_6102_ragavan_exile_cast;

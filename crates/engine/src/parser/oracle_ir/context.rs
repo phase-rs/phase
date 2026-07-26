@@ -171,6 +171,23 @@ pub(crate) struct ParseContext {
     /// `SelfRef` so non-token self-triggers ("Whenever ~ attacks, put a counter on
     /// it") are unaffected.
     pub token_created_in_chain: bool,
+    /// CR 608.2c + CR 301.5 + CR 303.4: An EARLIER clause in this same effect
+    /// chain turns the ability's own SOURCE into an attachable object — an Aura
+    /// (CR 303.4: an enchantment with the Aura subtype, attached via its enchant
+    /// ability) or an Equipment (CR 301.5: an artifact with the Equipment
+    /// subtype). This is the animate-then-attach class, of which the 12 Licids
+    /// are the canonical members ("This creature loses this ability and becomes
+    /// an Aura enchantment with enchant creature. Attach **it** to target
+    /// creature"). The source is the only object the chain has made attachable,
+    /// so the following clause's bare "it" attachment anaphor names it
+    /// (`TargetFilter::SelfRef`) rather than the ability's chosen target.
+    /// Seeded only in the chunk loop via
+    /// `parser::oracle_effect::chain_source_becomes_attachment`; every other
+    /// construction site defaults `false` (`..Default::default()`), so an attach
+    /// clause whose chain never animated its source keeps its pre-existing
+    /// `parse_target` binding (Embercleave's Equipment-ETB `ParentTarget`; Aura
+    /// Graft's chained-referent `ParentTarget`).
+    pub source_becomes_attachment_in_chain: bool,
     /// CR 608.2c: Full lowercased effect-chain text for cross-clause features
     /// like cultivate/Final-Parting split-destination detection on a search
     /// clause that does not include the put-destination phrase in its chunk.

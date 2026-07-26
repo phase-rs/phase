@@ -5709,9 +5709,45 @@ fn parse_neuter_attach_self_recipient(input: &str) -> OracleResult<'_, ()> {
 /// "Choose target X and target Y", that object is the sole attachable
 /// (Equipment/Aura) slot among the declared targets — so bind the pronoun to
 /// that `ParentTargetSlot`, giving the Attach a distinct `attachment` and
-/// `target` (no slot collision). When there is no unique attachable slot (empty
-/// or ambiguous registry), fall back to the normal target parse so every
-/// existing attach card is byte-identical.
+/// `target` (no slot collision).
+///
+/// With no declared attachable slot, exactly ONE narrow class rebinds the
+/// pronoun away from the default target parse (issue #605): a chain in which an
+/// EARLIER clause animated the ability's own SOURCE into an Aura (CR 303.4) or
+/// an Equipment (CR 301.5) — `ctx.source_becomes_attachment_in_chain`. That is
+/// the animate-then-attach class, of which the 12 Licids are the canonical
+/// members ("{W}, {T}: This creature loses this ability and becomes an Aura
+/// enchantment with enchant creature. Attach **it** to target creature"). The
+/// chain has made exactly one object attachable, so "it" names the source
+/// (`SelfRef`). Without this the clause fell through to `ParentTarget`, which
+/// `resolve_object_filter` reads as the ability's *chosen target* — the
+/// enchant-recipient creature — so the effect attached the recipient to itself
+/// and state-based actions silently undid the whole activation.
+///
+/// Every other chain keeps its pre-existing `parse_target` binding, unchanged:
+///
+/// * **A chain with an earlier typed object referent** — "it" names that
+///   referent and `ParentTarget` is correct (Aura Graft "gain control of target
+///   Aura … attach **it** to another permanent"; Ogre Geargrabber; Auriok
+///   Survivors).
+/// * **The Equipment-ETB class** (Embercleave — "When this Equipment enters,
+///   attach **it** to target creature you control") — intentionally left at
+///   `ParentTarget`. It is resolved at RUNTIME by
+///   `game::effects::attach::resolve_parent_target_attachment_from_trigger`,
+///   which rescues a `ParentTarget` attachment out of the trigger context
+///   whenever the current trigger event is a `ZoneChanged { to: Battlefield }`.
+///   Rebinding it here would be behaviorally inert for those cards and an active
+///   REGRESSION for the cards whose SOURCE IS NOT ATTACHABLE (Adaptive Armorer,
+///   Stonehewer Giant, Quest for the Holy Relic, Armored Skyhunter, …): they
+///   would attach a creature/artifact/instant source to a permanent, an illegal
+///   state that neither `attachment_illegality` nor the SBA sweep cleans up
+///   today (CR 704.5p is unimplemented).
+///
+/// The recipient-side sibling `parse_attach_recipient` gates its own delegation
+/// on the wider `attach_neuter_recipient_resolves_via_subject` predicate. That
+/// asymmetry is deliberate: the recipient slot may legally name a chosen target
+/// ("attach up to one target Equipment you control **to it**"), so it needs the
+/// `ctx.subject` / `parent_target_is_chosen` arms to tell the two apart.
 fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFilter, &'a str) {
     if is_bare_object_pronoun(text.trim().to_ascii_lowercase().as_str()) {
         if let Some(index) = unique_attachable_slot(&ctx.declared_target_slots) {
@@ -5719,6 +5755,12 @@ fn parse_attachment_anaphor<'a>(text: &'a str, ctx: &ParseContext) -> (TargetFil
                 TargetFilter::ParentTargetSlot { index },
                 &text[text.len()..],
             );
+        }
+        // CR 608.2c + CR 301.5 + CR 303.4: an earlier clause animated the
+        // source into an Aura/Equipment, so the source is the only object this
+        // chain could be asking to attach.
+        if ctx.source_becomes_attachment_in_chain {
+            return (TargetFilter::SelfRef, &text[text.len()..]);
         }
     }
     parse_target(text)
@@ -14183,6 +14225,80 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    /// CR 608.2c + CR 303.4 (issue #605): when an earlier clause of the chain
+    /// animated the SOURCE into an Aura/Equipment, the attachment slot's bare
+    /// "it" names that source — not the ability's chosen target. Seeds the flag
+    /// axis directly so the branch is pinned independently of any one card.
+    #[test]
+    fn parse_attachment_anaphor_it_binds_source_when_chain_animates_source() {
+        let input = "attach it to target creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            source_becomes_attachment_in_chain: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::SelfRef);
+    }
+
+    /// CR 608.2c: without that animation the pronoun keeps its pre-existing
+    /// `ParentTarget` binding. This is the Equipment-ETB class (Embercleave —
+    /// rescued at runtime by `resolve_parent_target_attachment_from_trigger`)
+    /// AND the non-attachable-source class (Adaptive Armorer, Stonehewer Giant),
+    /// which must never be rebound to the source.
+    #[test]
+    fn parse_attachment_anaphor_it_keeps_parent_target_without_source_animation() {
+        let input = "attach it to target creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTarget);
+    }
+
+    /// CR 608.2c: with an earlier typed referent in the chain (Aura Graft's
+    /// "gain control of target Aura …"), the same pronoun keeps `ParentTarget`.
+    #[test]
+    fn parse_attachment_anaphor_it_keeps_parent_target_when_referent_available() {
+        let input = "attach it to another permanent it can enchant";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            parent_target_available: true,
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTarget);
+    }
+
+    /// CR 601.2c + CR 608.2c: a declared attachable slot outranks the
+    /// source-animation arm — the pronoun binds to that slot even when the chain
+    /// also animated its source.
+    #[test]
+    fn parse_attachment_anaphor_declared_slot_outranks_source_binding() {
+        let input = "attach it to target creature";
+        let lower = input.to_lowercase();
+        let mut ctx = ParseContext {
+            source_becomes_attachment_in_chain: true,
+            declared_target_slots: vec![TargetFilter::Typed(
+                TypedFilter::default().subtype("Equipment".to_string()),
+            )],
+            ..Default::default()
+        };
+        let result = parse_utility_imperative_ast(input, &lower, &mut ctx);
+        let Some(UtilityImperativeAst::Attach { attachment, .. }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::ParentTargetSlot { index: 0 });
     }
 
     #[test]

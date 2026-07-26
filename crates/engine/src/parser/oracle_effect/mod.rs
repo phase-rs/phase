@@ -18887,6 +18887,82 @@ fn chain_prior_referent_is_created_token(clauses: &[ClauseIr]) -> bool {
     false
 }
 
+/// CR 301.5 + CR 303.4: Do these continuous modifications give their subject a
+/// subtype that makes it attachable — "Aura" (CR 303.4: an Aura is attached to
+/// the object or player defined by its enchant ability) or "Equipment"
+/// (CR 301.5: an Equipment can be attached to a creature)?
+///
+/// Keyed on `AddSubtype` because both are SUBTYPES (CR 205.3): a card-type
+/// replacement (`SetCardTypes`) can only carry `CoreType`s, so it can never name
+/// Aura or Equipment, and the `RemoveAllSubtypes` the parser emits alongside the
+/// grant ("becomes an Aura enchantment" lowers to `RemoveAllSubtypes{Enchantment}`
+/// → `AddSubtype{Aura}`) only clears the old set. Matching the grant alone
+/// therefore covers the whole class without depending on whether the clearing
+/// sibling was emitted.
+pub(super) fn modifications_grant_attachable_subtype(mods: &[ContinuousModification]) -> bool {
+    mods.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::AddSubtype { subtype }
+                if subtype.eq_ignore_ascii_case("Aura")
+                    || subtype.eq_ignore_ascii_case("Equipment")
+        )
+    })
+}
+
+/// CR 301.5 + CR 303.4: Does this continuous static turn the ability's own
+/// SOURCE into an attachable object? `affected: None` is the engine's
+/// self-scoped default (a static that modifies only the object printing it), so
+/// it is treated exactly like an explicit `SelfRef`. That default is an engine
+/// convention, not a CR rule, so it carries no citation of its own.
+fn static_makes_source_attachable(def: &StaticDefinition) -> bool {
+    matches!(def.affected, None | Some(TargetFilter::SelfRef))
+        && modifications_grant_attachable_subtype(&def.modifications)
+}
+
+/// CR 608.2c + CR 301.5 + CR 303.4: Does an EARLIER clause of this chain animate
+/// the ability's own source into an Aura or an Equipment?
+///
+/// This is the animate-then-attach class — the 12 Licids ("This creature loses
+/// this ability and becomes an Aura enchantment with enchant creature. Attach
+/// **it** to target creature"). The chain has made exactly one object
+/// attachable, the source, so the following clause's bare "it" attachment
+/// anaphor names it (CR 608.2c — read the whole text and apply the rules of
+/// English: nothing else in the sentence can be attached).
+///
+/// A flat scan, not a walk-back with re-anchor bails like
+/// `chain_prior_referent_is_created_token`: the animation has no duration
+/// (CR 611.2a — it lasts until the end of the game), so once a clause has made
+/// the source an Aura/Equipment it stays one for every later clause of the
+/// chain. A later typed target cannot un-animate it, and cannot become the
+/// attachment either, because it is not what the chain made attachable.
+///
+/// The condition bail IS kept, matching `chain_prior_referent_is_created_token`:
+/// a gated animation ("if you control an Aura, this creature becomes an
+/// Equipment") may never fire, and binding the attachment to a source that is
+/// still a creature would attach a creature to a permanent — a state no SBA
+/// undoes, because the engine implements only CR 704.5p's battle clause
+/// (`sba.rs`), not its creature/other-permanent clause. No shipped card has this
+/// shape today; the bail keeps the predicate honest if one is printed.
+fn chain_source_becomes_attachment(clauses: &[ClauseIr]) -> bool {
+    clauses.iter().any(|prev| {
+        if prev
+            .condition
+            .as_ref()
+            .is_some_and(|c| !c.is_affirmative_reflexive_gate())
+        {
+            return false;
+        }
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &prev.parsed.effect
+        else {
+            return false;
+        };
+        static_abilities.iter().any(static_makes_source_attachable)
+    })
+}
+
 fn chain_has_prior_player_target_referent(clauses: &[ClauseIr]) -> bool {
     for prev in clauses.iter().rev() {
         if prev.condition.is_some() {
@@ -29280,6 +29356,11 @@ pub(crate) fn parse_effect_chain_ir(
             // most-recent object referent (Esper Terra's "put up to three lore
             // counters on it"). Cleared by an intervening explicit typed target.
             token_created_in_chain: chain_prior_referent_is_created_token(builder.clauses()),
+            // CR 608.2c + CR 301.5 + CR 303.4: bind a bare "it" in this chunk's
+            // Attach to the SOURCE when an earlier clause animated the source
+            // into an Aura/Equipment (the Licid class). Nothing else in the
+            // chain is attachable, so the pronoun cannot name the chosen target.
+            source_becomes_attachment_in_chain: chain_source_becomes_attachment(builder.clauses()),
             effect_chain_full_lower: ctx.effect_chain_full_lower.clone(),
             parent_target_is_chosen,
             // CR 608.2c + CR 400.7: seed the zone published by an earlier
