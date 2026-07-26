@@ -16,10 +16,18 @@ use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
 use super::{casting, priority, triggers};
 
+/// Both owned parameters are `Box`ed deliberately, not incidentally.
+/// `PendingTrigger::ability` and `GameState::pending_trigger` are both already
+/// `Box`es, and every caller's source is one; taking them by value here would
+/// move a 5,264 B `ResolvedAbility` and a 744 B `PendingTrigger` through this
+/// frame only to re-box both, buying two allocations and a free for nothing.
+/// Threading the boxes keeps the frame at two pointers. See
+/// `engine/src/types/game_state_size.rs` for the stack budget these sizes
+/// count against.
 pub(super) fn finalize_trigger_target_selection(
     state: &mut GameState,
-    trigger: PendingTrigger,
-    ability: ResolvedAbility,
+    mut trigger: Box<PendingTrigger>,
+    ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
     let assigned_targets = flatten_targets_in_chain(&ability);
@@ -34,10 +42,9 @@ pub(super) fn finalize_trigger_target_selection(
     // CR 601.2d: Division is announced only among the distributing effect's own targets, not sibling-effect targets (which still become targets above).
     let dist_targets = distribution_targets(&ability);
 
-    let mut trigger = trigger;
     let controller = trigger.controller;
     let distribute = trigger.distribute.clone();
-    trigger.ability = Box::new(ability);
+    trigger.ability = ability;
 
     // CR 601.2d + CR 603.3d: When a triggered ability divides damage or
     // counters among its targets, the controller announces that division while
@@ -66,7 +73,7 @@ pub(super) fn finalize_trigger_target_selection(
                         priority::clear_priority_passes(state);
                         return WaitingFor::Priority { player: controller };
                     }
-                    state.pending_trigger = Some(Box::new(trigger));
+                    state.pending_trigger = Some(trigger);
                     priority::clear_priority_passes(state);
                     return WaitingFor::DistributeAmong {
                         player: controller,
@@ -183,7 +190,7 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
     Ok(finalize_trigger_target_selection(
-        state, *trigger, *ability, events,
+        state, trigger, ability, events,
     ))
 }
 
@@ -340,7 +347,7 @@ pub(super) fn handle_trigger_target_selection_choose_target(
                 .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
 
             Ok(finalize_trigger_target_selection(
-                state, *trigger, *ability, events,
+                state, trigger, ability, events,
             ))
         }
     }

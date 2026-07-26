@@ -469,14 +469,17 @@ fn handle_triggered_mode_choice(
             // here — the resulting stack entry carries `trigger_event` for the
             // resolution-time re-establishment in `stack::resolve_top`.
             triggers::restore_trigger_event_context(state, mode_context_snapshot);
-            let mut resolved = (*trigger.ability).clone();
+            // `Box::clone` clones straight into a fresh allocation, so this
+            // never materializes the 5,264 B `ResolvedAbility` on this frame —
+            // `(*trigger.ability).clone()` would.
+            let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(state, &mut resolved, &targets)?;
             // CR 113.2c + CR 603.2 + CR 603.3b: `finalize_trigger_target_selection`
             // already drains the deferred-trigger queue and surfaces the next
             // WaitingFor if a sibling trigger needs input; use that result
             // instead of falling through to Priority below.
             return Ok(engine_stack::finalize_trigger_target_selection(
-                state, *trigger, resolved, events,
+                state, trigger, resolved, events,
             ));
         } else {
             // CR 601.2c + CR 603.3d: Mode chosen but target choice still
